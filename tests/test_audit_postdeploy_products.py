@@ -5,7 +5,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from dalton_core.coverage_mission import CoverageMissionAuthority
+from dalton_core.model_router import ModelRouter
+from dalton_core.observability import ObservabilityStore
 from dalton_core.store import DaltonStore, canonical_json, content_hash
+from dalton_core.thesis_impact_budget import (
+    ThesisImpactBudgetStore, ThesisImpactDayBudgetExceeded,
+)
+from tests.test_model_router import MutableClock, policy, profile, route_args, work_order
 from tests.test_research_planner import NOW, directive, plan_from_response, response, state
 
 
@@ -128,6 +134,90 @@ class ResearchPlanAuditTests(unittest.TestCase):
         )
         self.assertEqual(classification,
                          "proved_paid_output_contract_terminal_barrier")
+
+
+class BudgetNoSendAuditTests(unittest.TestCase):
+    def setUp(self):
+        self.core = DaltonStore()
+        self.addCleanup(self.core.close)
+        ObservabilityStore(self.core)
+        self.clock = MutableClock()
+        self.router = ModelRouter(":memory:", clock=self.clock)
+        self.addCleanup(self.router.close)
+        self.router.register_policy(policy())
+        self.router.register_profile(profile("audit"))
+        self.work = work_order()
+        self.route = self.router.route(self.work, **route_args())["decision"]
+        self.budget = ThesisImpactBudgetStore(clock=self.clock)
+        self.addCleanup(self.budget.close)
+        self.budget.register_policy(policy_version_id="budget:audit:1", day_cap_micros=100_000)
+        self.formal = {
+            "terminal_state": "failed", "attempt_number": 1,
+            "invocation_ref": "invocation:not-started:test", "usage_refs": [],
+            "error": {"code": "BUDGET_REFUSED"},
+            "metadata": {"route_decision_ref": self.route["id"]},
+        }
+
+    def admit(self, reserved):
+        return self.budget.admit(
+            policy_version_id="budget:audit:1", day="2026-08-14",
+            work_order_ref=self.work["id"], attempt_number=1, phase="assessment",
+            route_decision_ref=self.route["id"], reserved_micros=reserved,
+        )
+
+    def reject(self):
+        with self.assertRaises(ThesisImpactDayBudgetExceeded):
+            self.admit(200_000)
+
+    def proof(self, **updates):
+        return audit.provider_send_proof(
+            self.core.connection, self.router.connection, self.budget.connection,
+            work_ref=self.work["id"], work_hash=self.route["work_order_hash"],
+            formal={**self.formal, **updates},
+        )
+
+    def test_exact_local_admission_refusal_proves_no_send(self):
+        self.reject()
+        proof = self.proof()
+        self.assertEqual(proof["classification"], "atomic_budget_refusal_no_send")
+        self.assertFalse(proof["provider_send_proven"])
+
+    def test_synthetic_not_started_after_admission_does_not_prove_no_send(self):
+        admission = self.admit(50_000)
+        self.budget.settle(admission["admission_id"], actual_micros=50_000)
+        proof = self.proof()
+        self.assertEqual(proof["classification"], "no_successful_provider_response_proven")
+        self.assertEqual(proof["budget"]["admissions"][0]["settlements"][0]["actual_micros"], 50_000)
+        self.assertFalse(proof["actual_cost_settled"])
+
+    def test_rejection_must_match_formal_attempt_route_error_and_empty_usage(self):
+        self.reject()
+        variants = (
+            {"attempt_number": 2},
+            {"metadata": {"route_decision_ref": "route:foreign"}},
+            {"error": {"code": "PROVIDER_BUDGET_EXCEEDED"}},
+            {"usage_refs": ["usage:returned"]},
+            {"terminal_state": "retryable"},
+        )
+        for variant in variants:
+            with self.subTest(variant=variant):
+                self.assertNotEqual(self.proof(**variant)["classification"],
+                                    "atomic_budget_refusal_no_send")
+
+    def test_rejection_sql_identity_drift_is_not_no_send_authority(self):
+        self.reject()
+        # Simulate a damaged projection after bypassing the local fixture's
+        # append-only guard; audit must still reject its canonical mismatch.
+        self.budget.connection.execute("DROP TRIGGER thesis_impact_day_rejections_no_update")
+        self.budget.connection.execute(
+            "UPDATE thesis_impact_day_rejections SET attempt_number=2")
+        with self.assertRaisesRegex(RuntimeError, "budget rejection SQL projection differs"):
+            self.proof(attempt_number=2)
+
+    def test_missing_usage_authority_cannot_prove_absence(self):
+        self.reject()
+        self.core.connection.execute("DROP TABLE observability_usage_entries")
+        self.assertNotEqual(self.proof()["classification"], "atomic_budget_refusal_no_send")
 
 
 if __name__ == "__main__":

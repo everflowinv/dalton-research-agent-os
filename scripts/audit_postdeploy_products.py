@@ -295,6 +295,11 @@ def budget_bundle(budget: sqlite3.Connection, work_ref: str) -> dict[str, Any]:
         "ORDER BY attempt_number,created_at", (work_ref,),
     ):
         wire = exact_record(row, label="budget admission")
+        if any(wire.get(field) != row[field] for field in (
+                "admission_id", "policy_version_id", "day", "work_order_ref",
+                "attempt_number", "phase", "route_decision_ref",
+                "reserved_micros", "created_at")):
+            raise RuntimeError("budget admission SQL projection differs")
         settlements = []
         for settled in budget.execute(
             "SELECT * FROM thesis_impact_day_settlements WHERE admission_id=? "
@@ -320,9 +325,16 @@ def budget_bundle(budget: sqlite3.Connection, work_ref: str) -> dict[str, Any]:
         "SELECT * FROM thesis_impact_day_rejections WHERE work_order_ref=? "
         "ORDER BY attempt_number,created_at", (work_ref,),
     ):
-        exact_record(row, label="budget rejection")
+        wire = exact_record(row, label="budget rejection")
+        if any(wire.get(field) != row[field] for field in (
+                "rejection_id", "policy_version_id", "day", "work_order_ref",
+                "attempt_number", "phase", "route_decision_ref",
+                "reserved_micros", "day_committed_micros", "day_cap_micros",
+                "created_at")):
+            raise RuntimeError("budget rejection SQL projection differs")
         rejections.append({
             "rejection_ref": row["rejection_id"], "attempt_number": row["attempt_number"],
+            "phase": row["phase"],
             "day": row["day"], "route_decision_ref": row["route_decision_ref"],
             "reserved_micros": row["reserved_micros"],
             "day_committed_micros": row["day_committed_micros"],
@@ -361,12 +373,34 @@ def provider_send_proof(core: sqlite3.Connection, router: sqlite3.Connection,
     invocation_ref = formal.get("invocation_ref")
     if formal.get("terminal_state") != "succeeded" or not isinstance(
             invocation_ref, str) or not invocation_ref.startswith("invocation:"):
+        # A synthetic not-started envelope is not dispatch evidence: legacy
+        # callers also emitted it after downstream failures. Require the exact
+        # local admission refusal and absence of contradictory local records.
+        route_ref = (formal.get("metadata") or {}).get("route_decision_ref")
+        rejections = [item for item in budget_evidence["rejections"]
+                      if item["attempt_number"] == formal.get("attempt_number")
+                      and item["route_decision_ref"] == route_ref]
         no_send = (
-            isinstance(invocation_ref, str)
+            formal.get("terminal_state") == "failed"
+            and (formal.get("error") or {}).get("code") == "BUDGET_REFUSED"
+            and isinstance(invocation_ref, str)
             and invocation_ref.startswith("invocation:not-started:")
-            and bool(budget_evidence["rejections"])
+            and formal.get("usage_refs") == []
+            and isinstance(route_ref, str) and bool(route_ref)
+            and len(rejections) == 1
             and not budget_evidence["admissions"]
         )
+        if no_send:
+            exact_route(router, route_ref, work_ref=work_ref,
+                        work_hash=work_hash, attempt=int(formal["attempt_number"]))
+            no_send = all(
+                table_exists(core, table)
+                and core.execute(
+                    f"SELECT 1 FROM {table} WHERE work_order_ref=? LIMIT 1",
+                    (work_ref,),
+                ).fetchone() is None
+                for table in ("model_invocations", "observability_usage_entries")
+            )
         return {
             "provider_send_proven": False,
             "actual_cost_settled": False,
@@ -1010,7 +1044,8 @@ def postdeploy(args: argparse.Namespace) -> None:
             "interpretation": (
                 "A settlement alone never proves a send. Provider response counts require exact "
                 "successful formal, ModelInvocation, route, provider usage, cost and budget authority. "
-                "Atomic day-budget rejection is a no-send wait until its exact UTC reset."
+                "Only an exact local admission rejection proves a budget no-send; "
+                "reentry timing requires separate authority."
             ),
         },
         "company_models": models,
