@@ -377,9 +377,12 @@ def _host_patch_artifacts(*, packet_root: Path, source_root: Path,
           "model broker host patch path is outside reviewed scope")
     helper = source_root / helper_rel
     target = openclaw_root / target_rel
+    runtime_targets = sorted((openclaw_root / "dist").glob(
+        "runtime-llm.runtime-*.mjs"))
     before = packet_root / Path(str(row["before"]))
     after = packet_root / Path(str(row["after"]))
-    _need(all(path.is_file() and not path.is_symlink()
+    _need(len(runtime_targets) == 1 and target == runtime_targets[0]
+          and all(path.is_file() and not path.is_symlink()
               for path in (helper, target, before, after))
           and sha256_bytes(helper.read_bytes()) == row["helper_sha256"]
           and sha256_bytes(before.read_bytes()) == row["before_sha256"]
@@ -432,12 +435,24 @@ def rollback_reviewed_host_patch(*, packet_root: Path, source_root: Path,
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
     unsigned = {key: value for key, value in receipt.items()
                 if key != "content_hash"}
-    _need(receipt.get("schema_version") == "openclaw-model-host-patch-receipt-0.1"
+    _need(set(receipt) == {"schema_version", "status", "source_commit",
+                           "helper_sha256", "target_relative_path",
+                           "before_sha256", "after_sha256",
+                           "installed_identity", "model_calls", "content_hash"}
+          and receipt.get("schema_version") == "openclaw-model-host-patch-receipt-0.1"
           and receipt.get("status") == "installed_checked_no_call"
           and receipt.get("content_hash") == canonical_hash(unsigned)
           and receipt.get("source_commit") == row["source_commit"]
+          and receipt.get("helper_sha256") == row["helper_sha256"]
+          and receipt.get("target_relative_path") == row["target_relative_path"]
+          and receipt.get("before_sha256") == row["before_sha256"]
           and receipt.get("after_sha256") == row["after_sha256"],
           "model broker host patch receipt differs")
+    _need(isinstance(receipt.get("installed_identity"), list)
+          and len(receipt["installed_identity"]) == 2
+          and all(isinstance(value, int) for value in receipt["installed_identity"])
+          and receipt.get("model_calls") == 0,
+          "model broker host patch receipt identity differs")
     identity = tuple(receipt["installed_identity"])
     _compare_and_install(target, after, before, expected_identity=identity)
     result = {"schema_version": "openclaw-model-host-patch-rollback-0.1",
@@ -446,6 +461,38 @@ def rollback_reviewed_host_patch(*, packet_root: Path, source_root: Path,
     result["content_hash"] = canonical_hash(result)
     _write_exclusive(receipt_path.with_name("host-patch-rollback.json"), result)
     return result
+
+
+def verify_reviewed_host_patch(*, packet_root: Path, source_root: Path,
+                               openclaw_root: Path, row: Mapping[str, Any],
+                               receipt_path: Path,
+                               run=subprocess.run) -> dict[str, Any]:
+    """Recheck exact installed bytes, receipt, and static capability proof."""
+    helper, target, _before, after = _host_patch_artifacts(
+        packet_root=packet_root, source_root=source_root,
+        openclaw_root=openclaw_root, row=row)
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    unsigned = {key: value for key, value in receipt.items()
+                if key != "content_hash"}
+    current = target.lstat()
+    _need(receipt.get("schema_version") == "openclaw-model-host-patch-receipt-0.1"
+          and receipt.get("status") == "installed_checked_no_call"
+          and receipt.get("content_hash") == canonical_hash(unsigned)
+          and receipt.get("source_commit") == row["source_commit"]
+          and receipt.get("helper_sha256") == row["helper_sha256"]
+          and receipt.get("after_sha256") == row["after_sha256"]
+          and receipt.get("installed_identity") == [current.st_dev, current.st_ino]
+          and target.read_bytes() == after and receipt.get("model_calls") == 0,
+          "installed model broker host patch differs")
+    checked = run([sys.executable, str(helper), "--openclaw-root",
+                   str(openclaw_root), "--check"], text=True,
+                  capture_output=True)
+    _need(checked.returncode == 0
+          and "OK provider output control endpoint" in checked.stdout,
+          "installed model broker host capability check failed")
+    return {"status": "installed_checked_no_call",
+            "receipt_sha256": sha256_bytes(receipt_path.read_bytes()),
+            "target_sha256": row["after_sha256"], "model_calls": 0}
 
 
 @contextmanager
@@ -531,6 +578,11 @@ def apply_reviewed_transition(
                 "historical_unresolved_count": len(reviewed["records"]),
                 "retry_authorized": False, "refund_authorized": False,
                 "managed_plugins": verified_plugins,
+                "managed_host_patch": (
+                    {"receipt_sha256": sha256_bytes((
+                        receipt_dir / "host-patch-receipt.json").read_bytes()),
+                     "status": "installed_checked_no_call"}
+                    if host_patch is not None else None),
                 "before_gateway": identity, "after_gateway": new_identity,
                 "model_calls": 0,
             }
@@ -592,6 +644,14 @@ def rollback_reviewed_transition(
                         if key != "content_hash"}
     _need(receipt.get("content_hash") == canonical_hash(unsigned_receipt),
           "broker transition receipt content hash differs")
+    host_receipt = receipt_path.parent / "host-patch-receipt.json"
+    expected_host = receipt.get("managed_host_patch")
+    _need((row.get("managed_host_patch") is None and expected_host is None)
+          or (row.get("managed_host_patch") is not None
+              and expected_host == {
+                  "receipt_sha256": sha256_bytes(host_receipt.read_bytes()),
+                  "status": "installed_checked_no_call"}),
+          "model broker host patch receipt binding differs")
     _source_identity(source_root, transition["source_commit"])
     _verify_plugins(row=row, source_root=source_root, packet_root=packet_root)
     _need(config_path.is_file() and not config_path.is_symlink()
@@ -614,7 +674,6 @@ def rollback_reviewed_transition(
         _compare_and_install(
             config_path, after, before,
             expected_identity=initial_config_identity)
-        host_receipt = receipt_path.parent / "host-patch-receipt.json"
         if row.get("managed_host_patch") is not None:
             _need(host_receipt.is_file() and not host_receipt.is_symlink(),
                   "model broker host patch receipt is unavailable")

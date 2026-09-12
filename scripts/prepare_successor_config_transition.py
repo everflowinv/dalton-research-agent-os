@@ -521,15 +521,17 @@ def _validated_openclaw_frame_transition(
     _need(before_state in (
         {"state": "absent", "effective_default": OPENCLAW_DEFAULT_MAX_FRAME_BYTES},
         {"state": "present", "value": OPENCLAW_DEFAULT_MAX_FRAME_BYTES},
+        {"state": "present", "value": OPENCLAW_TARGET_MAX_FRAME_BYTES},
     ), "OpenClaw maxFrameBytes baseline differs from reviewed default")
-    expected = _set_leaf(before, OPENCLAW_FRAME_PATH,
-                         OPENCLAW_TARGET_MAX_FRAME_BYTES)
-    semantic_mutations = [{
-        "kind": "json_leaf_compare_and_patch",
-        "json_path": list(OPENCLAW_FRAME_PATH),
-        "before_presence": before_state,
-        "after_value": OPENCLAW_TARGET_MAX_FRAME_BYTES,
-    }]
+    already_target = before_state == {
+        "state": "present", "value": OPENCLAW_TARGET_MAX_FRAME_BYTES}
+    expected = (json.loads(json.dumps(before)) if already_target else
+                _set_leaf(before, OPENCLAW_FRAME_PATH,
+                          OPENCLAW_TARGET_MAX_FRAME_BYTES))
+    semantic_mutations = ([] if already_target else [{
+        "kind": "json_leaf_compare_and_patch", "json_path": list(OPENCLAW_FRAME_PATH),
+        "before_presence": before_state, "after_value": OPENCLAW_TARGET_MAX_FRAME_BYTES,
+    }])
     managed_plugins: list[dict[str, Any]] = []
     for plugin_input, expected_id, expected_source, default_before in (
         (model_broker_plugin, OPENCLAW_MODEL_PLUGIN_ID,
@@ -1027,9 +1029,9 @@ def expected_openclaw_frame_transition_state(
         "before_presence", "after_value", "before", "after",
         "before_sha256", "after_sha256", "semantic_mutations",
         "managed_plugins", "historical_unresolved",
-        "managed_host_patch",
     }
-    _need(set(row) == expected_keys
+    _need(frozenset(row) in {frozenset(expected_keys),
+                             frozenset(expected_keys | {"managed_host_patch"})}
           and row.get("name") == "openclaw_model_broker_max_frame"
           and row.get("kind") == "compare_and_patch"
           and row.get("mutation_count") == 1
@@ -1066,6 +1068,8 @@ def expected_openclaw_frame_transition_state(
                                   == OPENCLAW_MODEL_PLUGIN_ID), None),
         model_broker_host_patch=row.get("managed_host_patch"),
         historical_unresolved=unresolved)
+    if "managed_host_patch" not in row:
+        validated.pop("managed_host_patch")
     _need(row == validated
           and row["before_sha256"] == sha256_bytes(before_bytes)
           and row["after_sha256"] == sha256_bytes(after_bytes),

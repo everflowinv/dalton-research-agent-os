@@ -588,6 +588,16 @@ class SuccessorOrchestrator(r11.Orchestrator):
             verify_provider_plugin_for_config(
                 artifacts["provider_plugin_snapshot"],
                 hashlib.sha256(expected_openclaw_bytes).hexdigest())
+            _before, _after, broker_row = expected_openclaw_frame_transition_state(
+                packet_root=self.packet, manifest=transition)
+            if broker_row.get("managed_host_patch") is not None:
+                host_verified = broker_window.verify_reviewed_host_patch(
+                    packet_root=self.packet, source_root=self.successor_source,
+                    openclaw_root=self.openclaw_root,
+                    row=broker_row["managed_host_patch"],
+                    receipt_path=(self.rollback_root /
+                                  "openclaw-broker-transition" /
+                                  "host-patch-receipt.json"))
         else:
             need(r11.verify_provider_plugin(artifacts["provider_plugin_snapshot"]),
                  "provider plugin authority differs")
@@ -613,6 +623,8 @@ class SuccessorOrchestrator(r11.Orchestrator):
         result = {"model_config_count": len(expected_models), "runtime_files": len(files),
                   "authority": authority, "writer_lane_enabled": True,
                   "thesis_impact_enabled": False, "backup_keep_latest": 3}
+        if transition.get("schema_version") == EXTERNAL_CAS_SCHEMA_VERSION:
+            result["model_broker_host_patch"] = locals().get("host_verified")
         if transition.get("schema_version") in PRESERVE_SCHEMA_VERSIONS:
             result.update({
                 "configuration_mutations": 0,

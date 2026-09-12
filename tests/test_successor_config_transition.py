@@ -375,7 +375,8 @@ class PreserveExistingTransitionTests(unittest.TestCase):
     def build_external(self, *, present: bool = True,
                        change_owner_signature: bool = False,
                        managed_web_search: bool = False,
-                       managed_model_broker: bool = False):
+                       managed_model_broker: bool = False,
+                       already_target: bool = False):
         service = json.loads(json.dumps(self.service_before))
         service["bounded_planner"]["config"]["planner_call_budget"] = self.budget
         write(self.packet / "service.installed.json", service)
@@ -388,7 +389,8 @@ class PreserveExistingTransitionTests(unittest.TestCase):
         }
         if present:
             before["plugins"]["entries"]["dalton-openclaw-model-broker"][
-                "config"]["maxFrameBytes"] = 262144
+                "config"]["maxFrameBytes"] = (
+                    OPENCLAW_TARGET_MAX_FRAME_BYTES if already_target else 262144)
         after = json.loads(json.dumps(before))
         after["plugins"]["entries"]["dalton-openclaw-model-broker"][
             "config"]["maxFrameBytes"] = OPENCLAW_TARGET_MAX_FRAME_BYTES
@@ -576,6 +578,15 @@ class PreserveExistingTransitionTests(unittest.TestCase):
         self.assertEqual(0, manifest["boundaries"]["service_config_mutations"])
         self.assertEqual(1, manifest["boundaries"]["external_config_mutations"])
 
+    def test_legacy_external_manifest_without_host_patch_key_replays(self):
+        manifest = self.build_external()
+        manifest["external_config_transitions"][0].pop("managed_host_patch")
+        manifest["content_hash"] = canonical_hash({
+            key: value for key, value in manifest.items() if key != "content_hash"})
+        _before, _after, row = expected_openclaw_frame_transition_state(
+            packet_root=self.packet, manifest=manifest)
+        self.assertNotIn("managed_host_patch", row)
+
     def test_external_frame_transition_records_absent_default_without_inventing_before(self):
         manifest = self.build_external(present=False)
         before, after, row = expected_openclaw_frame_transition_state(
@@ -618,6 +629,18 @@ class PreserveExistingTransitionTests(unittest.TestCase):
             [plugin["plugin_id"] for plugin in row["managed_plugins"]])
         self.assertTrue(row["managed_plugins"][0]["replaces"].endswith(
             "/old/openclaw-model-broker"))
+
+    def test_r18_preserves_already_promoted_frame_while_replacing_model_broker(self):
+        manifest = self.build_external(
+            managed_model_broker=True, already_target=True)
+        before, after, row = expected_openclaw_frame_transition_state(
+            packet_root=self.packet, manifest=manifest)
+        self.assertEqual(OPENCLAW_TARGET_MAX_FRAME_BYTES,
+                         json.loads(before)["plugins"]["entries"]
+                         ["dalton-openclaw-model-broker"]["config"]["maxFrameBytes"])
+        self.assertEqual([], [m for m in row["semantic_mutations"]
+                              if m["kind"] == "json_leaf_compare_and_patch"])
+        self.assertNotEqual(before, after)
 
     def test_external_transition_rejects_rehashed_invalid_pending_record(self):
         manifest = self.build_external()
