@@ -1233,7 +1233,8 @@ def postdeploy(args: argparse.Namespace) -> None:
     }
     write_json(args.output_dir / "audit.json", report)
     lines = [
-        "# R15 postdeploy product audit", "",
+        "# Postdeploy product audit", "",
+        f"Source commit: `{expected_source}`  ",
         f"Snapshot: `{report['snapshot_at']}`  ",
         f"Deployment cutoff: `{cutoff.isoformat()}`  ",
         f"Tracked directed admissions: **{len(directed)}**.  ",
@@ -1245,7 +1246,8 @@ def postdeploy(args: argparse.Namespace) -> None:
         f"Postdeploy planner Works: **{planner['work_count']}** (Scheduler location recorded per Work).",
         "", "Admission, budget wait, provider response, candidate outcome and canonical promotion "
         "remain separate states. Old DXC/EPAM admissions stay in scope even though their admission "
-        "timestamps precede R15; only transitions at or after the deployment cutoff are fresh.",
+        "timestamps come from earlier deployment history; only transitions at or after the current "
+        "deployment cutoff are fresh.",
     ]
     write = ("\n".join(lines) + "\n").encode()
     create(args.output_dir / "report.md", write)
