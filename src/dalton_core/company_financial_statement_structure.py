@@ -142,7 +142,13 @@ _STRUCTURE_LINE_SCHEMA = _schema_object(
         },
         "period_kind": {"const": "duration"},
         "annual_semantics": {"enum": list(ANNUAL_SEMANTICS)},
-        "forecast_method": {"enum": list(FORECAST_METHODS)},
+        "forecast_method": {
+            "enum": list(FORECAST_METHODS),
+            "description": (
+                "A filed standard subtotal is historical/tie authority and must use "
+                "unavailable. Forecasting a subtotal requires an explicit derived formula."
+            ),
+        },
         "forecast_base_ref": {"type": ["string", "null"], "maxLength": 80},
         "annual_forecast_method": {
             "type": ["string", "null"],

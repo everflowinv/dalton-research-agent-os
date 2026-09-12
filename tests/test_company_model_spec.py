@@ -249,7 +249,7 @@ class CompanyModelSpecTests(unittest.TestCase):
         self.assertEqual(json.loads(pretty), json.loads(compact))
         self.assertEqual(
             TASK_HASH,
-            "9b23af19d037a586ec0ce30fdbf688e9f9cf63a9317a4f63640635fd1cc3c43b",
+            "726ad0d2aac54b8b61c7e98c54ab6e02952474914bc5bd4e42ba91870e10f8a7",
         )
         self.assertNotEqual(
             TASK_HASH,
@@ -577,6 +577,12 @@ class CompanyModelSpecTests(unittest.TestCase):
             prompt,
         )
         self.assertIn(
+            "A filed standard subtotal is historical/tie authority and uses "
+            "unavailable, not independent growth or shares",
+            prompt,
+        )
+        self.assertIn("otherwise retain the unavailable forecast gap", prompt)
+        self.assertIn(
             "Presentation rounding does not permit arbitrary or global tie "
             "tolerance, rewriting a filed amount, or inventing a balancing term",
             prompt,
@@ -596,6 +602,11 @@ class CompanyModelSpecTests(unittest.TestCase):
         )
         self.assertIn(
             "A per-share divide ties using each source period's disclosed filed precision",
+            prompt,
+        )
+        self.assertIn(
+            "A filed standard subtotal is historical/tie authority and must use "
+            "unavailable. Forecasting a subtotal requires an explicit derived formula.",
             prompt,
         )
 
