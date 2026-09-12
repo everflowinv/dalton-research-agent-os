@@ -691,13 +691,18 @@ class SuccessorCopiedStateRehearsalTests(unittest.TestCase):
             after_host = fixture.packet / "runtime.after.mjs"
             before_host.write_text("const old = true;\n")
             after_host.write_text("const guarded = true;\n")
+            source_root = fixture.root / "source"
+            helper = (source_root / "integrations/openclaw_host_patches" /
+                      "patch_provider_output_control_endpoint.py")
+            helper.parent.mkdir(parents=True, exist_ok=True)
+            helper.write_text("# inert reviewed helper\n")
             external = manifest["external_config_transitions"][0]
             external["managed_host_patch"] = {
                 "source_commit": manifest["source_commit"],
                 "helper_relative_path": (
                     "integrations/openclaw_host_patches/"
                     "patch_provider_output_control_endpoint.py"),
-                "helper_sha256": "d" * 64,
+                "helper_sha256": hashlib.sha256(helper.read_bytes()).hexdigest(),
                 "target_relative_path": "dist/runtime-llm.runtime-test.mjs",
                 "before": before_host.name, "before_sha256": hashlib.sha256(before_host.read_bytes()).hexdigest(),
                 "after": after_host.name, "after_sha256": hashlib.sha256(after_host.read_bytes()).hexdigest(),
@@ -727,7 +732,8 @@ class SuccessorCopiedStateRehearsalTests(unittest.TestCase):
                 temp_config=scratch_config, replacements={})
             derived_path, _proof_path, proof = derive_confined_transition(
                 PathModule, rehearsal, packet_root=fixture.packet,
-                manifest=manifest, original_manifest_sha256="e" * 64)
+                manifest=manifest, original_manifest_sha256="e" * 64,
+                source_root=source_root)
             derived = json.loads(derived_path.read_text())
             _before, _after, row = expected_openclaw_frame_transition_state(
                 packet_root=derived_path.parent, manifest=derived)
@@ -741,8 +747,11 @@ class SuccessorCopiedStateRehearsalTests(unittest.TestCase):
             self.assertEqual(
                 {"status": "artifacts_confined_not_executed", "model_calls": 0,
                  "before_sha256": host["before_sha256"],
-                 "after_sha256": host["after_sha256"]},
+                 "after_sha256": host["after_sha256"],
+                 "helper_sha256": host["helper_sha256"]},
                 proof["managed_host_patch"])
+            self.assertTrue((derived_path.parent / "managed-host-patch" /
+                             "patch-helper.py").is_file())
             for name in ("before", "after"):
                 self.assertTrue((derived_path.parent / host[name]).is_file())
                 self.assertTrue((derived_path.parent / host[name]).resolve().is_relative_to(

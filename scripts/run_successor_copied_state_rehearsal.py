@@ -322,6 +322,7 @@ def _write_json(path: Path, value: Mapping[str, Any]) -> None:
 def derive_confined_transition(
     module: Any, rehearsal: Any, *, packet_root: Path,
     manifest: Mapping[str, Any], original_manifest_sha256: str,
+    source_root: Path | None = None,
 ) -> tuple[Path, Path, dict[str, Any]]:
     """Derive a scratch-path CAS manifest from one exact reviewed transition."""
     derived_root = rehearsal.temp_root / "successor-confined-transition"
@@ -497,8 +498,15 @@ def derive_confined_transition(
                         "unsupported confined OpenClaw semantic mutation")
             host_patch = external.get("managed_host_patch")
             if host_patch is not None:
+                _need(source_root is not None,
+                      "model broker host patch rehearsal source is unavailable")
                 host_root = derived_root / "managed-host-patch"
                 host_root.mkdir(mode=0o700)
+                helper_source = source_root / host_patch["helper_relative_path"]
+                _artifact(helper_source, host_patch["helper_sha256"],
+                          "original model broker host patch helper")
+                helper_copy = host_root / "patch-helper.py"
+                _write_exclusive(helper_copy, helper_source.read_bytes())
                 for name in ("before", "after"):
                     original_host = packet_root / host_patch[name]
                     _artifact(original_host, host_patch[f"{name}_sha256"],
@@ -566,6 +574,7 @@ def derive_confined_transition(
             "managed_host_patch")
         proof["managed_host_patch"] = (
             {"status": "artifacts_confined_not_executed", "model_calls": 0,
+             "helper_sha256": host_patch["helper_sha256"],
              "before_sha256": host_patch["before_sha256"],
              "after_sha256": host_patch["after_sha256"]}
             if host_patch is not None else None)
@@ -796,7 +805,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                       "mission document lane config already exists in copied baseline")
             confined_manifest, proof_path, proof = derive_confined_transition(
                 module, self, packet_root=packet_root, manifest=manifest,
-                original_manifest_sha256=args.transition_manifest_sha256)
+                original_manifest_sha256=args.transition_manifest_sha256,
+                source_root=source_root)
             receipt = apply_transition_to_scratch(
                 packet_root=confined_manifest.parent, scratch_root=temp_root,
                 state_dir=self.temp_state,
