@@ -440,11 +440,20 @@ def build_work(*, purpose: str, request_id: str, prompt: str, mission_version_re
                request_identity: Mapping[str, Any] | None = None,
                model_spec_request_identity: Mapping[str, Any] | None = None,
                structured_output_repair: Mapping[str, Any] | None = None,
+               transport_retry: Mapping[str, Any] | None = None,
                provider_retry: Mapping[str, Any] | None = None,
                broker_frame_policy: Mapping[str, Any] | None = None,
                producer_route_decision_refs: Sequence[str] = ()) -> WorkOrder:
     if purpose not in _PURPOSES:
         raise CockpitModelError("unknown cockpit model purpose")
+    if transport_retry is not None:
+        from .document_extraction import validate_transport_retry
+        if purpose != "model_spec" or (
+            (model_spec_request_identity is None)
+            == (structured_output_repair is None)
+        ):
+            raise CockpitModelError("transport retry authority requires bound model specification work")
+        transport_retry = validate_transport_retry(transport_retry)
     if len(prompt.encode("utf-8")) > max_input_tokens:
         raise CockpitModelError("the question and its context exceed the model input bound")
     identity = {"identity_version": IDENTITY_VERSION,
@@ -518,12 +527,42 @@ def build_work(*, purpose: str, request_id: str, prompt: str, mission_version_re
                                          structured_output_repair)}),
                                  **({} if provider_retry is None else {
                                      "provider_retry": dict(provider_retry)}),
+                                 **({} if transport_retry is None else {
+                                     "transport_retry": dict(transport_retry)}),
                                  **({} if verifier_provider_contract is None else {
                                      "verifier_output_schema_version": "0.1",
                                      "verifier_provider_contract": verifier_provider_contract,
                                      "verifier_provider_schema_hash": verifier_provider_schema_hash,
                                  })},
     )
+
+
+def _preserve_legacy_model_spec_transport_work(
+    scheduler: Scheduler, expected: WorkOrder,
+) -> WorkOrder:
+    """Keep an exact pre-metadata Work immutable, without changing its identity.
+
+    The request suffix already binds this policy. New Work stores its source
+    policy for independent audit; an existing Work must match every other byte.
+    Scheduler still performs the atomic id/hash comparison at enqueue, including
+    if another process inserts a different wire after this read.
+    """
+    if "transport_retry" not in expected.metadata:
+        return expected
+    try:
+        authority = scheduler.work_order_authority(expected.id)
+    except SchedulerConflict as exc:
+        raise CockpitModelError("model specification Work authority drifted") from exc
+    if authority is None:
+        return expected
+    wire = expected.to_dict()
+    existing = authority["work_order"]
+    if canonical_json(existing) == canonical_json(wire):
+        return expected
+    del wire["metadata"]["transport_retry"]
+    if canonical_json(existing) != canonical_json(wire):
+        raise CockpitModelError("model specification Work differs from this request")
+    return WorkOrder.from_dict(existing)
 
 
 def _validate_structured_output_repair_authority(
@@ -1508,6 +1547,13 @@ class CockpitModel:
             "broker_frame_policy": broker_frame_execution_binding(self.config),
             "model_spec_request_identity": _model_spec_request_identity,
             "structured_output_repair": _structured_output_repair,
+            "transport_retry": (
+                self.config.get("transport_retry")
+                if purpose == "model_spec" and (
+                    _model_spec_request_identity is not None
+                    or _structured_output_repair is not None
+                ) else None
+            ),
         }
         work = build_work(
             request_id=request_id,
@@ -1572,6 +1618,7 @@ class CockpitModel:
             max_lease_seconds=lease_seconds,
             max_total_lease_seconds=lease_seconds * 2,
         ) as scheduler:
+            work = _preserve_legacy_model_spec_transport_work(scheduler, work)
             if _structured_output_repair is not None:
                 _validate_structured_output_repair_authority(
                     scheduler, _structured_output_repair, work, self.config

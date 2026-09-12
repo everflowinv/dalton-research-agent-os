@@ -23,6 +23,7 @@ from dalton_core.cockpit_model import (
     CockpitModel,
     CockpitModelError,
     _failed_work_trace,
+    _preserve_legacy_model_spec_transport_work,
     build_work,
     independent_model_call,
     register_purpose,
@@ -544,7 +545,10 @@ class CockpitChainTests(unittest.TestCase):
                 )
 
         adapter = SequenceAdapter()
-        model = self._model(adapter, policy_version_ref=self.pinned_policy)
+        transport = {"max_definitely_not_sent_retries": 0,
+                     "queue_wait_seconds": 0, "retry_backoff_seconds": 0}
+        model = self._model(adapter, policy_version_ref=self.pinned_policy,
+                            transport_retry=transport)
         initial_identity = model_spec_request_identity(
             STATE["state_hash"], repair_config={"max_attempts": 1},
         )
@@ -573,6 +577,8 @@ class CockpitChainTests(unittest.TestCase):
             ).fetchall()
             works = [json.loads(row["work_order_json"]) for row in rows]
         self.assertEqual(len(works), 2)
+        self.assertTrue(all(work["metadata"]["transport_retry"] == transport
+                            for work in works))
         original_work = next(
             work for work in works
             if work["id"] == first["work_order_ref"]
@@ -652,6 +658,140 @@ class CockpitChainTests(unittest.TestCase):
                 "SELECT count(*) FROM scheduler_work_orders"
             ).fetchone()[0]
         self.assertEqual(count, 2)
+
+    def test_legacy_model_spec_transport_result_replays_without_metadata_rewrite(self):
+        from dalton_core.company_model_cli import model_spec_request_identity
+        identity = model_spec_request_identity("a" * 64)
+        policy = {"max_definitely_not_sent_retries": 0,
+                  "queue_wait_seconds": 0, "retry_backoff_seconds": 0}
+        adapter = ChainAdapter({})
+        model = self._model(adapter, policy_version_ref=self.pinned_policy,
+                            transport_retry=policy)
+        args = dict(purpose="model_spec", request_id=content_hash(identity)[:32],
+                    prompt="legacy model specification", mission=self.mission,
+                    _model_spec_request_identity=identity)
+
+        def old_build(**kwargs):
+            kwargs.pop("transport_retry", None)
+            return build_work(**kwargs)
+
+        with patch("dalton_core.cockpit_model.build_work", side_effect=old_build):
+            original = model.call(**args)
+        with Scheduler(self.root / "scheduler.sqlite") as scheduler:
+            before = scheduler.work_order_authority(original["work_order_ref"])
+        self.assertNotIn("transport_retry", before["work_order"]["metadata"])
+        replay = model.call(**args)
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(replay["work_order_ref"], original["work_order_ref"])
+        self.assertEqual(len(adapter.served), 1)
+        with Scheduler(self.root / "scheduler.sqlite") as scheduler:
+            self.assertEqual(before, scheduler.work_order_authority(original["work_order_ref"]))
+            from scripts.audit_postdeploy_products import scheduler_bundle, model_spec_task_contract
+            spec = {"company_ref": "company:test", "state_hash": identity["state_hash"],
+                    "task_hash": identity["task_hash"]}
+            spec["spec_id"] = "company-model-spec:" + content_hash(spec)[:32]
+            proof = model_spec_task_contract(spec, scheduler_bundle(
+                scheduler.connection, original["work_order_ref"], include_request_identity=True))
+            self.assertEqual(proof["status"], "unknown_legacy_missing_transport_retry_authority")
+
+    def test_new_model_spec_transport_authority_is_auditable_and_policy_bound(self):
+        from dalton_core.company_model_cli import model_spec_request_identity
+        from scripts.audit_postdeploy_products import scheduler_bundle, model_spec_task_contract
+        identity = model_spec_request_identity("a" * 64)
+        args = dict(purpose="model_spec", request_id=content_hash(identity)[:32],
+                    prompt="new specification authority", mission=self.mission,
+                    _model_spec_request_identity=identity)
+        adapter = ChainAdapter({})
+        refs = []
+        for wait in (0, 1):
+            policy = {"max_definitely_not_sent_retries": 0,
+                      "queue_wait_seconds": wait, "retry_backoff_seconds": 0}
+            model = self._model(adapter, policy_version_ref=self.pinned_policy,
+                                transport_retry=policy)
+            result = model.call(**args)
+            refs.append(result["work_order_ref"])
+            with Scheduler(self.root / "scheduler.sqlite") as scheduler:
+                bundle = scheduler_bundle(scheduler.connection, refs[-1], include_request_identity=True)
+                self.assertEqual(bundle["transport_retry"], policy)
+                spec = {"company_ref": "company:test", "state_hash": identity["state_hash"],
+                        "task_hash": identity["task_hash"]}
+                spec["spec_id"] = "company-model-spec:" + content_hash(spec)[:32]
+                self.assertEqual(model_spec_task_contract(spec, bundle)["status"],
+                                 "verified_exact_work_identity")
+            self.assertTrue(model.call(**args)["replayed"])
+        self.assertNotEqual(refs[0], refs[1])
+        self.assertEqual(len(adapter.served), 2)
+
+    def test_legacy_active_model_spec_transport_work_stays_running(self):
+        from dalton_core.company_model_cli import model_spec_request_identity
+        identity = model_spec_request_identity("a" * 64)
+        policy = {"max_definitely_not_sent_retries": 0,
+                  "queue_wait_seconds": 0, "retry_backoff_seconds": 0}
+        adapter = ChainAdapter({})
+        model = self._model(adapter, policy_version_ref=self.pinned_policy,
+                            transport_retry=policy)
+        args = dict(purpose="model_spec", request_id=content_hash(identity)[:32],
+                    prompt="active legacy specification", mission=self.mission,
+                    _model_spec_request_identity=identity)
+        original_claim = Scheduler.claim
+
+        def old_build(**kwargs):
+            kwargs.pop("transport_retry", None)
+            return build_work(**kwargs)
+
+        def already_claimed(scheduler, *pos, **kwargs):
+            original_claim(scheduler, *pos, **kwargs)
+            return None
+
+        with patch("dalton_core.cockpit_model.build_work", side_effect=old_build), \
+                patch.object(Scheduler, "claim", already_claimed), \
+                self.assertRaisesRegex(CockpitModelError, "already running"):
+            model.call(**args)
+        with self.assertRaisesRegex(CockpitModelError, "already running"):
+            model.call(**args)
+        self.assertEqual(adapter.served, [])
+        with Scheduler(self.root / "scheduler.sqlite") as scheduler:
+            rows = scheduler.connection.execute("SELECT work_order_json FROM scheduler_work_orders").fetchall()
+            self.assertEqual(len(rows), 1)
+            self.assertNotIn("transport_retry", json.loads(rows[0][0])["metadata"])
+
+    def test_model_spec_transport_legacy_match_is_exact_and_atomic(self):
+        from dalton_core.company_model_cli import model_spec_request_identity
+        identity = model_spec_request_identity("a" * 64)
+        policy = {"max_definitely_not_sent_retries": 0,
+                  "queue_wait_seconds": 0, "retry_backoff_seconds": 0}
+        expected = build_work(
+            purpose="model_spec", request_id=content_hash(identity)[:32]
+            + ":transport-policy:" + content_hash(policy)[:16],
+            prompt="exact wire", mission_version_ref=self.mission["id"],
+            mission_version_hash=self.mission["content_hash"],
+            model_spec_request_identity=identity, transport_retry=policy,
+            max_input_tokens=1000, max_output_tokens=100, max_cost_usd=1,
+            max_seconds=60, created_at=NOW.isoformat(timespec="microseconds"),
+        )
+        legacy_wire = expected.to_dict()
+        del legacy_wire["metadata"]["transport_retry"]
+        variants = []
+        for value in (None, {}, {**policy, "queue_wait_seconds": 1}):
+            wire = copy.deepcopy(legacy_wire)
+            wire["metadata"]["transport_retry"] = value
+            variants.append(wire)
+        wire = copy.deepcopy(legacy_wire)
+        wire["metadata"]["model_spec_request_identity"]["state_hash"] = "b" * 64
+        variants.append(wire)
+        wire = copy.deepcopy(legacy_wire)
+        wire["budget"]["max_output_tokens"] = 101
+        variants.append(wire)
+        for index, wire in enumerate(variants):
+            with self.subTest(index=index), Scheduler(self.root / f"drift-{index}.sqlite") as scheduler:
+                scheduler.enqueue(wire)
+                with self.assertRaisesRegex(CockpitModelError, "differs from this request"):
+                    _preserve_legacy_model_spec_transport_work(scheduler, expected)
+        with Scheduler(self.root / "race.sqlite") as scheduler:
+            selected = _preserve_legacy_model_spec_transport_work(scheduler, expected)
+            scheduler.enqueue(legacy_wire)  # Concurrent historical writer wins.
+            self.assertEqual(scheduler.enqueue(selected)["status"], "conflict")
+            self.assertEqual(scheduler.work_order_authority(expected.id)["work_order"], legacy_wire)
 
     def test_model_spec_repair_rejects_a_genuine_foreign_mission_parent(self) -> None:
         from dalton_core.company_model_cli import (
