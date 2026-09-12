@@ -313,7 +313,7 @@ TASK_HASH = content_hash({
         "ref": COST_REGISTRY_REF, "hash": COST_REGISTRY_HASH,
     },
     "authority_projection": "company-model-state-with-financial-notes:0.3",
-    "prompt_contract": "company-model-spec-prompt:0.9",
+    "prompt_contract": "company-model-spec-prompt:0.10",
     "structured_output_repair": "company-model-spec-repair:0.1",
 })
 
@@ -548,7 +548,10 @@ def build_prompt(state: Mapping[str, Any]) -> str:
         f"{OUTPUT_SCHEMA['properties']['assessment']['maxLength']} characters. The output is "
         "a modelling specification; investment scenarios and tracking tasks have their own "
         "downstream consumers. Do not squeeze a full scenario discussion into every because.\n"
-        "* Return JSON matching OUTPUT_SCHEMA and nothing else.\n\n"
+        "* Return compact JSON matching OUTPUT_SCHEMA and nothing else. Do not "
+        "pretty-print or add indentation or insignificant whitespace; preserve every "
+        "required semantic field. This reduces formatting overhead but does not change "
+        "the output-token limit.\n\n"
         f"{template}\n\n"
         f"{cost_prompt_block(state.get('industry_classification'), state.get('concepts') or ())}\n\n"
         f"OUTPUT_SCHEMA:\n{json.dumps(OUTPUT_SCHEMA, ensure_ascii=False)}\n\n"

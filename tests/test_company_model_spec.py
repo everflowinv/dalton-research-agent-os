@@ -11,6 +11,7 @@ whether you can forecast revenue and margin is not.
 from __future__ import annotations
 
 import copy
+import json
 import tempfile
 import threading
 import unittest
@@ -19,6 +20,7 @@ from pathlib import Path
 from dalton_core.company_model_spec import (
     MAX_FORECAST_QUARTERS,
     MAX_REVENUE_DRIVERS,
+    TASK_HASH,
     CompanyModelSpecError,
     build_prompt,
     forecast_statements,
@@ -233,6 +235,26 @@ class CompanyModelSpecTests(unittest.TestCase):
         self.assertEqual(len(spec["content_hash"]), 64)
         # Same judgement, same hash: a spec is identified by what it says.
         self.assertEqual(self.verify()["content_hash"], spec["content_hash"])
+
+    def test_pretty_and_compact_json_have_the_same_verified_semantics(self):
+        body = _spec()
+        pretty = json.dumps(body, ensure_ascii=False, indent=2)
+        compact = json.dumps(body, ensure_ascii=False, separators=(",", ":"))
+        self.assertLess(len(compact), len(pretty))
+        pretty_spec = self.verify(pretty)
+        compact_spec = self.verify(compact)
+        self.assertEqual(pretty_spec, compact_spec)
+        # Parsing accepts either valid representation; it does not rewrite or
+        # auto-accept a prior response under a different task identity.
+        self.assertEqual(json.loads(pretty), json.loads(compact))
+        self.assertEqual(
+            TASK_HASH,
+            "af60c3495da0e329d17b79940bbffcfa5639c6683a1e6a26e5d9f1bbc4038564",
+        )
+        self.assertNotEqual(
+            TASK_HASH,
+            "e7b893bf6d1f1c1bef2a3c964606b435eb60ead7a76ed3c7e686e3943d432865",
+        )
 
     def test_only_syntax_and_schema_text_bounds_are_typed_for_repair(self):
         with self.assertRaises(CompanyModelSpecError) as malformed:
@@ -520,6 +542,9 @@ class CompanyModelSpecTests(unittest.TestCase):
                       "srt:StatementGeographicalAxis", prompt)
         # And the concept list is not repeated: every concept is in the table.
         self.assertNotIn('"concepts"', prompt)
+        self.assertIn("Return compact JSON matching OUTPUT_SCHEMA", prompt)
+        self.assertIn("Do not pretty-print", prompt)
+        self.assertIn("does not change the output-token limit", prompt)
 
     def test_prompt_places_a_derived_lines_filed_tie_only_on_its_formula(self):
         prompt = build_prompt(STATE)
