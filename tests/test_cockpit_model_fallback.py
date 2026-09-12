@@ -348,6 +348,85 @@ class CockpitChainTests(unittest.TestCase):
                 "SELECT record_json FROM thesis_impact_day_settlements").fetchone()[0])
         self.assertEqual(settlement["actual_micros"], admission["reserved_micros"])
 
+    def test_broker_budget_failure_is_not_rewritten_as_a_no_send_refusal(self) -> None:
+        adapter = ChainAdapter({
+            "profile:gpt-6-astra": {
+                "code": "PROVIDER_BUDGET_EXCEEDED",
+                "message": "broker refused its downstream budget",
+            }
+        })
+        with self.assertRaisesRegex(CockpitModelError, "broker refused") as raised:
+            self._model(adapter, policy_version_ref=self.chain_policy).call(
+                purpose="plan", request_id="downstream-budget", prompt="draft",
+                mission=self.mission,
+            )
+
+        # The adapter ran, and budget refusal is a halting class: there is no
+        # blind fallback call to a second provider.
+        self.assertEqual(adapter.served, ["profile:gpt-6-astra"])
+        with ThesisImpactBudgetStore(self.root / "budget.sqlite") as ledger:
+            admission = json.loads(ledger.connection.execute(
+                "SELECT record_json FROM thesis_impact_day_admissions"
+            ).fetchone()[0])
+            settlement = json.loads(ledger.connection.execute(
+                "SELECT record_json FROM thesis_impact_day_settlements"
+            ).fetchone()[0])
+        self.assertEqual(settlement["actual_micros"], admission["reserved_micros"])
+        self.assertGreater(settlement["actual_micros"], 0)
+
+        trace = raised.exception.failure_trace
+        with Scheduler(self.root / "scheduler.sqlite") as scheduler:
+            envelope = scheduler.formal_result(
+                trace["work_order_ref"]
+            )["result_envelope"]
+        self.assertEqual(envelope["error"]["code"], "MODEL_CHAIN_EXHAUSTED")
+        self.assertIn("budget_refused", envelope["error"]["message"])
+        self.assertIn("broker refused its downstream budget",
+                      envelope["error"]["message"])
+        # Cockpit has no Core ModelInvocation authority. Do not leave a
+        # dangling invocation/usage claim or falsely label the post-call state
+        # not-started; the bounded marker reports that dispatch is unknown.
+        self.assertTrue(envelope["invocation_ref"].startswith("invocation:unavailable:"))
+        self.assertEqual(envelope["metadata"]["dispatch_state"], "unknown")
+        self.assertFalse(envelope["invocation_ref"].startswith("invocation:not-started:"))
+        self.assertEqual(envelope["usage_refs"], [])
+        self.assertNotEqual(envelope["error"]["code"], "BUDGET_REFUSED")
+
+    def test_day_ledger_refusal_remains_a_pre_dispatch_budget_refusal(self) -> None:
+        with ThesisImpactBudgetStore(self.root / "budget.sqlite") as ledger:
+            prior = ledger.admit(
+                policy_version_id=BUDGET_POLICY,
+                day=NOW.date().isoformat(),
+                work_order_ref="work:prior-budget-consumer",
+                attempt_number=1,
+                phase="assessment",
+                route_decision_ref="model-route-decision:prior-budget-consumer",
+                reserved_micros=5_000_000,
+                mission_binding={
+                    "mission_ref": self.mission["mission_ref"],
+                    "mission_version_ref": self.mission["id"],
+                    "mission_version_hash": self.mission["content_hash"],
+                    "max_daily_paid_calls": 50,
+                    "max_daily_cost_micros": 5_000_000,
+                },
+            )
+            ledger.settle(prior["admission_id"], actual_micros=5_000_000)
+
+        adapter = ChainAdapter({})
+        with self.assertRaises(CockpitModelError) as raised:
+            self._model(adapter, policy_version_ref=self.chain_policy).call(
+                purpose="plan", request_id="local-budget", prompt="draft",
+                mission=self.mission,
+            )
+        self.assertEqual(adapter.served, [])
+        with Scheduler(self.root / "scheduler.sqlite") as scheduler:
+            envelope = scheduler.formal_result(
+                raised.exception.failure_trace["work_order_ref"]
+            )["result_envelope"]
+        self.assertEqual(envelope["error"]["code"], "BUDGET_REFUSED")
+        self.assertTrue(envelope["invocation_ref"].startswith("invocation:not-started:"))
+        self.assertNotIn("dispatch_state", envelope["metadata"])
+
     def test_single_pin_ambiguous_adapter_failure_keeps_reservation(self) -> None:
         adapter = ChainAdapter({"profile:gpt-6-astra": BrokerTimeout("recv timed out")})
         with self.assertRaises(CockpitModelError):

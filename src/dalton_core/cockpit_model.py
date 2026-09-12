@@ -1016,16 +1016,27 @@ def _validated_dossier_success(
 def _failure(work: WorkOrder, code: str, route_ref: str | None,
              *, message: str | None = None,
              chain_failures: Sequence[Mapping[str, Any]] = (),
-             status: str = "failed") -> ResultEnvelope:
+             status: str = "failed",
+             dispatch_state: str = "not_started") -> ResultEnvelope:
+    if dispatch_state not in {"not_started", "unknown"}:
+        raise CockpitModelError("failure dispatch state is not recognized")
     identity = {"work_order_ref": work.id, "code": code, "route_ref": route_ref}
+    if dispatch_state != "not_started":
+        # Preserve existing control-envelope identities byte-for-byte while
+        # ensuring a post-call unknown state cannot reuse a not-started id.
+        identity["dispatch_state"] = dispatch_state
+    invocation_state = "not-started" if dispatch_state == "not_started" else "unavailable"
+    metadata = {"control_plane_failure": True, "route_decision_ref": route_ref,
+                "chain_failures": list(chain_failures)[:12]}
+    if dispatch_state != "not_started":
+        metadata["dispatch_state"] = dispatch_state
     return ResultEnvelope(
         schema_version=SCHEMA_VERSION, id=f"result:cockpit-control-{content_hash(identity)[:32]}",
         created_at=_now(), work_order_ref=work.id,
-        invocation_ref=f"invocation:not-started:{content_hash(identity)[:32]}", status=status,
+        invocation_ref=f"invocation:{invocation_state}:{content_hash(identity)[:32]}", status=status,
         outputs={}, actual_side_effects=(), usage_refs=(), artifact_refs=(),
         error={"code": code, **({} if message is None else {"message": message[:1000]})},
-        metadata={"control_plane_failure": True, "route_decision_ref": route_ref,
-                  "chain_failures": list(chain_failures)[:12]},
+        metadata=metadata,
     )
 
 
@@ -2255,7 +2266,18 @@ class CockpitModel:
                     "cost_micros": served_micros, "cost_status": served_status,
                     "pool_rejection": None, "route": outcome["decision"],
                     "profile": outcome["profile"], "invocation": invocation}
-        if outcome["status"] == "halted" and outcome.get("reason") == "budget_refused":
+        # ``budget_refused`` has two different origins.  ``admit`` appends a
+        # refusal when Dalton's day ledger stops the call before dispatch.  A
+        # broker may also return a BUDGET_* failure after the adapter was
+        # called; that path can have uncertain spend and must not be labelled
+        # as Dalton's pre-dispatch ``BUDGET_REFUSED`` decision. Cockpit has no
+        # canonical Core accounting writer, so the generic chain failure below
+        # retains the broker detail without claiming an unpersisted invocation
+        # or usage row. Its distinct error code prevents the synthetic
+        # ``invocation:not-started`` marker from becoming no-send proof.
+        if (outcome["status"] == "halted"
+                and outcome.get("reason") == "budget_refused"
+                and (pool_rejection is not None or refusal)):
             if pool_rejection is not None:
                 return {"result": _failure(work, "POOL_EXHAUSTED", route_ref),
                         "failure": _pool_refusal_message(pool_rejection),
@@ -2300,7 +2322,8 @@ class CockpitModel:
         return {"result": _failure(
                     work, "MODEL_CHAIN_EXHAUSTED", route_ref,
                     message=failure, chain_failures=details,
-                    status="retryable" if retryable else "failed"),
+                    status="retryable" if retryable else "failed",
+                    dispatch_state="unknown" if uncertain_spend else "not_started"),
                 "failure": failure,
                 "cost_micros": ceiling if uncertain_spend else 0,
                 "cost_status": "reserved" if uncertain_spend else "failed",
