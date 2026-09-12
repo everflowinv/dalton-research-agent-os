@@ -591,9 +591,11 @@ class SuccessorOrchestrator(r11.Orchestrator):
             _before, _after, broker_row = expected_openclaw_frame_transition_state(
                 packet_root=self.packet, manifest=transition)
             if broker_row.get("managed_host_patch") is not None:
+                verification_source = Path(manifest["source"]["root"])
+                verification_openclaw = broker_window.managed_openclaw_root()
                 host_verified = broker_window.verify_reviewed_host_patch(
-                    packet_root=self.packet, source_root=self.successor_source,
-                    openclaw_root=self.openclaw_root,
+                    packet_root=self.packet, source_root=verification_source,
+                    openclaw_root=verification_openclaw,
                     row=broker_row["managed_host_patch"],
                     receipt_path=(self.rollback_root /
                                   "openclaw-broker-transition" /
