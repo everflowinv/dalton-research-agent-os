@@ -207,9 +207,10 @@ class CockpitLanguageTests(unittest.TestCase):
         backend = Path(__import__("dalton_core.cockpit_plane", fromlist=["x"]).__file__).read_text(encoding="utf-8")
         self.assertIn("正在保存模型选择…", frontend)
         for expected in ("投资备忘录：是否批准进入持续覆盖",
-                         "请选择接受、不接受或暂缓，并写明理由",
+                         "等待正式研究审批流程接入；本页暂不能提交决定",
                          "暂缓决定论点修订", "重新出具初步筛查报告"):
             self.assertIn(expected, backend)
+        self.assertNotIn('+ f"：{ref', backend)
         for stale in ("正在发布新的模型选择", "memo verification contract failed",
                       "Investment Memo：", "写者操作 decide_conviction_call",
                       "把论点修订放了放", "重出 Initial Screen"):

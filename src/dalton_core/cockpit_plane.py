@@ -3491,7 +3491,7 @@ class CockpitPlane:
                             row["risk_reward_status"], row["risk_reward_status"]),
                         "可观察信号": [step.get("signal") for step
                                        in record.get("event_pathway") or []],
-                        "所需决定": "请选择接受、不接受或暂缓，并写明理由",
+                        "审批状态": "等待正式研究审批流程接入；本页暂不能提交决定",
                     },
                     "actions": [],
                     "needs_rationale": False,
@@ -3720,7 +3720,7 @@ class CockpitPlane:
             operation, params = "decide_thesis_admission", {
                 "candidate_id": ref, "candidate_hash": digest, "verdict": decision, "rationale": rationale.strip(),
                 "decision_id": f"thesis-admission-decision:cockpit:{content_hash({'candidate': ref, 'request': request_id})[:24]}"}
-            title = ("接受了研究论点" if decision == "admit" else "拒绝了研究论点") + f"：{ref.split(':', 1)[-1]}"
+            title = ("接受了研究论点" if decision == "admit" else "拒绝了研究论点")
         elif kind == "capability":
             if decision not in {"approve", "reject"}:
                 raise CockpitError("decision must be approve or reject")
@@ -3731,7 +3731,7 @@ class CockpitPlane:
                 "proposal_ref": ref, "decision": decision, "rationale": rationale.strip(),
                 "decision_id": f"capability-decision:cockpit:{content_hash({'proposal': ref, 'request': request_id})[:24]}",
                 **({"evaluation_id": evaluation} if isinstance(evaluation, str) and evaluation else {})}
-            title = ("批准了新工具" if decision == "approve" else "拒绝了新工具") + f"：{ref}"
+            title = ("批准了新工具" if decision == "approve" else "拒绝了新工具")
         elif kind == "planner":
             if decision != "accept":
                 raise CockpitError("planner proposals can only be accepted here")
@@ -3754,7 +3754,7 @@ class CockpitPlane:
                 "gate_version_ref": ref, "gate_version_hash": digest,
                 "decision": decision, "reason": rationale.strip()}
             title = {"approve": "通过了深度认知评审", "return_for_more_work": "将深度认知评审退回补充",
-                     "reject": "未通过深度认知评审"}[decision] + f"：{ref.split(':', 1)[-1]}"
+                     "reject": "未通过深度认知评审"}[decision]
         elif kind == "investment_memo":
             if decision not in {"approve", "reject"}:
                 raise CockpitError("decision must be approve or reject")
@@ -3764,7 +3764,7 @@ class CockpitPlane:
                 "memo_version_ref": ref, "memo_version_hash": digest,
                 "decision": decision, "reason": rationale.strip()}
             title = ("批准了投资备忘录" if decision == "approve"
-                     else "未批准投资备忘录") + f"：{ref.split(':', 1)[-1]}"
+                     else "未批准投资备忘录")
         elif kind == "forecast":
             if decision not in {"keep_forecast", "revise_forecast"}:
                 raise CockpitError("decision must be keep_forecast or revise_forecast")
@@ -3773,7 +3773,7 @@ class CockpitPlane:
             operation, params = "decide_forecast_overturn", {
                 "reconciliation_ref": ref, "reconciliation_hash": digest, "decision": decision, "rationale": rationale.strip(),
                 "idempotency_key": f"cockpit-overturn:{ref}:{request_id}"}
-            title = ("维持了预测" if decision == "keep_forecast" else "决定修订预测") + f"：{ref}"
+            title = ("维持了预测" if decision == "keep_forecast" else "决定修订预测")
         elif kind == "thesis_revision_candidate":
             # ADR-0007: automation may never take this branch. The cockpit
             # mints an ephemeral *human* principal for the call, and the
@@ -3786,7 +3786,7 @@ class CockpitPlane:
                 "candidate_ref": ref, "candidate_hash": digest,
                 "verdict": decision, "reason": rationale.strip()}
             title = {"accept": "接受了论点修订", "reject": "未接受论点修订",
-                     "defer": "暂缓决定论点修订"}[decision] + f"：{ref}"
+                     "defer": "暂缓决定论点修订"}[decision]
         elif kind == "gate_reopen":
             if decision not in {"approve", "decline"}:
                 raise CockpitError("decision must be approve or decline")
@@ -3796,7 +3796,7 @@ class CockpitPlane:
                 "proposal_ref": ref, "proposal_hash": digest,
                 "verdict": decision, "reason": rationale.strip()}
             title = ("同意重新出具初步筛查报告" if decision == "approve"
-                     else "不同意重新出具初步筛查报告") + f"：{ref}"
+                     else "不同意重新出具初步筛查报告")
         else:
             raise CockpitError("unknown approval kind")
         try:
