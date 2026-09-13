@@ -4,7 +4,7 @@ import unittest
 
 from dalton_core.research_language_review import run_language_review
 
-IDENTITY = {"provider": "antigravity",
+IDENTITY = {"provider": "antigravity-cli-gateway",
             "model": "antigravity-cli-gateway/gemini-3.8-flash"}
 
 

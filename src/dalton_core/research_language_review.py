@@ -12,7 +12,7 @@ from .research_localization import validate_localized_text
 SCHEMA_VERSION = "research-language-review:0.1"
 CHECKER_PURPOSE = "research_language_check"
 BRAIN_PURPOSE = "research_language_revision"
-CHECKER_PROVIDER = "antigravity"
+CHECKER_PROVIDER = "antigravity-cli-gateway"
 CHECKER_MODEL = "antigravity-cli-gateway/gemini-3.8-flash"
 
 
@@ -142,7 +142,8 @@ def run_language_review(
 
     source_hash = _hash(product)
     if dict(checker_identity) != {"provider": CHECKER_PROVIDER, "model": CHECKER_MODEL}:
-        raise ResearchLanguageReviewError("language checker must be antigravity Gemini 3.8 Flash")
+        raise ResearchLanguageReviewError(
+            "language checker must use the exact Antigravity Gemini 3.8 Flash transport identity")
     try:
         review = validate_checker_output(
             checker(build_checker_prompt(product)),
