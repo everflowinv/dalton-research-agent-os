@@ -13,18 +13,15 @@ from integrations.openclaw_host_patches.patch_provider_failure_bridge import (
 )
 
 
-INSTALLED = Path("/Users/everflow/.openclaw/tools/node-v26.8.2/lib/node_modules/openclaw")
-
-
 class ProviderFailureBridgePatchTests(unittest.TestCase):
     def setUp(self):
-        if not INSTALLED.exists():
-            self.skipTest("reviewed OpenClaw installation is unavailable")
+        installed = (Path(__file__).parent / "fixtures" /
+                     "openclaw-controlled-repair-2026.9.3")
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name) / "openclaw"
         (self.root / "dist").mkdir(parents=True)
-        shutil.copy2(INSTALLED / "package.json", self.root / "package.json")
-        source = next((INSTALLED / "dist").glob("runtime-llm.runtime-*.mjs"))
+        shutil.copy2(installed / "package.json", self.root / "package.json")
+        source = next((installed / "dist").glob("runtime-llm.runtime-*.mjs"))
         shutil.copy2(source, self.root / "dist" / source.name)
         # Exercise the unpatched input even after the reviewed patch is live.
         # Never modify the installed bundle to make a fixture pass.
@@ -36,7 +33,7 @@ class ProviderFailureBridgePatchTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def test_actual_bundle_is_patched_once_and_remains_valid_javascript(self):
+    def test_reviewed_bundle_fixture_is_patched_once_and_remains_valid_javascript(self):
         self.assertTrue(apply(self.root, check=False))
         self.assertFalse(apply(self.root, check=False))
         source = target(self.root).read_text(encoding="utf-8")

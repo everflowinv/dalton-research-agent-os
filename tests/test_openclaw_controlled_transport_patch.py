@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -12,6 +13,16 @@ from integrations.openclaw_host_patches.patch_controlled_completion_transport im
 from integrations.openclaw_host_patches.patch_provider_output_control_endpoint import (
     apply as check_provider_output_endpoint,
 )
+
+
+def installed_openclaw_root(test: unittest.TestCase) -> Path:
+    named = os.environ.get("DALTON_TEST_OPENCLAW_INSTALL_ROOT")
+    if not named:
+        test.skipTest("set DALTON_TEST_OPENCLAW_INSTALL_ROOT for installed-runtime validation")
+    root = Path(named).resolve(strict=True)
+    if not (root / "package.json").is_file() or not (root / "dist").is_dir():
+        raise AssertionError("DALTON_TEST_OPENCLAW_INSTALL_ROOT must name the OpenClaw package root")
+    return root
 
 
 MODULE = r'''
@@ -134,10 +145,8 @@ class ControlledTransportPatchTests(unittest.TestCase):
                     apply(root, check=True)
 
     def test_copied_installed_module_uses_native_seam_for_controls(self):
-        installed = sorted(Path.home().glob(
-            ".openclaw/tools/node-*/lib/node_modules/openclaw/dist/"
-            "simple-completion-execution-*.mjs"
-        ))
+        installed = sorted((installed_openclaw_root(self) / "dist").glob(
+            "simple-completion-execution-*.mjs"))
         if not installed:
             self.skipTest("installed OpenClaw completion module unavailable")
         source = installed[-1].read_text(encoding="utf-8")
@@ -211,11 +220,7 @@ console.log(JSON.stringify({{...observed,proof}}));
                              "google-generative-ai-count-tokens-v1")
 
     def test_installed_control_patches_match_repo_owned_contracts(self):
-        roots = sorted(Path.home().glob(
-            ".openclaw/tools/node-*/lib/node_modules/openclaw/package.json"))
-        if not roots:
-            self.skipTest("installed OpenClaw unavailable")
-        root = roots[-1].parent
+        root = installed_openclaw_root(self)
         # Both installed bytes and behavior are checked against repository-owned
         # contracts.  The behavioral harness uses only loopback mock transports;
         # it performs no paid or external provider call.

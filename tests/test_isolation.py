@@ -7,9 +7,22 @@ from pathlib import Path
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "src" / "dalton_core"
+REPOSITORY_ROOT = PACKAGE_ROOT.parents[1]
 
 
 class IsolationTests(unittest.TestCase):
+    def test_installed_openclaw_tests_require_an_explicit_package_root(self) -> None:
+        paths = [
+            REPOSITORY_ROOT / "tests/test_portable_verifier_contracts.py",
+            REPOSITORY_ROOT / "tests/test_openclaw_controlled_transport_patch.py",
+        ]
+        for path in paths:
+            source = path.read_text(encoding="utf-8")
+            with self.subTest(path=path.name):
+                self.assertIn("DALTON_TEST_OPENCLAW_INSTALL_ROOT", source)
+                self.assertNotIn("Path.home().glob", source)
+                self.assertNotIn("/Users/everflow/.openclaw", source)
+
     def test_source_has_no_live_system_references(self) -> None:
         forbidden = (
             "workspace-chem",

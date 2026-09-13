@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -43,8 +44,12 @@ class PortableVerifierContractTests(unittest.TestCase):
                 assert_portable(self, json.loads(path.read_text(encoding="utf-8")))
 
     def test_every_schema_crosses_the_installed_google_validator(self) -> None:
-        modules = sorted(Path.home().glob(
-            ".openclaw/tools/node-*/lib/node_modules/openclaw/node_modules/"
+        named = os.environ.get("DALTON_TEST_OPENCLAW_INSTALL_ROOT")
+        if not named:
+            self.skipTest("set DALTON_TEST_OPENCLAW_INSTALL_ROOT for installed-runtime validation")
+        root = Path(named).resolve(strict=True)
+        modules = sorted(root.glob(
+            "node_modules/"
             "@openclaw/ai/dist/google-shared-*.mjs"
         ))
         if not modules:
