@@ -109,9 +109,25 @@ def final_surface_products(connection: Any, mission: Mapping[str, Any],
         ).fetchall()
         for row in rows:
             body = _record(row)
+            values = [body.get(field) for field in fields]
+            if kind.endswith("judgement"):
+                effect = body.get("effect") or {}
+                if isinstance(effect, Mapping):
+                    values.append(effect.get("reason"))
+            else:
+                market = body.get("market_view_vs_ours") or {}
+                if isinstance(market, Mapping):
+                    values.append(market.get("summary"))
+                for item in body.get("missed_debates") or []:
+                    if isinstance(item, Mapping): values.append(item.get("question"))
+                for item in body.get("followup_tracking") or []:
+                    if isinstance(item, Mapping): values.append(item.get("because"))
+                for item in body.get("followup_research") or []:
+                    if isinstance(item, Mapping):
+                        values.extend((item.get("question"), item.get("wants")))
             products.append(_product(kind, company_ref, row[id_col], row["content_hash"],
                                      [*_sections("事件研判" if kind.endswith("judgement") else "观点复盘",
-                                               *(body.get(field) for field in fields))]))
+                                               *values)]))
 
     if _has(connection, "deep_insight_gate_versions"):
         decision_join = (" LEFT JOIN deep_insight_gate_decisions d ON d.gate_version_ref=v.version_id "
@@ -135,6 +151,7 @@ def final_surface_products(connection: Any, mission: Mapping[str, Any],
                     gaps += [unknown.get("missing"), unknown.get("evidence_that_would_answer")]
                 sections.extend(_sections(str(item.get("question") or item.get("question_ref")
                                                     or "深度认知"), *sentences, *gaps))
+            sections = _sections("行业分类", body.get("classification")) + sections
             products.append(_product("surface_deep_insight", company_ref, row["version_id"],
                                      row["content_hash"], sections))
 
@@ -161,10 +178,17 @@ def final_surface_products(connection: Any, mission: Mapping[str, Any],
             (mission["mission_ref"],)).fetchone()
         if row:
             body = _record(row); narrative = body.get("narrative") or {}
+            values = [narrative.get("prose"), *(body.get("policy_suggestions") or []),
+                      body.get("authority_note")]
+            for item in narrative.get("table") or []:
+                if isinstance(item, Mapping):
+                    values.extend(value for value in item.values() if isinstance(value, str))
+            for item in body.get("backlog_candidates") or []:
+                if isinstance(item, Mapping):
+                    values.extend((item.get("question"), item.get("because")))
             products.append(_product("surface_cycle_reflection", mission["mission_ref"],
                 row["version_id"], row["content_hash"],
-                [*_sections(narrative.get("title") or "每周研究复盘", narrative.get("prose"),
-                          *(body.get("policy_suggestions") or []))]))
+                [*_sections(narrative.get("title") or "每周研究复盘", *values)]))
 
     if _has(connection, "mission_deliverable_pointer") and _has(connection, "mission_deliverable_versions"):
         rows = connection.execute(
