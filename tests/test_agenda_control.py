@@ -467,7 +467,7 @@ class AgendaControlTests(unittest.TestCase):
             html = response.read().decode("utf-8")
             cookie = response.getheader("Set-Cookie").split(";", 1)[0]
             self.assertEqual(response.status, 200)
-            self.assertIn("Dalton 研究台", html)
+            self.assertIn("Dalton 投研工作台", html)
             self.assertIn("/v1/cockpit/overview", html)
             # The review-oriented page stays reachable for operators at /legacy.
             connection.request("GET", "/legacy", headers=headers)
