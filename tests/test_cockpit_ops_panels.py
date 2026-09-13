@@ -332,7 +332,8 @@ class PageTests(unittest.TestCase):
                 self.assertIn(word, self.page)
 
     def test_terminal_copy_does_not_claim_every_failure_is_unreadable_bytes(self) -> None:
-        self.assertIn("当前产出未通过校验", self.page)
+        self.assertIn("已经结束且不会自动重试", self.page)
+        self.assertIn("任务已经结束，具体原因暂未记录", self.page)
         self.assertIn("每项具体原因见下方分类", self.page)
         self.assertNotIn("内容本身读不出来，再试一次读到的还是同样的字节", self.page)
         self.assertIn("const grouped=new Map()", self.page)

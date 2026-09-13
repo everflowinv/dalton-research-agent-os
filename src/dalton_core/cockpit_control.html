@@ -1028,10 +1028,10 @@ function renderOps(sheet,r){sheet.replaceChildren(readerClose(),node("h2","运�
     node("div","权限或治理配置改变后继续；等待期间不重复调用。","hint"));const ul=node("ul",null,"latest");
     (r.permission_items||[]).forEach(it=>ul.append(node("li",`${it.lane_label}：${it.reason}`)));s.append(ul);sheet.append(s)}
   if(r.terminal_count){const s=node("section");
-    s.append(node("h3",`当前产出未通过校验 · ${r.terminal_count} 件`),
+    s.append(node("h3",`已经结束且不会自动重试 · ${r.terminal_count} 件`),
              node("div","这些任务已经结束，不会原样重试；每项具体原因见下方分类。","hint"));
     const ul=node("ul",null,"latest");
-    const grouped=new Map();r.terminal_items.forEach(it=>{const reason=it.display_reason||"当前产出未通过内容或证据校验";
+    const grouped=new Map();r.terminal_items.forEach(it=>{const reason=it.display_reason||"任务已经结束，具体原因暂未记录";
       const key=`${it.lane_label}\u0000${reason}`,found=grouped.get(key);if(found)found.count+=1;
       else grouped.set(key,{lane_label:it.lane_label,reason,count:1})});
     grouped.forEach(it=>ul.append(node("li",`${it.lane_label}：${it.reason}${it.count>1?`（${it.count} 件）`:""}`)));
