@@ -19,6 +19,7 @@ Every step is idempotent: a re-run with nothing new to say publishes nothing.
 from __future__ import annotations
 
 import argparse
+import calendar
 import json
 import os
 import re
@@ -287,7 +288,10 @@ def _actionable_residue(raw_body: str, cleaned_body: str) -> list[dict[str, Any]
     return actionable
 
 
-def _correction_note(stray: list[str], residue: list[dict[str, Any]]) -> str:
+def _correction_note(
+    stray: list[str], residue: list[dict[str, Any]],
+    period_issues: list[dict[str, str]] | None = None,
+) -> str:
     """What the one corrective attempt is told, in the terms of the defect."""
 
     notes = ["\n"]
@@ -307,7 +311,85 @@ def _correction_note(stray: list[str], residue: list[dict[str, Any]]) -> str:
               "whose subject was a tag: name the source in words (管理层、该季报、卖方研报) and "
               "put the tags in the JSON arrays only."
         )
+    if period_issues:
+        notes.append(
+            "\nYour previous draft attached an authoritative amount to the wrong quarter: "
+            + "；".join(
+                f"USD {item['amount']} was written as {item['written_period']} but its N tag "
+                f"is {item['expected_period']} ({item['period']})"
+                for item in period_issues[:4]
+            )
+            + ". Rewrite those period labels to match the N tags; do not change the amounts, "
+              "rates, thesis, or any other fact."
+        )
     return "".join(notes)
+
+
+_QUARTER_LABEL = re.compile(
+    r"(?P<year>20\d{2})\s*(?:(?:年\s*)?(?:第\s*)?"
+    r"(?P<cn_quarter>[一二三四1-4])\s*(?:季度|季)|Q(?P<q_quarter>[1-4]))",
+    re.IGNORECASE,
+)
+_PRIMARY_USD_AMOUNT = re.compile(r"\breported\b.*?\bof\s+USD\s+([0-9][0-9,]*)", re.IGNORECASE)
+
+
+def inconsistent_number_periods(
+    body: str, numbers: list[Mapping[str, Any]]
+) -> list[dict[str, str]]:
+    """Find a quarter label that contradicts the Claim carrying its amount.
+
+    This is deliberately narrow.  It checks only a filing Claim's primary USD
+    amount when that exact raw amount and a nearby quarter label both appear in
+    prose.  Omitting a label, formatting an amount, or citing a comparison
+    figure is left to the existing source and completeness checks.
+    """
+
+    issues: list[dict[str, str]] = []
+    quarter_number = {"一": 1, "二": 2, "三": 3, "四": 4}
+    for number in numbers:
+        period = str(number.get("period") or "")
+        match = re.fullmatch(r"(20\d{2})-(\d{2})-\d{2}\.\.(20\d{2})-(\d{2})-\d{2}", period)
+        amount_match = _PRIMARY_USD_AMOUNT.search(str(number.get("text") or ""))
+        if match is None or amount_match is None:
+            continue
+        start_year, end_year = int(match.group(1)), int(match.group(3))
+        start_month, end_month = int(match.group(2)), int(match.group(4))
+        # A date range such as Accenture's Mar-May fiscal quarter does not
+        # reveal the issuer's fiscal-quarter number.  Only calendar-aligned
+        # ranges carry enough information for this comparison.
+        expected_range = (
+            start_year == end_year
+            and period[8:10] == "01"
+            and int(period[-2:]) == calendar.monthrange(end_year, end_month)[1]
+            and (start_month, end_month) in {(1, 3), (4, 6), (7, 9), (10, 12)}
+        )
+        if not expected_range:
+            continue
+        expected_year = int(match.group(1))
+        expected_quarter = (start_month - 1) // 3 + 1
+        amount = amount_match.group(1).replace(",", "")
+        for occurrence in re.finditer(rf"(?<!\d){re.escape(amount)}(?!\d)", body):
+            prefix = body[max(0, occurrence.start() - 48):occurrence.start()]
+            labels = list(_QUARTER_LABEL.finditer(prefix))
+            if not labels:
+                continue
+            label = labels[-1]
+            label_prefix = prefix[max(0, label.start() - 12):label.start()]
+            if re.search(r"(?:FY|fiscal\s*|财年\s*)$", label_prefix, re.IGNORECASE):
+                continue
+            actual_year = int(label.group("year"))
+            raw_quarter = label.group("cn_quarter") or label.group("q_quarter")
+            actual_quarter = quarter_number.get(raw_quarter, int(raw_quarter) if raw_quarter.isdigit() else 0)
+            if (actual_year, actual_quarter) != (expected_year, expected_quarter):
+                issues.append({
+                    "claim_version_ref": str(number.get("claim_version_ref") or ""),
+                    "amount": amount,
+                    "period": period,
+                    "written_period": f"{actual_year}Q{actual_quarter}",
+                    "expected_period": f"{expected_year}Q{expected_quarter}",
+                })
+            break
+    return issues
 
 
 def _dropped_section(
@@ -477,15 +559,16 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             # the rest of the document can still be published.
             stray = unsourced_numbers(section["body"], section["numbers"])
             residue = _actionable_residue(raw, section["body"])
+            period_issues = inconsistent_number_periods(section["body"], section["numbers"])
             retried = False
-            if stray or residue:
+            if stray or residue or period_issues:
                 retried = True
                 try:
                     correction = model.call(
                         purpose="draft",
                         request_id=f"{mission['id']}:{company_ref}:{KIND}:{index}:"
                                    f"{len(claims.get(company_ref) or [])}:retry",
-                        prompt=prompt + _correction_note(stray, residue),
+                        prompt=prompt + _correction_note(stray, residue, period_issues),
                         mission=mission,
                     )
                     candidate = parse_section_output(correction["text"], context=context, title=title)
@@ -494,25 +577,40 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     candidate_stray = unsourced_numbers(candidate["body"], candidate["numbers"])
                     candidate_residue = _actionable_residue(
                         raw_section_body(correction["text"]), candidate["body"])
-                    if candidate["body"] and not candidate_stray and not candidate_residue:
+                    candidate_period_issues = inconsistent_number_periods(
+                        candidate["body"], candidate["numbers"]
+                    )
+                    if (candidate["body"] and not candidate_stray
+                            and not candidate_residue and not candidate_period_issues):
                         section = candidate
-                        stray, residue = [], []
+                        stray, residue, period_issues = [], [], []
                     else:
                         stray = candidate_stray or stray
                         residue = candidate_residue or residue
+                        period_issues = candidate_period_issues or period_issues
                 except CockpitModelError as exc:
                     summary["sections"].append({
                         "title": title,
                         "status": lane_status_for(exc, "retry_failed"),
                         "reason": str(exc)})
-            if stray or residue:
-                section = _dropped_section(title, stray, residue)
+            if stray or residue or period_issues:
+                if period_issues and not stray and not residue:
+                    section = {
+                        "title": title, "body": "", "claim_refs": [], "numbers": [],
+                        "gaps": [
+                            "这一节暂缺：正文中的财务期间与引用来源不一致，需要核对后补充。"
+                        ],
+                    }
+                else:
+                    section = _dropped_section(title, stray, residue)
             sections.append(section)
             summary["sections"].append({
                 "title": title,
                 "status": ("drafted" if section["body"]
-                           else ("dropped_unsourced" if stray else "dropped_residual_citation")),
+                           else ("dropped_unsourced" if stray else (
+                               "dropped_residual_citation" if residue else "dropped_period_mismatch"))),
                 "retried": retried,
+                "period_issues": period_issues,
                 "chars": len(section["body"]), "claims": len(section["claim_refs"]),
                 "numbers": len(section["numbers"]), "replayed": call["replayed"],
                 "cost_usd": round(call["cost_micros"] / 1_000_000, 6),

@@ -29,6 +29,7 @@ from dalton_core.initial_screen_cli import (
     _actionable_residue,
     _correction_note,
     _dropped_section,
+    inconsistent_number_periods,
 )
 from dalton_core.mission_deliverable import GAP_MARKER
 from dalton_core.research_quality_score import residual_citation_artefacts
@@ -175,6 +176,78 @@ class ClaimContextDedupeTests(unittest.TestCase):
         context = build_claim_context([self.figure("claim:1")])
         self.assertEqual(context["duplicates_dropped"],
                          {"claims": 0, "numbers": 0})
+
+
+class NumberPeriodConsistencyTests(unittest.TestCase):
+    def number(self, *, period="2026-04-01..2026-06-30"):
+        return {
+            "claim_version_ref": "claim-version:epam-q2",
+            "period": period,
+            "text": (
+                "EPAM SYSTEMS, INC. reported Revenue from Contract with Customer, "
+                "Excluding Assessed Tax of USD 1414767000 for 2026-04-01..2026-06-30, "
+                "up 4.53% year over year from USD 1353443000 in the comparable quarter."
+            ),
+        }
+
+    def test_the_live_epam_year_shift_is_rejected(self):
+        issues = inconsistent_number_periods(
+            "2025 年第二季度收入为 1414767000 美元，同比增长 4.53%。",
+            [self.number()],
+        )
+        self.assertEqual(issues[0]["written_period"], "2025Q2")
+        self.assertEqual(issues[0]["expected_period"], "2026Q2")
+
+    def test_the_authoritative_quarter_passes_in_chinese_or_compact_form(self):
+        for body in (
+            "2026 年第二季度收入为 1414767000 美元。",
+            "2026Q2 revenue was USD 1414767000.",
+        ):
+            with self.subTest(body=body):
+                self.assertEqual(inconsistent_number_periods(body, [self.number()]), [])
+
+    def test_a_wrong_compact_quarter_is_rejected(self):
+        issues = inconsistent_number_periods(
+            "2025Q2 revenue was USD 1414767000.", [self.number()]
+        )
+        self.assertEqual(issues[0]["written_period"], "2025Q2")
+
+    def test_a_comparison_amount_or_unlabelled_amount_is_not_misclassified(self):
+        for body in (
+            "上一财年同期收入为 1353443000 美元。",
+            "收入为 1414767000 美元，同比增长 4.53%。",
+        ):
+            with self.subTest(body=body):
+                self.assertEqual(inconsistent_number_periods(body, [self.number()]), [])
+
+    def test_a_non_calendar_fiscal_quarter_is_not_guessed_from_its_month(self):
+        self.assertEqual(
+            inconsistent_number_periods(
+                "2025Q3 revenue was USD 1414767000.",
+                [self.number(period="2025-03-01..2025-05-31")],
+            ),
+            [],
+        )
+
+    def test_an_explicit_fiscal_quarter_is_not_compared_to_calendar_quarter(self):
+        self.assertEqual(
+            inconsistent_number_periods(
+                "DXC FY2027Q1 revenue was USD 1414767000.", [self.number()]
+            ),
+            [],
+        )
+
+    def test_a_partial_or_cross_year_range_is_not_treated_as_a_calendar_quarter(self):
+        for period in ("2026-04-02..2026-06-30", "2026-04-01..2026-06-29",
+                       "2025-10-01..2026-12-31"):
+            with self.subTest(period=period):
+                self.assertEqual(
+                    inconsistent_number_periods(
+                        "2025Q2 revenue was USD 1414767000.",
+                        [self.number(period=period)],
+                    ),
+                    [],
+                )
 
 
 # The exact sentence a published, gate-passed Accenture Initial Screen carries.
