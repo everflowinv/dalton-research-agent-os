@@ -896,11 +896,10 @@ def build_context(
     pool = list(claims)
     if subjects["companies"]:
         named = set(subjects["companies"])
-        chosen = [c for c in pool if c.get("subject_ref") in named]
-        # The v1 rule, kept: a name with almost nothing on it gets the rest of
-        # the Ledger rather than four rows and a shrug.
-        pool = chosen if len(chosen) >= 20 else chosen + [
-            c for c in pool if c.get("subject_ref") not in named]
+        # A thin company record is an honest thin answer. Pulling unrelated
+        # companies in to make it longer lets a fluent answer silently assign
+        # one company's model or management statement to another.
+        pool = [c for c in pool if c.get("subject_ref") in named]
     pool = pool[-MAX_CLAIM_ROWS:]
 
     # The claims block is the one block whose row count is not capped by
@@ -1070,7 +1069,11 @@ def render_block(block: Mapping[str, Any]) -> str:
         if period:
             head += f" [{period}]"
         detail = _render_detail(block["block"], row.get("detail") or {})
-        lines.append(f"{head} {row.get('text')}" + (f"  {detail}" if detail else ""))
+        # Put ownership before prose. In a multi-company context, a trailing
+        # label arrives after the model has already read an ambiguous sentence
+        # beginning "Management..." or "The company...".
+        lines.append(f"{head}" + (f" {detail}" if detail else "")
+                     + f" {row.get('text')}")
     return "\n".join(lines) + "\n"
 
 

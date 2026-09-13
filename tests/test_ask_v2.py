@@ -206,6 +206,38 @@ class ContextOnAnOldCoreTests(unittest.TestCase):
         self.assertTrue(all(row["tag"].startswith("C")
                             for row in context["shown"]))
 
+    def test_named_company_never_borrows_other_company_claims_to_fill_context(self):
+        rows = [
+            claim_row("ACN 管理层维持全年指引。", ref="claim-version:" + "a" * 64),
+            *[
+                claim_row(
+                    f"EPAM 管理层材料 {index}。",
+                    ref=f"claim-version:{index + 100:064d}",
+                    subject=EPAM,
+                )
+                for index in range(25)
+            ],
+        ]
+        context = context_for("ACN 管理层怎么看需求？", empty_core(), claim_rows=rows)
+        claim_block = next(row for row in context["blocks"] if row["block"] == "claims")
+
+        self.assertEqual(len(claim_block["rows"]), 1)
+        self.assertEqual(claim_block["rows"][0]["detail"]["company"], "ACN")
+        self.assertNotIn("EPAM", ask_context.render_context(context))
+
+    def test_company_owner_is_rendered_before_ambiguous_claim_prose(self):
+        rows = [
+            claim_row("Management expects demand to improve.",
+                      ref="claim-version:" + "a" * 64),
+            claim_row("Management expects utilization to improve.",
+                      ref="claim-version:" + "b" * 64, subject=EPAM),
+        ]
+        context = context_for("行业需求怎么看？", empty_core(), claim_rows=rows)
+        rendered = ask_context.render_context(context)
+
+        self.assertLess(rendered.index("（ACN"), rendered.index("Management expects demand"))
+        self.assertLess(rendered.index("（EPAM"), rendered.index("Management expects utilization"))
+
     def test_a_question_naming_nobody_marks_the_per_company_blocks_as_such(self):
         core = empty_core()
         core.executescript(
