@@ -108,4 +108,32 @@ class ModelDisplayTest(unittest.TestCase):
         self.assertNotIn('12.35%', shown)
         self.assertEqual(before, record)
 
+    def test_closed_forecast_unavailable_templates_are_chinese_without_changing_reasons(self):
+        reasons = [
+            'statement line result:revenue is explicitly unavailable for forecast',
+            'formula terms unavailable for this quarter: result:revenue, result:cost',
+            'forecast base result:revenue is unavailable for this quarter',
+            'no growth assumption for us-gaap:Revenues in this quarter',
+            '2 operating expense lines are not available for this quarter',
+            'operating cash flow or capital expenditure is not available for this quarter',
+            'no cash-flow share assumption for us-gaap:OperatingCashFlow in this quarter',
+            'the forecast base would make positive-outflow capital expenditure negative',
+        ]
+        record = {'forecast_periods': [{'end': '2027-12-31'}], 'drivers': [],
+                  'results': [{'ref': f'result:r{i}', 'label': f'项目{i}',
+                               'status': 'unavailable', 'reason': reason,
+                               'unit': 'USD', 'cells': []}
+                              for i, reason in enumerate(reasons)]}
+        before = copy.deepcopy(record)
+        shown = render_forecast_model(record, include_technical=False)
+        for expected in ('该报表项目未提供预测值', '本季度缺少公式所需项目',
+                         '本季度缺少预测基准', '本季度缺少增长假设',
+                         '本季度缺少部分营业费用项目', '本季度缺少经营现金流或资本支出'):
+            self.assertIn(expected, shown)
+        self.assertIn('本季度缺少现金流占比假设', shown)
+        self.assertIn('预测基准会使正向列示的资本支出变为负数，因此未计算', shown)
+        for reason in reasons:
+            self.assertNotIn(reason, shown)
+        self.assertEqual(before, record)
+
 if __name__ == '__main__': unittest.main()

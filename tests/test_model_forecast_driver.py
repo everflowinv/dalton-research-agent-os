@@ -812,8 +812,8 @@ class RenderTests(unittest.TestCase):
         self.assertIn("carried forward unchanged", text)
         self.assertIn("1,464.1", text)
         # An unavailable result prints its reason where its number would be.
-        self.assertIn("状态：暂无结果；原因：the specification marks the cash flow statement",
-                      text)
+        self.assertIn("状态：暂无结果；原因：模型规则将现金流量表标为非重大项目", text)
+        self.assertIn("技术原因：the specification marks the cash flow statement", text)
         self.assertIn(" |", text)
 
     def test_human_model_fields_are_localized_before_table_layout(self):

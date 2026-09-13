@@ -24,6 +24,7 @@ the table is a view, and the ledger keeps what was filed.
 from __future__ import annotations
 
 import argparse
+import re
 import json
 import sys
 import unicodedata
@@ -51,6 +52,44 @@ def _model_text(value: str, fallback: Callable[[str], str]) -> str:
 
     mapped = _CHINESE_MODEL_LABELS.get(value.strip())
     return mapped if mapped is not None else fallback(value)
+
+
+def _forecast_reason_text(value: str, fallback: Callable[[str], str]) -> str:
+    """Translate closed forecast-engine reasons without changing the record."""
+    exact = {
+        "formula terms unavailable for this quarter": "本季度缺少公式所需项目",
+        "revenue or cost of revenue is not available for this quarter": "本季度缺少营业收入或营业成本",
+        "gross profit is not available for this quarter": "本季度缺少毛利润",
+        "operating income or income tax is not available for this quarter": "本季度缺少营业利润或所得税",
+        "operating cash flow or capital expenditure is not available for this quarter": "本季度缺少经营现金流或资本支出",
+        "the specification binds no filed cost-of-revenue concept": "模型规则未绑定已披露的营业成本项目",
+        "the specification binds no filed income-tax or net-income concept": "模型规则未绑定已披露的所得税或净利润项目",
+        "the specification binds no single filed operating-cash-flow concept": "模型规则未绑定唯一的已披露经营现金流项目",
+        "the specification binds no single filed capital-expenditure concept": "模型规则未绑定唯一的已披露资本支出项目",
+        "the specification marks the cash flow statement not_material": "模型规则将现金流量表标为非重大项目",
+    }
+    text = value.strip()
+    if text in exact:
+        return exact[text]
+    patterns = (
+        (r"statement line .+ is explicitly unavailable for forecast", "该报表项目未提供预测值"),
+        (r"forecast base .+ is unavailable for this quarter", "本季度缺少预测基准"),
+        (r"formula terms unavailable for this quarter: .+", "本季度缺少公式所需项目"),
+        (r"no growth assumption for .+ in this quarter", "本季度缺少增长假设"),
+        (r"no share assumption for .+ in this quarter; its trailing history gives no usable rate", "本季度缺少占比假设，历史数据也无法提供可用比例"),
+        (r"no cash-flow share assumption for .+ in this quarter", "本季度缺少现金流占比假设"),
+        (r"no supported exact (operating_cash_flow|capital_expenditure) forecast basis is available", "缺少可核验的现金流预测基准"),
+        (r".+ is not available for this quarter", "本季度缺少计算基准"),
+        (r"\d+ operating expense lines are not available for this quarter", "本季度缺少部分营业费用项目"),
+        (r"more than one filed concept claims the cost-of-revenue role: .+", "多个已披露项目同时被标为营业成本，无法唯一确定"),
+        (r"more than one filed concept claims the income-tax or net-income role", "多个已披露项目同时被标为所得税或净利润，无法唯一确定"),
+        (r"structured base .+ is unavailable for this quarter", "本季度缺少结构化预测基准"),
+        (r"the forecast base would make positive-outflow capital expenditure negative", "预测基准会使正向列示的资本支出变为负数，因此未计算"),
+    )
+    for pattern, translated in patterns:
+        if re.fullmatch(pattern, text):
+            return translated
+    return fallback(value)
 
 
 def _millions(value: Any) -> str:
@@ -231,7 +270,8 @@ def render_forecast_model(
 
     supplied_show = display_text or (lambda value: value)
     from .cockpit_model_display import field_label
-    show = lambda value: field_label(value, lambda raw: _model_text(raw, supplied_show))
+    show = lambda value: _forecast_reason_text(
+        value, lambda raw: field_label(raw, lambda item: _model_text(item, supplied_show)))
     history = [str(item) for item in (record.get("history_periods") or [])]
     history = history[-max(0, int(history_columns)):] if history_columns else []
     realised = [str(item["end"]) for item in (record.get("realised_periods") or [])]
@@ -323,8 +363,12 @@ def render_forecast_model(
                     f"{cell['period']['end']}；实际披露 "
                     f"{_display_value(actual.get('value'), actual.get('unit') or result.get('unit'))}")
         if result.get("status") != "computed":
+            raw_reason = str(result.get('reason') or '未记录原因')
+            shown_reason = show(raw_reason)
             out.append(f"        状态：{show(str(result.get('status') or '未记录'))}；"
-                       f"原因：{show(str(result.get('reason') or '未记录原因'))}")
+                       f"原因：{shown_reason}")
+            if include_technical and shown_reason != raw_reason:
+                out.append(f"        技术原因：{raw_reason}")
         elif include_technical:
             out.append(f"        {result.get('formula')}")
     if annual_projection is not None:
@@ -456,7 +500,7 @@ def render_sensitivity(
     """
 
     supplied_show = display_text or (lambda value: value)
-    show = lambda value: _model_text(value, supplied_show)
+    show = lambda value: _forecast_reason_text(value, lambda item: _model_text(item, supplied_show))
     scenario_label = lambda value: {"trough":"历史低点","mean":"历史均值","ours":"本模型","peak":"历史高点","latest":"最新值"}.get(str(value),show(str(value)))
     out: list[str] = []
     title = entity_name or record.get("company_ref") or "company"
