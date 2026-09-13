@@ -244,9 +244,15 @@ class CockpitLanguageTests(unittest.TestCase):
         for field in (
             'finalResearchText(x.because)',
             'finalResearchText(r.what_we_expected)', 'finalResearchText(r.what_happened)',
-            'finalResearchText(r.prose||"")',
         ):
             self.assertIn(field, text)
+        self.assertIn('const finalFields=[r.title,r.prose', text)
+        self.assertIn('if(!finalResearchReady(finalFields))', text)
+        self.assertIn('technicalDetails({original_reflection:r})', text)
+        self.assertIn('const answer=r.display_answer?displayText(r.display_answer):finalResearchText(r.answer)', text)
+        self.assertIn('technicalDetails({original_answer:r.answer,original_gaps:r.gaps})', text)
+        self.assertIn('fields=[z.title,...(z.sections||[]).flatMap', text)
+        self.assertIn('technicalDetails({original_review:z})', text)
 
 
 if __name__ == "__main__":
