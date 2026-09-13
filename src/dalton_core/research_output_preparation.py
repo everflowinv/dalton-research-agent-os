@@ -406,8 +406,12 @@ def run_chunk(task, *, mission, draft_config, verifier_config, checker_config,
         repairs_used+=1
         repair_prompt=_repair_prompt(product=product,draft_localized=evidence['draft_localized'],
             review=review,failure=failure,attempt=repairs_used)
-        repair_id=hashlib.sha256((identity+str(repairs_used)+repair_prompt).encode()).hexdigest()
-        brain=model(brain_config,16000)
+        # The router estimates input conservatively from UTF-8 bytes. Keep
+        # room for the full source and advice within the unchanged $1 cap.
+        repair_output_tokens=12000
+        repair_id=hashlib.sha256((identity+str(repairs_used)+repair_prompt+
+            ':output-tokens:'+str(repair_output_tokens)).encode()).hexdigest()
+        brain=model(brain_config,repair_output_tokens)
         prior_brain_call=copy.deepcopy(active_brain_call)
         repair_call=brain.call(purpose=BRAIN_PURPOSE,request_id='zh-revise-repair-'+repair_id,
             prompt=repair_prompt,mission=mission)
