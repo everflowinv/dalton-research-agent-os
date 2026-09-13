@@ -220,3 +220,22 @@ class ResearchLocalizationTests(unittest.TestCase):
     source=product();source['sections'][0].update(title='订单',body='GIS订单出货比低于一；十二月继续跟踪。对T1与增长的影响尚待明确。',gaps=[])
     out={'sections':[{'index':0,'title':'订单','body':'GIS 订单出货比低于1；12月继续跟踪。对 T1 与增长的影响尚待明确。','gaps':[]}]}
     self.assertEqual(validate_localized_text(source,out)[0]['index'],0)
+
+ def test_internal_s_labels_and_chinese_adjacent_english_months_are_not_new_facts(self):
+    source=product();source['sections'][0].update(
+        title='S1 公司概览',body='公司于November 2021完成交易。',gaps=[])
+    out={'sections':[{'index':0,'title':'公司概览',
+        'body':'公司于November 2021（2021年11月）完成交易。','gaps':[]}]}
+    self.assertEqual(validate_localized_text(source,out)[0]['index'],0)
+
+ def test_quarter_labels_allow_chinese_names_and_exact_period_consolidation(self):
+    source=product();source['sections'][0].update(title='进展',body=(
+        'IBM Q2 improved before early Q3. From 2026Q1 to 2026Q2, A improved; '
+        'from 2026Q1 to 2026Q2, B improved.'),gaps=[])
+    out={'sections':[{'index':0,'title':'进展','body':(
+        'IBM第二季度改善，第三季度初继续。2026Q1至2026Q2期间，A和B均改善。'),
+        'gaps':[]}]}
+    self.assertEqual(validate_localized_text(source,out)[0]['index'],0)
+    out['sections'][0]['body']='IBM第二季度改善，第四季度初继续。2026Q1至2026Q2期间，A和B均改善。'
+    with self.assertRaisesRegex(ResearchLocalizationError,'number tokens'):
+        validate_localized_text(source,out)

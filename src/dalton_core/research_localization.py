@@ -31,7 +31,7 @@ _OPAQUE_ID = re.compile(
     r"\b(?:claim|claim-version|dossier|dossier-version|memo|memo-version|"
     r"debate|debate-map|forecast-model-version|company-model-spec|mission|"
     r"mission-version|thesis|thesis-version|event|document|document-version)"
-    r":[A-Za-z0-9:._-]+|\b[0-9a-f]{64}\b|(?<![A-Za-z0-9])T[0-9]+(?![A-Za-z0-9])|\bcausal_chain:[0-9]+\b",
+    r":[A-Za-z0-9:._-]+|\b[0-9a-f]{64}\b|(?<![A-Za-z0-9])[ST][0-9]+(?![A-Za-z0-9])|\bcausal_chain:[0-9]+\b",
     re.IGNORECASE,
 )
 _HAN = re.compile(r"[\u3400-\u9fff]")
@@ -44,7 +44,8 @@ _ENGLISH_NUMBER_VALUES = {
     "september": "9", "october": "10", "november": "11", "december": "12",
 }
 _ENGLISH_NUMBER = re.compile(
-    r"\b(" + "|".join(_ENGLISH_NUMBER_VALUES) + r")\b", re.IGNORECASE
+    r"(?<![A-Za-z])(" + "|".join(_ENGLISH_NUMBER_VALUES) + r")(?![A-Za-z])",
+    re.IGNORECASE,
 )
 
 
@@ -162,6 +163,26 @@ def _number_differences(source_values: Sequence[str], target_values: Sequence[st
         for match in re.finditer(r"\b(?:FY|fiscal(?:\s+year)?)\s*(20[0-9]{2})\b", value, re.I):
             aliases[str(int(match.group(1)) % 100)] += 1
     added -= aliases
+
+    source_joined_raw = " ".join(source_values)
+    target_joined_raw = " ".join(target_values)
+    quarter_names = {"1": "一", "2": "二", "3": "三", "4": "四"}
+    for match in re.finditer(r"(?<![A-Za-z0-9])Q([1-4])(?![0-9])", source_joined_raw, re.I):
+        quarter = match.group(1)
+        if missing_counter[quarter] and re.search(
+                rf"第?{quarter_names[quarter]}季度", target_joined_raw):
+            missing_counter[quarter] -= 1
+    # A shared period may be stated once before a consolidated peer list.
+    # Only collapse repetitions of the exact same YYYYQn composite retained
+    # at least once in the target.
+    period = re.compile(r"(?<!\d)(20\d{2})\s*Q([1-4])(?!\d)", re.I)
+    source_periods = Counter(period.findall(source_joined_raw))
+    target_periods = Counter(period.findall(target_joined_raw))
+    for (year, quarter), count in source_periods.items():
+        collapsed = count - target_periods[(year, quarter)]
+        if target_periods[(year, quarter)] and collapsed > 0:
+            missing_counter[year] -= min(collapsed, missing_counter[year])
+            missing_counter[quarter] -= min(collapsed, missing_counter[quarter])
 
     source_joined = " ".join(_numeric_text(value) for value in source_values)
     source_joined = _NUMBER.sub(lambda match: _canonical_number(match.group()), source_joined)
