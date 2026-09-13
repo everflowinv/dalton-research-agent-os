@@ -107,6 +107,20 @@ class PreparationTests(unittest.TestCase):
         with self.assertRaisesRegex(CockpitModelError,'broker busy'):self.run_one()
         self.assertEqual(self.calls.count(prep.BRAIN_PURPOSE),0)
 
+    def test_worker_two_attempt_budget_still_gets_one_content_repair(self):
+        self.args['attempts'] = 2
+        bad = {'sections': [{'index': 0, 'title': '收入', 'body': '收入为 124 USD。', 'gaps': []}]}
+        self.responses['research_localization'] = [bad, bad]
+        self.responses[prep.BRAIN_PURPOSE] = [CHINESE, REVISION]
+        self.run_one()
+        self.assertEqual(self.calls.count('research_localization'), 2)
+        self.assertEqual(self.calls.count(prep.BRAIN_PURPOSE), 2)
+
+    def test_io_errors_are_not_treated_as_repairable_model_content(self):
+        self.responses['research_localization'] = OSError('storage unavailable')
+        with self.assertRaisesRegex(OSError, 'storage unavailable'): self.run_one()
+        self.assertEqual(self.calls, ['research_localization'])
+
     def test_interrupted_brain_resumes_without_repeating_checker(self):
         self.responses[prep.BRAIN_PURPOSE] = CockpitModelError('this request is already running')
         with self.assertRaisesRegex(ValueError, 'already running'):

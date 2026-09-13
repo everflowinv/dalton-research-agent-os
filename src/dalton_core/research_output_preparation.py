@@ -21,11 +21,11 @@ from dalton_core.company_dossier_draft import independence, router_family_resolv
 from dalton_core.cockpit_research_library import research_library
 from dalton_core.model_fallback_chain import register_purpose_tier
 from dalton_core.research_localization import (build_prompt, build_verifier_prompt,
-    build_localization, validate_localized_text, source_content_hash)
+    build_localization, validate_localized_text, source_content_hash, ResearchLocalizationError)
 from dalton_core.research_localization_store import publish_attachment, publish_ui_texts, publish_reviewed_attachment, has_reviewed_attachment
 from dalton_core.final_text_contract import FINAL_TEXT_RULES_VERSION
 from dalton_core.research_language_review import (run_language_review, parse_stage_output, CHECKER_PURPOSE,
-    BRAIN_PURPOSE, CHECKER_MODEL, CHECKER_PROVIDER)
+    BRAIN_PURPOSE, CHECKER_MODEL, CHECKER_PROVIDER, ResearchLanguageReviewError)
 from dalton_core.model_router import ModelRouter
 
 PIPELINE_VERSION = "localization-with-one-language-review:0.1"
@@ -138,7 +138,7 @@ def _draft_brain_repair_prompt(product, last_draft, feedback):
     display={key:copy.deepcopy(product[key]) for key in
              ('kind','version_ref','status','title','sections') if key in product}
     return '\n'.join((
-        '你是研究成品的中文初稿修复器。便宜初稿模型已完成三次，但确定性内容校验仍未通过。',
+        '你负责修订研究成品的中文初稿。初稿模型已用完本轮尝试次数，但内容校验仍未通过。',
         '只修复给出的校验错误，忠实保留原文的事实、数字、单位、来源、审批状态、缺口和章节结构。',
         '只输出 JSON：{"sections":[{"index":0,"title":"...","body":"...","gaps":[]}]}。',
         '原始展示内容：'+json.dumps(display,ensure_ascii=False,sort_keys=True,separators=(',',':')),
@@ -240,7 +240,8 @@ def run_chunk(task, *, mission, draft_config, verifier_config, checker_config,
                 write_json(stage_path, evidence)
                 break
             except Exception as exc:
-                if not isinstance(exc,CockpitModelError):
+                content_failure = isinstance(exc, (ResearchLocalizationError, ResearchLanguageReviewError))
+                if content_failure:
                     final_validation_error=exc
                     evidence.setdefault('draft_failures',[]).append({
                         'attempt':attempt,'error':str(exc),'draft_call':copy.deepcopy(evidence.get('draft'))})
@@ -248,7 +249,7 @@ def run_chunk(task, *, mission, draft_config, verifier_config, checker_config,
                 write_json(work_dir/'attempts'/(identity+'-'+str(attempt)+'.json'),evidence)
                 # Transport, routing and budget errors have their own governed adapter
                 # retry. Redrafting cannot repair them and would spend unnecessarily.
-                if isinstance(exc, CockpitModelError):
+                if not content_failure:
                     raise
                 if attempt+1 == attempts:
                     break
@@ -258,8 +259,6 @@ def run_chunk(task, *, mission, draft_config, verifier_config, checker_config,
         if 'draft_localized' not in evidence:
             if final_validation_error is None or not evidence.get('draft'):
                 raise ValueError('draft validation failed without repairable evidence')
-            if attempts != 3:
-                raise final_validation_error
             try:last_draft=parse_stage_output(evidence['draft']['text'],stage='draft')
             except ValueError:last_draft={'unparsed_output':evidence['draft']['text']}
             repair_prompt=_draft_brain_repair_prompt(product,last_draft,final_validation_error)
