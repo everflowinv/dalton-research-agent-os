@@ -24,7 +24,7 @@ from contextlib import closing
 from pathlib import Path
 
 from dalton_core.catalyst_calendar import CatalystCalendarAuthority
-from dalton_core.cockpit_plane import CockpitPlane
+from dalton_core.cockpit_plane import CockpitPlane, _claim_period_label
 from dalton_core.event_judgement import EventJudgementAuthority
 from dalton_core.research_event import ResearchEventAuthority
 from dalton_core.tracking_cadence import TrackingCadenceAuthority, load_policy
@@ -554,6 +554,19 @@ class ApprovalsTests(Int2Case):
 
 
 class SourcePanelTests(Int2Case):
+    def test_claim_period_metadata_has_readable_text_without_changing_dates(self) -> None:
+        cases = {
+            "Current": "当前", "Not specified": "期间未注明",
+            "ongoing as of December 31, 2025": "持续中 截至 2025年12月31日",
+            "Current/Forecast to 2035": "当前／预测至 2035",
+            "Current rating period": "当前评级期",
+            "FY29 medium-term guidance": "FY29 中期指引",
+            "Q2 2026 / ongoing": "Q2 2026 / 持续中",
+        }
+        for raw, expected in cases.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(expected, _claim_period_label(raw))
+
     def test_every_source_says_what_it_yields_and_what_it_is_worth(self) -> None:
         view = self.plane.sources()
         rows = {row["slug"]: row for row in view["sources"]}

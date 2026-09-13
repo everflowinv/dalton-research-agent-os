@@ -458,6 +458,50 @@ SOURCE_OPERATION_LABELS = {
     "calendar": "公司日程", "daily_prices": "每日股价",
     "search_web": "搜索公开网页", "fetch_get": "读取公开网页",
 }
+CONFIDENCE_LABELS = {"high": "高", "medium": "中等", "low": "低"}
+
+
+def _claim_period_label(value: Any) -> str | None:
+    """Translate known period metadata while preserving dates and raw authority."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    replacements = (
+        (r"Not specified", "期间未注明"), (r"current commentary", "当前评论"),
+        (r"recent opportunities", "近期机会"), (r"currentratingperiod", "当前评级期"),
+        (r"Current rating period", "当前评级期"), (r"Current rating", "当前评级"),
+        (r"Current pipeline period", "当前商机期"),
+        (r"Current company description", "当前公司描述"), (r"Current coverage", "当前覆盖期"),
+        (r"Current trend", "当前趋势"), (r"Current and forward-looking", "当前及前瞻期"),
+        (r"Current and future", "当前及未来"), (r"Current and near term", "当前及近期"),
+        (r"current and medium-to-long term", "当前至中长期"),
+        (r"current and medium term", "当前及中期"), (r"current to medium-term", "当前至中期"),
+        (r"medium-to-long-term", "中长期"), (r"medium to long term", "中长期"),
+        (r"FY(\d+) medium-term guidance", r"FY\1 中期指引"),
+        (r"over the medium term", "中期内"), (r"medium-term", "中期"),
+        (r"medium term", "中期"), (r"last couple of years and ongoing", "过去几年至今"),
+        (r"ongoing", "持续中"), (r"Current/Forecast to", "当前／预测至"),
+        (r"Current/Forecast", "当前／预测"),
+        (r"Current fiscal year second half", "当前财年下半年"),
+        (r"Current fiscal year", "当前财年"),
+        (r"Current quarter vs\. last year", "当前季度同比"), (r"Current quarter", "当前季度"),
+        (r"Current period", "当前期间"), (r"Current year", "当前年度"),
+        (r"Current as of", "截至"), (r"as of", "截至"), (r"Current into", "当前至"),
+        (r"Current", "当前"), (r"fiscal year", "财年"), (r"guidance", "指引"),
+        (r"report date", "报告日"),
+    )
+    for pattern, replacement in replacements:
+        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+    months = {name: index for index, name in enumerate((
+        "January", "February", "March", "April", "May", "June", "July",
+        "August", "September", "October", "November", "December"), 1)}
+    text = re.sub(
+        r"\b(" + "|".join(months) + r")\s+(\d{1,2}),\s+(\d{4})\b",
+        lambda match: (f"{match.group(3)}年{months[match.group(1).capitalize()]}月"
+                       f"{int(match.group(2))}日"), text, flags=re.IGNORECASE)
+    return text
+
+
 CONNECTION_STATUS_LABELS = {
     "connected": "已连接", "not_connected": "尚未连接",
     "probe_only": "仅允许试读", "undeclared": "研究目标尚未声明该来源",
@@ -535,7 +579,7 @@ def _gate_answer_line(item: Mapping[str, Any]) -> str:
     if item["status"] == "answered":
         refs = len(item["sources"])
         return (f"{head} —— {answer_body(item)}"
-                f"（置信度 {item['confidence']}，{refs} 条引用）")
+                f"（置信度 {CONFIDENCE_LABELS.get(item['confidence'], item['confidence'])}，{refs} 条引用）")
     unknown = item["unknown"]
     return (f"{head} —— 未回答：{unknown['missing']}。"
             f"所需证据：{unknown['evidence_that_would_answer']}")
@@ -3788,6 +3832,7 @@ class CockpitPlane:
             "ref": row["ref"], "statement": row["statement"],
             "company": self._label(members, row["subject_ref"]),
             "company_ref": row["subject_ref"], "period": row["period"],
+            "period_label": _claim_period_label(row["period"]),
             "at": row["created_at"],
             "aspect": row["index_aspect"],
             "aspect_label": ASPECT_LABELS.get(row["index_aspect"]),
