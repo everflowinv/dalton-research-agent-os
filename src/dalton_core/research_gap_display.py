@@ -25,6 +25,84 @@ _FULL=re.compile(r"^(?P<subject>.+?) 未覆盖成本模板的「(?P<label>[^」]
 _PREFIX=re.compile(r"^(?P<key>[a-z_]+)(?P<sep>\s*[:：/／-]\s*)(?P<rest>.*)$")
 _BAD_TAGS=re.compile(r"^模型引用了不存在的标签：(?P<tags>[^。]+)。?$")
 
+_DISPLAY_TERMS = {
+    **_SLOTS,
+    **_EVIDENCE,
+    "insufficient_data": "资料不足",
+    "not_drafted_this_run": "本轮尚未起草",
+    "cost_structure": "成本结构",
+    "unit_economics": "单位经济性",
+    "milestones": "关键里程碑",
+    "cash_runway": "现金可支撑期限",
+    "pricing": "定价",
+    "retention": "客户留存",
+    "volume": "业务量",
+    "price": "实现价格",
+    "revenue": "营业收入",
+    "revenues": "营业收入",
+    "revenue_yoy_growth": "营业收入同比增速",
+    "operating_margin": "营业利润率",
+    "gross_margin": "毛利率",
+    "diluted_eps": "稀释每股收益",
+    "free_cash_flow": "自由现金流",
+    "ah_premium": "A/H 股溢价",
+    "announcements_index": "公告索引",
+    "blind_reviews": "匿名审阅",
+    "blocks_links": "屏蔽链接",
+    "candidate_sources": "候选来源",
+    "connection_status": "连接状态",
+    "content_kind": "内容类型",
+    "cost_note": "成本说明",
+    "covered_driver_refs": "已覆盖驱动因素引用",
+    "daily_quota": "每日额度",
+    "daily_unit_limit": "每日单位上限",
+    "disclosure_of_interests": "权益披露",
+    "driver_refs": "驱动因素引用",
+    "employee_review": "员工评价",
+    "evidence_tier": "证据层级",
+    "expert_excerpt": "专家访谈摘录",
+    "expert_network": "专家网络",
+    "fetch_get": "网页获取",
+    "financial_statements": "财务报表",
+    "gap_ref": "缺口引用",
+    "get_document": "读取文档",
+    "get_note": "读取笔记",
+    "in_inventory": "已纳入资料库",
+    "internal_wiki": "内部知识库",
+    "list_documents": "文档列表",
+    "list_filings": "公告列表",
+    "list_notes": "笔记列表",
+    "management_minutes": "管理层会议纪要",
+    "margin_balance": "融资余额",
+    "monthly_returns": "月度回报",
+    "news_media": "新闻媒体",
+    "next_day_disclosure_returns": "披露次日回报",
+    "northbound_flow": "北向资金流",
+    "not_connected": "尚未连接",
+    "primary_filing": "公司正式公告",
+    "probe_only": "仅作探测",
+    "quota_unit": "额度单位",
+    "sales_note": "销售笔记",
+    "search_library": "检索资料库",
+    "search_web": "网页搜索",
+    "sell_side": "卖方研究",
+    "sell_side_report": "卖方研报",
+    "source_ref": "来源引用",
+    "vendor_note": "供应商笔记",
+    "verification_kind": "核验类型",
+    "web_page": "网页",
+    "what_is_missing": "待补内容",
+}
+_TERM_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_])("
+    + "|".join(re.escape(key) for key in sorted(_DISPLAY_TERMS, key=len, reverse=True))
+    + r")(?![A-Za-z0-9_])", re.IGNORECASE)
+
+def display_metadata_text(value: Any) -> str:
+    """Replace only registered machine metadata tokens in reader-facing text."""
+    text = str(value) if value is not None else ""
+    return _TERM_PATTERN.sub(lambda match: _DISPLAY_TERMS[match.group(1).lower()], text)
+
 def gap_display_text(value: Any) -> str:
     """Return friendly Chinese for a closed known gap; preserve everything else."""
     text=str(value) if value is not None else ""
@@ -41,6 +119,6 @@ def gap_display_text(value: Any) -> str:
         return _SLOTS[match["key"]]+match["sep"]+match["rest"]
     match=_BAD_TAGS.fullmatch(text)
     if match:return f"模型引用了未纳入依据的内部标签：{match['tags']}。"
-    return text
+    return display_metadata_text(text)
 
-__all__=["gap_display_text"]
+__all__=["display_metadata_text", "gap_display_text"]

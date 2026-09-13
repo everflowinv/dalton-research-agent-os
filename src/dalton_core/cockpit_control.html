@@ -550,7 +550,7 @@ async function loadResearchProducts(companyRef,box){
       if(p.version_ref){const tech=technicalDetails(p.version_ref);if(tech)d.append(tech)}
       appendProductState(d,p);
       (p.sections||[]).forEach(sec=>{
-        const part=node("div",null,"memo-section");part.append(node("h5",sec.label||contentLabel(sec.title,SECTION_LABELS,"研究内容")));renderText(part,sec.body||"");
+        const part=node("div",null,"memo-section");part.append(node("h5",sec.label||contentLabel(sec.title,SECTION_LABELS,"研究内容")));renderText(part,sec.display_body||sec.body||"");
         (sec.display_gaps??sec.gaps??[]).forEach(g=>part.append(node("div",g,"gap")));
         if(sec.display_gaps&&JSON.stringify(sec.display_gaps)!==JSON.stringify(sec.gaps)){const tech=technicalDetails({原始资料缺口:sec.gaps});if(tech)part.append(tech)}
         if((sec.sources||[]).length)part.append(node("div",`来源：${sec.sources.map(sourceLabel).join(" · ")}`,"hint"));

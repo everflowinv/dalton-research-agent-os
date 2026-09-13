@@ -9,7 +9,7 @@ from typing import Any, Mapping, Sequence
 from .cockpit_research_library import research_library
 from .store import content_hash
 from .numeric_display import format_typed_value
-from .research_gap_display import gap_display_text
+from .research_gap_display import display_metadata_text, gap_display_text
 
 _SHA = re.compile(r"^[0-9a-f]{64}$")
 _IMAGE_TYPES = {"image/png": ".png", "image/jpeg": ".jpg", "image/jpg": ".jpeg"}
@@ -62,11 +62,7 @@ def _display_reason(value: Any) -> str:
 
 
 def _display_metric_terms(value: Any) -> str:
-    text = str(value or "暂无可核验内容")
-    for key in sorted(_METRIC_LABELS, key=len, reverse=True):
-        text = re.sub(rf"(?<![A-Za-z0-9_]){re.escape(key)}(?![A-Za-z0-9_])",
-                      _METRIC_LABELS[key], text, flags=re.IGNORECASE)
-    return text
+    return display_metadata_text(value or "暂无可核验内容")
 
 
 class ResearchHtmlExportError(RuntimeError):
