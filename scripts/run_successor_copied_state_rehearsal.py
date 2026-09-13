@@ -676,7 +676,6 @@ def derive_confined_transition(
                 if row["kind"] == "authority" and row["path"].endswith("-model-config.json"):
                     value = json.loads(confined.read_text())
                     final_models[row["path"]] = value
-                    confined_model_hashes[row["path"]] = _sha(confined)
 
     derived["model_inventory"] = {
         "before_count": len(raw_models), "after_count": len(final_models),

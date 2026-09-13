@@ -540,6 +540,32 @@ class PreserveExistingTransitionTests(unittest.TestCase):
             packet_root=self.packet, manifest=manifest)
         self.assertEqual(len(self.models) + 4, len(expected_models))
         self.install_before()
+        scratch = self.root / "derive-publication"
+        (scratch / "openclaw").mkdir(parents=True)
+        (scratch / "openclaw/openclaw.json").write_bytes(
+            (self.packet / "openclaw.preserved.json").read_bytes())
+
+        class Module:
+            @staticmethod
+            def model_config_inventory(state):
+                return {path.name: json.loads(path.read_text())
+                        for path in sorted(state.glob("*-model-config.json"))}
+
+            @staticmethod
+            def rewrite_paths(value, replacements):
+                return value
+
+        derived_path, _proof_path, _proof = derive_confined_transition(
+            Module, SimpleNamespace(
+                temp_root=scratch, temp_state=self.state,
+                temp_config=self.service, replacements={},
+            ), packet_root=self.packet, manifest=manifest,
+            original_manifest_sha256="f" * 64)
+        derived = json.loads(derived_path.read_text())
+        self.assertEqual(set(self.models),
+                         set(derived["model_inventory"]["file_sha256"]))
+        self.assertEqual(len(self.models) + 4,
+                         derived["model_inventory"]["after_count"])
         openclaw = self.root / "scratch-publication/openclaw.json"
         openclaw.parent.mkdir(); openclaw.write_bytes(
             (self.packet / "openclaw.preserved.json").read_bytes())
