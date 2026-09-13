@@ -71,6 +71,10 @@ def _forecast_reason_text(value: str, fallback: Callable[[str], str]) -> str:
     text = value.strip()
     if text in exact:
         return exact[text]
+    operating_expenses = re.fullmatch(
+        r"(\d+) operating expense lines are not available for this quarter", text)
+    if operating_expenses:
+        return f"本季度缺少 {operating_expenses.group(1)} 项营业费用"
     patterns = (
         (r"statement line .+ is explicitly unavailable for forecast", "该报表项目未提供预测值"),
         (r"forecast base .+ is unavailable for this quarter", "本季度缺少预测基准"),
@@ -80,7 +84,6 @@ def _forecast_reason_text(value: str, fallback: Callable[[str], str]) -> str:
         (r"no cash-flow share assumption for .+ in this quarter", "本季度缺少现金流占比假设"),
         (r"no supported exact (operating_cash_flow|capital_expenditure) forecast basis is available", "缺少可核验的现金流预测基准"),
         (r".+ is not available for this quarter", "本季度缺少计算基准"),
-        (r"\d+ operating expense lines are not available for this quarter", "本季度缺少部分营业费用项目"),
         (r"more than one filed concept claims the cost-of-revenue role: .+", "多个已披露项目同时被标为营业成本，无法唯一确定"),
         (r"more than one filed concept claims the income-tax or net-income role", "多个已披露项目同时被标为所得税或净利润，无法唯一确定"),
         (r"structured base .+ is unavailable for this quarter", "本季度缺少结构化预测基准"),

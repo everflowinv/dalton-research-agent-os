@@ -128,7 +128,7 @@ class ModelDisplayTest(unittest.TestCase):
         shown = render_forecast_model(record, include_technical=False)
         for expected in ('该报表项目未提供预测值', '本季度缺少公式所需项目',
                          '本季度缺少预测基准', '本季度缺少增长假设',
-                         '本季度缺少部分营业费用项目', '本季度缺少经营现金流或资本支出'):
+                         '本季度缺少 2 项营业费用', '本季度缺少经营现金流或资本支出'):
             self.assertIn(expected, shown)
         self.assertIn('本季度缺少现金流占比假设', shown)
         self.assertIn('预测基准会使正向列示的资本支出变为负数，因此未计算', shown)
