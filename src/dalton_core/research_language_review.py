@@ -89,6 +89,13 @@ def render_suggestions_markdown(review: Mapping[str, Any]) -> str:
 
 
 def build_brain_prompt(product: Mapping[str, Any], review: Mapping[str, Any]) -> str:
+    source = {
+        "kind": product.get("kind"), "version_ref": product.get("version_ref"),
+        "source_hash": _hash(product),
+        "sections": [{"index": index, "title": row.get("title") or "",
+                      "body": row.get("body") or "", "gaps": row.get("gaps") or []}
+                     for index, row in enumerate(product.get("sections") or [])],
+    }
     return "\n".join((
         "你是负责该研究成品的大脑。语言检查员只评估表达，没有核实事实或数字。逐条决定采纳或拒绝，"
         "给出具体理由，然后返回修订后的全部章节。只改语言；不得新增、删除或改变事实、数字、来源、"
@@ -96,7 +103,8 @@ def build_brain_prompt(product: Mapping[str, Any], review: Mapping[str, Any]) ->
         "只输出 JSON："
         '{"decisions":[{"suggestion_index":0,"decision":"adopt|reject","reason":"理由"}],'
         '"sections":[{"index":0,"title":"...","body":"...","gaps":[]}]}',
-        "原文：" + json.dumps(product, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        "原文展示字段与不可变身份：" + json.dumps(
+            source, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
         "语言建议：" + json.dumps(review, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
     ))
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from dalton_core.research_language_review import run_language_review
+from dalton_core.research_language_review import build_brain_prompt, run_language_review
 
 IDENTITY = {"provider": "antigravity-cli-gateway",
             "model": "antigravity-cli-gateway/gemini-3.8-flash"}
@@ -22,6 +22,12 @@ def review():
 
 
 class ResearchLanguageReviewTests(unittest.TestCase):
+    def test_brain_prompt_omits_large_authority_and_source_payloads(self):
+        source = product(); source["sources"] = [{"raw": "secret-large-authority"}]
+        prompt = build_brain_prompt(source, review())
+        self.assertNotIn("secret-large-authority", prompt)
+        self.assertIn("source_hash", prompt)
+
     def test_checker_once_then_brain_once_and_preserves_advice_and_decision(self):
         calls = []
         def checker(prompt):

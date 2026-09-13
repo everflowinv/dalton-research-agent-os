@@ -181,6 +181,13 @@ def build_verifier_prompt(product: Mapping[str, Any], localized: Mapping[str, An
     ))
 
 
+def _english_display_allowed(product: Mapping[str, Any]) -> bool:
+    kind = str(product.get("kind") or "").lower()
+    media = str(product.get("media_type") or "").lower()
+    return (kind in {"excel", "xlsx", "workbook", "model_excel"}
+            or "spreadsheet" in media or "excel" in media or "xlsx" in media)
+
+
 def validate_localized_text(product: Mapping[str, Any], localized: Mapping[str, Any]) -> list[dict[str, Any]]:
     """Cheap structural and numeric preservation checks to run before verification."""
 
@@ -209,7 +216,9 @@ def validate_localized_text(product: Mapping[str, Any], localized: Mapping[str, 
                 "localized section changed financial number tokens: "
                 + json.dumps(detail, ensure_ascii=False, sort_keys=True)
             )
-        if any(value.strip() for value in source_text) and not _HAN.search(" ".join(target_text)):
+        if (not _english_display_allowed(product)
+                and any(value.strip() for value in source_text)
+                and not _HAN.search(" ".join(target_text))):
             raise ResearchLocalizationError(
                 f"localized section {index} has no Simplified Chinese presentation text"
             )

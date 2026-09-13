@@ -142,3 +142,11 @@ class ResearchLocalizationTests(unittest.TestCase):
     translated['sections'][0]['body']='T1 支持 124 USD 收入的判断。'
     with self.assertRaises(ResearchLocalizationError):
         validate_localized_text(source,translated)
+ def test_excel_titles_and_explanations_may_remain_english(self):
+    source = product(); source["kind"] = "model_excel"
+    checked = validate_localized_text(source, {"sections": [{
+        "index": 0, "title": "Financial Model",
+        "body": "Revenue was USD 1,234.50, up 5.2%.",
+        "gaps": ["Missing FY2027 margin"],
+    }]})
+    self.assertEqual(checked[0]["title"], "Financial Model")
