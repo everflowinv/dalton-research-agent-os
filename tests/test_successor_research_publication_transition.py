@@ -93,6 +93,11 @@ class ResearchPublicationTransitionTest(unittest.TestCase):
                 "DALTON_ACCEPTED_RUNTIME_SOURCE_ROOT",
                 "/Users/everflow/Projects/dalton-foundation-r25-final-v11-worktree"))
             self.assertTrue((runtime / "src/dalton_core/research_output_preparation.py").is_file())
+            self.assertEqual(
+                "045484612406452fd31a6eeafcbbed31b166dffd",
+                subprocess.check_output(
+                    ["git", "-C", str(runtime), "rev-parse", "HEAD"],
+                    text=True).strip())
             env = dict(os.environ, PYTHONPATH=str(runtime / "src"))
             completed = subprocess.run(
                 [sys.executable, "-m", "dalton_core.research_output_preparation",
