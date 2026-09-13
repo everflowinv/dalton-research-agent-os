@@ -111,6 +111,9 @@ _VERIFIER_PROVIDER_CONTRACTS = {
     "conviction_call_verifier": (
         "conviction-call-verifier-provider-output-0.1",
         "conviction-call-verifier-provider-output-v0.1.schema.json"),
+    "research_localization_verifier": (
+        "research-localization-verifier-provider-output-0.1",
+        "research-localization-verifier-provider-output-v0.1.schema.json"),
 }
 
 

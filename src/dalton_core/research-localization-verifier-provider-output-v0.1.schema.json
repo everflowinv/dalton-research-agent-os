@@ -1,0 +1,14 @@
+{
+  "$id": "https://dalton.local/schemas/research-localization-verifier-provider-output-v0.1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdict", "faithful", "no_new_facts", "meaning_preserved", "findings"],
+  "properties": {
+    "verdict": {"type": "string", "enum": ["pass", "reject"]},
+    "faithful": {"type": "boolean"},
+    "no_new_facts": {"type": "boolean"},
+    "meaning_preserved": {"type": "boolean"},
+    "findings": {"type": "array", "items": {"type": "string"}, "maxItems": 64}
+  }
+}

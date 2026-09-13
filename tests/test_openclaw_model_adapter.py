@@ -617,6 +617,10 @@ class OpenClawModelAdapterTests(unittest.TestCase):
             ("conviction_call_verifier", "conviction-call-verifier-provider-output-0.1",
              "conviction-call-verifier-provider-output-v0.1.schema.json",
              "conviction_call_verifier_provider_output_v0_1", "code"),
+            ("research_localization_verifier",
+             "research-localization-verifier-provider-output-0.1",
+             "research-localization-verifier-provider-output-v0.1.schema.json",
+             "research_localization_verifier_provider_output_v0_1", None),
         )
         for index, (purpose, contract, resource, schema_name, locator) in enumerate(cases, 1):
             with self.subTest(purpose=purpose):

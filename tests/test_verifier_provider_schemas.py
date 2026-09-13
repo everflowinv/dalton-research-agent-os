@@ -45,3 +45,14 @@ class VerifierProviderSchemaTests(unittest.TestCase):
         self.assertEqual(set(memo["properties"]["finding_codes"]["items"]["enum"]), set(MEMO_CODES))
         zero = self.schema("zero-base-review-verifier-provider-output-v0.1.schema.json")
         self.assertEqual(zero["properties"]["findings"]["items"], {"type": "string"})
+
+    def test_research_localization_schema_is_closed_and_matches_the_validator_shape(self):
+        schema = self.schema(
+            "research-localization-verifier-provider-output-v0.1.schema.json")
+        self.assertFalse(schema["additionalProperties"])
+        self.assertEqual(set(schema["required"]), {
+            "verdict", "faithful", "no_new_facts", "meaning_preserved", "findings"})
+        self.assertEqual(schema["properties"]["verdict"]["enum"], ["pass", "reject"])
+        for key in ("faithful", "no_new_facts", "meaning_preserved"):
+            self.assertEqual(schema["properties"][key], {"type": "boolean"})
+        self.assertEqual(schema["properties"]["findings"]["items"], {"type": "string"})

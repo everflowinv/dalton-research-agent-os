@@ -7,11 +7,12 @@ from collections.abc import Callable, Mapping
 from hashlib import sha256
 from typing import Any
 
+from .cockpit_model import register_purpose
 from .research_localization import validate_localized_text
 
 SCHEMA_VERSION = "research-language-review:0.1"
-CHECKER_PURPOSE = "research_language_check"
-BRAIN_PURPOSE = "research_language_revision"
+CHECKER_PURPOSE = register_purpose("research_language_check")
+BRAIN_PURPOSE = register_purpose("research_language_revision")
 CHECKER_PROVIDER = "antigravity-cli-gateway"
 CHECKER_MODEL = "antigravity-cli-gateway/gemini-3.8-flash"
 

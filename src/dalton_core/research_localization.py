@@ -13,11 +13,13 @@ from collections import Counter
 from hashlib import sha256
 from typing import Any, Mapping, Sequence
 
+from .cockpit_model import register_purpose
 from .final_text_contract import FINAL_TEXT_RULES_VERSION, final_text_instructions
 from .numeric_display import format_display_number
 
 SCHEMA_VERSION = "research-localization:0.1"
 TARGET_LOCALE = "zh-CN"
+VERIFIER_PURPOSE = register_purpose("research_localization_verifier")
 _NUMBER = re.compile(r"[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?%?")
 _OPAQUE_ID = re.compile(
     r"\b(?:claim|claim-version|dossier|dossier-version|memo|memo-version|"
@@ -304,7 +306,7 @@ def select_localized(product: Mapping[str, Any], candidate: Mapping[str, Any] | 
     return result
 
 
-__all__ = ["ResearchLocalizationError", "SCHEMA_VERSION", "TARGET_LOCALE",
+__all__ = ["ResearchLocalizationError", "SCHEMA_VERSION", "TARGET_LOCALE", "VERIFIER_PURPOSE",
            "build_prompt", "build_verifier_prompt", "build_localization",
            "validate_localized_text", "validate_localization", "select_localized",
            "source_content_hash"]

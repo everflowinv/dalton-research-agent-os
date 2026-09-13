@@ -121,6 +121,12 @@ _VERIFIER_PROVIDER_CONTRACTS = {
         "conviction_call_verifier_provider_output_v0_1",
         frozenset({"conviction_call_verifier"}),
     ),
+    "research-localization-verifier-provider-output-0.1": (
+        "0.1",
+        "research-localization-verifier-provider-output-v0.1.schema.json",
+        "research_localization_verifier_provider_output_v0_1",
+        frozenset({"research_localization_verifier"}),
+    ),
 }
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _BROKER_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")

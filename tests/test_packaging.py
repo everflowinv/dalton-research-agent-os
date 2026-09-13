@@ -63,6 +63,7 @@ class PackagingTests(unittest.TestCase):
             "thesis-impact-verifier-provider-output-v0.2.schema.json",
             "thesis-impact-verifier-output-v0.2.schema.json",
             "thesis-impact-verifier-decision-provider-output-v0.1.schema.json",
+            "research-localization-verifier-provider-output-v0.1.schema.json",
             "dashboard.html",
             "cockpit_control.html",
             "cockpit_control_legacy.html",
