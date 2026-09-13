@@ -258,6 +258,10 @@ class ResearchLocalizationTests(unittest.TestCase):
       ('Cost was $0.03 and the next cost was $0.02.','成本为3美分，下一项为2美分。'),
       ('whole-site 403 as of 2026-09; pre-2023 forms differ.',
        '截至2026年9月整站返回403；2023年以前的表格不同。'),
+      ('C4Q24 remained labelled C4Q24.','2024年第四季度仍标记为C4Q24。'),
+      ('In 2026, FY26 improved.','2026年，2026财年改善。'),
+      ('The window is 2–4 quarters and covers 8 个未来季度.',
+       '窗口为二至四个季度，覆盖未来八个季度。'),
     )
     for original,translated in cases:
       source=product();source['sections'][0].update(title='期间',body=original,gaps=[])

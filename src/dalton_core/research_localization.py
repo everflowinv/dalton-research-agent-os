@@ -83,7 +83,8 @@ def _numeric_text(value: str) -> str:
     cleaned = re.sub(r"(?i)(?<![A-Za-z])pre-(20\d{2})", r"pre \1", cleaned)
     cleaned = _SAME_YEAR_ISO_RANGE.sub(r"\1 \2 \3 \4 \5", cleaned)
     cleaned = _ISO_DATE.sub(r"\1 \2 \3", cleaned)
-    return _ISO_YEAR_MONTH.sub(r"\1 \2", cleaned)
+    cleaned = _ISO_YEAR_MONTH.sub(r"\1 \2", cleaned)
+    return re.sub(r"(?<!\d)(\d{1,2})-(\d{1,2})(?=\s*月)", r"\1 \2", cleaned)
 
 
 def _canonical_number(token: str) -> str:
@@ -158,9 +159,10 @@ def _number_differences(source_values: Sequence[str], target_values: Sequence[st
         for match in re.finditer(r"(?<![A-Za-z])FY\s*([0-9]{2})(?![0-9])", value, re.I):
             short = str(int(match.group(1)))
             full = str(2000 + int(match.group(1)))
-            if missing_counter[short] and added[full]:
+            if missing_counter[short] and (added[full] or re.search(
+                    rf"(?<!\d){full}\s*财年", " ".join(target_values))):
                 missing_counter[short] -= 1
-                added[full] -= 1
+                if added[full]: added[full] -= 1
             else:
                 aliases[full] += 1
         for match in re.finditer(r"(?<![A-Za-z])(?:FY|fiscal(?:\s+year)?)\s*(20[0-9]{2})(?![0-9])", value, re.I):
@@ -172,6 +174,8 @@ def _number_differences(source_values: Sequence[str], target_values: Sequence[st
             if missing_counter[short] and added[full]:
                 missing_counter[short] -= 1
                 added[full] -= 1
+            else:
+                aliases[full] += 1
             if missing_counter[quarter] and re.search(
                     rf"第?[一二三四]\s*(?:个\s*)?季度", " ".join(target_values)):
                 expected = {"1":"一","2":"二","3":"三","4":"四"}[quarter]
@@ -212,6 +216,19 @@ def _number_differences(source_values: Sequence[str], target_values: Sequence[st
         target_unit = r"(?:个\s*)?季度" if "quarter" in unit or unit == "季度" else r"(?:个\s*)?月"
         if missing_counter[str(number)] and re.search(
                 rf"{chinese_digits[number]}\s*{target_unit}", target_joined_raw):
+            missing_counter[str(number)] -= 1
+    for match in re.finditer(
+            r"(?<!\d)([1-9]|1[0-2])\s*(?:至|到|[-–—])\s*([1-9]|1[0-2])\s*(?:个\s*)?(季度|quarters?)",
+            source_joined_raw, re.I):
+        low, high = int(match.group(1)), int(match.group(2))
+        target_pattern = rf"{chinese_digits[low]}\s*(?:至|到|[-–—])\s*{chinese_digits[high]}\s*(?:个\s*)?季度"
+        if re.search(target_pattern, target_joined_raw):
+            for number in (low, high):
+                if missing_counter[str(number)]: missing_counter[str(number)] -= 1
+    for match in re.finditer(r"(?<!\d)([1-9]|1[0-2])\s*个\s*未来\s*季度", source_joined_raw):
+        number = int(match.group(1))
+        if (missing_counter[str(number)] and re.search(
+                rf"未来\s*{chinese_digits[number]}\s*个?\s*季度", target_joined_raw)):
             missing_counter[str(number)] -= 1
     # Repeating the same calendar year for each date in a list is optional
     # when the target retains that exact year and all month/day values remain.
