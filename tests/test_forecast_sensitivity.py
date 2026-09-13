@@ -784,23 +784,23 @@ class RenderTests(unittest.TestCase):
         self.assertIn("敏感性分析  Accenture plc", text)
         self.assertIn("一致预期对照", text)
         self.assertIn("暂无可用的一致预期对照", text)
-        for scenario in SCENARIOS:
+        for scenario in ("历史低点", "历史均值", "本模型", "历史高点"):
             self.assertIn(scenario, text)
         # The quarter each extreme happened in, beside the number.
         self.assertIn("(2024-11-30)", text)
         # An unavailable line prints its reason where its number would be.
         self.assertIn("not_material", text)
-        self.assertIn("this is what ranks it", text)
+        self.assertIn("驱动因素按此排序", text)
         # The reader is told the columns are flat holds, not paths.
         self.assertIn("每个情景列在所示全部季度中保持同一假设水平", text)
-        self.assertIn("next peak in:", text)
+        self.assertIn("次历史高点：", text)
 
     def test_the_view_says_where_our_estimate_sits_in_the_band(self):
         projection = build_projection(model())
         projection.update({"id": "sensitivity-projection:x:1", "version": 1,
                            "created_at": "now"})
         text = render_sensitivity(projection)
-        self.assertIn("of the way from trough to peak", text)
+        self.assertIn("位于低点至高点区间", text)
 
 
 if __name__ == "__main__":  # pragma: no cover

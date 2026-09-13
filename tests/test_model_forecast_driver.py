@@ -21,7 +21,7 @@ import unittest
 from decimal import Decimal
 
 from dalton_core.company_model_inputs import build_model_inputs
-from dalton_core.company_model_report import render_forecast_model
+from dalton_core.company_model_report import _visual_width, render_forecast_model
 from dalton_core.model_forecast import DRIVER_FORMULA_HASH, DRIVER_FORMULA_REF
 from dalton_core.model_forecast_driver import (
     CHANGE_REASONS,
@@ -812,9 +812,22 @@ class RenderTests(unittest.TestCase):
         self.assertIn("carried forward unchanged", text)
         self.assertIn("1,464.1", text)
         # An unavailable result prints its reason where its number would be.
-        self.assertIn("unavailable: the specification marks the cash flow statement",
+        self.assertIn("状态：unavailable；原因：the specification marks the cash flow statement",
                       text)
         self.assertIn(" |", text)
+
+    def test_human_model_fields_are_localized_before_table_layout(self):
+        record = model()
+        translated = {"Revenues": "营业收入", "evidence_thicker": "新增证据触发更新"}
+        text = render_forecast_model(record, display_text=lambda value: translated.get(value, value))
+        self.assertIn("营业收入", text)
+        self.assertIn("新增证据触发更新", text)
+        self.assertNotIn("更新原因：evidence_thicker", text)
+        header = next(line for line in text.splitlines() if "25-08-31" in line)
+        translated_row = next(line for line in text.splitlines()
+                              if line.startswith("  营业收入") and "|" in line)
+        self.assertEqual(_visual_width(header.split("|", 1)[0]),
+                         _visual_width(translated_row.split("|", 1)[0]))
 
     def test_browser_forecast_report_preserves_per_share_and_unknown_units(self):
         record = model()

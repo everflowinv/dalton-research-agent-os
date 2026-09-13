@@ -3723,6 +3723,18 @@ class CockpitPlane:
             } for row in rows]
         label = self._label(members, ref)
         readiness = model_readiness(record)
+        try:
+            from .research_localization_store import load_ui_texts
+            model_text = load_ui_texts(self.config.core_db)
+        except (ImportError, OSError, sqlite3.Error, ValueError, TypeError):
+            model_text = {}
+        policy = _load_json(self.config.core_db.parent / "research-language-policy.json") or {}
+        review_required = isinstance(policy, Mapping) and policy.get("required") is True
+        def display_model_text(value: str) -> str:
+            if value in model_text:
+                return model_text[value]
+            return ("正文正在检查文字表达，完成后会显示。"
+                    if review_required else value)
         return {
             "as_of": _iso(self.clock()), "company_ref": ref, "company": label,
             "version": record.get("version"), "version_ref": record.get("id"),
@@ -3732,7 +3744,9 @@ class CockpitPlane:
                 record.get("change_reason"), record.get("change_reason")),
             "decision": record.get("decision"),
             "readiness": readiness, "note": self._forecast_note(readiness),
-            "table": render_forecast_model(record, entity_name=label),
+            "table": render_forecast_model(
+                record, entity_name=label,
+                display_text=display_model_text),
             "history": history,
             "invariants": refused,
         }

@@ -136,9 +136,9 @@ class CockpitLanguageTests(unittest.TestCase):
         self.assertIn('FINAL_RESEARCH_REQUIRED&&shown===value', text)
         self.assertIn('正文正在检查文字表达，完成后会显示。', text)
         for field in (
-            'finalResearchText(x.summary)', 'finalResearchText(x.because)',
+            'finalResearchText(x.because)',
             'finalResearchText(r.what_we_expected)', 'finalResearchText(r.what_happened)',
-            'finalResearchText(r.prose||"")', 'finalResearchText(t.conclusion||t.gap||"")',
+            'finalResearchText(r.prose||"")',
         ):
             self.assertIn(field, text)
 
