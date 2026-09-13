@@ -274,6 +274,40 @@ class AssessmentTests(ReopenHarness):
         self.assertNotEqual(first["assessment_hash"], third["assessment_hash"])
 
 
+class HumanErratumProposalTests(ReopenHarness):
+    def candidate(self, version):
+        import hashlib
+        before = version["sections"][3]["body"]
+        old = before
+        after = before + "已纠正。"
+        return {"schema_version":"epam-initial-screen-factual-erratum-candidate-0.1",
+            "status":"reviewable_not_applied","subject_ref":ACN,
+            "deliverable_ref":version["deliverable_ref"],
+            "source_version":{"version_ref":version["id"],"content_hash":version["content_hash"],"version_number":1},
+            "scope":{"change_reason":"human_revision","section_index":3},
+            "replacement":{"before":before,"after":after,"after_sha256":hashlib.sha256(after.encode()).hexdigest(),
+                "substitutions":[{"before":old,"after":after}]},
+            "authority":{"claim_numbers":[{"claim_version_ref":ref,"claim_content_hash":
+                self.store.connection.execute("SELECT content_hash FROM claim_versions WHERE claim_version_id=?",(ref,)).fetchone()[0]}
+                for ref in self.claim_refs[:4]]}}
+
+    def test_owner_erratum_proposes_without_evidence_flip_and_still_needs_decision(self):
+        version=self.publish();self.pass_gate(version);candidate=self.candidate(version)
+        proposal=self.reopens.propose_human_revision(candidate=candidate,candidate_hash=content_hash(candidate),mission=self.mission,actor_ref=AUTOMATION)
+        self.assertEqual(proposal["flipped"],[]);self.assertEqual(proposal["change_reason"],"human_revision")
+        self.assertIsNone(self.reopens.decision_for(proposal["id"]))
+        self.assertEqual(self.reopens.propose_human_revision(candidate=candidate,candidate_hash=content_hash(candidate),mission=self.mission,actor_ref=AUTOMATION)["status"],"duplicate")
+
+    def test_owner_erratum_rejects_source_claim_and_projection_drift(self):
+        version=self.publish();self.pass_gate(version);candidate=self.candidate(version)
+        for mutate,message in ((lambda c:c["source_version"].update(content_hash="0"*64),"source"),
+            (lambda c:c["authority"]["claim_numbers"][0].update(claim_content_hash="0"*64),"Claim"),
+            (lambda c:c["replacement"].update(after="different"),"projection")):
+            changed=json.loads(json.dumps(candidate));mutate(changed)
+            with self.assertRaisesRegex(DeliverableReopenConflict,message):
+                self.reopens.propose_human_revision(candidate=changed,candidate_hash=content_hash(changed),mission=self.mission,actor_ref=AUTOMATION)
+
+
 class ProposalTests(ReopenHarness):
     def setUp(self):
         super().setUp()

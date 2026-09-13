@@ -47,6 +47,7 @@ by the version that cites it.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from collections.abc import Mapping, Sequence
@@ -756,6 +757,108 @@ class GateReopenAuthority:
                 ),
             )
         return {**record, "status": "fresh"}
+
+    def propose_human_revision(
+        self, *, candidate: Mapping[str, Any], candidate_hash: str,
+        mission: Mapping[str, Any], actor_ref: str,
+    ) -> dict[str, Any]:
+        """Propose one source-backed factual erratum without inventing an evidence flip."""
+        candidate_hash = _sha256(candidate_hash, "candidate_hash")
+        if content_hash(candidate) != candidate_hash:
+            raise DeliverableReopenConflict("human revision candidate hash binding failed")
+        actor_ref = _text(actor_ref, "actor_ref")
+        if actor_ref != mission.get("autonomy", {}).get("automation_principal"):
+            raise DeliverableReopenConflict("automation actor is not the mission principal")
+        scope = candidate.get("scope") or {}
+        if (candidate.get("schema_version") != "epam-initial-screen-factual-erratum-candidate-0.1"
+                or scope.get("change_reason") != CHANGE_REASON_HUMAN
+                or candidate.get("subject_ref") not in
+                    {row.get("company_ref") for row in mission.get("universe") or ()}):
+            raise DeliverableReopenValidationError("human revision candidate shape is invalid")
+        source = candidate.get("source_version") or {}
+        row = self.connection.execute(
+            "SELECT * FROM mission_deliverable_versions WHERE version_id=?",
+            (source.get("version_ref"),),
+        ).fetchone()
+        if (row is None or row["deliverable_ref"] != candidate.get("deliverable_ref")
+                or row["content_hash"] != source.get("content_hash")
+                or int(row["version_number"]) != source.get("version_number")):
+            raise DeliverableReopenConflict("source deliverable version binding failed")
+        original = json.loads(row["record_json"])
+        passed = passed_version(self.connection, company_ref=candidate["subject_ref"])
+        if (passed is None or passed["version_id"] != source["version_ref"]
+                or passed["content_hash"] != source["content_hash"]):
+            raise DeliverableReopenConflict("erratum source is not the currently passed version")
+        section_index = scope.get("section_index")
+        if isinstance(section_index, bool) or not isinstance(section_index, int):
+            raise DeliverableReopenValidationError("section_index must be an integer")
+        sections = original.get("sections") or []
+        if section_index < 0 or section_index >= len(sections):
+            raise DeliverableReopenValidationError("section_index is outside the source version")
+        replacement = candidate.get("replacement") or {}
+        before = replacement.get("before")
+        after = replacement.get("after")
+        if sections[section_index].get("body") != before:
+            raise DeliverableReopenConflict("erratum before text is not the source section")
+        substitutions = replacement.get("substitutions")
+        if not isinstance(substitutions, list) or not substitutions or len(substitutions) > 20:
+            raise DeliverableReopenValidationError("substitutions must contain 1..20 exact changes")
+        projected = before
+        for change in substitutions:
+            if not isinstance(change, Mapping) or set(change) != {"before", "after"}:
+                raise DeliverableReopenValidationError("each substitution must be exact before/after")
+            old = _text(change["before"], "substitution.before", maximum=2000)
+            new = _text(change["after"], "substitution.after", maximum=2000)
+            if projected.count(old) != 1:
+                raise DeliverableReopenConflict("substitution before text is not unique")
+            projected = projected.replace(old, new, 1)
+        if (projected != after or hashlib.sha256(after.encode()).hexdigest()
+                != replacement.get("after_sha256")):
+            raise DeliverableReopenConflict("erratum replacement projection failed")
+        claims = (candidate.get("authority") or {}).get("claim_numbers")
+        if not isinstance(claims, list) or len(claims) != 4:
+            raise DeliverableReopenValidationError("exactly four Claim authorities are required")
+        evidence_refs = []
+        for claim in claims:
+            found = self.connection.execute(
+                "SELECT content_hash FROM claim_versions WHERE claim_version_id=?",
+                (claim.get("claim_version_ref") if isinstance(claim, Mapping) else None,),
+            ).fetchone()
+            if found is None or found["content_hash"] != claim.get("claim_content_hash"):
+                raise DeliverableReopenConflict("Claim authority binding failed")
+            evidence_refs.append(claim["claim_version_ref"])
+        assessment_hash = content_hash({"candidate_hash": candidate_hash,
+                                        "source_hash": row["content_hash"]})
+        record = {
+            "schema_version": SCHEMA_VERSION,
+            "id": "gate-reopen-proposal:" + content_hash({
+                "company_ref": candidate["subject_ref"], "assessment_hash": assessment_hash})[:32],
+            "created_at": _now(), "company_ref": candidate["subject_ref"],
+            "deliverable_ref": candidate["deliverable_ref"], "stage_ref": STAGE_REF,
+            "stage_record_ref": passed["stage_record_ref"],
+            "passed_version_ref": source["version_ref"], "passed_version_hash": source["content_hash"],
+            "passed_version_number": source["version_number"], "passed_at": row["created_at"],
+            "assessment_hash": assessment_hash, "policy_ref": "owner-directed-factual-erratum:0.1",
+            "thresholds": {}, "flipped": [], "regressed": [], "diff": [],
+            "evidence_refs": evidence_refs, "gate_recomputed": None,
+            "checkpoint_kind": CHECKPOINT_KIND, "change_reason": CHANGE_REASON_HUMAN,
+            "mission_version_ref": mission["id"], "mission_version_hash": mission["content_hash"],
+            "actor_ref": actor_ref, "erratum": {"candidate_hash": candidate_hash,
+                "section_index": section_index, "after_hash": replacement["after_sha256"],
+                "substitutions": [dict(x) for x in substitutions]},
+        }
+        record["content_hash"] = content_hash(record)
+        with self.store._transaction() as cur:
+            existing = cur.execute("SELECT * FROM gate_reopen_proposals WHERE company_ref=? AND assessment_hash=?",
+                                   (record["company_ref"], assessment_hash)).fetchone()
+            if existing is not None:
+                return {**_decode(existing, "GateReopenProposal"), "status": "duplicate"}
+            cur.execute("INSERT INTO gate_reopen_proposals(proposal_id,company_ref,deliverable_ref,stage_ref,passed_version_ref,passed_version_hash,assessment_hash,flipped_count,checkpoint_kind,change_reason,mission_version_ref,record_json,content_hash,actor_ref,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (record["id"],record["company_ref"],record["deliverable_ref"],STAGE_REF,
+                 record["passed_version_ref"],record["passed_version_hash"],assessment_hash,
+                 len(substitutions),CHECKPOINT_KIND,CHANGE_REASON_HUMAN,mission["id"],
+                 canonical_json(record),record["content_hash"],actor_ref,record["created_at"]))
+        return {**record,"status":"fresh"}
 
     def decide(
         self,
