@@ -38,6 +38,12 @@ _METRIC_LABELS = {
     "gross_margin": "毛利率",
     "diluted_eps": "稀释每股收益",
     "free_cash_flow": "自由现金流",
+    "cost_structure": "成本结构",
+    "unit_economics": "单位经济性",
+    "volume": "业务量",
+    "price": "实现价格",
+    "pricing": "定价",
+    "retention": "客户留存",
 }
 
 def _metric_label(value: Any) -> str:

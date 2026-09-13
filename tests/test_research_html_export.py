@@ -114,6 +114,7 @@ class HtmlRenderTests(unittest.TestCase):
         lib["products"][0]["sections"][0]["gaps"] = [
             "not_drafted_this_run",
             "缺少可比营业利润率（operating_margin）。",
+            "cost_structure 与 unit_economics 尚缺数据。",
         ]
         claims = {
             "claim:1": {"id": "claim:1", "subject_ref": "company:acn",
@@ -134,6 +135,9 @@ class HtmlRenderTests(unittest.TestCase):
         self.assertNotIn("not_drafted_this_run", page)
         self.assertIn("缺少可比营业利润率（营业利润率）", page)
         self.assertNotIn("operating_margin", page)
+        self.assertIn("成本结构 与 单位经济性 尚缺数据", page)
+        self.assertNotIn("cost_structure", page)
+        self.assertNotIn("unit_economics", page)
         self.assertNotIn("<th>证据编号</th>", page)
         self.assertNotIn("<td><code>claim:1</code></td>", page)
         self.assertIn("技术详情与来源（2）", page)
