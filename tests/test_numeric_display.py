@@ -50,7 +50,7 @@ class NumericDisplayTests(unittest.TestCase):
             '正文15.35 亿美元。')
 
     def test_amounts_use_readable_chinese_units(self):
-        self.assertEqual(FINAL_TEXT_RULES_VERSION, "simplified-chinese-research-prose:0.2")
+        self.assertEqual(FINAL_TEXT_RULES_VERSION, "simplified-chinese-research-prose:0.3")
         self.assertEqual(format_display_number("15623445", kind="amount_usd"), "1562 万美元")
         self.assertEqual(format_display_number("125500000", kind="amount_usd"), "1.26 亿美元")
 
