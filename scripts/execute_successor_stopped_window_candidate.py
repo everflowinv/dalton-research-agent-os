@@ -28,7 +28,9 @@ from scripts import prepare_release_acceptance_candidate as release_acceptance
 from scripts.successor_ops_binding import OpsBindingError, verify_ops_binding
 from scripts.prepare_successor_config_transition import (
     DOCUMENT_CONFIG, EXTERNAL_CAS_SCHEMA_VERSION, LANE_CONFIG,
-    PRESERVE_SCHEMA_VERSION, PURE_PRESERVE_SCHEMA_VERSION, _json_bytes,
+    PRESERVE_SCHEMA_VERSION, PURE_PRESERVE_SCHEMA_VERSION,
+    WRITER_APPEND_SCHEMA_VERSION, _json_bytes,
+    expected_writer_operation_transition_state,
     apply_transition, expected_service_transition_state,
     expected_openclaw_frame_transition_state, expected_transition_state,
     expected_preserved_openclaw_state, verify_preserved_state_authorities,
@@ -54,7 +56,7 @@ MANIFEST_FIELDS = frozenset({
 })
 PRESERVE_SCHEMA_VERSIONS = frozenset({
     PRESERVE_SCHEMA_VERSION, EXTERNAL_CAS_SCHEMA_VERSION,
-    PURE_PRESERVE_SCHEMA_VERSION,
+    PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION,
 })
 
 
@@ -117,7 +119,7 @@ def expected_preserved_service_bytes(
     before, after = expected_service_transition_state(
         packet_root=packet, manifest=transition)
     if transition.get("schema_version") not in {
-            EXTERNAL_CAS_SCHEMA_VERSION, PURE_PRESERVE_SCHEMA_VERSION}:
+            EXTERNAL_CAS_SCHEMA_VERSION, PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION}:
         return _json_bytes(after)
     need(before == after, "schema 0.3 service semantics are not preserved")
     row = transition["service_transition"]["before"]
@@ -129,6 +131,15 @@ def expected_preserved_service_bytes(
          and sha(artifact) == row["sha256"],
          "preserved service artifact bytes changed")
     return artifact.read_bytes()
+
+
+def writer_transition_result(before: bytes, after: bytes, row: Mapping[str, Any]) -> dict[str, Any]:
+    row = row["proof"]
+    return {"before_sha256": hashlib.sha256(before).hexdigest(),
+            "after_sha256": hashlib.sha256(after).hexdigest(),
+            "added_operations": row["added_operations"],
+            "predecessor_commit": row["predecessor"]["commit"],
+            "successor_commit": row["successor"]["commit"]}
 
 
 def template() -> dict[str, Any]:
@@ -220,7 +231,7 @@ def packet_preflight(packet: Path) -> tuple[dict[str, Any], dict[str, Path]]:
          "successor transition is not the frozen inert candidate")
     binding = load_json(paths["copied_state_rehearsal_binding"])
     if transition.get("schema_version") in {
-            EXTERNAL_CAS_SCHEMA_VERSION, PURE_PRESERVE_SCHEMA_VERSION}:
+            EXTERNAL_CAS_SCHEMA_VERSION, PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION}:
         ops_helpers = binding.get("ops_helpers", {})
         execution_binding = ops_helpers.get("execution_binding", {})
         need(execution_binding.get("git_commit") == ops_helpers.get("git_commit"),
@@ -254,7 +265,7 @@ def packet_preflight(packet: Path) -> tuple[dict[str, Any], dict[str, Path]]:
             need(results.get("openclaw_config_semantic_sha256")
                  == canonical_hash(json.loads(external_after)),
                  "copied-state rehearsal does not prove the OpenClaw result")
-        elif transition.get("schema_version") == PURE_PRESERVE_SCHEMA_VERSION:
+        elif transition.get("schema_version") in {PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION}:
             expected_openclaw = expected_preserved_openclaw_state(
                 packet_root=packet, manifest=transition)
             need(results.get("openclaw_config_sha256")
@@ -262,6 +273,12 @@ def packet_preflight(packet: Path) -> tuple[dict[str, Any], dict[str, Path]]:
                  and results.get("openclaw_config_semantic_sha256")
                  == canonical_hash(json.loads(expected_openclaw)),
                  "copied-state rehearsal does not prove exact OpenClaw preservation")
+    if transition.get("schema_version") == WRITER_APPEND_SCHEMA_VERSION:
+        before_writer, after_writer, writer_row = expected_writer_operation_transition_state(
+            packet_root=packet, manifest=transition, successor_root=Path(source["root"]))
+        need(binding.get("results", {}).get("writer_operation_transition")
+             == writer_transition_result(before_writer, after_writer, writer_row),
+             "copied-state rehearsal does not prove exact writer operation append")
     suite = load_json(paths["full_suite_receipt"])
     try:
         release_acceptance._validate_full_suite(
@@ -339,6 +356,92 @@ class SuccessorOrchestrator(r11.Orchestrator):
             else: raise SuccessorExecuteError("unsupported protected state entry")
         return canonical_hash(rows)
 
+    def _writer_projection(self):
+        need(self.artifacts is not None and self.rollback_root is not None,
+             "writer transition rollback authority is unavailable")
+        transition = load_json(self.artifacts["transition_manifest"])
+        need(transition.get("schema_version") == WRITER_APPEND_SCHEMA_VERSION,
+             "writer transition schema differs")
+        source = getattr(self, "successor_source", None)
+        need(source is not None, "accepted writer successor source is unavailable")
+        return expected_writer_operation_transition_state(
+            packet_root=self.packet, manifest=transition, successor_root=source)
+
+    def _verify_writer_protected_state(self, initial, *, require_after=False):
+        before, after, row = self._writer_projection()
+        backup = self.rollback_root / "state-files"
+        target = r11.STATE / "writer-tokens.json"
+        saved = backup / "writer-tokens.json"
+        need(r11.protected_state_hash(backup) == initial.get("protected_state_sha256"),
+             "protected owner rollback baseline changed")
+        need(target.is_file() and not target.is_symlink()
+             and saved.is_file() and not saved.is_symlink()
+             and saved.read_bytes() == before
+             and target.stat().st_mode & 0o7777 == saved.stat().st_mode & 0o7777,
+             "writer authority baseline or permissions changed")
+        current = target.read_bytes()
+        need(current == after if require_after else current in (before, after),
+             "writer authority differs from exact reviewed endpoints")
+        need(self._protected_hash_excluding(r11.STATE, {"writer-tokens.json"})
+             == self._protected_hash_excluding(backup, {"writer-tokens.json"}),
+             "protected owner state changed outside writer operation append")
+        return before, after, row
+
+    def verify_rollback_protected_state(self, initial):
+        transition = (load_json(self.artifacts["transition_manifest"])
+                      if self.artifacts and "transition_manifest" in self.artifacts else {})
+        if transition.get("schema_version") != WRITER_APPEND_SCHEMA_VERSION:
+            return super().verify_rollback_protected_state(initial)
+        self._verify_writer_protected_state(initial)
+
+    def restore_rollback_protected_state(self, initial):
+        transition = (load_json(self.artifacts["transition_manifest"])
+                      if self.artifacts and "transition_manifest" in self.artifacts else {})
+        if transition.get("schema_version") != WRITER_APPEND_SCHEMA_VERSION:
+            return super().restore_rollback_protected_state(initial)
+        before, after, _row = self._verify_writer_protected_state(initial)
+        target = r11.STATE / "writer-tokens.json"
+        if target.read_bytes() == after:
+            # Keep the displaced inode in the rollback evidence. Publishing
+            # with link is exclusive: an owner recreating the target wins,
+            # and no concurrent bytes can be overwritten by our restoration.
+            directory = self.rollback_root / "writer-token-restore"
+            directory.mkdir(mode=0o700)
+            temporary = directory / "reviewed-before"
+            displaced = directory / "displaced-current"
+            fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(before); stream.flush(); os.fsync(stream.fileno())
+            self._verify_writer_protected_state(initial)
+            os.rename(target, displaced)
+            directory_fd = os.open(directory, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+            try:
+                need(displaced.is_file() and not displaced.is_symlink()
+                     and displaced.stat().st_mode & 0o7777 == 0o600
+                     and displaced.read_bytes() == after,
+                     "writer authority changed during rollback displacement")
+                os.link(temporary, target)
+                directory_fd = os.open(r11.STATE, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+            except Exception:
+                # Restore a displaced concurrent value only into a vacant
+                # name; otherwise keep both values, then fail visibly.
+                if not target.exists() and not target.is_symlink():
+                    try:
+                        os.link(displaced, target, follow_symlinks=False)
+                    except FileExistsError:
+                        pass
+                raise
+        need(r11.protected_state_hash(r11.STATE) == initial["protected_state_sha256"],
+             "restored protected owner state differs from original baseline")
+
     def live_preflight(self, manifest: Mapping[str, Any], artifacts: Mapping[str, Path]):
         source = Path(manifest["source"]["root"])
         need(source.is_dir() and not source.is_symlink(),
@@ -360,6 +463,15 @@ class SuccessorOrchestrator(r11.Orchestrator):
         need(r11.OPENCLAW.read_bytes() == artifacts["openclaw_config_snapshot"].read_bytes(),
              "live OpenClaw config differs from successor baseline")
         transition = load_json(artifacts["transition_manifest"])
+        self.successor_source = source
+        if transition.get("schema_version") == WRITER_APPEND_SCHEMA_VERSION:
+            before_writer, _after_writer, _writer_row = expected_writer_operation_transition_state(
+                packet_root=self.packet, manifest=transition, successor_root=source)
+            target = r11.STATE / "writer-tokens.json"
+            need(target.is_file() and not target.is_symlink()
+                 and target.stat().st_mode & 0o7777 == 0o600
+                 and target.read_bytes() == before_writer,
+                 "live writer authority differs from reviewed append baseline")
         if transition.get("schema_version") in PRESERVE_SCHEMA_VERSIONS:
             _models, expected_document, expected_lane = expected_transition_state(
                 packet_root=self.packet, manifest=transition)
@@ -397,7 +509,7 @@ class SuccessorOrchestrator(r11.Orchestrator):
                     row=broker_row["managed_host_patch"])
         else:
             plugin = r11.verify_provider_plugin(artifacts["provider_plugin_snapshot"])
-        if transition.get("schema_version") == PURE_PRESERVE_SCHEMA_VERSION:
+        if transition.get("schema_version") in {PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION}:
             need(expected_preserved_openclaw_state(
                      packet_root=self.packet, manifest=transition)
                  == artifacts["openclaw_config_snapshot"].read_bytes(),
@@ -437,6 +549,15 @@ class SuccessorOrchestrator(r11.Orchestrator):
         self.artifacts = dict(artifacts)
         self.artifacts["service_config_before"] = artifacts["service_config_snapshot"]
         transition = load_json(artifacts["transition_manifest"])
+        self.successor_source = source
+        if transition.get("schema_version") == WRITER_APPEND_SCHEMA_VERSION:
+            before_writer, _after_writer, _writer_row = expected_writer_operation_transition_state(
+                packet_root=self.packet, manifest=transition, successor_root=source)
+            target = r11.STATE / "writer-tokens.json"
+            need(target.is_file() and not target.is_symlink()
+                 and target.stat().st_mode & 0o7777 == 0o600
+                 and target.read_bytes() == before_writer,
+                 "live writer authority differs from reviewed append baseline")
         if transition.get("schema_version") in PRESERVE_SCHEMA_VERSIONS:
             service_before, service_after = expected_service_transition_state(
                 packet_root=self.packet, manifest=transition)
@@ -449,7 +570,7 @@ class SuccessorOrchestrator(r11.Orchestrator):
                     expected_preserved_service_bytes(self.packet, transition)
                     if transition.get("schema_version") in {
                         EXTERNAL_CAS_SCHEMA_VERSION,
-                        PURE_PRESERVE_SCHEMA_VERSION}
+                        PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION}
                     else _json_bytes(service_after)
                 )
                 stream.write(service_after_bytes); stream.flush(); os.fsync(stream.fileno())
@@ -480,8 +601,10 @@ class SuccessorOrchestrator(r11.Orchestrator):
             external_config_path=(
                 r11.OPENCLAW if transition.get("schema_version")
                 in {EXTERNAL_CAS_SCHEMA_VERSION,
-                    PURE_PRESERVE_SCHEMA_VERSION} else None),
+                    PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION} else None),
             accepted_evidence=manifest["acceptance"],
+            **({"successor_source_root": source}
+               if transition.get("schema_version") == WRITER_APPEND_SCHEMA_VERSION else {}),
         )
         rendered = self.rollback_root / "reviewed-rendered-plists"
         self.command([str(r11.VENV / "bin/python"), "-m", "dalton_core.macos_launchagent",
@@ -551,7 +674,7 @@ class SuccessorOrchestrator(r11.Orchestrator):
             _before, expected_openclaw_bytes, _row = (
                 expected_openclaw_frame_transition_state(
                     packet_root=self.packet, manifest=transition))
-        elif transition.get("schema_version") == PURE_PRESERVE_SCHEMA_VERSION:
+        elif transition.get("schema_version") in {PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION}:
             expected_openclaw_bytes = expected_preserved_openclaw_state(
                 packet_root=self.packet, manifest=transition)
         need(r11.SERVICE_CONFIG.read_bytes() == expected_service_bytes
@@ -580,9 +703,12 @@ class SuccessorOrchestrator(r11.Orchestrator):
         need(self.rollback_root is not None, "rollback authority is unavailable")
         initial = load_json(self.rollback_root / "initial-state.json")
         if transition.get("schema_version") in PRESERVE_SCHEMA_VERSIONS:
-            need(r11.protected_state_hash(r11.STATE)
-                 == initial.get("protected_state_sha256"),
-                 "installer changed preserved owner metadata, credentials or signatures")
+            if transition.get("schema_version") == WRITER_APPEND_SCHEMA_VERSION:
+                self._verify_writer_protected_state(initial, require_after=True)
+            else:
+                need(r11.protected_state_hash(r11.STATE)
+                     == initial.get("protected_state_sha256"),
+                     "installer changed preserved owner metadata, credentials or signatures")
         need([label for label in r11.LABELS if self.loaded(label)] == self.initially_loaded,
              "installed service set differs from stopped-window precondition")
         for label, expected in initial.get("reviewed_rendered_plist_sha256", {}).items():
@@ -646,13 +772,19 @@ class SuccessorOrchestrator(r11.Orchestrator):
                 "service_config_mutations": (
                     0 if transition.get("schema_version") in {
                         EXTERNAL_CAS_SCHEMA_VERSION,
-                        PURE_PRESERVE_SCHEMA_VERSION} else 1),
+                        PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION} else 1),
                 "external_config_mutations": (
                     1 if transition.get("schema_version")
                     == EXTERNAL_CAS_SCHEMA_VERSION else 0),
                 "service_config_sha256": sha(r11.SERVICE_CONFIG),
                 "preserved_state_authorities": state_authorities,
             })
+        if transition.get("schema_version") == WRITER_APPEND_SCHEMA_VERSION:
+            before_writer, after_writer, writer_row = self._verify_writer_protected_state(
+                initial, require_after=True)
+            result["writer_operation_transition"] = writer_transition_result(
+                before_writer, after_writer, writer_row)
+            result["writer_token_mutations"] = 1
         return result
 
     def rollback(self):
@@ -687,7 +819,7 @@ class SuccessorOrchestrator(r11.Orchestrator):
             result = super().rollback()
             return {**result, "preserved_concurrent_config_targets": []}
         if transition.get("schema_version") in {
-                PRESERVE_SCHEMA_VERSION, PURE_PRESERVE_SCHEMA_VERSION}:
+                PRESERVE_SCHEMA_VERSION, PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION}:
             result = super().rollback()
             return {**result, "preserved_concurrent_config_targets": []}
         conflicts = []

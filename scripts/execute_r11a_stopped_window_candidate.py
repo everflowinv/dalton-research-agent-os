@@ -487,6 +487,15 @@ class Orchestrator:
                 time.sleep(2)
             raise ExecuteError("restored runtime did not become healthy")
 
+    def verify_rollback_protected_state(self, initial: Mapping[str, Any]) -> None:
+        need(protected_state_hash(STATE) == initial["protected_state_sha256"],
+             "protected owner state changed; refusing to overwrite concurrent values")
+
+    def restore_rollback_protected_state(self, initial: Mapping[str, Any]) -> None:
+        # Historical releases never mutate protected state. Successors may
+        # override only with an exact, separately reviewed transition proof.
+        self.verify_rollback_protected_state(initial)
+
     def rollback(self) -> dict[str, Any]:
         if not self.stopped: return {"status": "not_required_before_stop"}
         if not self.mutations_started:
@@ -502,8 +511,7 @@ class Orchestrator:
         initial = load_json(rollback / "initial-state.json")
         for name, expected in initial["backup_tree_hashes"].items():
             need(tree_hash(rollback / name) == expected, f"rollback {name} copy changed")
-        need(protected_state_hash(STATE) == initial["protected_state_sha256"],
-             "protected owner state changed; refusing to overwrite concurrent values")
+        self.verify_rollback_protected_state(initial)
         need(self.artifacts is not None, "rollback artifact authority is unavailable")
         need(tree_hash_excluding(CONFIG_DIR, {"service.json"})
              == tree_hash_excluding(rollback / "config", {"service.json"}),
@@ -552,6 +560,7 @@ class Orchestrator:
         need(tree_hash(VENV) == initial["backup_tree_hashes"]["venv"]
              and tree_hash(CONFIG_DIR) == initial["backup_tree_hashes"]["config"],
              "restored runtime or config bytes differ")
+        self.restore_rollback_protected_state(initial)
         self.restart_initial()
         shutil.rmtree(failed_venv); shutil.rmtree(failed_config)
         return {"status": "rolled_back_healthy", "bytes_restored": True,
