@@ -154,6 +154,13 @@ class CockpitLanguageTests(unittest.TestCase):
         self.assertIn('需要核实：${displayText(q.wants)}', text)
         self.assertIn('${displayText(d.subject)} · ${displayText(d.item)}', text)
 
+    def test_event_and_cadence_prose_is_mapped_before_composition(self) -> None:
+        text = HTML.read_text(encoding="utf-8")
+        self.assertIn('node("span",x.summary||"—")', text)
+        self.assertNotIn('`${x.kind_label}：${x.summary||"—"}`', text)
+        self.assertIn('node("span",r.because,"hint")', text)
+        self.assertNotIn('` ${r.because}`', text)
+
     def test_final_research_prose_waits_for_exact_reviewed_text(self) -> None:
         text = HTML.read_text(encoding="utf-8")
         self.assertIn('FINAL_RESEARCH_REQUIRED&&!Object.prototype.hasOwnProperty.call(UI_TEXT,value)', text)

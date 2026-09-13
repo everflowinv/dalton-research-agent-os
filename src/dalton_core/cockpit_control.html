@@ -719,7 +719,9 @@ function eventsBlock(e){const d=node("div",null,"mdl");d.append(node("b",`${e.da
   d.append(node("div",(e.kinds||[]).map(k=>`${k.label} ${k.count}`).join(" · "),"hint"));
   const ul=node("ul",null,"latest");
   (e.latest||[]).forEach(x=>{const li=node("li");
-    li.append(node("span",`${x.kind_label}：${x.summary||"—"}`),
+    const body=node("span");body.append(node("span",`${x.kind_label}：`),
+      node("span",x.summary||"—"));
+    li.append(body,
       /* The tier travels with the event: a filing and a tweet are both
          events and are not worth the same. */
       node("span",` ${x.tier_label}`,"figp"));ul.append(li)});
@@ -762,7 +764,7 @@ function cadenceBlock(rows){const d=node("details");const s=node("summary","我�
   rows.forEach(r=>{const li=node("li");
     li.append(node("span",`${r.source_label}：${r.interval_label}`,"figv"));
     li.append(node("span",` ${r.decided_by_brain?"系统已调整":r.adjustable_label}`,"figp"));
-    if(r.because)li.append(node("span",` ${r.because}`,"hint"));ul.append(li)});
+    if(r.because){li.append(document.createTextNode(" "),node("span",r.because,"hint"))}ul.append(li)});
   d.append(ul);return d}
 /* INT2: the source capability map and the model routing, in the reader. */
 /* P17d: named, because the 四格 tile opens the same sheet as the button. Two
