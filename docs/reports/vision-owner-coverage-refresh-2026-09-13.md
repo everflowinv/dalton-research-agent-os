@@ -1,5 +1,7 @@
 # Vision 与 owner 指令覆盖复盘 — 2026-09-13
 
+**R24 发布进行中，尚未宣称部署或 Ask 成功。** 冻结 runtime `7025`、OPS `2790` 已通过 7,949 项完整测试（0 failures/errors、1 skip）、134 项 OPS 检查、608 文件与 17 份模型配置核验、14 步复制状态演练及 preflight。Ask 安装绑定修复已合回通用集成 `c93ce1b6`；仍需完成安装后的运行健康与真实问答验收。R23 页面、模型表和导出成功及其 Ask 路由失败历史继续保留，高级投资能力仍为 pending。
+
 本表替代旧报告中的“当前缺失”判断，历史报告保留其日期含义。核对范围包括 v0.1、v0.5/v0.6、v0.9、v1.1 vision，09-09 analyst onboarding 蓝图、并行计划及 owner 裁决，09-10 owner expectations/steps，09-11 foundation priorities 与两份 prompt-contract review，以及本次 owner 关于持续开发、Sol 并行、Guidepoint、OpenClaw Wiki、桌面历史资料和及时清理备份的指令。没有发现比这些更近的独立 Dalton 指令文件；这不代表能访问全部历史对话。
 
 最新 owner 优先级已收敛为先交付正式可运行 demo。当前已发布基础版本 R23 `3e4e8682`，页面、模型表及五公司导出通过；实际 Ask 路由缺陷仍在修复，尚未计正式交互 demo 完成。最新执行状态见 [PROJECT_STATUS](../PROJECT_STATUS.md)。后续集成包含模板导入、合成双工作区工具和 Wiki 路径修复，但这些扩展不在本次 demo wheel。下列高级范围暂停推进，未从剩余清单中删除。
