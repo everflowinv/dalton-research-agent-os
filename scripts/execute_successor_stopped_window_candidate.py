@@ -238,6 +238,21 @@ def validate_recovery_writer_preservation(
          }, "recovery rehearsal does not prove exact writer preservation")
 
 
+def recovered_protected_entries(root: Path) -> set[Path]:
+    """Reproduce the historical R21 recovery receipt's inventory count."""
+
+    historically_managed = {
+        "document-research-config.json", "mission-document-research-lane.json"}
+    protected = {path for path in root.glob("*.json")
+                 if path.name not in historically_managed
+                 and path.name != "writer-tokens.json"}
+    for name in ("connector-governance", "governance-decisions", "discovery-plans"):
+        directory = root / name
+        if directory.is_dir():
+            protected.update({directory, *directory.rglob("*")})
+    return protected
+
+
 def packet_preflight(packet: Path) -> tuple[dict[str, Any], dict[str, Path]]:
     manifest_path = packet / "release-manifest.candidate.json"
     need(packet.is_dir() and not packet.is_symlink()
@@ -500,14 +515,8 @@ class SuccessorOrchestrator(r11.Orchestrator):
              and token.stat().st_mode & 0o7777 == 0o600
              and sha(token) == expected["writer_tokens"]["live_sha256"],
              "recovered predecessor writer authority differs")
-        protected = [path for path in r11.STATE.glob("*.json")
-                     if path.name not in r11.INSTALLER_MANAGED_STATE_JSON
-                     and path.name != "writer-tokens.json"]
-        for name in ("connector-governance", "governance-decisions", "discovery-plans"):
-            directory = r11.STATE / name
-            if directory.is_dir():
-                protected.extend([directory, *directory.rglob("*")])
-        need(len(set(protected))
+        protected = recovered_protected_entries(r11.STATE)
+        need(len(protected)
              == expected["protected_entries_excluding_writer_tokens"],
              "recovered predecessor protected-state inventory differs")
         from scripts.successor_predecessor_recovery import protected_state_hash
@@ -526,7 +535,7 @@ class SuccessorOrchestrator(r11.Orchestrator):
             "reviewed_plist_sha256": {
                 label: sha(r11.LAUNCH_AGENTS / f"{label}.plist")
                 for label in reviewed_plists},
-            "protected_entries_excluding_writer_tokens": len(set(protected)),
+            "protected_entries_excluding_writer_tokens": len(protected),
             "protected_state_excluding_writer_tokens_sha256":
                 protected_state_hash(r11.STATE),
         })

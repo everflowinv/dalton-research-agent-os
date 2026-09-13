@@ -154,6 +154,22 @@ class SuccessorStoppedWindowCandidateTests(unittest.TestCase):
                 {"schema_version": execute.WRITER_APPEND_SCHEMA_VERSION},
                 {"results": {"writer_token_preservation": preservation}}, recovery)
 
+    def test_recovered_inventory_uses_historical_receipt_exclusions(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name in (
+                    "document-research-config.json",
+                    "mission-document-research-lane.json",
+                    "model-catalog-sync.json", "writer-tokens.json", "owned.json"):
+                (root / name).write_text("{}\n", encoding="utf-8")
+            governance = root / "governance-decisions"
+            governance.mkdir()
+            (governance / "decision.json").write_text("{}\n", encoding="utf-8")
+            self.assertEqual(
+                {root / "model-catalog-sync.json", root / "owned.json",
+                 governance, governance / "decision.json"},
+                execute.recovered_protected_entries(root))
+
     def test_unaccepted_or_incomplete_packet_cannot_reach_live_preflight(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             packet = Path(temporary)
