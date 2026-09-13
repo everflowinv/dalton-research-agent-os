@@ -27,6 +27,8 @@ Automation may publish only what the mission grants (``deliverable`` in
 
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
 import re
 import sqlite3
@@ -1035,6 +1037,97 @@ class MissionDeliverableAuthority:
                     (record["id"], version, record["content_hash"], record["created_at"], deliverable_ref),
                 )
         return {**record, "status": "fresh"}
+
+    def publish_human_erratum(
+        self, *, permission: Mapping[str, Any], mission: Mapping[str, Any],
+        playbook: Mapping[str, Any], actor_ref: str,
+    ) -> dict[str, Any]:
+        """Append the exact five substitutions authorized by one erratum reopen."""
+        proposal = permission.get("proposal") or {}
+        erratum = proposal.get("erratum") or {}
+        if (permission.get("verdict") != "approve"
+                or permission.get("proposal_ref") != proposal.get("id")
+                or permission.get("proposal_hash") != proposal.get("content_hash")
+                or proposal.get("change_reason") != "human_revision"
+                or proposal.get("flipped") != []):
+            raise MissionDeliverableConflict("an exact approved human erratum is required")
+        proposal_row = self.connection.execute(
+            "SELECT record_json,content_hash FROM gate_reopen_proposals WHERE proposal_id=?",
+            (proposal.get("id"),),).fetchone()
+        decision_row = self.connection.execute(
+            "SELECT record_json,content_hash FROM gate_reopen_decisions WHERE decision_id=? AND proposal_ref=?",
+            (permission.get("id"),proposal.get("id")),).fetchone()
+        if (proposal_row is None or proposal_row["content_hash"] != proposal.get("content_hash")
+                or json.loads(proposal_row["record_json"]) != proposal
+                or decision_row is None or decision_row["content_hash"] != permission.get("content_hash")
+                or json.loads(decision_row["record_json"]) != {k:v for k,v in permission.items() if k != "proposal"}):
+            raise MissionDeliverableConflict("erratum approval authority did not read back exactly")
+        required = {"candidate_file_sha256","candidate_hash","source_version_ref",
+            "source_version_hash","source_version_number","section_index","before_sha256",
+            "after_sha256","substitutions","claim_authorities"}
+        if set(erratum) != required:
+            raise MissionDeliverableValidationError("erratum proof has an unexpected shape")
+        if (proposal.get("mission_version_ref") != mission.get("id")
+                or proposal.get("mission_version_hash") != mission.get("content_hash")):
+            raise MissionDeliverableConflict("erratum mission binding failed")
+        substitutions = erratum["substitutions"]
+        if not isinstance(substitutions, list) or len(substitutions) != 5:
+            raise MissionDeliverableValidationError("this erratum requires exactly five substitutions")
+        for claim in erratum["claim_authorities"]:
+            if not isinstance(claim, Mapping) or set(claim) != {"claim_version_ref","claim_content_hash"}:
+                raise MissionDeliverableValidationError("erratum Claim proof is not closed")
+            claim_row=self.connection.execute("SELECT content_hash FROM claim_versions WHERE claim_version_id=?",
+                (claim["claim_version_ref"],)).fetchone()
+            if claim_row is None or claim_row["content_hash"] != claim["claim_content_hash"]:
+                raise MissionDeliverableConflict("erratum Claim authority changed")
+        row = self.connection.execute(
+            "SELECT * FROM mission_deliverable_versions WHERE version_id=?",
+            (erratum["source_version_ref"],),
+        ).fetchone()
+        if (row is None or row["content_hash"] != erratum["source_version_hash"]
+                or int(row["version_number"]) != erratum["source_version_number"]):
+            raise MissionDeliverableConflict("erratum source version binding failed")
+        source = json.loads(row["record_json"])
+        index = erratum["section_index"]
+        if isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < len(source["sections"]):
+            raise MissionDeliverableValidationError("erratum section index is invalid")
+        before = source["sections"][index]["body"]
+        if hashlib.sha256(before.encode()).hexdigest() != erratum["before_sha256"]:
+            raise MissionDeliverableConflict("erratum before bytes changed")
+        after = before
+        for change in substitutions:
+            if not isinstance(change, Mapping) or set(change) != {"before", "after"}:
+                raise MissionDeliverableValidationError("erratum substitutions are not closed")
+            old, new = change["before"], change["after"]
+            if not isinstance(old, str) or not isinstance(new, str) or after.count(old) != 1:
+                raise MissionDeliverableConflict("erratum substitution is not unique")
+            after = after.replace(old, new, 1)
+        if hashlib.sha256(after.encode()).hexdigest() != erratum["after_sha256"]:
+            raise MissionDeliverableConflict("erratum after bytes do not match")
+        sections = copy.deepcopy(source["sections"]); sections[index]["body"] = after
+        latest = self.latest(row["deliverable_ref"])
+        idem = "human-erratum:" + erratum["candidate_hash"]
+        if latest is not None and latest["id"] != source["id"]:
+            if (latest.get("prior_version_ref") == source["id"]
+                    and latest.get("idempotency_key") == idem
+                    and latest.get("version") == source["version"] + 1
+                    and latest.get("sections") == sections
+                    and latest.get("revision", {}).get("reopen_ref") == proposal["id"]):
+                return {**latest, "status": "duplicate"}
+            raise MissionDeliverableConflict("erratum source is no longer the chain head")
+        if latest is None or latest["content_hash"] != source["content_hash"]:
+            raise MissionDeliverableConflict("erratum source is no longer the chain head")
+        revision = {"change_reason":"human_revision","reopen_ref":proposal["id"],
+            "evidence_refs":[permission["id"],proposal["id"],source["id"],
+                *[row["claim_version_ref"] for row in erratum["claim_authorities"]]]}
+        result = self.publish(kind=source["kind"],subject_ref=source["subject_ref"],
+            mission=mission,playbook=playbook,template_ref=source["template_ref"],
+            sections=sections,summary=source["summary"],gaps=source["gaps"],
+            model_invocation_refs=source["model_invocation_refs"],actor_ref=actor_ref,
+            revision=revision,idempotency_key=idem)
+        if result["version"] != source["version"] + 1 or result["sections"] != sections:
+            raise MissionDeliverableConflict("erratum append did not preserve the source document")
+        return result
 
 
 __all__ = [
