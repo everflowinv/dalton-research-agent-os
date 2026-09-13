@@ -201,3 +201,15 @@ class PreparationTests(unittest.TestCase):
         self.assertEqual(self.calls.count(prep.CHECKER_PURPOSE),1)
         self.assertEqual(self.calls.count(prep.BRAIN_PURPOSE),2)
         self.assertEqual(self.calls.count('research_localization_verifier'),2)
+
+    def test_reviewed_repair_does_not_redraft_for_semantic_transport_failure(self):
+        self.responses['research_localization_verifier']=[
+            CockpitModelError('temporary verifier outage'),VERDICT]
+        self.args['repair_reviewed']=True
+        with self.assertRaisesRegex(CockpitModelError,'temporary verifier outage'):
+            self.run_one()
+        result=self.run_one()
+        self.assertEqual(result['status'],'passed')
+        self.assertEqual(self.calls.count(prep.CHECKER_PURPOSE),1)
+        self.assertEqual(self.calls.count(prep.BRAIN_PURPOSE),1)
+        self.assertEqual(self.calls.count('research_localization_verifier'),2)

@@ -331,6 +331,7 @@ def run_chunk(task, *, mission, draft_config, verifier_config, checker_config,
                 build_localization(product,saved['localized'],saved['verifier'])
                 return product_index,start,saved
             semantic_evidence=None
+            repairable_semantic_rejection=False
             try:
                 localized={'sections':review['brain_revision']['sections']}
                 validate_localized_text(product,localized)
@@ -358,6 +359,7 @@ def run_chunk(task, *, mission, draft_config, verifier_config, checker_config,
                     verifier_route=checked['route_decision_ref'],resolve=resolve)
                 if not proof['independent']:
                     raise ValueError('semantic verifier model is not independent of both authors')
+                repairable_semantic_rejection=isinstance(verdict,dict)
                 build_localization(product,localized,verdict)
             except Exception as exc:
                 semantic_record={'stage':'semantic','revision_hash':revision,
@@ -373,7 +375,7 @@ def run_chunk(task, *, mission, draft_config, verifier_config, checker_config,
                 write_json(stage_path,evidence)
                 failure={'stage':'semantic','reason':str(exc),
                     'verifier':semantic_record.get('verifier')}
-                if repairs_used >= max_repairs:raise
+                if not repairable_semantic_rejection or repairs_used >= max_repairs:raise
             else:
                 all_calls=[evidence['draft'],evidence['checker_call'],evidence.get('brain_call'),
                     *(evidence.get('repair_brain_calls') or []),checked,
