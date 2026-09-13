@@ -17,6 +17,7 @@ const checks = {
   askWaitExplained: html.includes("通常约需一分钟"),
   approvalDedupeRequiresKey: html.includes("sameActions&&item.dedupe_key"),
   budgetInputsLabelled: html.includes('input.setAttribute("aria-label",label)'),
+  readableFinancialMetrics: html.includes("function formatDisplayMetric") && html.includes("1e8") && html.includes("per_share") && html.includes("toFixed(1)"),
   eventEmptyState: html.includes("目前没有可核实的新事件"),
 };
 const failed = Object.entries(checks).filter(([, value]) => !value).map(([key]) => key);

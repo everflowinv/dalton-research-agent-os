@@ -421,6 +421,18 @@ let UI_TEXT={};
 const displayText=value=>typeof value==="string"&&Object.prototype.hasOwnProperty.call(UI_TEXT,value)?UI_TEXT[value]:value;
 const rawNode=(tag,text,cls)=>{const n=document.createElement(tag);if(text!=null)n.textContent=text;if(cls)n.className=cls;return n};
 const node=(tag,text,cls)=>rawNode(tag,text==null?text:displayText(text),cls);
+function formatDisplayMetric(value,{unit=null,currency=null,scale=null,metric_ref=""}={}){
+  if(value==null||value==="")return "—";const n=Number(String(value).replace(/,/g,""));if(!Number.isFinite(n))return String(value);
+  const kind=String(unit||"").toLowerCase(),ref=String(metric_ref||"").toLowerCase();
+  if(kind==="percent"||kind==="percentage")return `${n.toFixed(1)}%`;
+  if(ref.includes("eps")||ref.includes("per-share")||ref.includes("arpu")||kind.includes("per_share"))return `${currency==="USD"?"US$":""}${n.toFixed(2)}`;
+  if(currency==="USD"){const factor={one:1,thousand:1e3,million:1e6,billion:1e9,trillion:1e12}[scale||"one"];
+    if(factor){const dollars=n*factor;if(Math.abs(dollars)<1e4)return `US$${dollars.toLocaleString("zh-CN",{minimumFractionDigits:2,maximumFractionDigits:2})}`;
+      const divisor=Math.abs(dollars)>=1e8?1e8:1e4,suffix=divisor===1e8?"亿美元":"万美元",shown=dollars/divisor,digits=Math.abs(shown)>=1000?0:Math.abs(shown)>=100?1:2;
+      return `${shown.toLocaleString("zh-CN",{maximumFractionDigits:digits})} ${suffix}`}}
+  return [n.toLocaleString("zh-CN"),scale&&scale!=="one"?scale:"",currency||""].filter(Boolean).join(" ")
+}
+
 const ENUM_LABELS={
   available:"可用",invalid:"记录有误",unavailable:"暂时不可用",published:"已发布",
   pending_human_decision:"等待你的决定",approved:"已通过",rejected:"未通过",
@@ -468,7 +480,7 @@ document.querySelectorAll(".nav-item").forEach(el=>el.onclick=()=>show(el.datase
 function show(view){current=view;document.querySelectorAll(".nav-item").forEach(e=>e.classList.toggle("active",e.dataset.view===view));document.querySelectorAll(".view").forEach(e=>e.classList.toggle("active",e.id===`view-${view}`));$("page-title").textContent=titles[view][0];$("page-sub").textContent=titles[view][1];if(view==="log"){unseen=0;$("log-badge").classList.remove("show");loadLog(true)}if(view==="approve")loadApprovals();if(view==="steer")loadSteerHistory();if(view==="ask")loadAskHistory();if(view==="goal")loadOverview()}
 
 
-function figures(f){const w=node("div",null,"figs");const head=node("div",null,"hint");head.textContent="已提取的关键数据："+Object.entries(f.by_grade||{}).map(([g,n])=>`${GRADE_LABEL[g]||"其他来源"} ${n}`).join(" · ");w.append(head);const ul=node("ul",null,"latest");(f.latest||[]).forEach(x=>{const li=node("li");const amount=[x.value,x.scale&&x.scale!=="one"?x.scale:"",x.currency||""].filter(Boolean).join(" ");li.append(node("span",`${x.label}：${amount}`,"figv"),node("span",` ${x.period}`,"figp"),node("span",x.grade_label||"","tag "+(x.grade==="company-filed-document"?"filed":"spoken")));ul.append(li)});w.append(ul);return w}
+function figures(f){const w=node("div",null,"figs");const head=node("div",null,"hint");head.textContent="已提取的关键数据："+Object.entries(f.by_grade||{}).map(([g,n])=>`${GRADE_LABEL[g]||"其他来源"} ${n}`).join(" · ");w.append(head);const ul=node("ul",null,"latest");(f.latest||[]).forEach(x=>{const li=node("li");const amount=formatDisplayMetric(x.value,x);li.append(node("span",`${x.label}：${amount}`,"figv"),node("span",` ${x.period}`,"figp"),node("span",x.grade_label||"","tag "+(x.grade==="company-filed-document"?"filed":"spoken")));ul.append(li)});w.append(ul);return w}
 const RESEARCH_STAGES=[
   ["initial_screen","初步筛选"],["deep_insight_gate","深度研究"],
   ["industry_model","行业模型"],["company_model","公司模型"],
@@ -617,7 +629,7 @@ function renderOverview(o){
   function figures(f){const w=node("div",null,"figs");const head=node("div",null,"hint");
     head.textContent="已提取的关键数据："+Object.entries(f.by_grade||{}).map(([g,n])=>`${GRADE_LABEL[g]||"其他来源"} ${n}`).join(" · ");
     w.append(head);const ul=node("ul",null,"latest");
-    f.latest.forEach(x=>{const li=node("li");const amount=[x.value,x.scale&&x.scale!=="one"?x.scale:"",x.currency||""].filter(Boolean).join(" ");
+    f.latest.forEach(x=>{const li=node("li");const amount=formatDisplayMetric(x.value,x);
       li.append(node("span",`${x.label}：${amount}`,"figv"),node("span",` ${x.period}`,"figp"),
         node("span",x.grade_label||"","tag "+(x.grade==="company-filed-document"?"filed":"spoken")));ul.append(li)});
     w.append(ul);return w}
@@ -626,8 +638,8 @@ function renderOverview(o){
   svc(o.activity.service_state,o.activity.last_tick_at);
 }
 /* INT1: the four Wave 1 lanes, on the card and in the reader. */
-function marketLine(m){const d=node("div",null,"mkt");d.append(node("span",`${m.close}${m.currency?" "+m.currency:""}`,"px"));
-  if(m.change_percent!=null)d.append(node("span",`${m.change_percent>0?"+":""}${m.change_percent}%`,m.change_percent>=0?"up":"dn"));
+function marketLine(m){const d=node("div",null,"mkt");d.append(node("span",formatDisplayMetric(m.close,{currency:m.currency,unit:"per_share"}),"px"));
+  if(m.change_percent!=null)d.append(node("span",`${m.change_percent>0?"+":""}${Number(m.change_percent).toFixed(1)}%`,m.change_percent>=0?"up":"dn"));
   if(m.change_since)d.append(node("span",`自 ${m.change_since}`,"hint"));
   d.append(node("span",`${m.as_of}`,"hint"));
   /* A mid-session price has the same shape as a close and is not one. */
@@ -635,7 +647,7 @@ function marketLine(m){const d=node("div",null,"mkt");d.append(node("span",`${m.
   return d}
 function valuationBlock(v){const w=node("div");w.append(node("div",`估值 · ${v.as_of}`,"hint"));const ul=node("ul",null,"val");
   (v.metrics||[]).forEach(m=>{if(m.status!=="available"){const li=node("li",null,"na");li.append(node("span",`${m.label}：${m.display_reason||"暂无可核验结果"}`));const tech=technicalDetails(m.reason);if(tech)li.append(tech);ul.append(li);return}
-    const li=node("li");li.append(node("span",m.label),node("span",String(m.value),"v"),node("span",m.percentile!=null?`历史分位 ${m.percentile}`:"历史不够，没有分位","pc"));
+    const li=node("li");li.append(node("span",m.label),node("span",formatDisplayMetric(m.value,m),"v"),node("span",m.percentile!=null?`历史分位 ${m.percentile}`:"历史不够，没有分位","pc"));
     /* The basis travels with the percentile: a percentile computed while the
        fundamentals never moved is the price's own percentile. */
     const basis=m.percentile!=null?m.percentile_basis_label:m.percentile_reason;if(basis)li.append(node("span",basis,"basis"));ul.append(li)});
