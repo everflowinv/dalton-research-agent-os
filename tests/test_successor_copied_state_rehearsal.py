@@ -4,6 +4,7 @@ import json
 import hashlib
 import os
 import plistlib
+import shutil
 import tempfile
 import unittest
 from contextlib import nullcontext
@@ -215,14 +216,22 @@ class SuccessorCopiedStateRehearsalTests(unittest.TestCase):
             fixture.doCleanups()
 
     def test_schema_v05_main_path_stages_openclaw_then_bootstraps_and_applies(self):
+        self._exercise_main_path("successor-config-transition-0.5")
+
+    def test_schema_v04_main_path_proves_exact_writer_preservation(self):
+        self._exercise_main_path("successor-config-transition-0.4")
+
+    def _exercise_main_path(self, schema_version):
         root = self.state.parent
         packet = root / "main-packet"; packet.mkdir()
         source = root / "source"; source.mkdir()
         live = root / "live"; live.mkdir()
         temp = Path(tempfile.mkdtemp(dir="/private/tmp"))
         temp.rmdir()
+        self.addCleanup(shutil.rmtree, temp, ignore_errors=True)
         before = b'{"principals":[{"id":"core","operations":["a"]}]}\n'
-        after = b'{"principals":[{"id":"core","operations":["a","b"]}]}\n'
+        after = (before if schema_version == "successor-config-transition-0.4" else
+                 b'{"principals":[{"id":"core","operations":["a","b"]}]}\n')
         openclaw = packet / "openclaw.json"
         openclaw.write_text('{"owner":{"signature":"kept"}}\n')
         service = packet / "service.json"; service.write_text("{}\n")
@@ -239,7 +248,7 @@ class SuccessorCopiedStateRehearsalTests(unittest.TestCase):
             "added_operations": ["b"],
         }
         manifest = {
-            "schema_version": "successor-config-transition-0.5",
+            "schema_version": schema_version,
             "status": "prepared_inert", "source_commit": "d" * 40,
             "acceptance": {"state": "pending"},
             "supporting_evidence": {"baseline_model_snapshot": {
@@ -251,6 +260,9 @@ class SuccessorCopiedStateRehearsalTests(unittest.TestCase):
                 "predecessor_source_root": str(root / "predecessor"),
                 "proof": proof},
         }
+        writer_row = manifest["writer_operation_transition"]
+        if schema_version == "successor-config-transition-0.4":
+            manifest.pop("writer_operation_transition")
         manifest_path = packet / "transition.json"
         manifest_path.write_text(json.dumps(manifest))
         transition_sha = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
@@ -269,6 +281,7 @@ class SuccessorCopiedStateRehearsalTests(unittest.TestCase):
                 self.temp_config.parent.mkdir(parents=True)
                 self.temp_config.write_text("{}\n")
                 (self.temp_state / "writer-tokens.json").write_bytes(before)
+                (self.temp_state / "writer-tokens.json").chmod(0o600)
                 (self.temp_state / "document-research-config.json").write_text("{}\n")
                 (self.temp_state / "mission-document-research-lane.json").write_text("{}\n")
                 return "copied", []
@@ -334,7 +347,7 @@ class SuccessorCopiedStateRehearsalTests(unittest.TestCase):
                    "expected_service_transition_state", return_value=({}, {})), \
              patch("scripts.run_successor_copied_state_rehearsal."
                    "expected_writer_operation_transition_state",
-                   return_value=(before, after, manifest["writer_operation_transition"])), \
+                   return_value=(before, after, writer_row)), \
              patch("scripts.run_successor_copied_state_rehearsal."
                    "expected_preserved_openclaw_state", return_value=openclaw.read_bytes()), \
              patch("scripts.run_successor_copied_state_rehearsal."
@@ -356,8 +369,15 @@ class SuccessorCopiedStateRehearsalTests(unittest.TestCase):
              patch("scripts.run_successor_copied_state_rehearsal."
                    "validate_external_market_digest_preservation", return_value={}):
             result = run_successor_rehearsal(args)
-        self.assertEqual(hashlib.sha256(after).hexdigest(),
-                         result["results"]["writer_operation_transition"]["after_sha256"])
+        if schema_version == "successor-config-transition-0.4":
+            digest = hashlib.sha256(before).hexdigest()
+            self.assertEqual(result["results"]["writer_token_preservation"], {
+                "before_sha256": digest, "after_sha256": digest,
+                "before_mode": 0o600, "after_mode": 0o600})
+            self.assertNotIn("writer_operation_transition", result["results"])
+        else:
+            self.assertEqual(hashlib.sha256(after).hexdigest(),
+                             result["results"]["writer_operation_transition"]["after_sha256"])
         self.assertEqual(openclaw.read_bytes(),
                          (temp / "openclaw/openclaw.json").read_bytes())
 

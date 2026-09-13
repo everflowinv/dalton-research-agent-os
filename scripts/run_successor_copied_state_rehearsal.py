@@ -336,6 +336,28 @@ def verify_scratch_bootstrap_writer_append(
     return detail, findings
 
 
+def verify_scratch_bootstrap_writer_preservation(
+    *, token_path: Path, bootstrap: Any,
+) -> tuple[str, list[str], dict[str, Any]]:
+    """Prove that a pure-preserve bootstrap leaves writer authority exact."""
+
+    _need(token_path.is_file() and not token_path.is_symlink(),
+          "copied writer authority is unavailable for preservation")
+    before = token_path.read_bytes()
+    mode = stat.S_IMODE(token_path.stat().st_mode)
+    detail, findings = verify_scratch_bootstrap_writer_append(
+        token_path=token_path, before=before, predicted_after=before,
+        bootstrap=bootstrap)
+    after_mode = stat.S_IMODE(token_path.stat().st_mode)
+    _need(after_mode == mode,
+          "pure-preserve bootstrap changed writer authority permissions")
+    digest = hashlib.sha256(before).hexdigest()
+    return detail, findings, {
+        "before_sha256": digest, "after_sha256": digest,
+        "before_mode": mode, "after_mode": after_mode,
+    }
+
+
 def derive_confined_transition(
     module: Any, rehearsal: Any, *, packet_root: Path,
     manifest: Mapping[str, Any], original_manifest_sha256: str,
@@ -819,6 +841,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             return detail, findings
 
         def run_bootstrap(self):
+            if manifest.get("schema_version") == PURE_PRESERVE_SCHEMA_VERSION:
+                detail, findings, preservation = (
+                    verify_scratch_bootstrap_writer_preservation(
+                        token_path=self.temp_state / "writer-tokens.json",
+                        bootstrap=super().run_bootstrap))
+                self.writer_token_preservation = preservation
+                return detail + "; writer authority preserved exactly", findings
             if manifest.get("schema_version") != WRITER_APPEND_SCHEMA_VERSION:
                 return super().run_bootstrap()
             before, predicted_after, row = (
@@ -979,6 +1008,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                            rehearsal.writer_operation_transition}
                        if manifest.get("schema_version")
                        == WRITER_APPEND_SCHEMA_VERSION else {}),
+                    **({"writer_token_preservation":
+                           rehearsal.writer_token_preservation}
+                       if manifest.get("schema_version")
+                       == PURE_PRESERVE_SCHEMA_VERSION else {}),
                     "confined_transition_derivation":
                         rehearsal.successor_derivation},
         "ops_helpers": {
