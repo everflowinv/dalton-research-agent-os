@@ -169,7 +169,8 @@ def build_brain_prompt(product: Mapping[str, Any], review: Mapping[str, Any]) ->
 
 
 def _validate_brain_output(product: Mapping[str, Any], review: Mapping[str, Any],
-                           value: Mapping[str, Any]) -> dict[str, Any]:
+                           value: Mapping[str, Any], *,
+                           numeric_source_product: Mapping[str, Any] | None = None) -> dict[str, Any]:
     if not isinstance(value, Mapping) or set(value) != {"decisions", "sections"}:
         raise ResearchLanguageReviewError("brain revision output has an invalid shape")
     decisions = value["decisions"]
@@ -192,7 +193,10 @@ def _validate_brain_output(product: Mapping[str, Any], review: Mapping[str, Any]
         checked_decisions.append({"suggestion_index": index, "decision": item["decision"],
                                   "reason": item["reason"].strip()})
     localized = {"sections": value["sections"]}
-    checked_sections = validate_localized_text(product, localized)
+    checked_sections = validate_localized_text(
+        numeric_source_product if numeric_source_product is not None else product,
+        localized,
+    )
     return {"decisions": checked_decisions,
             "sections": [{"index": row["index"], "title": row["title"],
                            "body": row["body"], "gaps": row["gaps"]}
@@ -204,10 +208,24 @@ def run_language_review(
     checker: Callable[[str], Mapping[str, Any]],
     brain: Callable[[str], Mapping[str, Any]],
     checker_identity: Mapping[str, str],
+    numeric_source_product: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Call the checker once, then the brain once; fail closed without retry loops."""
 
     source_hash = _hash(product)
+    numeric_source_hash = None
+    if numeric_source_product is not None:
+        if (numeric_source_product.get("kind") != product.get("kind")
+                or numeric_source_product.get("version_ref") != product.get("version_ref")
+                or len(numeric_source_product.get("sections") or [])
+                    != len(product.get("sections") or [])):
+            raise ResearchLanguageReviewError(
+                "numeric source identity or section count differs from reviewed product")
+        validate_localized_text(
+            numeric_source_product,
+            {"sections": list(product.get("sections") or [])},
+        )
+        numeric_source_hash = _hash(numeric_source_product)
     if dict(checker_identity) != {"provider": CHECKER_PROVIDER, "model": CHECKER_MODEL}:
         raise ResearchLanguageReviewError(
             "language checker must use the exact Antigravity Gemini 3.8 Flash transport identity")
@@ -217,21 +235,32 @@ def run_language_review(
             sections=list(product.get("sections") or []),
         )
     except Exception as exc:
-        return {"schema_version": SCHEMA_VERSION, "status": "pending_language_review",
-                "source_hash": source_hash, "reason": str(exc)}
+        result = {"schema_version": SCHEMA_VERSION, "status": "pending_language_review",
+                  "source_hash": source_hash, "reason": str(exc)}
+        if numeric_source_hash is not None:
+            result["numeric_source_hash"] = numeric_source_hash
+        return result
     markdown = render_suggestions_markdown(review)
     try:
-        revision = _validate_brain_output(product, review, brain(build_brain_prompt(product, review)))
+        revision = _validate_brain_output(
+            product, review, brain(build_brain_prompt(product, review)),
+            numeric_source_product=numeric_source_product,
+        )
     except Exception as exc:
-        return {"schema_version": SCHEMA_VERSION, "status": "pending_brain_revision",
-                "source_hash": source_hash, "checker_identity": dict(checker_identity),
-                "language_review": review, "suggestions_markdown": markdown,
-                "reason": str(exc)}
+        result = {"schema_version": SCHEMA_VERSION, "status": "pending_brain_revision",
+                  "source_hash": source_hash, "checker_identity": dict(checker_identity),
+                  "language_review": review, "suggestions_markdown": markdown,
+                  "reason": str(exc)}
+        if numeric_source_hash is not None:
+            result["numeric_source_hash"] = numeric_source_hash
+        return result
     result = {"schema_version": SCHEMA_VERSION, "status": "ready_for_publication",
               "source_hash": source_hash, "checker_identity": dict(checker_identity),
               "language_review": review, "suggestions_markdown": markdown,
               "brain_revision": revision, "revision_hash": _hash(revision["sections"]),
               "language_scope": "readability_only_not_fact_or_number_verification"}
+    if numeric_source_hash is not None:
+        result["numeric_source_hash"] = numeric_source_hash
     result["content_hash"] = _hash(result)
     return result
 

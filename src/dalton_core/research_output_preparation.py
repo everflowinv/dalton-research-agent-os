@@ -326,7 +326,8 @@ def run_chunk(task, *, mission, draft_config, verifier_config, checker_config,
                 write_json(stage_path,evidence)
             return parse_stage_output(evidence['brain_call']['text'], stage='brain')
         review = run_language_review(review_product,checker=check,brain=revise,
-            checker_identity={'provider':CHECKER_PROVIDER,'model':CHECKER_MODEL})
+            checker_identity={'provider':CHECKER_PROVIDER,'model':CHECKER_MODEL},
+            numeric_source_product=product)
         evidence['language_review'] = review
         write_json(stage_path,evidence)
         if review.get('suggestions_markdown'):
@@ -341,7 +342,8 @@ def run_chunk(task, *, mission, draft_config, verifier_config, checker_config,
         review=run_language_review(review_product,
             checker=lambda _:parse_stage_output(evidence['checker_call']['text'], stage='checker'),
             brain=lambda _:parse_stage_output(evidence['brain_call']['text'], stage='brain'),
-            checker_identity={'provider':CHECKER_PROVIDER,'model':CHECKER_MODEL})
+            checker_identity={'provider':CHECKER_PROVIDER,'model':CHECKER_MODEL},
+            numeric_source_product=product)
         evidence['language_review']=review
         write_json(stage_path,evidence)
 
@@ -359,7 +361,8 @@ def run_chunk(task, *, mission, draft_config, verifier_config, checker_config,
             review=run_language_review(review_product,
                 checker=lambda _:parse_stage_output(evidence['checker_call']['text'],stage='checker'),
                 brain=lambda _:parse_stage_output(active_brain_call['text'],stage='brain'),
-                checker_identity={'provider':CHECKER_PROVIDER,'model':CHECKER_MODEL})
+                checker_identity={'provider':CHECKER_PROVIDER,'model':CHECKER_MODEL},
+                numeric_source_product=product)
             history.append({'stage':'brain_repair','attempt':repairs_used,
                 'prior_brain_call':None,'prior_language_review':None,
                 'brain_call':copy.deepcopy(active_brain_call),
@@ -484,7 +487,8 @@ def run_chunk(task, *, mission, draft_config, verifier_config, checker_config,
         repaired=run_language_review(review_product,
             checker=lambda _:parse_stage_output(evidence['checker_call']['text'],stage='checker'),
             brain=lambda _:parse_stage_output(repair_call['text'],stage='brain'),
-            checker_identity={'provider':CHECKER_PROVIDER,'model':CHECKER_MODEL})
+            checker_identity={'provider':CHECKER_PROVIDER,'model':CHECKER_MODEL},
+            numeric_source_product=product)
         history.append({'stage':'brain_repair','attempt':repairs_used,
             'prior_brain_call':prior_brain_call,
             'prior_language_review':prior_review,

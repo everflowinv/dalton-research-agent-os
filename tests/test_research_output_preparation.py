@@ -78,6 +78,8 @@ class PreparationTests(unittest.TestCase):
                                      'research_localization_verifier'])
         self.assertEqual(self.excluded,[['research_localization',prep.BRAIN_PURPOSE]])
         self.assertEqual(result['localized']['sections'][0]['body'],'收入为 123 美元。')
+        self.assertEqual(result['language_review']['numeric_source_hash'],
+                         prep.source_content_hash(SOURCE))
         self.assertEqual(len(list(Path(self.temp.name).glob('language-reviews/*.md'))),1)
         self.assertEqual(self.run_one(),result)
         self.assertEqual(len(self.calls),4)

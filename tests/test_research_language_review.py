@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 
+from dalton_core.research_localization import source_content_hash
 from dalton_core.research_language_review import (
     build_brain_prompt, publish_language_attachment, run_language_review, validate_checker_output,
 )
@@ -24,6 +25,48 @@ def review():
 
 
 class ResearchLanguageReviewTests(unittest.TestCase):
+    def test_original_numeric_source_allows_restoring_exact_precision(self):
+        source = {"kind": "ui_text", "version_ref": "ui:1", "sections": [{
+            "title": "收入", "body": "Revenue was 1535000000 USD.", "gaps": [],
+        }]}
+        draft = {**source, "sections": [{
+            "index": 0, "title": "收入", "body": "收入为15.35亿美元。", "gaps": [],
+        }]}
+        checker = {"overall": "表达清楚。", "suggestions": []}
+        brain = {"decisions": [], "sections": [{
+            "index": 0, "title": "收入",
+            "body": "收入为1535000000美元。", "gaps": [],
+        }]}
+        result = run_language_review(
+            draft, checker=lambda _: checker, brain=lambda _: brain,
+            checker_identity=IDENTITY, numeric_source_product=source,
+        )
+        self.assertEqual(result["status"], "ready_for_publication")
+        self.assertEqual(result["numeric_source_hash"], source_content_hash(source))
+        without_source = run_language_review(
+            draft, checker=lambda _: checker, brain=lambda _: brain,
+            checker_identity=IDENTITY,
+        )
+        self.assertEqual(without_source["status"], "pending_brain_revision")
+
+    def test_numeric_source_must_match_identity_and_draft_numbers(self):
+        source = {"kind": "ui_text", "version_ref": "ui:1", "sections": [{
+            "title": "收入", "body": "Revenue was 1535000000 USD.", "gaps": [],
+        }]}
+        checker = {"overall": "表达清楚。", "suggestions": []}
+        brain = {"decisions": [], "sections": [{
+            "index": 0, "title": "收入", "body": "收入为15.35亿美元。", "gaps": [],
+        }]}
+        for draft in (
+            {**source, "version_ref": "ui:2", "sections": brain["sections"]},
+            {**source, "sections": [{"index": 0, "title": "收入", "body": "收入为15.36亿美元。", "gaps": []}]},
+        ):
+            with self.assertRaises(ValueError):
+                run_language_review(
+                    draft, checker=lambda _: checker, brain=lambda _: brain,
+                    checker_identity=IDENTITY, numeric_source_product=source,
+                )
+
     def test_checker_recovers_unique_quote_location_and_terminal_excerpt(self):
         sections = [{'title': '公司', 'body': '公司概况。', 'gaps': []},
                     {'title': '风险', 'body': 'AI 需求仍处于早期，收入转化需要时间。', 'gaps': []}]
