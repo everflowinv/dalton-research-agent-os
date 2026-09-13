@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -23,6 +24,7 @@ from dalton_core.cockpit_plane import (
     LANE_STATUS_BUCKET_OF,
     REGISTRY_LANE_LABELS,
 )
+from dalton_core.extraction_backlog import observed_yield
 from dalton_core.lane_failure_class import LaneFailureBudget
 from dalton_core.lane_failure_ledger import LaneFailureLedger, default_path
 
@@ -150,6 +152,18 @@ class OpsBacklogTests(PanelCase):
 
 
 class FourPanelTests(PanelCase):
+    def test_overview_reads_the_ticket_tree_once(self) -> None:
+        tickets = self.plane.tickets.tickets
+        with patch.object(self.plane.tickets, "tickets", wraps=tickets) as read:
+            self.plane.overview()
+        self.assertEqual(read.call_count, 1)
+
+    def test_overview_measures_document_yield_once_for_all_companies(self) -> None:
+        with patch("dalton_core.extraction_backlog.observed_yield",
+                   wraps=observed_yield) as read:
+            self.plane.overview()
+        self.assertEqual(read.call_count, 1)
+
     def test_the_overview_carries_all_four_panels_each_linking_somewhere(self) -> None:
         ops = self.plane.overview()["ops"]
         self.assertEqual(set(ops), {"lanes", "gaps", "failures", "acceptance"})

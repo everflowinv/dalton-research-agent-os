@@ -685,6 +685,23 @@ class BacklogProjectionTests(unittest.TestCase):
         self.assertEqual(measured[TIER_SELL_SIDE]["documents_read"], 1)
         self.assertEqual(measured[TIER_SELL_SIDE]["claims_per_document"], Decimal("3.00"))
 
+    def test_review_history_is_folded_once_per_document_without_correlated_scans(self):
+        _document(self.connection, doc="doc:acn-b1", spec="sell-side-reports",
+                  company=self.acn, version="v9")
+        _review(self.connection, record="rec:doc:acn-b1:v9", doc="doc:acn-b1",
+                company=self.acn, state="dismissed", version="v9")
+        statements = []
+        self.connection.set_trace_callback(statements.append)
+        backlog = extraction_backlog(self.connection, self.acn)
+        self.connection.set_trace_callback(None)
+        tier = next(t for t in backlog["tiers"] if t["tier"] == TIER_SELL_SIDE)
+        self.assertEqual(tier["already_read"], 1)
+        review_queries = [sql for sql in statements
+                          if "WITH review_state AS" in sql]
+        self.assertEqual(len(review_queries), 1)
+        self.assertNotIn("SELECT COUNT(*) FROM coverage_mission_document_reviews",
+                         review_queries[0])
+
     def test_windows_per_document_says_whether_it_was_measured(self):
         # S3: only the dismissal sentence names a window count, so a tier
         # whose documents were all admitted has no window evidence and must

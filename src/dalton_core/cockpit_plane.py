@@ -1001,9 +1001,10 @@ class CockpitPlane:
         name = COMPANY_NAMES.get(ticker)
         return f"{ticker} · {name}" if name and name.upper() != ticker.upper() else ticker
 
-    def _url_map(self) -> dict[str, dict[str, Any]]:
+    def _url_map(self, tickets: Sequence[Mapping[str, Any]] | None = None
+                 ) -> dict[str, dict[str, Any]]:
         """document_ref → {url, host, title} from fetch tickets and search summaries."""
-        tickets = self.tickets.tickets()
+        tickets = list(tickets) if tickets is not None else self.tickets.tickets()
         key = len(tickets)
         if self._url_cache is not None and self._url_cache[0] == key:
             return self._url_cache[1]
@@ -1995,7 +1996,9 @@ class CockpitPlane:
             # half of the system stopped". Four pools can.
             "pools": self._pools(mission, today),
         }
-        running = [self._ticket_event(t, members, self._url_map()) for t in self.tickets.tickets()
+        tickets = self.tickets.tickets()
+        urls = self._url_map(tickets)
+        running = [self._ticket_event(t, members, urls) for t in tickets
                    if _ticket_still_running(t["ticket"])]
         lane_rows = self._lane_states(
             heartbeat, extraction, discovery, mission["budget"], planner)
@@ -2512,13 +2515,25 @@ class CockpitPlane:
         if not _table_exists(core, "coverage_mission_discovered_documents"):
             return {"available": False,
                     "reason": "这个 Core 还没有资料发现表"}
-        from .extraction_backlog import ExtractionBacklogError, extraction_backlog
+        from .extraction_backlog import (
+            ExtractionBacklogError, extraction_backlog, observed_yield,
+        )
 
         queued = awaiting = unqueued = discovered = 0
         counted = 0
+        pointer = core.execute(
+            "SELECT mission_version_id FROM coverage_mission_pointer "
+            "ORDER BY mission_ref LIMIT 1"
+        ).fetchone()
+        mission_version_ref = None if pointer is None else pointer[0]
+        yields = observed_yield(core)
         for company_ref in sorted(members):
             try:
-                backlog = extraction_backlog(core, company_ref)
+                backlog = extraction_backlog(
+                    core, company_ref,
+                    mission_version_ref=mission_version_ref,
+                    yields=yields,
+                )
             except (ExtractionBacklogError, sqlite3.Error, ValueError):
                 continue
             counted += 1

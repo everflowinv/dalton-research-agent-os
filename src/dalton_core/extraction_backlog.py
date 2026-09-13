@@ -352,15 +352,20 @@ def extraction_backlog(
         mission_version_ref = None if row is None else row[0]
     measured = dict(yields or observed_yield(connection))
     rows = connection.execute(
+        "WITH review_state AS ("
+        " SELECT document_ref,"
+        " MAX(CASE WHEN mission_version_ref=? "
+        "          AND state='awaiting_human_extraction' THEN 1 ELSE 0 END) AS open_here,"
+        " MAX(CASE WHEN state IN ('extraction_staged','dismissed') "
+        "          THEN 1 ELSE 0 END) AS closed_anywhere "
+        " FROM coverage_mission_document_reviews GROUP BY document_ref"
+        ") "
         "SELECT d.document_ref, s.spec_ref, d.status, "
-        "(SELECT COUNT(*) FROM coverage_mission_document_reviews r "
-        "  WHERE r.document_ref=d.document_ref AND r.mission_version_ref=? "
-        "    AND r.state='awaiting_human_extraction') AS open_here, "
-        "(SELECT COUNT(*) FROM coverage_mission_document_reviews r2 "
-        "  WHERE r2.document_ref=d.document_ref "
-        "    AND r2.state IN ('extraction_staged','dismissed')) AS closed_anywhere "
+        "COALESCE(r.open_here,0) AS open_here, "
+        "COALESCE(r.closed_anywhere,0) AS closed_anywhere "
         "FROM coverage_mission_discovered_documents d "
         "JOIN coverage_mission_source_discoveries s ON s.record_id=d.discovery_ref "
+        "LEFT JOIN review_state r ON r.document_ref=d.document_ref "
         "WHERE d.company_ref=?",
         (mission_version_ref or "", company_ref),
     ).fetchall()
