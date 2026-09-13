@@ -23,6 +23,10 @@ TARGET_LOCALE = "zh-CN"
 VERIFIER_PURPOSE = register_purpose("research_localization_verifier")
 _NUMBER = re.compile(r"[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?%?")
 _ISO_DATE = re.compile(r"(?<!\d)(\d{4})-(\d{2})-(\d{2})(?!\d)")
+_SAME_YEAR_ISO_RANGE = re.compile(
+    r"(?<!\d)(\d{4})-(\d{2})-(\d{2})\s*(?:\.\.|至|to)\s*\1-(\d{2})-(\d{2})(?!\d)",
+    re.IGNORECASE,
+)
 _OPAQUE_ID = re.compile(
     r"\b(?:claim|claim-version|dossier|dossier-version|memo|memo-version|"
     r"debate|debate-map|forecast-model-version|company-model-spec|mission|"
@@ -74,6 +78,7 @@ def _numeric_text(value: str) -> str:
     """Remove opaque IDs and make ISO date separators unambiguously non-signs."""
 
     cleaned = _OPAQUE_ID.sub("", value)
+    cleaned = _SAME_YEAR_ISO_RANGE.sub(r"\1 \2 \3 \4 \5", cleaned)
     return _ISO_DATE.sub(r"\1 \2 \3", cleaned)
 
 
@@ -91,6 +96,9 @@ def _canonical_number(token: str) -> str:
 def _display_variants(token: str, kind: str) -> list[str]:
     rendered = format_display_number(token, kind=kind)  # type: ignore[arg-type]
     variants = [rendered]
+    trimmed = re.sub(r"(?<=\d)\.0+(?=\s|%|$)|(?<=\.\d)0+(?=\s|%|$)", "", rendered)
+    if trimmed != rendered:
+        variants.append(trimmed)
     number = Decimal(token.replace(",", ""))
     # Large 亿 amounts remain faithful at either one or two decimal places.
     # This accepts 180.4 and 180.44 for 18,044,066,000, never 180.5.
@@ -134,10 +142,50 @@ def _number_differences(source_values: Sequence[str], target_values: Sequence[st
         for match in re.finditer(r"[零〇一二两三四五六七八九十]+", _OPAQUE_ID.sub("",value)):
             if match.group() in written:
                 aliases[written[match.group()]] += 1
+        # “两成五” is the conventional Chinese expression for 25%.
+        chinese_digits = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3,
+                          "四": 4, "五": 5, "六": 6, "七": 7,
+                          "八": 8, "九": 9}
+        for match in re.finditer(r"([一二两三四五六七八九])成([一二三四五六七八九])?", value):
+            whole = chinese_digits[match.group(1)] * 10
+            fraction = chinese_digits.get(match.group(2) or "零", 0)
+            aliases[f"{whole + fraction}%"] += 1
+        # FY26 and fiscal 2026 are two spellings of the same fiscal year.
+        for match in re.finditer(r"\bFY\s*([0-9]{2})(?![0-9])", value, re.I):
+            short = str(int(match.group(1)))
+            full = str(2000 + int(match.group(1)))
+            if missing_counter[short] and added[full]:
+                missing_counter[short] -= 1
+                added[full] -= 1
+            else:
+                aliases[full] += 1
+        for match in re.finditer(r"\b(?:FY|fiscal(?:\s+year)?)\s*(20[0-9]{2})\b", value, re.I):
+            aliases[str(int(match.group(1)) % 100)] += 1
     added -= aliases
 
-    source_joined = " ".join(source_values)
+    source_joined = " ".join(_numeric_text(value) for value in source_values)
+    source_joined = _NUMBER.sub(lambda match: _canonical_number(match.group()), source_joined)
     target_compact = re.sub(r"\s+", "", " ".join(target_values))
+    # Explicit $/USD magnitudes are source amounts, not dimensionless values.
+    # Convert the exact magnitude to base USD before applying display rounding.
+    magnitude_rows: list[tuple[str, Decimal]] = []
+    for value in source_values:
+        for match in re.finditer(
+                r"(?:\$|USD\s*)([+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)\s*"
+                r"(million|billion)\b", value, re.I):
+            token = _canonical_number(match.group(1))
+            factor = Decimal("1000000") if match.group(2).lower() == "million" else Decimal("1000000000")
+            magnitude_rows.append((token, Decimal(token) * factor))
+    for token, base_amount in magnitude_rows:
+        for rendered in _display_variants(str(base_amount), "amount_usd"):
+            rendered_numbers = _numbers(rendered)
+            if (rendered.replace(" ", "") in target_compact
+                    and all(added[number] for number in rendered_numbers)):
+                if missing_counter[token]:
+                    missing_counter[token] -= 1
+                for number in rendered_numbers:
+                    added[number] -= 1
+                break
     # Consume only a formatting result computed from the exact missing source
     # token and an explicit source unit. Unlabelled numbers remain strict.
     for token in list(source_numbers.elements()):

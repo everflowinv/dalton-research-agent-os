@@ -149,6 +149,47 @@ class ResearchLocalizationTests(unittest.TestCase):
         with self.assertRaisesRegex(ResearchLocalizationError, "number tokens"):
             validate_localized_text(source, translated)
 
+ def test_preflight_accepts_explicit_dollar_magnitudes_and_grouped_usd(self):
+    cases = (
+        ("Revenue was $1.353 billion.", "收入为13.53亿美元。"),
+        ("Revenue was $970 million.", "收入为9.7亿美元。"),
+        ("Revenue was 1,562,000 USD.", "收入为156.2万美元。"),
+    )
+    for original, body in cases:
+        source = product(); source["sections"][0]["body"] = original
+        translated = {"sections": [{"index": 0, "title": "收入", "body": body,
+            "gaps": ["缺少 FY2027 利润率"]}]}
+        self.assertEqual(validate_localized_text(source, translated)[0]["index"], 0)
+    source["sections"][0]["body"] = "Revenue was $970 million."
+    translated["sections"][0]["body"] = "收入为9.8亿美元。"
+    with self.assertRaisesRegex(ResearchLocalizationError, "number tokens"):
+        validate_localized_text(source, translated)
+
+ def test_preflight_accepts_only_explicit_fiscal_year_and_cheng_equivalents(self):
+    cases = (
+        ("FY26 revenue outlook", "2026财年收入展望"),
+        ("fiscal 2027 outlook", "2027财年展望（FY27）"),
+        ("约两成五的收入", "约25%的收入"),
+    )
+    for original, body in cases:
+        source = product(); source["sections"][0].update(body=original, gaps=[])
+        translated = {"sections": [{"index": 0, "title": "展望", "body": body, "gaps": []}]}
+        self.assertEqual(validate_localized_text(source, translated)[0]["index"], 0)
+    source["sections"][0]["body"] = "约两成五的收入"
+    translated["sections"][0]["body"] = "约26%的收入"
+    with self.assertRaisesRegex(ResearchLocalizationError, "number tokens"):
+        validate_localized_text(source, translated)
+
+ def test_preflight_allows_same_year_date_range_to_omit_repeated_year(self):
+    source = product(); source["sections"][0].update(
+        body="Period 2026-01-01..2026-06-30", gaps=[])
+    translated = {"sections": [{"index": 0, "title": "期间",
+        "body": "2026年1月1日至6月30日", "gaps": []}]}
+    self.assertEqual(validate_localized_text(source, translated)[0]["index"], 0)
+    translated["sections"][0]["body"] = "2026年1月1日至7月30日"
+    with self.assertRaisesRegex(ResearchLocalizationError, "number tokens"):
+        validate_localized_text(source, translated)
+
  def test_preflight_rejects_an_all_english_display_section(self):
     source = product()
     with self.assertRaisesRegex(ResearchLocalizationError, "no Simplified Chinese"):
