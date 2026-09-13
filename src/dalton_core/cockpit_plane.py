@@ -4611,6 +4611,7 @@ class CockpitPlane:
 
         language_review = {"status": "not_configured"}
         reviewed_display_answer = None
+        reviewed_display_gaps = None
         language_root = self.config.core_db.parent
         language_policy = language_root / "research-language-policy.json"
         checker_config = language_root / "language-checker-model-config.json"
@@ -4641,6 +4642,7 @@ class CockpitPlane:
                 raise CockpitError("回答已生成，但仍在等待语言审查，尚未发布")
             section = language_review["brain_revision"]["sections"][0]
             reviewed_display_answer = section["body"]
+            reviewed_display_gaps = section["gaps"]
         elif required:
             raise CockpitError("回答已生成，但发布前语言审查尚未配置，尚未发布")
 
@@ -4649,6 +4651,7 @@ class CockpitPlane:
             "question": question,
             "answer": answer["answer"],
             "display_answer": reviewed_display_answer,
+            "display_gaps": reviewed_display_gaps,
             "sentences": answer["sentences"],
             # The page's existing citation card reads ``statement``,
             # ``company``, ``period`` and ``at``; those four keep their names
