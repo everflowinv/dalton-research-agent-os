@@ -1,5 +1,16 @@
 # Dalton 项目进度
 
+## 2026-09-13 恢复开发：修复 R21 writer 权限变更的部署契约
+
+已从最新集成代码 `b1f367ab` 建立隔离分支 `resume/0913-integration`，三个 GPT-5.6 Sol 子代理并行开发与交叉审查。主目录四份既有模型配置改动保留。
+
+只读恢复结果：R21 `8801dadd` 的完整测试 **7,854 项通过（1 skip）**，wheel 608 文件与副本演练通过；其真实部署随后因新增 `settle_company_model_spec` 被保护状态校验拒绝，回滚也拒绝。历史恢复记录证明 R21 程序已恢复运行、当时健康，但 R21 没有完整持续健康/最终发布验收；正式发布指针仍为 R20。历史失败不改写为成功。
+
+本批补齐源码声明的 core operation 严格追加证明、配置转换 schema 0.5、真实 scratch bootstrap 字节对照、安装后精确校验与并发安全回滚。原 token、其他 principal、其他 owner state、配置和历史 schema 行为继续受验证。财务累计配对与带负值增长预测已独立复核。
+
+当前批次验证和后续步骤见 [本轮开发记录](reports/development-resume-2026-09-13.md)。本轮未运行 live 安装、权限写入或发布操作。
+
+
 Current checkpoint (2026-09-12 23:32 UTC): Published R20 `b994b09c` remains healthy and has four fresh model specifications (CTSH, EPAM, ACN, DXC). CTSH and EPAM forecast publication failed because SEC `usdPerShare` was compared with model `usd_per_share`; exact values, periods and filings match. R21 integration `232a2a2a` fixes only this structured unit projection and versions the local forecast validator to v5, preserving all numerical/source checks and legacy behavior. Strict isolated CTSH full build/publish now succeeds; this is not an actual production model claim. Earlier next-wave prompt, transport-authority compatibility and settlement-only polling improvements passed 352 combined root tests plus 35 writer/acceptance tests. Financial-proof independent regression passed 153 tests. The combined source is entering a clean R21 full-suite/wheel/copied-state freeze; no R21 deployment or full-suite pass is claimed yet. Exact R20 publication authority and separate R18b external dependencies remain preserved. See [resumed development and next steps](reports/session-resume-r16a-financial-notes-2026-09-12.md).
 
 
