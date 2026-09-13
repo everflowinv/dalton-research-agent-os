@@ -5,6 +5,8 @@ import json
 import tempfile
 import unittest
 import subprocess
+import os
+import sys
 import plistlib
 import zipfile
 from types import SimpleNamespace
@@ -27,6 +29,87 @@ def write_json(path: Path, value: object) -> None:
 
 
 class SuccessorStoppedWindowCandidateTests(unittest.TestCase):
+    def test_runtime_commands_drop_ops_python_environment(self) -> None:
+        worker = execute.SuccessorOrchestrator(Path("/packet"), io.StringIO())
+        script = (
+            "import json,os; print(json.dumps({"
+            "'pythonpath':os.environ.get('PYTHONPATH'),"
+            "'pythonhome':os.environ.get('PYTHONHOME'),"
+            "'marker':os.environ.get('DALTON_STARTUP_TIMEOUT_SECONDS')}))"
+        )
+        inherited = {
+            **os.environ,
+            "PYTHONPATH": "/separately-frozen-ops:/separately-frozen-ops/src",
+            "PYTHONHOME": "/wrong-python-home",
+            "DALTON_STARTUP_TIMEOUT_SECONDS": "900",
+        }
+        with patch.dict(os.environ, inherited, clear=True):
+            result = worker.command([sys.executable, "-c", script])
+        observed = json.loads(result.stdout)
+        self.assertIsNone(observed["pythonpath"])
+        self.assertIsNone(observed["pythonhome"])
+        self.assertEqual("900", observed["marker"])
+
+    def test_explicit_installer_environment_is_sanitized_too(self) -> None:
+        worker = execute.SuccessorOrchestrator(Path("/packet"), io.StringIO())
+        captured = {}
+
+        def parent_command(_self, argv, *, timeout=None, env=None, check=True):
+            captured.update(env)
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        with patch.object(execute.r11.Orchestrator, "command", parent_command):
+            worker.command(
+                ["/bin/zsh", "/candidate/deploy/macos/install.sh"],
+                env={"PYTHONPATH": "/ops/src", "PYTHONHOME": "/ops/python",
+                     "DALTON_STARTUP_TIMEOUT_SECONDS": "900",
+                     "DRAIN_TIMEOUT": "600"},
+            )
+        self.assertNotIn("PYTHONPATH", captured)
+        self.assertNotIn("PYTHONHOME", captured)
+        self.assertEqual("900", captured["DALTON_STARTUP_TIMEOUT_SECONDS"])
+        self.assertEqual("600", captured["DRAIN_TIMEOUT"])
+
+    def test_real_installer_discovery_boundary_does_not_seed_present_host_wiki(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            host = root / "host-workspace"
+            (host / "wiki").mkdir(parents=True)
+            (host / "wiki/vectors.db").write_bytes(b"index")
+            state = root / "state"
+            governance = state / "connector-governance"
+            feeds = state / "feeds"
+            hidden = root / "rollback/preserved-absent-openclaw-workspace"
+            probe = root / "wiki-install-probe.zsh"
+            # This is the install.sh discovery and three-create condition,
+            # executed by a real zsh child under the executor environment.
+            probe.write_text(
+                "set -e\n"
+                "openclaw_workspace=${DALTON_OPENCLAW_WORKSPACE:-$HOME/.openclaw/workspace}\n"
+                "wiki_index_source=$openclaw_workspace/wiki/vectors.db\n"
+                "[[ -e $wiki_index_source ]] || wiki_index_source=$openclaw_workspace/wiki-index.sqlite\n"
+                "if [[ -d $openclaw_workspace && -e $wiki_index_source ]]; then\n"
+                " mkdir -p $GOVERNANCE_DIR $FEEDS_DIR\n"
+                " print '{}' >$GOVERNANCE_DIR/company-wiki-list-documents-v1.json\n"
+                " print '{}' >$GOVERNANCE_DIR/company-wiki-get-document-v1.json\n"
+                " ln -s $openclaw_workspace $FEEDS_DIR/company-wiki\n"
+                "fi\n")
+            worker = execute.SuccessorOrchestrator(root / "packet", io.StringIO())
+            result = worker.command(
+                ["/bin/zsh", str(probe)],
+                env={**os.environ, "HOME": str(root),
+                     "PYTHONPATH": "/separately-frozen-ops/src",
+                     "PYTHONHOME": "/wrong-python-home",
+                     "DALTON_OPENCLAW_WORKSPACE": str(hidden),
+                     "GOVERNANCE_DIR": str(governance),
+                     "FEEDS_DIR": str(feeds)},
+            )
+            self.assertEqual(0, result.returncode)
+            self.assertTrue((host / "wiki/vectors.db").is_file())
+            self.assertFalse(hidden.exists())
+            self.assertFalse(governance.exists())
+            self.assertFalse(feeds.exists())
+
     def test_schema_v03_preserves_noncanonical_service_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             packet = Path(temporary)

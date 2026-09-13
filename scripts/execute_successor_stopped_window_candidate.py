@@ -474,6 +474,23 @@ def packet_preflight(packet: Path) -> tuple[dict[str, Any], dict[str, Path]]:
 
 
 class SuccessorOrchestrator(r11.Orchestrator):
+    def command(self, argv: Sequence[str], *, timeout: float | None = None,
+                env: Mapping[str, str] | None = None,
+                check: bool = True) -> subprocess.CompletedProcess[str]:
+        """Run installed/runtime commands without inheriting the OPS import roots.
+
+        The executor itself is intentionally loaded from the separately frozen
+        OPS checkout.  Its caller therefore supplies OPS and OPS/src through
+        PYTHONPATH.  Those paths are not runtime authority and must not reach
+        the candidate installer, installed venv, health command, or rollback
+        helpers.  PYTHONHOME is equally capable of redirecting an interpreter.
+        """
+        child_env = dict(os.environ if env is None else env)
+        child_env.pop("PYTHONPATH", None)
+        child_env.pop("PYTHONHOME", None)
+        return super().command(
+            argv, timeout=timeout, env=child_env, check=check)
+
     @staticmethod
     def _protected_hash_excluding(root: Path, excluded: set[str]) -> str:
         rows = []
@@ -845,9 +862,27 @@ class SuccessorOrchestrator(r11.Orchestrator):
         temporary = initial_path.with_name(".initial-state.successor-rendered")
         temporary.write_text(json.dumps(initial, indent=2) + "\n")
         os.replace(temporary, initial_path)
+        # Successor installation must preserve the reviewed owner-state
+        # inventory.  install.sh normally discovers an OpenClaw wiki and, on
+        # first install, seeds two governance records plus a corpus symlink.
+        # Discovery is useful for a new installation, but it is an unreviewed
+        # state expansion during this exact preserve-existing transition.
+        # Point only this installer process at a closed absent workspace.  Any
+        # already-installed wiki records remain untouched by install.sh.
+        preserved_absent_workspace = (
+            self.rollback_root / "preserved-absent-openclaw-workspace")
+        need(not preserved_absent_workspace.exists()
+             and not preserved_absent_workspace.is_symlink(),
+             "reviewed absent OpenClaw workspace boundary is occupied")
         env = dict(os.environ)
-        env.update({"DALTON_STARTUP_TIMEOUT_SECONDS": "900", "DRAIN_TIMEOUT": "600"})
+        env.update({
+            "DALTON_STARTUP_TIMEOUT_SECONDS": "900", "DRAIN_TIMEOUT": "600",
+            "DALTON_OPENCLAW_WORKSPACE": str(preserved_absent_workspace),
+        })
         self.command(["/bin/zsh", str(source / "deploy/macos/install.sh")], env=env)
+        need(not preserved_absent_workspace.exists()
+             and not preserved_absent_workspace.is_symlink(),
+             "installer wrote through the absent OpenClaw workspace boundary")
         if transition.get("schema_version") == RESEARCH_PUBLICATION_SCHEMA_VERSION:
             from scripts.successor_research_publication_transition import (
                 LAUNCH_AGENT_NAME, artifact_bytes, validate_transition,
