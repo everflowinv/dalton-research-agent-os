@@ -72,6 +72,13 @@ class CockpitLanguageTests(unittest.TestCase):
         self.assertIn('it.kind==="gate_reopen"', text)
         self.assertIn("group.entries.forEach(card=>d.append(card))", text)
 
+    def test_long_approval_evidence_is_progressively_disclosed(self) -> None:
+        text = HTML.read_text(encoding="utf-8")
+        self.assertIn('node("details",null,"memo-review")', text)
+        self.assertIn('node("summary","展开投资备忘录核验依据")', text)
+        self.assertIn('node("summary","展开完整复盘依据")', text)
+        self.assertIn('d.append(review)', text)
+
     def test_dynamic_lane_snapshot_uses_research_language(self) -> None:
         from dalton_core.cockpit_plane import REGISTRY_LANE_LABELS
 
