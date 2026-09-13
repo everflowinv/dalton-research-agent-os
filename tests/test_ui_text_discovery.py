@@ -6,10 +6,18 @@ from pathlib import Path
 from unittest.mock import patch
 
 from dalton_core.store import canonical_json, content_hash
-from dalton_core.ui_text_discovery import poll_ui_texts
+from dalton_core.ui_text_discovery import needs_display_translation, poll_ui_texts
 
 
 class UITextDiscoveryTests(unittest.TestCase):
+    def test_display_language_admission_is_conservative_and_explicit(self):
+        self.assertTrue(needs_display_translation(
+            "Management expects demand to improve during the next fiscal year."))
+        self.assertFalse(needs_display_translation(
+            "EPAM 管理层认为 AI 和 BPO 服务会受 token 成本及 IT 预算影响。"))
+        self.assertTrue(needs_display_translation(
+            "管理层称 the company expects enterprise demand to recover across major markets next year."))
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -54,6 +62,14 @@ class UITextDiscoveryTests(unittest.TestCase):
         calls = []
         result = self.poll(calls.append, {"Revenue rose 10%.": "收入增长10%。"})
         self.assertEqual((result["sealed"], result["attempted"]), (0, 0))
+        self.assertEqual(calls, [])
+
+    def test_already_readable_chinese_claim_is_not_prepared(self):
+        self.claim("claim:1", "EPAM 管理层认为 AI 和 BPO 服务会受 token 成本及 IT 预算影响。")
+        calls = []
+        result = self.poll(calls.append)
+        self.assertEqual((result["translation_needed"], result["already_readable"],
+                          result["sealed"], result["attempted"]), (0, 1, 0, 0))
         self.assertEqual(calls, [])
 
     def test_sealed_batch_is_stable_when_new_claim_sorts_first(self):
@@ -107,25 +123,27 @@ class UITextDiscoveryTests(unittest.TestCase):
         self.assertTrue((all_refs - set(first)).issubset(set(second)))
 
     def test_latest_current_claim_and_retirement_are_honored(self):
-        self.claim("claim:old", "Old", claim_ref="claim:logical", version=1)
-        self.claim("claim:new", "New", claim_ref="claim:logical", version=2)
-        self.claim("claim:retired", "Retired")
+        self.claim("claim:old", "Old claim statement", claim_ref="claim:logical", version=1)
+        self.claim("claim:new", "New claim statement", claim_ref="claim:logical", version=2)
+        self.claim("claim:retired", "Retired claim statement")
         self.db.execute("INSERT INTO claim_retirement_decisions VALUES(?,?)",
                         ("claim:retired", "retired")); self.db.commit()
         products = []
         self.poll(lambda product: products.append(product) or {"status": "pending"})
-        self.assertEqual([row["body"] for row in products[0]["sections"]], ["New"])
+        self.assertEqual([row["body"] for row in products[0]["sections"]],
+                         ["New claim statement"])
 
     def test_noncanonical_index_duplicate_is_excluded_unless_library_cites_it(self):
-        self.claim("claim:canonical", "Canonical")
-        self.claim("claim:duplicate", "Duplicate")
+        self.claim("claim:canonical", "Canonical claim statement")
+        self.claim("claim:duplicate", "Duplicate claim statement")
         self.db.executemany("INSERT INTO claim_index_entry_versions VALUES(?,?,?,?,?)", [
             ("index:1", "entry:1", 1, "claim:canonical", 1),
             ("index:2", "entry:2", 1, "claim:duplicate", 0),
         ]); self.db.commit()
         products = []
         self.poll(lambda product: products.append(product) or {"status": "pending"})
-        self.assertEqual([row["body"] for row in products[0]["sections"]], ["Canonical"])
+        self.assertEqual([row["body"] for row in products[0]["sections"]],
+                         ["Canonical claim statement"])
         other_state = self.state.with_name("library-state")
         with patch("dalton_core.ui_text_discovery.research_library",
                    return_value=self.library("claim:duplicate")):
@@ -133,7 +151,7 @@ class UITextDiscoveryTests(unittest.TestCase):
             poll_ui_texts(self.db, self.mission, state_dir=other_state, mapping={},
                           prepare=lambda product: cited.append(product) or {"status": "pending"})
         self.assertEqual({row["body"] for row in cited[0]["sections"]},
-                         {"Canonical", "Duplicate"})
+                         {"Canonical claim statement", "Duplicate claim statement"})
 
     def test_library_exact_historical_claim_version_remains_discoverable(self):
         self.claim("claim:old", "Historical source", claim_ref="claim:logical", version=1)
@@ -147,9 +165,9 @@ class UITextDiscoveryTests(unittest.TestCase):
                          ["library_claim_source"])
 
     def test_old_mission_and_removed_subject_batches_are_not_prepared(self):
-        self.claim("claim:a", "Company A")
+        self.claim("claim:a", "Company A current statement")
         self.poll(lambda product: {"status": "pending"})
-        self.claim("claim:b", "Company B", subject="company:B")
+        self.claim("claim:b", "Company B current statement", subject="company:B")
         changed = {"mission_ref": "mission:new", "industry_ref": "industry:test",
                    "universe": [{"company_ref": "company:B"}]}
         calls = []
@@ -162,13 +180,13 @@ class UITextDiscoveryTests(unittest.TestCase):
         self.assertIn("ineligible", {row["status"] for row in result["batches"]})
 
     def test_recomputed_manifest_transplant_and_symlink_are_refused(self):
-        self.claim("claim:1", "Original")
+        self.claim("claim:1", "Original claim statement")
         self.poll(lambda product: {"status": "pending"})
         path = next((self.state / "manifests").glob("*.json"))
         manifest = json.loads(path.read_text())
-        manifest["entries"][0]["text"] = "Forged"
+        manifest["entries"][0]["text"] = "Forged claim statement"
         manifest["entries"][0]["text_sha256"] = __import__("hashlib").sha256(
-            b"Forged").hexdigest()
+            b"Forged claim statement").hexdigest()
         # Rebind all local hashes; the immutable ClaimVersion still refuses it.
         from dalton_core.ui_text_discovery import _hash, _product
         digest = _hash({"mission_ref": manifest["mission_ref"],
@@ -190,7 +208,7 @@ class UITextDiscoveryTests(unittest.TestCase):
                           mapping={}, prepare=lambda product: {})
 
     def test_manifest_symlink_is_refused(self):
-        self.claim("claim:1", "Original")
+        self.claim("claim:1", "Original claim statement")
         self.poll(lambda product: {"status": "pending"})
         path = next((self.state / "manifests").glob("*.json"))
         target = Path(self.tmp.name) / "manifest-copy.json"
@@ -200,7 +218,7 @@ class UITextDiscoveryTests(unittest.TestCase):
             self.poll(lambda product: {"status": "pending"})
 
     def test_source_hash_transplant_is_refused_even_with_all_local_hashes_rebound(self):
-        self.claim("claim:1", "Original")
+        self.claim("claim:1", "Original claim statement")
         self.poll(lambda product: {"status": "pending"})
         path = next((self.state / "manifests").glob("*.json"))
         manifest = json.loads(path.read_text())

@@ -11,6 +11,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import re
 from collections.abc import Callable, Mapping
 from hashlib import sha256
 from pathlib import Path
@@ -37,6 +38,24 @@ def _hash(value: Any) -> str:
 
 def _text_hash(value: str) -> str:
     return sha256(value.encode("utf-8")).hexdigest()
+
+
+def needs_display_translation(value: str) -> bool:
+    """Whether an intermediate Claim needs Chinese display preparation.
+
+    This is only an admission filter for normalized Claim/source summaries. It
+    does not replace the mandatory checker and semantic review for final
+    research products.  Count alphabetic letters rather than named acronyms:
+    normal English prose has at least twelve, while mixed text must also have
+    at least twenty-four and twice as many Latin letters as Han characters.
+    Chinese prose containing company names or terms such as AI/IT/BPO/token is
+    therefore left byte-for-byte as its already-readable display text.
+    """
+    if not isinstance(value, str):
+        return False
+    han = len(re.findall(r"[\u3400-\u9fff]", value))
+    latin = sum(len(token) for token in re.findall(r"[A-Za-z]+", value))
+    return latin >= 12 and (han == 0 or (latin >= 24 and latin >= 2 * han))
 
 
 def _claim_hash(wire: Mapping[str, Any]) -> str:
@@ -306,7 +325,7 @@ def _eligible(manifest: Mapping[str, Any], mission_ref: str,
                         for source in entry["sources"]}
         for entry in discovered
     }
-    return all(entry["text"] in current and
+    return all(needs_display_translation(entry["text"]) and entry["text"] in current and
                {(source["ref"], source["hash"]) for source in entry["sources"]}
                .issubset(current[entry["text"]]) for entry in manifest["entries"])
 
@@ -342,7 +361,8 @@ def poll_ui_texts(connection: Any, mission: Mapping[str, Any], *, state_dir: Pat
         assigned = {entry["text"] for manifest in existing
                     if _eligible(manifest, mission_ref, discovered)
                     for entry in manifest["entries"]}
-        new = [entry for entry in discovered if entry["text"] not in mapping
+        translatable = [entry for entry in discovered if needs_display_translation(entry["text"])]
+        new = [entry for entry in translatable if entry["text"] not in mapping
                and entry["text"] not in assigned]
         for entries in _chunks(new):
             digest = _hash({"mission_ref": mission_ref, "entries": entries})
@@ -411,5 +431,7 @@ def poll_ui_texts(connection: Any, mission: Mapping[str, Any], *, state_dir: Pat
         for row in summaries:
             row.pop("manifest", None); row.pop("result_path", None)
         return {"schema_version": POLL_SCHEMA, "discovered": len(discovered),
+                "translation_needed": len(translatable),
+                "already_readable": len(discovered) - len(translatable),
                 "sealed": len(new), "attempted": attempted, "batches": summaries,
                 "pending": sum(row["status"] in {"pending", "deferred"} for row in summaries)}
