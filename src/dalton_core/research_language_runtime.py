@@ -14,7 +14,7 @@ from .model_fallback_chain import TIER_BRAIN, TIER_CHEAP, TIER_VERIFIER, registe
 from .research_localization import build_verifier_prompt
 from .research_language_review import (
     BRAIN_PURPOSE, CHECKER_MODEL, CHECKER_PURPOSE, ResearchLanguageReviewError,
-    run_language_review,
+    build_checker_prompt, parse_stage_output, run_language_review,
 )
 from .store import canonical_json, content_hash
 
@@ -73,21 +73,80 @@ def _write_once(path: Path, data: bytes) -> None:
     with os.fdopen(fd,"wb") as stream: stream.write(data)
 
 
+def _config(path: Path) -> tuple[dict[str, Any], str]:
+    data=path.read_bytes(); value=json.loads(data)
+    if not isinstance(value,dict): raise ResearchLanguageReviewError("语言审查配置格式无效")
+    return value,_hash_bytes(data)
+
+
+def _call_evidence(call: Mapping[str,Any]) -> dict[str,Any]:
+    return {key:call.get(key) for key in ("route_decision_ref","work_order_ref",
+        "result_envelope_ref","invocation_ref","cost_micros","replayed")}
+
+
+def _sealed(value: Mapping[str,Any]) -> dict[str,Any]:
+    row=dict(value);row["content_hash"]=content_hash(row);return row
+
+
+def _read_sealed(path: Path) -> tuple[dict[str,Any],bytes]:
+    payload=path.read_bytes();value=json.loads(payload)
+    if (not isinstance(value,dict) or value.get("content_hash") !=
+            content_hash({k:v for k,v in value.items() if k!="content_hash"})):
+        raise ResearchLanguageReviewError("既有语言审查记录不完整或身份不匹配")
+    return value,payload
+
+
+def _record_failure(root: Path | None, key: str, stage: str,
+                    value: Mapping[str,Any]) -> dict[str,Any]:
+    if root is None:return dict(value)
+    directory=root/"failures";directory.mkdir(parents=True,exist_ok=True)
+    payload=(canonical_json(_sealed(value))+"\n").encode()
+    for number in range(10_000):
+        path=directory/f"{key}.{stage}.{number:04d}.json"
+        try:
+            _write_once(path,payload)
+            if value.get("suggestions_markdown") is not None:
+                _write_once(path.with_suffix(".md"),str(value["suggestions_markdown"]).encode())
+            return {**dict(value),"artifact_ref":path.relative_to(root).with_suffix("").as_posix(),
+                    "artifact_sha256":_hash_bytes(payload)}
+        except ResearchLanguageReviewError:continue
+    raise ResearchLanguageReviewError("语言审查失败记录数量超出限制")
+
+
 def run(product: Mapping[str, Any], *, mission: Mapping[str, Any], request_id: str,
         checker_config: Path, brain_config: Path, verifier_config: Path, scheduler_db: Path,
         producer_route_decision_ref: str, artifact_dir: Path | None=None,
         model_factory: Callable[[Mapping[str, Any]], Any] | None=None) -> dict[str, Any]:
-    """Run exactly one checker and one brain call, persisting a closed receipt."""
-    checker_raw=_load(checker_config); brain_raw=_load(brain_config); verifier_raw=_load(verifier_config)
-    proof_key=sha256((request_id+":"+sha256((canonical_json(product)+"\n").encode()).hexdigest()).encode()).hexdigest()[:24]
+    """Resume completed stages and persist a final closed receipt after fidelity."""
+    checker_raw,checker_hash=_config(checker_config)
+    brain_raw,brain_hash=_config(brain_config)
+    verifier_raw,verifier_hash=_config(verifier_config)
+    source_hash=sha256((canonical_json(product)+"\n").encode()).hexdigest()
+    proof_key=sha256((request_id+":"+source_hash).encode()).hexdigest()[:24]
     proof_base=None if artifact_dir is None else artifact_dir/proof_key
-    if proof_base is not None and proof_base.with_suffix(".json").exists():
-        payload=proof_base.with_suffix(".json").read_bytes(); prior=json.loads(payload)
-        if (prior.get("status") not in {"ready_for_publication","pending_fidelity_review"}
-                or prior.get("content_hash")!=content_hash({k:v for k,v in prior.items() if k!="content_hash"})):
-            raise ResearchLanguageReviewError("既有语言审查记录不完整或身份不匹配")
-        return {**prior,"artifact_ref":proof_base.name,"artifact_sha256":_hash_bytes(payload),
-                "artifact_replayed":True}
+    identities={"source_hash":source_hash,"checker_config_sha256":checker_hash,
+                "brain_config_sha256":brain_hash,"verifier_config_sha256":verifier_hash,
+                "producer_route_decision_ref":producer_route_decision_ref}
+    final_path=None if proof_base is None else proof_base.with_suffix(".json")
+    identity_final=(None if proof_base is None else proof_base.with_name(
+        proof_base.name+".final-"+content_hash(identities)[:24]+".json"))
+    replay_path=identity_final
+    if replay_path is not None and not replay_path.exists():replay_path=final_path
+    if replay_path is not None and replay_path.exists():
+        prior,payload=_read_sealed(replay_path)
+        if prior.get("status")=="ready_for_publication" and prior.get("runtime_binding")==identities:
+            runtime=prior.get("runtime_identity") or {};calls=prior.get("call_evidence") or {}
+            for label,cfg in (("checker",checker_raw),("brain",brain_raw),("fidelity",verifier_raw)):
+                if _route_identity(cfg,calls[label]) != runtime[label]:
+                    raise ResearchLanguageReviewError("既有语言审查模型身份无法重放")
+            replay=_independence(verifier_raw,draft_routes=[producer_route_decision_ref,
+                calls["brain"]["route_decision_ref"]],verifier_route=calls["fidelity"]["route_decision_ref"])
+            if replay.get("independent") is not True:
+                raise ResearchLanguageReviewError("既有事实保真核验独立性无法重放")
+            return {**prior,"artifact_ref":replay_path.relative_to(artifact_dir).with_suffix("").as_posix(),"artifact_sha256":_hash_bytes(payload),
+                    "artifact_replayed":True}
+        # Old pending receipts remain immutable evidence but no longer block a
+        # new staged attempt; their result is never promoted into a stage.
     def default_factory(cfg: Mapping[str,Any]):
         output=16_000 if cfg is brain_raw else 12_000
         return CockpitModel(cfg,scheduler_db=scheduler_db,max_input_tokens=120_000,
@@ -98,50 +157,107 @@ def run(product: Mapping[str, Any], *, mission: Mapping[str, Any], request_id: s
     def invoke(label: str, purpose: str, cfg: Mapping[str,Any], prompt: str) -> Mapping[str,Any]:
         call=make(cfg).call(purpose=purpose,request_id=f"{request_id}:{label}",prompt=prompt,mission=mission)
         calls[label]=dict(call)
-        parsed=unwrap_json_object(call["text"])
+        parsed=(parse_stage_output(call["text"],stage=label)
+                if label in {"checker","brain"} else unwrap_json_object(call["text"]))
         if not isinstance(parsed,Mapping): raise ResearchLanguageReviewError("语言审查模型没有返回有效结构")
         return parsed
-    # Identity passed into the pure review is validated again from persisted router records below.
-    identity_failure: list[Exception] = []
-    def brain_after_checker(prompt: str) -> Mapping[str,Any]:
-        identity=_route_identity(checker_raw,calls["checker"])
-        if identity["provider"]!="antigravity-cli-gateway" or identity["model"]!="gemini-3.8-flash":
-            error=ResearchLanguageReviewError("语言检查模型身份不符合发布要求"); identity_failure.append(error); raise error
-        return invoke("brain",BRAIN_PURPOSE,brain_raw,prompt)
-    result=run_language_review(product,
-        checker=lambda prompt:invoke("checker",CHECKER_PURPOSE,checker_raw,prompt),
-        brain=brain_after_checker,
-        checker_identity={"provider":"antigravity-cli-gateway","model":"antigravity-cli-gateway/gemini-3.8-flash"})
-    if identity_failure: raise identity_failure[0]
-    if result["status"]=="ready_for_publication":
-        checker_identity=_route_identity(checker_raw,calls["checker"])
+    checker_binding={"source_hash":source_hash,"checker_config_sha256":checker_hash}
+    checker_path=(None if proof_base is None else proof_base.with_name(
+        proof_base.name+".checker-"+content_hash(checker_binding)[:24]+".json"))
+    if checker_path is not None and checker_path.exists():
+        checker_stage,_=_read_sealed(checker_path)
+        if checker_stage.get("binding")!=checker_binding:raise ResearchLanguageReviewError("语言检查缓存身份不匹配")
+        checker_value=checker_stage["value"];checker_call=checker_stage["call_evidence"]
+        checker_identity=_route_identity(checker_raw,checker_call)
+        if checker_identity!=checker_stage["route_identity"]:raise ResearchLanguageReviewError("语言检查缓存路由无法重放")
+    else:
+        try: checker_value=invoke("checker",CHECKER_PURPOSE,checker_raw,
+                                  build_checker_prompt(product))
+        except Exception as exc:
+            _record_failure(artifact_dir,proof_key,"checker",{"status":"pending_language_review","binding":checker_binding,"error_type":type(exc).__name__})
+            raise
+        checker_call=_call_evidence(calls["checker"]);checker_identity=_route_identity(checker_raw,checker_call)
         if checker_identity["provider"]!="antigravity-cli-gateway" or checker_identity["model"]!="gemini-3.8-flash":
             raise ResearchLanguageReviewError("语言检查模型身份不符合发布要求")
-        brain_identity=_route_identity(brain_raw,calls["brain"])
+        checker_stage=_sealed({"schema_version":"research-language-checker-stage:0.1","binding":checker_binding,
+            "value":checker_value,"call_evidence":checker_call,"route_identity":checker_identity})
+        if checker_path is not None:_write_once(checker_path,(canonical_json(checker_stage)+"\n").encode())
+    style_binding={**checker_binding,"brain_config_sha256":brain_hash,
+                   "checker_stage_sha256":content_hash(checker_stage)}
+    style_path=(None if proof_base is None else proof_base.with_name(
+        proof_base.name+".style-"+content_hash(style_binding)[:24]+".json"))
+    brain_terminal_path=(None if proof_base is None else
+        proof_base.with_name(proof_base.name+".brain-terminal-"+
+                             content_hash(style_binding)[:24]+".json"))
+    if brain_terminal_path is not None and brain_terminal_path.exists():
+        terminal,_=_read_sealed(brain_terminal_path)
+        if terminal.get("binding")!=style_binding:
+            raise ResearchLanguageReviewError("语言修订失败记录身份不匹配")
+        return terminal["review"]
+    if style_path is not None and style_path.exists():
+        style_stage,_=_read_sealed(style_path)
+        if style_stage.get("binding")!=style_binding:raise ResearchLanguageReviewError("语言修订缓存身份不匹配")
+        result=style_stage["review"];brain_call=style_stage["call_evidence"]
+        brain_identity=_route_identity(brain_raw,brain_call)
+        if brain_identity!=style_stage["route_identity"]:raise ResearchLanguageReviewError("语言修订缓存路由无法重放")
+    else:
         try:
-            verifier_model=make(verifier_raw)
-            verifier_call=independent_model_call(verifier_model,producer_route_decision_refs=[producer_route_decision_ref,calls["brain"]["route_decision_ref"]],purpose=FIDELITY_PURPOSE,request_id=f"{request_id}:fidelity",prompt=build_verifier_prompt(product,{"sections":result["brain_revision"]["sections"]}),mission=mission)
-            calls["fidelity"]=dict(verifier_call)
-            verdict=unwrap_json_object(verifier_call["text"])
-            expected={"verdict","faithful","no_new_facts","meaning_preserved","findings"}
-            valid=(isinstance(verdict,Mapping) and set(verdict)==expected
-                   and verdict.get("verdict")=="pass"
-                   and all(verdict.get(k) is True for k in ("faithful","no_new_facts","meaning_preserved"))
-                   and verdict.get("findings")==[])
-            route=_route_identity(verifier_raw,verifier_call)
-            replay=_independence(verifier_raw,draft_routes=[producer_route_decision_ref,calls["brain"]["route_decision_ref"]],verifier_route=verifier_call["route_decision_ref"])
-            result["fidelity_verification"]={**(dict(verdict) if isinstance(verdict,Mapping) else {"raw_structure_valid":False}),"route":route,"independence":replay}
-            if not valid or replay.get("independent") is not True:
-                result["status"]="pending_fidelity_review"
-                result["pending_reason"]="独立事实保真核验未通过"
+            result=run_language_review(product,checker=lambda _:checker_value,
+                brain=lambda prompt:invoke("brain",BRAIN_PURPOSE,brain_raw,prompt),
+                checker_identity={"provider":"antigravity-cli-gateway","model":"antigravity-cli-gateway/gemini-3.8-flash"})
         except Exception as exc:
-            result["status"]="pending_fidelity_review"
-            result["pending_reason"]="独立事实保真核验未完成"
-            result["fidelity_verification"]={"error_type":type(exc).__name__}
-        result["runtime_identity"]={"checker":checker_identity,"brain":brain_identity}
-        if isinstance(result.get("fidelity_verification"),Mapping) and isinstance(result["fidelity_verification"].get("route"),Mapping):
-            result["runtime_identity"]["fidelity"]=result["fidelity_verification"]["route"]
-    result["call_evidence"]={k:{x:v.get(x) for x in ("work_order_ref","result_envelope_ref","invocation_ref","cost_micros","replayed")} for k,v in calls.items()}
+            _record_failure(artifact_dir,proof_key,"brain",{"status":"pending_brain_revision","binding":style_binding,"error_type":type(exc).__name__});raise
+        if result["status"]!="ready_for_publication":
+            evidence={"checker":checker_call}
+            if "brain" in calls:evidence["brain"]=_call_evidence(calls["brain"])
+            pending=_record_failure(artifact_dir,proof_key,"brain",{**result,
+                "binding":style_binding,"runtime_identity":{"checker":checker_identity},
+                "call_evidence":evidence,
+                "review_cost_micros":sum(int(row.get("cost_micros") or 0)
+                                         for row in evidence.values())})
+            # A returned brain envelope followed by structural rejection is a
+            # completed one-time revision, not transient infrastructure work.
+            if "brain" in calls and brain_terminal_path is not None:
+                terminal=_sealed({"schema_version":"research-language-brain-terminal:0.1",
+                    "binding":style_binding,"review":pending,
+                    "call_evidence":_call_evidence(calls["brain"])})
+                _write_once(brain_terminal_path,(canonical_json(terminal)+"\n").encode())
+            return pending
+        brain_call=_call_evidence(calls["brain"]);brain_identity=_route_identity(brain_raw,brain_call)
+        style_stage=_sealed({"schema_version":"research-language-style-stage:0.1","binding":style_binding,
+            "review":result,"call_evidence":brain_call,"route_identity":brain_identity})
+        if style_path is not None:_write_once(style_path,(canonical_json(style_stage)+"\n").encode())
+    semantic_binding={"style_stage_sha256":content_hash(style_stage),
+        "verifier_config_sha256":verifier_hash,"producer_route_decision_ref":producer_route_decision_ref}
+    semantic_attempt=(0 if artifact_dir is None else
+        len(list((artifact_dir/"failures").glob(f"{proof_key}.fidelity.*.json")))
+        if (artifact_dir/"failures").is_dir() else 0)
+    try:
+        verifier_model=make(verifier_raw)
+        verifier_call=independent_model_call(verifier_model,producer_route_decision_refs=[producer_route_decision_ref,brain_call["route_decision_ref"]],purpose=FIDELITY_PURPOSE,request_id=f"{request_id}:fidelity:{content_hash(semantic_binding)[:16]}:{semantic_attempt}",prompt=build_verifier_prompt(product,{"sections":result["brain_revision"]["sections"]}),mission=mission)
+        calls["fidelity"]=dict(verifier_call);verdict=unwrap_json_object(verifier_call["text"])
+        expected={"verdict","faithful","no_new_facts","meaning_preserved","findings"}
+        valid=(isinstance(verdict,Mapping) and set(verdict)==expected and verdict.get("verdict")=="pass"
+               and all(verdict.get(k) is True for k in ("faithful","no_new_facts","meaning_preserved")) and verdict.get("findings")==[])
+        route=_route_identity(verifier_raw,verifier_call)
+        replay=_independence(verifier_raw,draft_routes=[producer_route_decision_ref,brain_call["route_decision_ref"]],verifier_route=verifier_call["route_decision_ref"])
+        result["fidelity_verification"]={**(dict(verdict) if isinstance(verdict,Mapping) else {"raw_structure_valid":False}),"route":route,"independence":replay}
+        if not valid or replay.get("independent") is not True:raise ResearchLanguageReviewError("独立事实保真核验未通过")
+    except Exception as exc:
+        pending={**result,"status":"pending_fidelity_review","pending_reason":"独立事实保真核验未完成",
+                 "fidelity_verification":result.get("fidelity_verification",{"error_type":type(exc).__name__}),
+                 "runtime_binding":identities,"runtime_identity":{"checker":checker_identity,
+                 "brain":brain_identity},"call_evidence":{"checker":checker_call,"brain":brain_call}}
+        if "fidelity" in calls:
+            pending["fidelity_call_evidence"]=_call_evidence(calls["fidelity"])
+            pending["call_evidence"]["fidelity"]=pending["fidelity_call_evidence"]
+        pending["review_cost_micros"]=sum(int(row.get("cost_micros") or 0)
+                                          for row in pending["call_evidence"].values())
+        return _record_failure(artifact_dir,proof_key,"fidelity",pending)
+    result["runtime_binding"]=identities
+    result["runtime_identity"]={"checker":checker_identity,"brain":brain_identity,"fidelity":route}
+    calls={"checker":checker_call,"brain":brain_call,"fidelity":_call_evidence(calls["fidelity"])}
+    result["call_evidence"]=calls
     result["review_cost_micros"]=sum(int(v.get("cost_micros") or 0) for v in calls.values())
     result["replayed"]=bool(calls) and all(v.get("replayed") is True for v in calls.values())
     result["content_hash"]=content_hash({k:v for k,v in result.items() if k!="content_hash"})
@@ -149,6 +265,10 @@ def run(product: Mapping[str, Any], *, mission: Mapping[str, Any], request_id: s
         base=proof_base
         if result.get("suggestions_markdown") is not None:
             _write_once(base.with_suffix(".md"),result["suggestions_markdown"].encode())
-        payload=(canonical_json(result)+"\n").encode();_write_once(base.with_suffix(".json"),payload)
+        payload=(canonical_json(result)+"\n").encode()
+        target=base.with_suffix(".json")
+        if target.exists(): target=identity_final
+        _write_once(target,payload)
+        base=target.with_suffix("")
         result={**result,"artifact_ref":base.name,"artifact_sha256":_hash_bytes(payload)}
     return result

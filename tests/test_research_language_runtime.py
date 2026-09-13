@@ -23,6 +23,18 @@ class Model:
                 "work_order_ref":"work:x","result_envelope_ref":"result:x","invocation_ref":"invoke:x","cost_micros":1,"replayed":False}
 
 class RuntimeTests(unittest.TestCase):
+    def resumable_args(self, root, factory, *, request_id="resume"):
+        paths={}
+        for kind in ('checker','brain','fidelity'):
+            path=root/f'{kind}.json';path.write_text(json.dumps({
+                "model_router_db":str(root/'router.db'),"fixture_kind":kind}))
+            paths[kind]=path
+        return dict(product={"kind":"ask_answer","sections":[{
+            "title":"回答","body":"收入为 10 美元。","gaps":[]}]},mission={},
+            request_id=request_id,checker_config=paths['checker'],brain_config=paths['brain'],
+            verifier_config=paths['fidelity'],producer_route_decision_ref='decision:producer',
+            scheduler_db=root/'scheduler.db',artifact_dir=root/'proof',model_factory=factory)
+
     def test_two_calls_are_bound_and_artifacts_are_idempotent(self):
         with tempfile.TemporaryDirectory() as d:
             root=Path(d); checker=root/'checker.json'; brain=root/'brain.json'
@@ -97,4 +109,67 @@ class RuntimeTests(unittest.TestCase):
             with patch('dalton_core.research_language_runtime.ModelRouter',Wrong):
                 with self.assertRaisesRegex(ValueError,'身份不符合'):
                     run({"kind":"ask_answer","sections":[{"title":"回答","body":"收入为 10 美元。","gaps":[]}]},mission={},request_id='x',checker_config=paths[0],brain_config=paths[1],verifier_config=paths[2],producer_route_decision_ref='decision:producer',scheduler_db=root/'s',model_factory=factory)
+
+    def test_fidelity_failure_retries_only_fidelity_and_preserves_failure(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d);calls=[];fail=[True]
+            class Routed(Model):
+                def call(self,**kw):
+                    calls.append(self.kind)
+                    if self.kind=='fidelity' and fail:
+                        fail.pop();raise RuntimeError('temporary outage')
+                    return super().call(**kw)
+            args=self.resumable_args(root,lambda cfg:Routed(cfg['fixture_kind']))
+            with patch('dalton_core.research_language_runtime.ModelRouter',FakeRouter):
+                first=run(**args);second=run(**args)
+            self.assertEqual('pending_fidelity_review',first['status'])
+            self.assertEqual('ready_for_publication',second['status'])
+            self.assertEqual(['checker','brain','fidelity','fidelity'],calls)
+            self.assertTrue(list((root/'proof'/'failures').glob('*.fidelity.*.json')))
+            self.assertTrue((root/'proof'/f'{second["artifact_ref"]}.json').is_file())
+
+    def test_brain_transport_failure_reuses_checker_then_finishes(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d);calls=[];failed=False
+            class Routed(Model):
+                def call(self,**kw):
+                    nonlocal failed
+                    calls.append(self.kind)
+                    if self.kind=='brain' and not failed:
+                        failed=True;raise RuntimeError('temporary brain outage')
+                    return super().call(**kw)
+            args=self.resumable_args(root,lambda cfg:Routed(cfg['fixture_kind']),request_id='brain-resume')
+            with patch('dalton_core.research_language_runtime.ModelRouter',FakeRouter):
+                first=run(**args);second=run(**args)
+            self.assertEqual('pending_brain_revision',first['status'])
+            self.assertEqual('ready_for_publication',second['status'])
+            self.assertEqual(['checker','brain','brain','fidelity'],calls)
+
+    def test_source_or_stage_config_change_cannot_reuse_cached_calls(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d);calls=[]
+            class Routed(Model):
+                def call(self,**kw):calls.append(self.kind);return super().call(**kw)
+            args=self.resumable_args(root,lambda cfg:Routed(cfg['fixture_kind']),request_id='binding')
+            with patch('dalton_core.research_language_runtime.ModelRouter',FakeRouter):run(**args)
+            checker=json.loads(args['checker_config'].read_text());checker['changed']=True
+            args['checker_config'].write_text(json.dumps(checker))
+            with patch('dalton_core.research_language_runtime.ModelRouter',FakeRouter):run(**args)
+            changed=dict(args);changed['product']={**args['product'],"version_ref":"other"}
+            with patch('dalton_core.research_language_runtime.ModelRouter',FakeRouter):run(**changed)
+            self.assertEqual(3,calls.count('checker'))
+            self.assertEqual(3,calls.count('brain'))
+
+    def test_verifier_config_change_reuses_style_but_not_semantic_result(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d);calls=[]
+            class Routed(Model):
+                def call(self,**kw):calls.append(self.kind);return super().call(**kw)
+            args=self.resumable_args(root,lambda cfg:Routed(cfg['fixture_kind']),request_id='verifier-change')
+            with patch('dalton_core.research_language_runtime.ModelRouter',FakeRouter):run(**args)
+            verifier=json.loads(args['verifier_config'].read_text());verifier['policy_version']='new'
+            args['verifier_config'].write_text(json.dumps(verifier))
+            with patch('dalton_core.research_language_runtime.ModelRouter',FakeRouter):second=run(**args)
+            self.assertEqual('ready_for_publication',second['status'])
+            self.assertEqual(['checker','brain','fidelity','fidelity'],calls)
 if __name__=='__main__': unittest.main()
