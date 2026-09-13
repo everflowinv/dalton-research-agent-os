@@ -77,42 +77,42 @@ class ResearchPublicationTransitionTest(unittest.TestCase):
                         launch_agents_dir=self.launch, transition=self.transition)
         manifest = {"research_publication_transition": self.transition}
         worker = execute.SuccessorOrchestrator(self.packet, io.StringIO())
+        checkpoint = self.state / "research-publication-work" / "worker-last-run.json"
+        checkpoint.parent.mkdir()
+        checkpoint.write_text(json.dumps({
+            "schema_version": "research-publication-worker-checkpoint:0.1",
+            "status": "waiting_for_release_publication", "model_calls": 0,
+            "observed_release_sha256": None, "observed_runtime_sha256": None,
+            "checked_at": "2026-09-13T01:00:00+00:00",
+        }) + "\n")
 
         def start(label):
             self.assertEqual("com.dalton.research-publication-worker", label)
             config = self.state / "research-publication-worker-config.json"
-            # A real child process exercises the launch ordering and durable
-            # checkpoint boundary without launchctl or a provider call.
-            script = (
-                "import datetime,json,pathlib,sys;"
-                "c=json.loads(pathlib.Path(sys.argv[1]).read_text());"
-                "p=pathlib.Path(c['work_dir'])/'worker-last-run.json';"
-                "p.parent.mkdir(parents=True,exist_ok=True);"
-                "p.write_text(json.dumps({'schema_version':'research-publication-worker-checkpoint:0.1',"
-                "'status':'waiting_for_release_publication','model_calls':0,"
-                "'observed_release_sha256':None,'observed_runtime_sha256':None,"
-                "'checked_at':'2026-09-13T22:00:00+00:00'})+'\\n')"
-            )
+            runtime = Path(os.environ.get(
+                "DALTON_ACCEPTED_RUNTIME_SOURCE_ROOT",
+                "/Users/everflow/Projects/dalton-foundation-r25-final-v11-worktree"))
+            self.assertTrue((runtime / "src/dalton_core/research_output_preparation.py").is_file())
+            env = dict(os.environ, PYTHONPATH=str(runtime / "src"))
             completed = subprocess.run(
-                [sys.executable, "-c", script, str(config)],
-                capture_output=True, text=True, timeout=30)
+                [sys.executable, "-m", "dalton_core.research_output_preparation",
+                 "run-worker", "--config", str(config)],
+                capture_output=True, text=True, env=env, timeout=30)
             self.assertEqual(0, completed.returncode, completed.stderr)
 
         worker.start = start
         with patch.object(execute.r11, "STATE", self.state), \
              patch.object(execute.r11, "LAUNCH_AGENTS", self.launch):
             worker._activate_research_publication_worker(manifest)
-        checkpoint = json.loads((self.state / "research-publication-work" /
-                                 "worker-last-run.json").read_text())
-        self.assertEqual("waiting_for_release_publication", checkpoint["status"])
-        self.assertEqual(0, checkpoint["model_calls"])
+        checkpoint_value = json.loads(checkpoint.read_text())
+        self.assertEqual("waiting_for_release_publication", checkpoint_value["status"])
+        self.assertEqual(0, checkpoint_value["model_calls"])
         plist = self.launch / LAUNCH_AGENT_NAME
         self.assertEqual(0o644, plist.stat().st_mode & 0o777)
         rollback(state_dir=self.state, launch_agents_dir=self.launch,
                  transition=self.transition)
         self.assertFalse(plist.exists())
-        self.assertTrue((self.state / "research-publication-work" /
-                         "worker-last-run.json").is_file())
+        self.assertTrue(checkpoint.is_file())
 
     def test_existing_target_refuses_without_overwrite(self):
         target = self.state / sorted(FIXED_FILES)[0]; target.write_text("owner\n")
@@ -120,6 +120,13 @@ class ResearchPublicationTransitionTest(unittest.TestCase):
             apply(packet_root=self.packet, state_dir=self.state,
                   launch_agents_dir=self.launch, transition=self.transition)
         self.assertEqual(target.read_text(), "owner\n")
+
+    def test_apply_refuses_to_skip_launch_agent(self):
+        with self.assertRaisesRegex(ResearchPublicationTransitionError,
+                                    "requires a LaunchAgents directory"):
+            apply(packet_root=self.packet, state_dir=self.state,
+                  launch_agents_dir=None, transition=self.transition)
+        self.assertEqual([], list(self.state.iterdir()))
 
     def test_rollback_refuses_changed_installed_file(self):
         apply(packet_root=self.packet, state_dir=self.state,

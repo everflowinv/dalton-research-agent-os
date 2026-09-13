@@ -516,14 +516,31 @@ class SuccessorOrchestrator(r11.Orchestrator):
              "installed research publication worker config differs")
         config = validate_worker_config_bytes(config_path.read_bytes())
         checkpoint = Path(config["work_dir"]) / "worker-last-run.json"
-        need(not checkpoint.exists() and not checkpoint.is_symlink(),
-             "research publication waiting checkpoint already exists before activation")
+        prior = None
+        if checkpoint.exists() or checkpoint.is_symlink():
+            need(checkpoint.is_file() and not checkpoint.is_symlink(),
+                 "research publication checkpoint is not a regular file")
+            prior = checkpoint.read_bytes()
+        gate = config["publication_gate"]
+        release_pointer = Path(gate["release_pointer"])
+        runtime_pointer = Path(gate["runtime_pointer"])
+        need(release_pointer.is_file() and not release_pointer.is_symlink()
+             and runtime_pointer.is_file() and not runtime_pointer.is_symlink(),
+             "research publication predecessor pointers are unavailable")
+        expected_observed = (sha(release_pointer), sha(runtime_pointer))
+        activated_at = datetime.now(timezone.utc)
         self.start(LAUNCH_AGENT_LABEL)
         for _ in range(300):
             if checkpoint.is_file() and not checkpoint.is_symlink():
                 try:
-                    validate_waiting_checkpoint(load_json(checkpoint))
-                    return
+                    current = checkpoint.read_bytes()
+                    value = validate_waiting_checkpoint(json.loads(current))
+                    checked_at = datetime.fromisoformat(value["checked_at"])
+                    if (current != prior and checked_at >= activated_at
+                            and (value["observed_release_sha256"],
+                                 value["observed_runtime_sha256"])
+                            == expected_observed):
+                        return
                 except Exception:
                     pass
             time.sleep(.2)

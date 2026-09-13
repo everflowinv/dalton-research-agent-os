@@ -255,6 +255,8 @@ def apply(*, packet_root: Path, state_dir: Path, launch_agents_dir: Path | None,
           transition: Mapping[str, Any]) -> list[Path]:
     """Install the closed inventory; an existing target always refuses."""
     value = validate_transition(transition)
+    _need(launch_agents_dir is not None,
+          "research publication transition requires a LaunchAgents directory")
     roots = {"launch_agent": (None if launch_agents_dir is None else launch_agents_dir.resolve())}
     state = state_dir.resolve()
     created: list[tuple[Path, dict[str, Any]]] = []
