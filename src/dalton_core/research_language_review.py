@@ -93,13 +93,20 @@ def validate_checker_output(value: Mapping[str, Any], *, sections: list[Mapping[
         # One reviewed checker transport emitted its language assessment under
         # ``body``. Accept only that exact closed alias; mixed or extra fields
         # remain invalid, and quote anchoring below is unchanged.
-        if set(item) == body_alias and isinstance(item.get("body"), str) and item["body"].strip():
+        optional = {"title", "index"}
+        if (set(item) - optional == body_alias
+                and isinstance(item.get("body"), str) and item["body"].strip()):
             item["assessment"] = item.pop("body")
-        if set(item) not in (required, required | {"title"}):
+        if set(item) - optional != required:
             raise ResearchLanguageReviewError("language checker suggestion has an invalid shape")
         index = item["section_index"]
         if isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < len(sections):
             raise ResearchLanguageReviewError("language checker section index is invalid")
+        if 'index' in item:
+            if (isinstance(item['index'], bool) or not isinstance(item['index'], int)
+                    or item['index'] != index):
+                raise ResearchLanguageReviewError("language checker redundant index differs from section index")
+            del item['index']
         if 'title' in item and item['title'] != sections[index].get('title'):
             raise ResearchLanguageReviewError("language checker redundant title differs from source")
         if any(not isinstance(item[key], str) for key in ('quote', 'assessment', 'suggestion')):

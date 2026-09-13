@@ -266,6 +266,10 @@ def _number_differences(source_values: Sequence[str], target_values: Sequence[st
                     rf"(?<!\d){full}\s*财年", " ".join(target_values))):
                 missing_counter[short] -= 1
                 if added[full]: added[full] -= 1
+                # Once FYnn has proved the corresponding full fiscal year,
+                # that same display spelling may appear in both the heading
+                # and body without inventing another period.
+                aliases[full] += 1
             else:
                 aliases[full] += 1
         for match in re.finditer(r"(?<![A-Za-z])(?:FY|fiscal(?:\s+year)?)\s*(20[0-9]{2})(?![0-9])", value, re.I):

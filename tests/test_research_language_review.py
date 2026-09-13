@@ -104,6 +104,19 @@ class ResearchLanguageReviewTests(unittest.TestCase):
         self.assertEqual(checked["suggestions"][0]["assessment"], "句式略显生硬。")
         self.assertNotIn("body", checked["suggestions"][0])
 
+    def test_checker_accepts_only_matching_redundant_numeric_index(self):
+        sections = [{"title": "标题", "body": "原句。", "gaps": []}]
+        item = {"index": 0, "section_index": 0, "quote": "原句。",
+                "assessment": "句式略显生硬。", "suggestion": "建议句。"}
+        checked = validate_checker_output(
+            {"overall": "可调整。", "suggestions": [item]}, sections=sections)
+        self.assertNotIn("index", checked["suggestions"][0])
+        for bad in (1, True, "0"):
+            item["index"] = bad
+            with self.assertRaisesRegex(ValueError, "redundant index"):
+                validate_checker_output(
+                    {"overall": "可调整。", "suggestions": [item]}, sections=sections)
+
     def test_checker_body_alias_remains_closed(self):
         sections = [{"title": "标题", "body": "原句。", "gaps": []}]
         for item in (

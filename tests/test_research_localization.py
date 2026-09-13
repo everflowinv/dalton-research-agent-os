@@ -196,6 +196,7 @@ class ResearchLocalizationTests(unittest.TestCase):
  def test_preflight_accepts_only_explicit_fiscal_year_and_cheng_equivalents(self):
     cases = (
         ("FY26 revenue outlook", "2026财年收入展望"),
+        ("FY26 revenue outlook", "2026财年收入展望：2026财年需求疲软"),
         ("fiscal 2027 outlook", "2027财年展望（FY27）"),
         ("约两成五的收入", "约25%的收入"),
     )
@@ -205,6 +206,11 @@ class ResearchLocalizationTests(unittest.TestCase):
         self.assertEqual(validate_localized_text(source, translated)[0]["index"], 0)
     source["sections"][0]["body"] = "约两成五的收入"
     translated["sections"][0]["body"] = "约26%的收入"
+    with self.assertRaisesRegex(ResearchLocalizationError, "number tokens"):
+        validate_localized_text(source, translated)
+
+    source["sections"][0]["body"] = "FY26 revenue outlook"
+    translated["sections"][0]["body"] = "2026财年收入展望：2027财年需求疲软"
     with self.assertRaisesRegex(ResearchLocalizationError, "number tokens"):
         validate_localized_text(source, translated)
 
