@@ -440,6 +440,10 @@ class SecLaneLauncherTests(unittest.TestCase):
             orphan = fresh.status(ticket["id"])
             self.assertEqual(orphan["status"], "orphaned")
             self.assertIsNotNone(orphan["completed_at"])
+            # Both launchers own supervisor threads whose final ticket write
+            # must finish before TemporaryDirectory removes their state.
+            fresh.close()
+            launcher.close()
 
     def test_form_is_validated_recorded_and_forwarded(self) -> None:
         """P9b: the annual form rides the ticket and the child argv; others fail closed."""
