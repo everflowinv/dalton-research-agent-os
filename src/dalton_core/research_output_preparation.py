@@ -24,7 +24,7 @@ from dalton_core.research_localization import (build_prompt, build_verifier_prom
     build_localization, validate_localized_text, source_content_hash)
 from dalton_core.research_localization_store import publish_attachment, publish_ui_texts, publish_reviewed_attachment, has_reviewed_attachment
 from dalton_core.final_text_contract import FINAL_TEXT_RULES_VERSION
-from dalton_core.research_language_review import (run_language_review, CHECKER_PURPOSE,
+from dalton_core.research_language_review import (run_language_review, parse_stage_output, CHECKER_PURPOSE,
     BRAIN_PURPOSE, CHECKER_MODEL, CHECKER_PROVIDER)
 from dalton_core.model_router import ModelRouter
 
@@ -146,8 +146,8 @@ def _migrate_legacy_style(*, product, work_dir, draft_config, checker_config,
         raise ValueError('legacy language checker identity could not be confirmed')
     review_product = dict(product, sections=legacy['draft_localized']['sections'])
     replayed_review = run_language_review(review_product,
-        checker=lambda _: unwrap_json_object(legacy['checker_call']['text']),
-        brain=lambda _: unwrap_json_object(legacy['brain_call']['text']),
+        checker=lambda _: parse_stage_output(legacy['checker_call']['text'], stage='checker'),
+        brain=lambda _: parse_stage_output(legacy['brain_call']['text'], stage='brain'),
         checker_identity={'provider': CHECKER_PROVIDER, 'model': CHECKER_MODEL})
     if replayed_review != review:
         raise ValueError('legacy language review does not replay exactly')
@@ -230,7 +230,7 @@ def run_chunk(task, *, mission, draft_config, verifier_config, checker_config,
     prior_review = evidence.get('language_review') or {}
     resume_interrupted_call = (
         prior_review.get('status') == 'pending_brain_revision' and 'brain_call' not in evidence
-        or prior_review.get('status') == 'pending_language_review' and 'checker_call' not in evidence
+        or prior_review.get('status') == 'pending_language_review'
     )
     if 'language_review' not in evidence or resume_interrupted_call:
         review_product = dict(product, sections=evidence['draft_localized']['sections'])
@@ -245,14 +245,14 @@ def run_chunk(task, *, mission, draft_config, verifier_config, checker_config,
             actual = selected_identity(checker_config,evidence['checker_call'])
             if actual != {'provider':CHECKER_PROVIDER,'model':CHECKER_MODEL}:
                 raise ValueError('language checker served an unexpected transport or model')
-            return unwrap_json_object(evidence['checker_call']['text'])
+            return parse_stage_output(evidence['checker_call']['text'], stage='checker')
         def revise(brain_prompt):
             if 'brain_call' not in evidence:
                 brain_id = hashlib.sha256((identity+brain_prompt).encode()).hexdigest()
                 evidence['brain_call'] = brain.call(purpose=BRAIN_PURPOSE,
                     request_id='zh-revise-'+brain_id,prompt=brain_prompt,mission=mission)
                 write_json(stage_path,evidence)
-            return unwrap_json_object(evidence['brain_call']['text'])
+            return parse_stage_output(evidence['brain_call']['text'], stage='brain')
         review = run_language_review(review_product,checker=check,brain=revise,
             checker_identity={'provider':CHECKER_PROVIDER,'model':CHECKER_MODEL})
         evidence['language_review'] = review
@@ -267,8 +267,8 @@ def run_chunk(task, *, mission, draft_config, verifier_config, checker_config,
     if review['status'] == 'pending_brain_revision' and 'brain_call' in evidence:
         review_product=dict(product,sections=evidence['draft_localized']['sections'])
         review=run_language_review(review_product,
-            checker=lambda _:unwrap_json_object(evidence['checker_call']['text']),
-            brain=lambda _:unwrap_json_object(evidence['brain_call']['text']),
+            checker=lambda _:parse_stage_output(evidence['checker_call']['text'], stage='checker'),
+            brain=lambda _:parse_stage_output(evidence['brain_call']['text'], stage='brain'),
             checker_identity={'provider':CHECKER_PROVIDER,'model':CHECKER_MODEL})
         evidence['language_review']=review
         write_json(stage_path,evidence)

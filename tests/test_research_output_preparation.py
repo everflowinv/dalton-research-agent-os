@@ -72,6 +72,15 @@ class PreparationTests(unittest.TestCase):
         self.assertEqual(self.calls.count('research_localization'), 1)
         self.assertEqual(self.calls.count(prep.BRAIN_PURPOSE), 2)
 
+    def test_restarted_json_stream_accepts_one_complete_object_only(self):
+        text = '```json\n{"overall":"unfinished\n```json\n' + json.dumps(STYLE) + '\n```'
+        self.assertEqual(prep.parse_stage_output(text, stage='checker'), STYLE)
+        with self.assertRaisesRegex(ValueError, 'unique'):
+            prep.parse_stage_output(json.dumps(STYLE) + json.dumps({**STYLE, 'overall':'different'}),
+                                    stage='checker')
+        with self.assertRaisesRegex(ValueError, 'unique'):
+            prep.parse_stage_output('{"overall":"unfinished', stage='checker')
+
     def test_brain_number_change_cannot_reach_verifier_or_publication(self):
         bad=copy.deepcopy(REVISION);bad['sections'][0]['body']='收入为 124 美元。'
         self.responses[prep.BRAIN_PURPOSE]=bad

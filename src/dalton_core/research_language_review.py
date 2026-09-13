@@ -21,6 +21,32 @@ class ResearchLanguageReviewError(ValueError):
     pass
 
 
+def parse_stage_output(text: str, *, stage: str) -> dict[str, Any]:
+    """Recover one complete closed object from a restarted text stream.
+
+    Some transports retain an incomplete prefix before the model restarts its
+    JSON response. Keep the original call bytes, accept only one unambiguous
+    complete stage object, and leave all content validation to the caller.
+    """
+    keys = {'checker': {'overall', 'suggestions'}, 'brain': {'decisions', 'sections'}}
+    if stage not in keys:
+        raise ValueError('unknown language review stage')
+    decoder = json.JSONDecoder()
+    candidates = {}
+    for index, char in enumerate(text):
+        if char != '{':
+            continue
+        try:
+            value, _ = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict) and set(value) == keys[stage]:
+            candidates[_hash(value)] = value
+    if len(candidates) != 1:
+        raise ResearchLanguageReviewError('language stage has no unique complete JSON object')
+    return next(iter(candidates.values()))
+
+
 def _canonical(value: Any) -> bytes:
     return (json.dumps(value, ensure_ascii=False, sort_keys=True,
                        separators=(",", ":")) + "\n").encode()
