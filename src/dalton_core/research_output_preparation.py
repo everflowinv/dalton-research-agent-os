@@ -211,7 +211,7 @@ def run_chunk(task, *, mission, draft_config, verifier_config, checker_config,
                 call = draft.call(purpose='research_localization', request_id='zh-draft-'+token,
                                   prompt=prompt, mission=mission)
                 evidence['draft'] = call
-                localized = unwrap_json_object(call['text'])
+                localized = parse_stage_output(call['text'], stage='draft')
                 validate_localized_text(product, localized)
                 evidence['draft_localized'] = localized
                 write_json(stage_path, evidence)

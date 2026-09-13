@@ -28,7 +28,8 @@ def parse_stage_output(text: str, *, stage: str) -> dict[str, Any]:
     JSON response. Keep the original call bytes, accept only one unambiguous
     complete stage object, and leave all content validation to the caller.
     """
-    keys = {'checker': {'overall', 'suggestions'}, 'brain': {'decisions', 'sections'}}
+    keys = {'draft': {'sections'}, 'checker': {'overall', 'suggestions'},
+            'brain': {'decisions', 'sections'}}
     if stage not in keys:
         raise ValueError('unknown language review stage')
     decoder = json.JSONDecoder()

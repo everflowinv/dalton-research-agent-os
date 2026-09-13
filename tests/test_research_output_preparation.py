@@ -75,6 +75,8 @@ class PreparationTests(unittest.TestCase):
     def test_restarted_json_stream_accepts_one_complete_object_only(self):
         text = '```json\n{"overall":"unfinished\n```json\n' + json.dumps(STYLE) + '\n```'
         self.assertEqual(prep.parse_stage_output(text, stage='checker'), STYLE)
+        self.assertEqual(prep.parse_stage_output('unfinished {"sections":\n' + json.dumps(CHINESE),
+                                                stage='draft'), CHINESE)
         with self.assertRaisesRegex(ValueError, 'unique'):
             prep.parse_stage_output(json.dumps(STYLE) + json.dumps({**STYLE, 'overall':'different'}),
                                     stage='checker')
