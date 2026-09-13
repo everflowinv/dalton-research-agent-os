@@ -932,7 +932,7 @@ class AllowPatchTests(unittest.TestCase):
             result["changed_paths"],
             ["plugins.entries.dalton-openclaw-model-broker"],
         )
-        self.assertIn("openclaw gateway restart", result["reload_instruction"])
+        self.assertEqual(result["reload_instruction"], "已允许使用。重启模型网关后生效。")
         # Round trip: what landed parses, and differs from the backup only
         # inside the subtree the patch names.
         before = json.loads(backup.read_text(encoding="utf-8"))

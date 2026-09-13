@@ -817,14 +817,14 @@ function renderSources(sheet,r){sheet.replaceChildren(readerClose(),node("h2","�
 /* P14-M2: the 模型 page. Per calling stage: what kind of judgement it is, the
    chain it will actually reach, what answered last time and what that cost,
    and a selector. Below it the gateway's catalog in three columns, with a
-   放行 button on the one column an owner can act on. */
+   允许使用 button on the one column an owner can act on. */
 $("open-models").onclick=openModels;$("hero-models").onclick=openModels;
 async function openModels(){const sheet=prepareReader("研究详情");
   sheet.replaceChildren(node("div","正在读取…","empty"));
   try{renderModels(sheet,await getJson("/v1/cockpit/models"))}
   catch(e){sheet.replaceChildren(readerClose());showProblem(sheet,e,"读取模型配置")}}
 function renderModels(sheet,r){sheet.replaceChildren(readerClose(),node("h2","每个环节用哪个模型"),
-  node("div","每个环节会说明当前使用的是模型顺序还是候选集。可热加载的环节在下一次调用生效；标为需重启的环节按行内提示生效。如需恢复原配置，请重新选择原方案。","meta"));
+  node("div","每个环节会说明当前使用的是模型顺序还是候选集。多数修改会在下一次调用生效；需要重启的环节会单独提示。如需恢复原配置，请重新选择原方案。","meta"));
   if(!r.available){sheet.append(node("div",r.reason,"empty"));return}
   (r.notices||[]).filter(n=>!n.acknowledged).forEach(n=>{
     const d=node("div",null,"gap");d.append(node("b","模型变动"),node("div",n.message,"raw"));
@@ -898,7 +898,7 @@ function renderModels(sheet,r){sheet.replaceChildren(readerClose(),node("h2","�
       const family=window.prompt("模型家族（用于独立核验；请填写已确认的公开家族名）",choice.family&& !choice.family.startsWith("unclassified:")?choice.family:"");
       if(family===null)return;const raw=window.prompt("能力，用逗号分隔",(choice.capabilities||[]).join(","));if(raw===null)return;
       const capabilities=raw.split(",").map(x=>x.trim()).filter(Boolean);declare.disabled=true;
-      try{const out=await postJson("/v1/cockpit/model_metadata",{profile_id:choice.model,profile_version_ref:choice.profile_version_ref,profile_hash:choice.profile_hash,family:family.trim(),capabilities});toast(out.application_status==="applied"?"元数据已发布并生效":out.application_status==="route_changed"?"模型路由已变化，旧声明未应用；请重新确认当前模型":"元数据已发布，等待目录同步");openModels()}
+      try{const out=await postJson("/v1/cockpit/model_metadata",{profile_id:choice.model,profile_version_ref:choice.profile_version_ref,profile_hash:choice.profile_hash,family:family.trim(),capabilities});toast(out.application_status==="applied"?"模型信息已保存并生效":out.application_status==="route_changed"?"模型路由已变化，旧声明未应用；请重新确认当前模型":"模型信息已保存，等待目录同步");openModels()}
       catch(e){declare.disabled=false;toast(readableError(e,"保存模型说明").message)}};line.append(declare);avail.append(line)});
   sheet.append(avail);
   const cat=r.catalog,box=node("section");box.append(node("h3","模型网关目录"));
@@ -908,9 +908,9 @@ function renderModels(sheet,r){sheet.replaceChildren(readerClose(),node("h2","�
     const c=node("div");c.append(node("b",`${title}（${names.length}）`));c.append(node("small",note));
     if(!names.length)c.append(node("small","没有","raw"));
     names.forEach(name=>{const line=node("div",null,"raw");line.append(node("span",name,"figv"));
-      if(allow){const b=node("button","放行","ghost");b.onclick=async()=>{b.disabled=true;
+      if(allow){const b=node("button","允许使用","ghost");b.onclick=async()=>{b.disabled=true;
         try{const out=await postJson("/v1/cockpit/model_allow",{model_ref:name});
-          toast(out.reload_instruction||"已放行");openModels()}
+          toast(out.reload_instruction||"已允许使用");openModels()}
         catch(e){b.disabled=false;toast(readableError(e,"授权模型").message)}};line.append(b)}
       c.append(line)});
     d.append(c);box.append(d)};
@@ -1070,7 +1070,7 @@ function draftActions(box,r,kind){const a=node("div",null,"actions"),ok=node("bu
 
 // ---------- steer
 $("steer-submit").onclick=async()=>{const text=$("steer-input").value.trim();if(!text){$("steer-status").textContent="请先写下调整方向";return}const b=$("steer-submit"),s=$("steer-status");b.disabled=true;s.className="status";s.textContent="正在整理具体改动…";$("steer-draft").replaceChildren();try{const job=await postJson("/v1/cockpit/steer",{text,request_id:rid()});const r=await waitJob(job.job_id);s.className="status ok";s.textContent="已整理完成，请确认。";renderSteerDraft(r)}catch(e){s.className="status err";s.textContent=readableError(e,"整理方向调整").message}finally{b.disabled=false}};
-function renderSteerDraft(r){const d=r.draft,box=node("div",null,"draft");if(d.understood_as)box.append(node("p",`我理解为：${d.understood_as}`,"summary"));if(d.summary)box.append(node("div",d.summary));const any=d.add_questions.length||d.remove_questions.length||d.changes.objective;if(d.add_questions.length){const ul=node("ul");d.add_questions.forEach(q=>ul.append(node("li",q,"add")));box.append(node("h4","新增的问题"),ul)}if(d.remove_questions.length){const ul=node("ul");d.remove_questions.forEach(q=>ul.append(node("li",q,"rm")));box.append(node("h4","去掉的问题"),ul)}if(d.changes.objective)box.append(node("h4","改写后的目标"),node("div",d.objective));if(d.not_possible.length){const ul=node("ul");d.not_possible.forEach(q=>ul.append(node("li",q)));box.append(node("h4","本次无法执行的调整"),ul)}if(!any)box.append(node("div","这句话不需要改动研究问题；如果你想改变的是数据来源或公司名单，请告诉我，我会记下来作为下一步开发。","hint"));else{box.append(node("div","确认后发布为新一版研究目标；系统从下一轮开始按新问题阅读和提炼。","hint"));draftActions(box,r,"steer")}$("steer-draft").replaceChildren(box)}
+function renderSteerDraft(r){const d=r.draft,box=node("div",null,"draft");if(d.understood_as)box.append(node("p",`我理解为：${d.understood_as}`,"summary"));if(d.summary)box.append(node("div",d.summary));const any=d.add_questions.length||d.remove_questions.length||d.changes.objective;if(d.add_questions.length){const ul=node("ul");d.add_questions.forEach(q=>ul.append(node("li",q,"add")));box.append(node("h4","新增的问题"),ul)}if(d.remove_questions.length){const ul=node("ul");d.remove_questions.forEach(q=>ul.append(node("li",q,"rm")));box.append(node("h4","去掉的问题"),ul)}if(d.changes.objective)box.append(node("h4","改写后的目标"),node("div",d.objective));if(d.not_possible.length){const ul=node("ul");d.not_possible.forEach(q=>ul.append(node("li",q)));box.append(node("h4","本次无法执行的调整"),ul)}if(!any)box.append(node("div","本次没有形成可发布的调整。请写明要新增的研究问题，或需要修改的研究目标。","hint"));else{box.append(node("div","确认后发布为新一版研究目标；系统从下一轮开始按新问题阅读和提炼。","hint"));draftActions(box,r,"steer")}$("steer-draft").replaceChildren(box)}
 async function loadSteerHistory(){try{const h=await getJson("/v1/cockpit/history?kind=steer");const box=$("steer-history");const items=h.drafts||[];if(!items.length){box.replaceChildren(node("div","尚无方向调整记录","empty"));return}box.replaceChildren(...items.map(x=>{const d=node("div",null,"h");d.append(node("b",`${fmtDate(x.created_at)} · ${{open:"待确认",published:"已生效",discarded:"已放弃"}[x.status]||"状态暂不可读"}`),node("div",`你的要求：${x.input_text}`),node("div",x.draft.understood_as||x.draft.summary||""));return d}))}catch(e){showProblem($("steer-history"),e,"读取方向调整记录")}}
 
 // ---------- log
@@ -1103,7 +1103,7 @@ const displayGroups=new Map();shown.forEach((it,index)=>{const fold=it.kind==="g
   if(!displayGroups.has(key))displayGroups.set(key,{fold,who:it.who,entries:[]});
   displayGroups.get(key).entries.push(cards[index])});
 const content=[];displayGroups.forEach(group=>{if(group.fold&&group.entries.length>1){const d=node("details",null,"approval-group");
-    d.append(node("summary",`${group.who||"未注明公司"} · 历史重开事项 ${group.entries.length} 项（展开逐项决定）`));
+    d.append(node("summary",`${group.who||"未注明公司"} · 历史修订申请 ${group.entries.length} 项（展开逐项决定）`));
     group.entries.forEach(card=>d.append(card));content.push(d)}else content.push(...group.entries)});
 box.replaceChildren(...content);
 for(const key of approvalCards.keys()){if(!activeKeys.has(key))approvalCards.delete(key)}

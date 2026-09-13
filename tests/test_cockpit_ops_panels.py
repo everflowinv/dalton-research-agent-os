@@ -340,8 +340,8 @@ class PageTests(unittest.TestCase):
         self.assertIn("it.count>1", self.page)
 
     def test_model_copy_distinguishes_reload_and_token_budget(self) -> None:
-        self.assertIn("可热加载的环节在下一次调用生效", self.page)
-        self.assertIn("标为需重启的环节按行内提示生效", self.page)
+        self.assertIn("多数修改会在下一次调用生效", self.page)
+        self.assertIn("需要重启的环节会单独提示", self.page)
         self.assertIn("输入额度（token，系统按文本估算）", self.page)
         self.assertNotIn("输入额度（按 UTF-8 字节预估）", self.page)
 

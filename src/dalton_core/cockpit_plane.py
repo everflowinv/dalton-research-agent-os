@@ -4261,7 +4261,7 @@ class CockpitPlane:
             "in_sync": bool(discovery.get("in_sync")),
             "in_openclaw_not_allowed": list(discovery["in_openclaw_not_allowed"]),
             "in_openclaw_not_allowed_note":
-                "模型网关已提供，但 Dalton 尚未获准使用；可通过「放行」提交授权操作",
+                "模型网关已提供，但 Dalton 尚未获准使用；可通过「允许使用」提交授权操作",
             "allowed_not_in_dalton": list(discovery["allowed_not_in_dalton"]),
             "allowed_not_in_dalton_note":
                 "Dalton 已获授权，但本机尚未登记模型档案；同步任务会按计划自动登记",
@@ -4592,16 +4592,16 @@ class CockpitPlane:
         return {**result, "purpose": purpose, "label": label}
 
     def allow_model(self, login: str, value: Mapping[str, Any]) -> dict[str, Any]:
-        """P14-M2: 「放行」 -- let one of the gateway's models through to Dalton."""
+        """P14-M2: 「允许使用」 -- let one of the gateway's models through to Dalton."""
 
         if not isinstance(value, Mapping):
-            raise CockpitError("放行请求必须是一个对象")
+            raise CockpitError("模型授权请求必须是一个对象")
         model_ref = _text(value.get("model_ref"), "model_ref", maximum=256)
         result = self._governance(
             login, "allow_openclaw_model", {"model_ref": model_ref},
-            failure="这个模型没有被放行")
+            failure="这个模型尚未获准使用")
         self.journal.record_event(
-            kind="model_allow", title=f"你放行了模型 {model_ref}",
+            kind="model_allow", title=f"你已允许使用模型 {model_ref}",
             detail=result.get("reload_instruction"), login=login,
             refs={"model_ref": model_ref,
                   "backup_path": result.get("backup_path") or ""})

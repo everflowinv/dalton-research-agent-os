@@ -1,7 +1,7 @@
 """P14-M2: let one more of the gateway's models through, and nothing else.
 
-The owner sees a model in the cockpit's 「可用但未放行」 column and presses
-「放行」.  What that has to mean, exactly:
+The owner sees a model in the cockpit's 「可用但未允许使用」 column and presses
+「允许使用」.  What that has to mean, exactly:
 
 * two keys move, both inside
   ``plugins.entries.dalton-openclaw-model-broker`` -- one string appended to
@@ -49,8 +49,7 @@ from .openclaw_model_discovery import (
 # What the owner has to do afterwards.  Returned rather than printed, because
 # the caller is a governance operation whose answer ends up on a web page.
 RELOAD_INSTRUCTION = (
-    "重载 openclaw 网关后这个模型才真的可用（broker 在网关启动时才读它的插件配置）："
-    "openclaw gateway restart"
+    "已允许使用。重启模型网关后生效。"
 )
 # The two profile settings this does not read off the provider entry, because
 # the provider entry does not carry them.  Both match what every existing
@@ -126,7 +125,7 @@ def build_allow_patch(config: Mapping[str, Any], model_ref: str) -> dict[str, An
     """What would change, without changing anything.
 
     Returns ``status: "already_allowed"`` when the broker already passes the
-    model and already has a profile for it -- pressing 「放行」 twice is a thing
+    model and already has a profile for it -- pressing 「允许使用」 twice is a thing
     an owner will do, and the second press must not append a duplicate.
     """
 

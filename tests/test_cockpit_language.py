@@ -187,6 +187,21 @@ class CockpitLanguageTests(unittest.TestCase):
         for expected in ("尚未配置", "等待批准", "尚未运行", "模型网关目录"):
             self.assertIn(expected, text)
 
+    def test_unsubmitted_actions_avoid_internal_or_false_promising_copy(self) -> None:
+        text = HTML.read_text(encoding="utf-8")
+        for expected in (
+            "允许使用", "已允许使用", "模型信息已保存并生效",
+            "多数修改会在下一次调用生效", "历史修订申请",
+            "本次没有形成可发布的调整",
+        ):
+            self.assertIn(expected, text)
+        for stale in (
+            'node("button","放行"', 'out.reload_instruction||"已放行"',
+            "元数据已发布并生效", "可热加载的环节",
+            "我会记下来作为下一步开发", "历史重开事项",
+        ):
+            self.assertNotIn(stale, text)
+
     def test_dynamic_planner_fields_are_mapped_before_composition(self) -> None:
         text = HTML.read_text(encoding="utf-8")
         self.assertIn('${displayText(q.subject)}：${displayText(q.question)}', text)
