@@ -1,0 +1,164 @@
+# Dalton Research Agent OS
+
+Dalton 是面向投研团队的独立研究控制内核。它把任务调度、研究账本、验证、模型路由、成本与产物权威从具体 agent host 中拆出来，让模型和连接器可以替换，研究记录仍可追溯。
+
+项目已有本机常驻控制服务，但仍是原型，尚未达到生产部署标准。OpenClaw 只是可选适配层，不是 Dalton 的运行时、数据库或事实来源。
+
+**当前进度与下一步见 [`docs/PROJECT_STATUS.md`](docs/PROJECT_STATUS.md) 顶部的"下一步"。**
+
+## 仓库边界
+
+- `src/dalton_core/`：Core 契约、Research Ledger、Scheduler、模型路由、Capability Registry、writer service 和只读 dashboard；
+  以及任务层——ResearchPlaybook 与 CoverageMission authority、来源发现与获取 lane、文档抽取与准入、
+  Claim 挑战/退役、任务交付物（Initial Screen）、以及 owner cockpit 的控制面。
+  数字侧：`document_numeric_extraction`（按名字问数字）、`document_numeric_claim`（数位与口径逐字核对所引原文）、
+  `metric_discovery`/`metric_discovery_extraction`（从市场在引用什么学出该收哪些指标；两份文档互证才成立需求，
+  同名不同单位的算"有争议"、单独排除而不影响其余）、
+  `document_figure_grade` 与 `document_subject`（这个数字出自什么文档、属于哪个主体）。
+  决策侧：`research_state`（把"做了什么/缺什么/被什么挡住/花了多少"拼成一个可读的小对象）与
+  `research_planner`（读它产出带理由的排序；固化清单由代码定义，模型只能在其之内排序、在其之上追问）。
+- `deploy/macos/`：owner-only runtime bootstrap、LaunchAgent 安装、卸载和健康检查。
+- `contracts/`：跨进程 JSON Schema。
+- `integrations/openclaw-model-broker/`：复用 OpenClaw 已管理模型认证的受限 broker。
+- `integrations/openclaw-web-search-broker/`：同样形状的网页搜索 broker，凭据留在 host，Dalton 只拿结果。
+- `spikes/`：候选 runtime 的隔离实验，不属于生产执行面。
+- `docs/reports/`：架构与实现记录。报告描述当时状态，不自动转化为当前约束。
+- `tests/`：契约、隔离、幂等、账本、调度和适配层测试。
+
+运行数据库、模型输出、旧研究文件、密钥、OAuth 状态和导入后的 artifact store 不进入 Git。部署时要把它们放在独立的 owner-only 数据目录。
+
+## 设计边界
+
+- Core 是 headless、event-driven 的权威层。
+- agent 负责规划和执行 WorkOrder，不能自行提交研究结论或改写治理规则。
+- 模型 fallback 必须由 Core 路由并留下 decision，provider 或 host 不能静默切换。
+- OpenClaw 可以提供模型、消息、审批和投递连接器；Core 常驻运行时不读取 OpenClaw 配置或凭据。显式校准命令只投影 provider/model、上下文、价格和 broker profile 等公开路由元数据，忽略密钥与 headers。
+- 旧 OpenClaw agent 的约束、研究结果和 cron 只作为 legacy input 归档。归档不代表采用、兼容或继续运行。
+
+旧工作流的初步取舍见 [docs/legacy-workflow-disposition.md](docs/legacy-workflow-disposition.md)。完整契约见 [SPEC.md](SPEC.md)，当前完成度与未完成项见 [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md)，当前执行顺序见 [Phase 9 任务驱动的自主研究](docs/reports/phase9-coverage-mission-autonomous-research-v1.0-2026-09-02.md)（上一阶段：[Phase 8 单主题自主认知闭环](docs/reports/phase8-single-topic-autonomous-cognition-loop-v1.0-2026-08-27.md)），Connector 边界见 [docs/CONNECTOR_PROTOCOL.md](docs/CONNECTOR_PROTOCOL.md)。
+
+## 本地验证
+
+需要 Python 3.11+；OpenClaw broker 需要 Node.js 24+。
+
+```bash
+python3 -m pip install -e .
+python3 -m unittest discover -s tests -v
+python3 -m pip install build
+python3 -m build
+
+# 无网络、无付费模型的显式 closure → thesis-impact replay gate
+python3 scripts/run_hermetic_research_replay_canary.py
+
+# 生成完整 review evidence；输出路径必须尚不存在
+python3 scripts/collect_review_evidence.py \
+  --manifest docs/review-evidence/gate0-review.manifest.json \
+  --output /tmp/dalton-review-evidence.md
+
+# 可选：真实公共 SEC 只读 canary；不读取凭据，不接 live 数据库
+python3 scripts/run_public_sec_authority_demo.py
+
+# S7f：只读复制一个现有 Core，在临时副本验证 weekly coordinator；不投递外部消息
+python3 scripts/run_weekly_brief_coordinator_canary.py \
+  --source-core /ABSOLUTE/PATH/TO/core.sqlite \
+  --plan deploy/phase1/weekly-brief-schedule-us-it-services-v1.json \
+  --policy deploy/phase1/governance-policy-v3-weekly-brief.candidate.params.json
+
+# 可选：人工批准的完整 ResearchPlan 四步 canary；output-dir 必须尚不存在
+python3 scripts/run_sec_research_plan_canary.py \
+  --output-dir temp/sec-plan-canary-example \
+  --date-from 2026-01-01 --date-to 2026-08-17 \
+  --approved-by human:operator
+
+# 在 exact candidate 已经人工接受并完成 Ledger promotion 后，关闭同一条计划
+python3 scripts/close_sec_research_plan_canary.py \
+  --output-dir temp/sec-plan-canary-example \
+  --decision-ref human-review:EXACT_DECISION_REF
+
+# 五家公司同口径 revenue-growth batch；要求仓库 clean，output-dir 不存在
+python3 scripts/run_sec_revenue_growth_batch.py \
+  --output-dir temp/sec-revenue-growth-batch \
+  --filed-from 2025-08-21 --filed-to 2026-08-21 \
+  --policy-owner human:operator
+
+# 对 batch 内单家公司做无网络 closure replay
+python3 scripts/replay_sec_research_plan_canary.py \
+  --output-dir temp/sec-revenue-growth-batch/samples/MSFT
+
+# 对照当前 OpenClaw 模型清单；报告不包含密钥，新/改 profile 进入 smoke_required
+python3 scripts/reconcile_openclaw_model_catalog.py \
+  --openclaw-config /ABSOLUTE/PATH/TO/openclaw.json
+
+# 把 router 目录改成与 broker 一致：只追加。broker 新增的 profile 注册进来，
+# broker 已下架的 profile 追加一个 retired 版本（不删除，历史版本链与旧路由决策
+# 仍可解析）。幂等；--check-only 只报告，不同步时退出码 2。安装脚本已自动调用。
+python3 scripts/sync_openclaw_model_catalog.py \
+  --openclaw-config /ABSOLUTE/PATH/TO/openclaw.json \
+  --model-router-db /ABSOLUTE/PATH/TO/model-router.sqlite
+
+# 显式带入当前模型清单跑一个付费 smoke；不会自动调用或自动上线新模型
+dalton-thesis-impact-calibrate-matrix \
+  --openclaw-config /ABSOLUTE/PATH/TO/openclaw.json \
+  --profile-id profile:NEW_MODEL --case-ref calibration:thesis-impact:001 \
+  --output-dir temp/model-smoke --socket-path /ABSOLUTE/PATH/TO/broker.sock \
+  --auth-key-path /ABSOLUTE/PATH/TO/broker.key
+
+# Owner 授权后的 3×30 provider-controlled verifier 生产 canary；三重硬顶，产出验收裁决
+dalton-thesis-impact-verifier-canary \
+  --output-dir temp/verifier-canary-3x30 \
+  --profile-id profile:gemini-3-7-flash \
+  --thinking-level low --rounds 3 \
+  --per-case-cap-usd 0.05 --per-round-cap-usd 1.60 --campaign-cap-usd 5.00 \
+  --socket-path /ABSOLUTE/PATH/TO/broker.sock \
+  --auth-key-path /ABSOLUTE/PATH/TO/broker.key
+
+cd integrations/openclaw-model-broker
+npm run check
+```
+
+默认测试不需要真实模型凭据，也不访问网络。SEC canary 是显式运行的开发验收，不属于默认 CI；
+它只访问 `data.sec.gov`，所有 SQLite 和 raw spool 都在隔离临时目录中创建。
+
+## macOS 常驻服务
+
+安装脚本会把 wheel 和 COS 可选依赖装进 Dalton 自己的 venv，在 `~/Library/Application Support/Dalton/` 创建 owner-only 配置和状态，再加载 writer、controller，以及启用时的 Agenda control 和 thesis-impact 短任务 LaunchAgent：
+
+```bash
+./deploy/macos/install.sh
+./deploy/macos/health.sh
+```
+
+controller 常驻，LLM worker 不常驻。空闲时 controller 只做 lease 回收、authority 变更检测、dashboard projection、插件重试和健康心跳。静态看板插件只读 projection DB，发布到 <https://eve.lumos.space/dalton/>；它不会修改 COS bucket 的站点首页配置。
+
+卸载脚本只停止 LaunchAgent，并把 plist 移到废纸篓；runtime 和 authority data 保留：
+
+```bash
+./deploy/macos/uninstall.sh
+```
+
+## 开发状态
+
+截至 2026-09-07，系统在 live 上按任务自主运行，人只在检查点介入。当前阶段是
+**Phase 10「按研究手册的阶段执行任务」**（基线：[愿景与下一阶段 v1.1](docs/reports/vision-and-next-phase-v1.1-2026-09-07.md)）。
+
+live 现状：
+
+- 一个生效中的 CoverageMission（`us-it-services:8`，五家公司：ACN、CTSH、EPAM、IBM、DXC），
+  三条来源已接入：SEC EDGAR、AlphaEngine、公开网页搜索；
+- 账本有 330 条 Claim / 330 条 Evidence，其中 60 条已按 P10b 的确定性检测器退役（错误归属与免责声明），
+  2 条 Thesis 由人准入；1745 份文档进入过任务队列，90 份已读完并关闭；
+- **搜集 → 获取 → 阅读 → 入库 Claim 全自动**（ADR-0005）：抽取子进程按公司优先级与原文类型读，
+  policy 规则准入定性 Claim，逐条绑定精确引文；付费模型调用受任务日预算约束（1000 次 / 5 USD）；
+- **五家公司都在研究手册的第一个阶段**（Initial Screen），每家有一份按手册必读清单算出的资料底座
+  清单（4 季财报 / 4 次电话会 / 最新年报 / 多空券商观点），缺口驱动获取与阅读的顺序；
+- **owner cockpit**（ADR-0006）在 tailnet 上：设定研究目标、调整方向、看研究日志、临时问答、
+  审批需要人裁决的事项；问答只从已入库结论作答并列出依据。
+
+需要人的只有这些：研究论点准入、新工具启用、深度认知门与投资备忘录、与预测的偏离裁决、
+扩范围/扩预算/扩写入范围（发布新的任务版本）。逐条审批文档、逐条审批 Claim 都已经不需要。
+
+下一步顺序见 [PROJECT_STATUS](docs/PROJECT_STATUS.md) 的「下一阶段顺序」：SEC 10-K 正文获取通道
+与季度数字补齐（Initial Screen 出口门第一问的前提）→ 深度认知门人审 → 行业框架与行业模型 →
+公司模型与预测线 → 投资备忘录。
+
+历史阶段的裁决与实现记录见 [PROJECT_STATUS](docs/PROJECT_STATUS.md) 与 `docs/reports/`。
