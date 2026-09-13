@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from decimal import Decimal, ROUND_HALF_UP
+import re
 from typing import Literal
 
 NumericKind = Literal["amount_usd", "percent", "eps", "arpu"]
@@ -41,7 +42,64 @@ def format_display_number(value: object, *, kind: NumericKind) -> str:
     raise ValueError("unsupported display number kind")
 
 
-__all__ = ["NumericKind", "format_display_number", "format_typed_value"]
+_HAN = re.compile(r"[\u3400-\u9fff]")
+_BASE_USD = re.compile(
+    r"(?i)(?P<prefix>\bUSD\s+)(?P<prefix_number>[+-]?\d[\d,]*(?:\.\d+)?)"
+    r"|(?P<suffix_number>[+-]?\d[\d,]*(?:\.\d+)?)\s*(?P<suffix>USD\b|美元)"
+)
+_EXPLICIT_SCALE = re.compile(r"(?i)^\s*(?:(?:thousand|million|billion)\b|[万亿])")
+
+
+def _format_unquoted_usd(text: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        number = match.group("prefix_number") or match.group("suffix_number")
+        if _EXPLICIT_SCALE.match(text[match.end():]):
+            return match.group(0)
+        value = _decimal(number)
+        if abs(value) < Decimal("10000"):
+            return match.group(0)
+        return format_display_number(value, kind="amount_usd")
+    return _BASE_USD.sub(replace, text)
+
+
+def format_prose_usd_amounts(text: str) -> str:
+    """Format explicit base-USD amounts in reviewed Chinese presentation prose.
+
+    Markdown quote lines, quoted source text, pure-English lines, small values,
+    and already-scaled amounts remain byte-for-byte unchanged.
+    """
+    if not isinstance(text, str):
+        raise ValueError("display prose must be a string")
+    rendered = []
+    for line in text.splitlines(keepends=True):
+        content = line.rstrip("\r\n")
+        ending = line[len(content):]
+        if content.lstrip().startswith(">") or not _HAN.search(content):
+            rendered.append(line)
+            continue
+        pieces = []
+        start = 0
+        quote_end = None
+        index = 0
+        while index < len(content):
+            char = content[index]
+            if quote_end is None and char in {'"', '“'}:
+                pieces.append(_format_unquoted_usd(content[start:index]))
+                quote_end = '"' if char == '"' else '”'
+                start = index
+            elif quote_end is not None and char == quote_end:
+                pieces.append(content[start:index + 1])
+                start = index + 1
+                quote_end = None
+            index += 1
+        tail = content[start:]
+        pieces.append(tail if quote_end is not None else _format_unquoted_usd(tail))
+        rendered.append("".join(pieces) + ending)
+    return "".join(rendered)
+
+
+__all__ = ["NumericKind", "format_display_number", "format_prose_usd_amounts",
+           "format_typed_value"]
 
 
 def _scaled_amount(number: Decimal, divisor: Decimal, label: str) -> str:
