@@ -21,6 +21,7 @@ from scripts.prepare_successor_config_transition import (
     expected_writer_operation_transition_state,
     expected_openclaw_frame_transition_state,
     expected_preserved_openclaw_state, expected_service_transition_state,
+    expected_transition_state,
 )
 from scripts.run_successor_copied_state_rehearsal import derive_confined_transition
 from scripts.execute_successor_stopped_window_candidate import expected_preserved_service_bytes
@@ -514,6 +515,11 @@ class PreserveExistingTransitionTests(unittest.TestCase):
     def test_cockpit_brain_binding_is_single_leaf_cas_and_round_trips_scratch(self):
         manifest = self.build_cockpit_brain()
         self.assertEqual(COCKPIT_BRAIN_SCHEMA_VERSION, manifest["schema_version"])
+        expected_models, expected_document, expected_lane = expected_transition_state(
+            packet_root=self.packet, manifest=manifest)
+        self.assertEqual(self.models, expected_models)
+        self.assertEqual(self.document, expected_document)
+        self.assertEqual(self.lane, expected_lane)
         before, after = expected_service_transition_state(
             packet_root=self.packet, manifest=manifest)
         self.assertEqual("document-extraction-model-config.json", Path(
@@ -546,6 +552,51 @@ class PreserveExistingTransitionTests(unittest.TestCase):
         self.assertEqual(0o600, self.service.stat().st_mode & 0o777)
         self.assertEqual((self.packet / "openclaw.preserved.json").read_bytes(),
                          openclaw.read_bytes())
+
+        # Derive a second, path-confined manifest from a real copied state and
+        # prove that it independently replays to the same one-leaf outcome.
+        copied_root = self.root / "copied"; copied_state = copied_root / "state"
+        copied_state.mkdir(parents=True)
+        for path in self.state.rglob("*"):
+            if path.is_file():
+                target = copied_state / path.relative_to(self.state)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(path.read_bytes())
+        copied_service = copied_root / "service.json"
+        copied_service_value = json.loads((self.packet / "service.before.json").read_text())
+        copied_cockpit = copied_service_value["control"]["config"]["cockpit"]
+        copied_cockpit["model_config_path"] = str(
+            copied_state / "document-extraction-model-config.json")
+        copied_cockpit["core_db"] = str(copied_state / "core.sqlite")
+        write(copied_service, copied_service_value)
+        os.chmod(copied_service, 0o600)
+        copied_openclaw = copied_root / "openclaw/openclaw.json"
+        copied_openclaw.parent.mkdir(); copied_openclaw.write_bytes(
+            (self.packet / "openclaw.preserved.json").read_bytes())
+
+        class Module:
+            @staticmethod
+            def model_config_inventory(state):
+                return {p.name: json.loads(p.read_text())
+                        for p in sorted(state.glob("*-model-config.json"))}
+
+        rehearsal = SimpleNamespace(temp_root=copied_root, temp_state=copied_state,
+                                    temp_config=copied_service, replacements={})
+        derived_path, _proof_path, _proof = derive_confined_transition(
+            Module, rehearsal, packet_root=self.packet, manifest=manifest,
+            original_manifest_sha256=hashlib.sha256(
+                manifest_path.read_bytes()).hexdigest())
+        derived = json.loads(derived_path.read_text())
+        _, derived_after = expected_service_transition_state(
+            packet_root=derived_path.parent, manifest=derived)
+        derived_receipt = apply_transition_to_scratch(
+            packet_root=derived_path.parent, scratch_root=copied_root,
+            state_dir=copied_state, manifest_path=derived_path,
+            expected_manifest_sha256=hashlib.sha256(derived_path.read_bytes()).hexdigest(),
+            receipt_path=copied_root / "receipt.json",
+            service_config_path=copied_service, external_config_path=copied_openclaw)
+        self.assertEqual(1, derived_receipt["service_config_mutations"])
+        self.assertEqual(derived_after, json.loads(copied_service.read_text()))
 
     def test_cockpit_brain_binding_rejects_any_other_service_leaf(self):
         manifest = self.build_cockpit_brain()

@@ -1079,7 +1079,8 @@ def expected_transition_state(
                     and version in {PRESERVE_SCHEMA_VERSION,
                                     EXTERNAL_CAS_SCHEMA_VERSION,
                                     PURE_PRESERVE_SCHEMA_VERSION,
-                                    WRITER_APPEND_SCHEMA_VERSION} else row.get("after")
+                                    WRITER_APPEND_SCHEMA_VERSION,
+                                    COCKPIT_BRAIN_SCHEMA_VERSION} else row.get("after")
                     if isinstance(row, Mapping) else None)
         if not isinstance(row, Mapping) or not isinstance(artifact, Mapping):
             raise ConfigTransitionError("transition target is invalid")
