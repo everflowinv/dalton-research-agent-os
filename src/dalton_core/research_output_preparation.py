@@ -117,13 +117,18 @@ def _revision_hash(review):
 
 
 def _repair_prompt(*, product, draft_localized, review, failure, attempt):
+    source = {'kind': product.get('kind'), 'version_ref': product.get('version_ref'),
+              'source_hash': source_content_hash(product),
+              'sections': [{key: row.get(key, [] if key == 'gaps' else '')
+                            for key in ('title', 'body', 'gaps')}
+                           for row in product.get('sections') or []]}
     return '\n'.join((
         '你是这份研究成品的大脑。此前语言修订未通过确定性校验或独立事实保真核验。',
         '不要再次调用或模拟语言检查员。重新评估原语言建议并返回全部章节；只改表达，不得新增、删除或改变事实、数字、单位、来源、审批状态、缺口或章节结构。',
         '只输出 JSON：{"decisions":[{"suggestion_index":0,"decision":"adopt|reject","reason":"理由"}],"sections":[{"index":0,"title":"...","body":"...","gaps":[]}]}',
         '修订次数：'+str(attempt),
         '失败反馈：'+json.dumps(failure,ensure_ascii=False,sort_keys=True,separators=(',',':')),
-        '原始权威内容：'+json.dumps(product,ensure_ascii=False,sort_keys=True,separators=(',',':')),
+        '原始展示内容与不可变身份：'+json.dumps(source,ensure_ascii=False,sort_keys=True,separators=(',',':')),
         '初次中文稿：'+json.dumps(draft_localized,ensure_ascii=False,sort_keys=True,separators=(',',':')),
         '原语言建议：'+json.dumps(review.get('language_review'),ensure_ascii=False,sort_keys=True,separators=(',',':')),
         '上次修订：'+json.dumps(review.get('brain_revision'),ensure_ascii=False,sort_keys=True,separators=(',',':')),

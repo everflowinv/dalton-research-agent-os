@@ -48,6 +48,17 @@ class PreparationTests(unittest.TestCase):
 
     def run_one(self):return prep.run_chunk((0,0,SOURCE),**self.args)[2]
 
+    def test_repair_prompt_keeps_display_facts_without_repeating_authority_payloads(self):
+        source = copy.deepcopy(SOURCE)
+        source['sources'] = [{'raw_document': 'large-raw-authority' * 10000}]
+        prompt = prep._repair_prompt(product=source, draft_localized=CHINESE,
+            review={'language_review': STYLE, 'brain_revision': REVISION},
+            failure={'reason': 'preserve the currency'}, attempt=1)
+        self.assertNotIn('large-raw-authority', prompt)
+        self.assertIn('Revenue was 123 USD.', prompt)
+        self.assertIn(prep.source_content_hash(source), prompt)
+        self.assertIn('preserve the currency', prompt)
+
     def test_checker_then_brain_then_semantic_verifier_replays_without_new_calls(self):
         result=self.run_one()
         self.assertEqual(self.calls,['research_localization',prep.CHECKER_PURPOSE,prep.BRAIN_PURPOSE,
