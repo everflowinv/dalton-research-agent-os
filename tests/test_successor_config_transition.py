@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import plistlib
 import os
 import subprocess
 import tempfile
@@ -502,7 +503,11 @@ class PreserveExistingTransitionTests(unittest.TestCase):
         seed = assets / "research-localization/index.json"
         seed.parent.mkdir(); write(seed, {"schema_version": "0.1", "records": []})
         plist = assets / "com.dalton.research-publication-worker.plist"
-        plist.write_bytes(b"<?xml version='1.0'?><plist version='1.0'><dict/></plist>\n")
+        plist.write_bytes(plistlib.dumps({
+            "Label": "com.dalton.research-publication-worker", "StartInterval": 300,
+            "ProgramArguments": ["/runtime/python", "-m",
+                "dalton_core.research_output_preparation", "run-worker", "--config",
+                "/state/research-publication-worker-config.json"]}))
         publication = build_publication(
             packet_root=self.packet, authority_files=authorities,
             seed_files={"research-localization/index.json": seed},

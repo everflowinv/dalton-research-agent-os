@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import plistlib
 import re
 import stat
 from pathlib import Path
@@ -156,6 +157,22 @@ def artifact_bytes(packet_root: Path, row: Mapping[str, Any]) -> bytes:
     data = path.read_bytes()
     _need(len(data) == row["size"] and _sha(data) == row["sha256"],
           "research publication artifact bytes differ")
+    if row["kind"] == "launch_agent":
+        try:
+            plist = plistlib.loads(data)
+        except Exception as exc:
+            raise ResearchPublicationTransitionError(
+                "research publication LaunchAgent is invalid") from exc
+        argv = plist.get("ProgramArguments")
+        _need(plist.get("Label") == LAUNCH_AGENT_LABEL
+              and plist.get("StartInterval") == 300
+              and isinstance(argv, list) and len(argv) == 6
+              and isinstance(argv[0], str) and Path(argv[0]).is_absolute()
+              and argv[1:5] == ["-m", "dalton_core.research_output_preparation",
+                                "run-worker", "--config"]
+              and isinstance(argv[5], str) and Path(argv[5]).is_absolute()
+              and Path(argv[5]).name == "research-publication-worker-config.json",
+              "research publication LaunchAgent contract differs")
     return data
 
 

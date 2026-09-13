@@ -1,4 +1,5 @@
 import hashlib
+import plistlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -23,7 +24,12 @@ class ResearchPublicationTransitionTest(unittest.TestCase):
                   (LAUNCH_AGENT_NAME, "launch_agent", 0o644)]
         rows = []
         for index, (name, kind, mode) in enumerate(paths):
-            data = (name + "\n").encode(); artifact = f"artifacts/{index}"
+            data = (plistlib.dumps({"Label": "com.dalton.research-publication-worker",
+                    "StartInterval": 300, "ProgramArguments": ["/runtime/python", "-m",
+                    "dalton_core.research_output_preparation", "run-worker", "--config",
+                    "/state/research-publication-worker-config.json"]})
+                    if kind == "launch_agent" else (name + "\n").encode())
+            artifact = f"artifacts/{index}"
             target = self.packet / artifact; target.parent.mkdir(exist_ok=True)
             target.write_bytes(data)
             rows.append({"path": name, "kind": kind, "artifact": artifact,
