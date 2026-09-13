@@ -309,7 +309,7 @@ class ForecastCardTests(Wave1Case):
         model = card["model"]
         readiness = model["readiness"]
         self.assertEqual(model["version"], 1)
-        self.assertEqual(model["change_reason_label"], "证据变厚了")
+        self.assertEqual(model["change_reason_label"], "支撑论据已补充更新")
         for field in ("forecast_quarters", "drivers", "drivers_with_assumptions",
                       "results_computed", "results_unavailable", "assumption_kinds",
                       "realised_quarters", "actual_cells", "superseded_estimates"):

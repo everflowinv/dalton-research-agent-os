@@ -80,7 +80,11 @@ class CockpitLanguageTests(unittest.TestCase):
         self.assertIn('d.append(review)', text)
 
     def test_dynamic_lane_snapshot_uses_research_language(self) -> None:
-        from dalton_core.cockpit_plane import REGISTRY_LANE_LABELS
+        from dalton_core.cockpit_plane import (
+            CHANGE_REASON_LABELS, CHECKPOINT_TITLES, PLAN_ACTION_LABELS,
+            REGISTRY_LANE_LABELS,
+        )
+        from dalton_core.model_selection import PURPOSE_LABELS
 
         self.assertGreaterEqual(len(REGISTRY_LANE_LABELS), 41)
         snapshot = "\n".join(REGISTRY_LANE_LABELS.values())
@@ -94,6 +98,16 @@ class CockpitLanguageTests(unittest.TestCase):
             "核心假设敏感性分析", "公司深度投研档案",
         ):
             self.assertIn(expected, snapshot)
+        visible_metadata = "\n".join((
+            *PURPOSE_LABELS.values(), *PLAN_ACTION_LABELS.values(),
+            *CHANGE_REASON_LABELS.values(), *CHECKPOINT_TITLES.values(),
+        ))
+        for stale in ("给产出打分", "整理市场在吵什么", "值得下注", "去抓数字",
+                      "证据变厚了", "人改的", "过掉的闸"):
+            self.assertNotIn(stale, visible_metadata)
+        for expected in ("评估研究产出质量", "梳理市场争议", "形成投资判断",
+                         "提取财务数字", "支撑论据已补充更新", "人工审阅后修订"):
+            self.assertIn(expected, visible_metadata)
 
     def test_goal_and_steer_prompts_share_the_final_text_contract(self) -> None:
         from dalton_core.cockpit_plane import CockpitPlane

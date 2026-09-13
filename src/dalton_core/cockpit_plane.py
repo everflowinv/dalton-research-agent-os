@@ -93,8 +93,8 @@ def _stage_readiness_labels(entry: Mapping[str, Any]) -> dict[str, Any]:
 _EMPTY_FIGURES: dict = {"total": 0, "by_grade": {}, "latest": []}
 # What a directive asks for, in the owner's language.
 PLAN_ACTION_LABELS = {
-    "search": "去找", "acquire": "去取", "read": "去读",
-    "extract_figures": "去抓数字", "stop": "停",
+    "search": "查找资料", "acquire": "获取资料", "read": "阅读资料",
+    "extract_figures": "提取财务数字", "stop": "停止",
 }
 ITEM_LABELS = {
     "quarterly_financials": "季度财报数字", "earnings_calls": "电话会纪要",
@@ -144,8 +144,8 @@ CALL_HORIZON_LABELS = {
 }
 CALL_STANDARD_LABELS = {
     "met": "达到手册的风险回报标准",
-    "not_met": "没达到手册的风险回报标准",
-    "unavailable": "没给出可对照的数字",
+    "not_met": "未达到手册规定的风险回报标准",
+    "unavailable": "缺少可供对照的数字",
     "not_applicable": "手册对这类 call 没有回报标准",
 }
 # P11c asked for this one specifically: a percentile computed while the
@@ -159,9 +159,9 @@ CHANGE_REASON_LABELS = {
     "filing_actual": "财报数字取代了当初的估计",
     "driver_event": "有事件改变了驱动因素",
     "assumption_review": "复核了假设",
-    "evidence_thicker": "证据变厚了",
-    "human_revision": "人改的",
-    "imported_prior": "从以前的资料导入的",
+    "evidence_thicker": "支撑论据已补充更新",
+    "human_revision": "人工审阅后修订",
+    "imported_prior": "从历史资料导入",
 }
 ASSUMPTION_KIND_LABELS = {"estimate": "模型估的", "human": "人写的", "actual": "已报实际"}
 QUALITY_CHECK_LABELS = {
@@ -524,8 +524,8 @@ def _gate_decidability(core: sqlite3.Connection, record: Mapping[str, Any]) -> d
 
 
 CHECKPOINT_TITLES = {
-    "thesis_revision_candidate": "有事情发生，可能要改我们对这家公司的判断",
-    "gate_reopen": "一道已经过掉的闸，现在有证据说可以重开",
+    "thesis_revision_candidate": "新证据可能影响现有投资论点，待人工决策",
+    "gate_reopen": "深度研究关卡出现新证据，待决定是否重新评估",
 }
 # What each one's buttons say, when this Core can actually decide it. The
 # words are the authorities' own verdict vocabularies -- ``accept / reject /
@@ -544,15 +544,15 @@ CHECKPOINT_ACTIONS = {
 }
 # And what it says instead, on a Core whose writer predates the decision ops.
 CHECKPOINT_UNDECIDABLE_NOTES = {
-    "thesis_revision_candidate": "这一项要人裁决，而这个 Core 上还没有裁决账本（ADR-0007）",
-    "gate_reopen": "这一项要人裁决，而这个 Core 上还没有裁决账本（ADR-0008）",
+    "thesis_revision_candidate": "需要人工决策；当前版本尚不能记录这类决定",
+    "gate_reopen": "需要人工决策；当前版本尚不能记录这类决定",
 }
 # C2: the four pools a day's budget is split into, named for what each buys.
 POOL_LABELS = {
-    "coverage": "把公司读完（找、取、读、抽数字）",
-    "event_response": "判断每天发生的事",
+    "coverage": "公司持续研究",
+    "event_response": "事件响应",
     "adhoc": "专项研究",
-    "maintenance": "维护（打标签、复核、周报）",
+    "maintenance": "研究维护",
 }
 # How many of each of these a company card carries. The card is a card.
 MAX_EVENTS_ON_CARD = 8
@@ -719,14 +719,14 @@ def _gate_reopen_view(record: Mapping[str, Any], summary: str) -> tuple[str, dic
     passed_ref = record.get("passed_version_ref")
     details: dict[str, Any] = {
         "变化": flipped,
-        "过闸的那一版": (None if passed_ref is None
+        "此前通过的版本": (None if passed_ref is None
                          else f"v{record.get('passed_version_number')}（{passed_ref}）"),
-        "过闸时间": record.get("passed_at"),
-        "改版理由": CHANGE_REASON_LABELS.get(
+        "此前通过时间": record.get("passed_at"),
+        "修订原因": CHANGE_REASON_LABELS.get(
             record.get("change_reason"), record.get("change_reason")),
-        "退步的项目": list(record.get("regressed") or ()),
+        "发生退步的项目": list(record.get("regressed") or ()),
     }
-    return ("；".join(flipped) or summary or "证据底座有项目从缺变成了有。"), details
+    return ("；".join(flipped) or summary or "原先缺失的证据现已补齐。"), details
 
 
 def _iso(value: datetime) -> str:
@@ -1672,7 +1672,7 @@ class CockpitPlane:
                 "market_view": {
                     "available": bool(market.get("available")),
                     "summary": (market.get("summary") if market.get("available")
-                                else "这个 Core 里还没有街上的看法可比"),
+                                else "当前没有可供比较的市场一致预期"),
                     "our_direction": market.get("our_direction"),
                 },
                 "convergence_pathway": record.get("convergence_pathway"),
@@ -2663,7 +2663,7 @@ class CockpitPlane:
         if published == 0:
             note = "上周没有产出被打过分"
         else:
-            note = (f"上周 {published} 份打分，覆盖 "
+            note = (f"上周完成 {published} 份质量评估，覆盖 "
                     f"{scores.get('distinct_targets')} 份产出")
             if entries:
                 note += f"；你留下 {entries} 条反馈"

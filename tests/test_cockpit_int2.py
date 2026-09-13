@@ -336,7 +336,7 @@ class ReflectionOnTheCardTests(Int2Case):
         self.reflection(self.judgement(event), event)
         market = self.card()["reflections"][0]["market_view"]
         self.assertFalse(market["available"])
-        self.assertIn("没有街上的看法", market["summary"])
+        self.assertIn("没有可供比较的市场一致预期", market["summary"])
 
 
 class CatalystOnTheCardTests(Int2Case):
@@ -437,7 +437,7 @@ class ApprovalsTests(Int2Case):
         self.candidate()
         item = next(i for i in self.plane.approvals()["items"]
                     if i["kind"] == "thesis_revision_candidate")
-        self.assertEqual(item["title"], "有事情发生，可能要改我们对这家公司的判断")
+        self.assertEqual(item["title"], "新证据可能影响现有投资论点，待人工决策")
         self.assertEqual(item["details"]["大脑的判断"], "论点被削弱了")
         # ADR-0007: the candidate and "what we may have missed" are worth the
         # same when a person is deciding, so they arrive together.
@@ -458,7 +458,7 @@ class ApprovalsTests(Int2Case):
                     if i["kind"] == "thesis_revision_candidate")
         self.assertEqual(bare["actions"], [])
         self.assertFalse(bare["needs_rationale"])
-        self.assertIn("ADR-0007", bare["note"])
+        self.assertEqual(bare["note"], "需要人工决策；当前版本尚不能记录这类决定")
 
         with closing(sqlite3.connect(self.c.core_path)) as core:
             core.execute(
@@ -510,12 +510,12 @@ class ApprovalsTests(Int2Case):
             core.commit()
         item = next(i for i in self.plane.approvals()["items"]
                     if i["kind"] == "gate_reopen")
-        self.assertEqual(item["title"], "一道已经过掉的闸，现在有证据说可以重开")
+        self.assertEqual(item["title"], "深度研究关卡出现新证据，待决定是否重新评估")
         # No diff on this hand-written row, so the summary falls back to what
         # the row does say rather than failing to render.
         self.assertEqual(item["summary"], "现在有了四个季度的纪要")
         self.assertEqual(item["actions"], [])
-        self.assertIn("ADR-0008", item["note"])
+        self.assertEqual(item["note"], "需要人工决策；当前版本尚不能记录这类决定")
 
     def test_a_decided_checkpoint_drops_off_when_a_decisions_table_exists(self) -> None:
         candidate = self.candidate()
