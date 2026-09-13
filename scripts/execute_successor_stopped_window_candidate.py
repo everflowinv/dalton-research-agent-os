@@ -376,7 +376,8 @@ def packet_preflight(packet: Path) -> tuple[dict[str, Any], dict[str, Path]]:
              and proof.get("file_sha256")
                  == {row["path"]: row["sha256"] for row in publication["files"]}
              and isinstance(proof.get("worker_run_once"), Mapping)
-             and proof["worker_run_once"].get("status") == "passed"
+             and proof["worker_run_once"].get("status")
+                 == "waiting_for_release_publication"
              and proof["worker_run_once"].get("exit_code") == 0
              and proof["worker_run_once"].get("provider_calls") == 0,
              "copied-state rehearsal does not prove research publication files")
@@ -1037,8 +1038,18 @@ class SuccessorOrchestrator(r11.Orchestrator):
                 "preserved_state_authorities": state_authorities,
             })
         if transition.get("schema_version") == RESEARCH_PUBLICATION_SCHEMA_VERSION:
-            from scripts.successor_research_publication_transition import validate_transition
+            from scripts.successor_research_publication_transition import (
+                artifact_bytes, validate_transition,
+            )
             publication = validate_transition(transition["research_publication_transition"])
+            for row in publication["files"]:
+                target = ((r11.LAUNCH_AGENTS / row["path"])
+                          if row["kind"] == "launch_agent"
+                          else r11.STATE / row["path"])
+                need(target.is_file() and not target.is_symlink()
+                     and stat.S_IMODE(target.stat().st_mode) == row["mode"]
+                     and target.read_bytes() == artifact_bytes(self.packet, row),
+                     f"installed research publication file differs: {row['path']}")
             result["research_publication_transition"] = {
                 "launch_agent_label": publication["launch_agent_label"],
                 "file_sha256": {row["path"]: row["sha256"]

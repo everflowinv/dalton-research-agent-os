@@ -999,8 +999,18 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     timeout=300, check=False)
                 _need(completed.returncode == 0,
                       "research publication worker run-once fixture failed")
+                try:
+                    worker_result = json.loads(completed.stdout)
+                except (UnicodeError, json.JSONDecodeError) as exc:
+                    raise RehearsalBindingError(
+                        "research publication worker result is invalid") from exc
+                _need(isinstance(worker_result, Mapping)
+                      and worker_result.get("status")
+                          == "waiting_for_release_publication"
+                      and worker_result.get("model_calls") == 0,
+                      "research publication worker did not wait for publication")
                 self.publication_worker_run_once = {
-                    "status": "passed", "exit_code": 0,
+                    "status": "waiting_for_release_publication", "exit_code": 0,
                     "stdout_sha256": hashlib.sha256(completed.stdout).hexdigest(),
                     "stderr_sha256": hashlib.sha256(completed.stderr).hexdigest(),
                     "provider_calls": 0,
