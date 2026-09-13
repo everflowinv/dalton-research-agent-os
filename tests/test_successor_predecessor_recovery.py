@@ -5,6 +5,7 @@ import hashlib
 import json
 import tempfile
 import unittest
+import shutil
 from pathlib import Path
 
 from scripts import successor_predecessor_recovery as recovery
@@ -25,8 +26,8 @@ def build(paths):
 
 class PredecessorRecoveryTests(unittest.TestCase):
     def setUp(self):
-        tmp = tempfile.TemporaryDirectory(dir=Path.cwd()); self.addCleanup(tmp.cleanup)
-        self.root = Path(tmp.name); self.paths = {name: self.root / name for name in ARTIFACT_KEYS}
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name).resolve(); self.paths = {name: self.root / name for name in ARTIFACT_KEYS}
         commit = "b" * 40; wheel = b"wheel"
         write(self.paths["accepted_wheel"], wheel)
         write(self.paths["model_snapshot"], {"a.json": {"model": "模型"}})
@@ -38,12 +39,19 @@ class PredecessorRecoveryTests(unittest.TestCase):
         write(self.paths["rollback_initial"], {
             "protected_state_sha256": recovery._full_protected_state_hash(
                 self.paths["rollback_state"])})
+        self.historical = self.root / "historical-rollback"
+        shutil.copytree(self.paths["rollback_state"], self.historical / "state-files")
+        shutil.copy2(self.paths["rollback_initial"], self.historical / "initial-state.json")
         previous = {"release_ref": "R19", "source_commit": "9" * 40,
-                    "candidate_manifest_sha256": "d" * 64}
+                    "candidate_manifest_sha256": "d" * 64,
+                    "deployment_receipt_sha256": "e" * 64,
+                    "finalization_sha256": "f" * 64}
         write(self.paths["published_previous_runtime_pointer"], {
             "schema_version": "dalton-runtime-config-pointer-0.2", "status": "deployed_verified",
             "base_release_commit": previous["source_commit"],
-            "candidate_manifest_sha256": previous["candidate_manifest_sha256"]})
+            "candidate_manifest_sha256": previous["candidate_manifest_sha256"],
+            "deployment_receipt_sha256": previous["deployment_receipt_sha256"],
+            "finalization_sha256": previous["finalization_sha256"]})
         previous["current_runtime_config_sha256"] = hashlib.sha256(
             self.paths["published_previous_runtime_pointer"].read_bytes()).hexdigest()
         write(self.paths["published_previous_pointer"], previous)
@@ -67,7 +75,7 @@ class PredecessorRecoveryTests(unittest.TestCase):
         deployment = {"schema_version": "successor-stopped-window-execution-0.1",
                       "status": "deployment_failed", "source_commit": commit,
                       "candidate_manifest_sha256": manifest_sha,
-                      "fresh_rollback_snapshot": {"path": str(self.root)},
+                      "fresh_rollback_snapshot": {"path": str(self.historical)},
                       "rollback": {"status": "rollback_failed"}}
         write(self.paths["failed_deployment"], deployment)
         deployment_sha = hashlib.sha256(self.paths["failed_deployment"].read_bytes()).hexdigest()
@@ -121,28 +129,39 @@ class PredecessorRecoveryTests(unittest.TestCase):
                    "metadata_overwrite_performed": False}
         write(self.paths["recovery_restart"], restart)
         published_commit = pointer["source_commit"]
-        published = {
-            "published_manifest": {"schema_version": "successor-stopped-window-candidate-0.1",
-                "status": "accepted_for_stopped_window", "release_ref": "R20",
-                "source": {"commit": published_commit}},
-        }
-        for name, value in published.items(): write(self.paths[name], value)
+        write(self.paths["published_manifest"], {
+            "schema_version": "successor-stopped-window-candidate-0.1",
+            "status": "accepted_for_stopped_window", "release_ref": "R20",
+            "source": {"commit": published_commit},
+            "artifacts": {"wheel": {"sha256": "f" * 64}}})
         published_manifest_sha = hashlib.sha256(
             self.paths["published_manifest"].read_bytes()).hexdigest()
-        write(self.paths["published_deployment"], {
-            "schema_version": "successor-stopped-window-execution-0.1",
-            "status": "installer_finished_runtime_health_pending", "exit_code": 0,
-            "source_commit": published_commit, "candidate_manifest_sha256": published_manifest_sha})
         write(self.paths["published_installed"], {
             "schema_version": "successor-installed-verification-0.1",
             "status": "installed_bytes_verified_runtime_pending", "source_commit": published_commit,
-            "candidate_manifest_sha256": published_manifest_sha})
+            "candidate_manifest_sha256": published_manifest_sha, "wheel_sha256": "f" * 64})
+        installed_sha = hashlib.sha256(self.paths["published_installed"].read_bytes()).hexdigest()
+        write(self.paths["published_deployment"], {
+            "schema_version": "successor-stopped-window-execution-0.1",
+            "status": "installer_finished_runtime_health_pending", "exit_code": 0,
+            "source_commit": published_commit, "candidate_manifest_sha256": published_manifest_sha,
+            "installed_verification_sha256": installed_sha})
+        deployment_sha = hashlib.sha256(self.paths["published_deployment"].read_bytes()).hexdigest()
         write(self.paths["published_health"], {
             "schema_version": "successor-health-observation-0.1", "status": "passed",
-            "accepted": True, "source_commit": published_commit})
+            "accepted": True, "source_commit": published_commit,
+            "candidate_manifest_sha256": published_manifest_sha,
+            "deployment_receipt_sha256": deployment_sha})
+        health_sha = hashlib.sha256(self.paths["published_health"].read_bytes()).hexdigest()
         write(self.paths["published_finalization"], {
             "schema_version": "successor-runtime-verification-candidate-0.1",
-            "status": "passed_pending_publication", "source_commit": published_commit})
+            "status": "passed_pending_publication", "source_commit": published_commit,
+            "candidate_manifest_sha256": published_manifest_sha,
+            "deployment_receipt_sha256": deployment_sha,
+            "installed_verification_sha256": installed_sha,
+            "health_summary_sha256": health_sha})
+        finalization_sha = hashlib.sha256(
+            self.paths["published_finalization"].read_bytes()).hexdigest()
         pointer.update({
             "candidate_manifest_sha256": hashlib.sha256(
                 self.paths["published_manifest"].read_bytes()).hexdigest(),
@@ -159,7 +178,11 @@ class PredecessorRecoveryTests(unittest.TestCase):
         write(self.paths["published_runtime_pointer"], {
             "schema_version": "dalton-runtime-config-pointer-0.2", "status": "deployed_verified",
             "base_release_commit": published_commit,
-            "candidate_manifest_sha256": published_manifest_sha})
+            "candidate_manifest_sha256": published_manifest_sha,
+            "deployment_receipt_sha256": deployment_sha,
+            "finalization_sha256": finalization_sha,
+            "prior_runtime_config_sha256": hashlib.sha256(
+                self.paths["published_previous_runtime_pointer"].read_bytes()).hexdigest()})
         pointer["current_runtime_config_sha256"] = hashlib.sha256(
             self.paths["published_runtime_pointer"].read_bytes()).hexdigest()
         write(self.paths["published_pointer"], pointer)
@@ -172,7 +195,13 @@ class PredecessorRecoveryTests(unittest.TestCase):
             "current_runtime_config_sha256": hashlib.sha256(
                 self.paths["published_runtime_pointer"].read_bytes()).hexdigest(),
             "prior_runtime_config_sha256": hashlib.sha256(
-                self.paths["published_previous_runtime_pointer"].read_bytes()).hexdigest()})
+                self.paths["published_previous_runtime_pointer"].read_bytes()).hexdigest(),
+            "prior_current_release_sha256": hashlib.sha256(
+                self.paths["published_previous_pointer"].read_bytes()).hexdigest(),
+            "deployment_receipt_sha256": deployment_sha,
+            "installed_verification_sha256": installed_sha,
+            "health_summary_sha256": health_sha,
+            "finalization_sha256": finalization_sha})
 
     def test_build_and_validate_closed_redacted_split_identity(self):
         proof = build(self.paths)
@@ -261,7 +290,7 @@ class PredecessorRecoveryTests(unittest.TestCase):
         publication["current_release_sha256"] = hashlib.sha256(
             self.paths["published_pointer"].read_bytes()).hexdigest()
         write(self.paths["published_publication"], publication)
-        with self.assertRaisesRegex(PredecessorRecoveryError, "references"):
+        with self.assertRaisesRegex(PredecessorRecoveryError, "pointer|references"):
             build(self.paths)
 
     def test_nonascii_model_semantic_hash_uses_runtime_canonicalization(self):
@@ -271,6 +300,23 @@ class PredecessorRecoveryTests(unittest.TestCase):
             separators=(",", ":")) + "\n").encode()).hexdigest()
         self.assertEqual(expected, proof["recovery"]["installed_identity"][
             "model_config_semantic_sha256"])
+
+    def test_packet_local_rollback_copy_replays_historical_authority(self):
+        proof = build(self.paths)
+        copied = dict(self.paths)
+        packet = self.root / "packet-copy"; packet.mkdir()
+        copied["rollback_state"] = packet / "state-files"
+        shutil.copytree(self.paths["rollback_state"], copied["rollback_state"])
+        copied["rollback_initial"] = packet / "initial-state.json"
+        shutil.copy2(self.paths["rollback_initial"], copied["rollback_initial"])
+        self.assertEqual(proof, validate_recovery_proof(proof, artifacts=copied))
+        write(copied["rollback_state"] / "owner.json", {"owner": "transplanted"})
+        forged_initial = json.loads(copied["rollback_initial"].read_bytes())
+        forged_initial["protected_state_sha256"] = recovery._full_protected_state_hash(
+            copied["rollback_state"])
+        write(copied["rollback_initial"], forged_initial)
+        with self.assertRaisesRegex(PredecessorRecoveryError, "authority"):
+            validate_recovery_proof(proof, artifacts=copied)
 
 
 if __name__ == "__main__": unittest.main()

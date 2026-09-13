@@ -180,15 +180,34 @@ def _identity(artifacts: Mapping[str, Path]) -> dict[str, Any]:
               == hashes["published_runtime_pointer"]
           and publication.get("prior_runtime_config_sha256")
               == hashes["published_previous_runtime_pointer"]
+          and publication.get("prior_current_release_sha256")
+              == hashes["published_previous_pointer"]
+          and publication.get("deployment_receipt_sha256")
+              == hashes["published_deployment"]
+          and publication.get("installed_verification_sha256")
+              == hashes["published_installed"]
+          and publication.get("health_summary_sha256") == hashes["published_health"]
+          and publication.get("finalization_sha256") == hashes["published_finalization"]
           and current_runtime.get("schema_version") == "dalton-runtime-config-pointer-0.2"
           and current_runtime.get("status") == "deployed_verified"
           and current_runtime.get("base_release_commit") == published_commit
           and current_runtime.get("candidate_manifest_sha256") == published_candidate_hash
+          and current_runtime.get("deployment_receipt_sha256")
+              == hashes["published_deployment"]
+          and current_runtime.get("finalization_sha256") == hashes["published_finalization"]
+          and current_runtime.get("prior_runtime_config_sha256")
+              == hashes["published_previous_runtime_pointer"]
           and previous_runtime.get("schema_version") == "dalton-runtime-config-pointer-0.2"
           and previous_runtime.get("status") == "deployed_verified"
           and previous_runtime.get("base_release_commit") == previous.get("source_commit")
           and previous_runtime.get("candidate_manifest_sha256")
-              == previous.get("candidate_manifest_sha256"),
+              == previous.get("candidate_manifest_sha256")
+          and _hex(previous.get("deployment_receipt_sha256"), 64)
+          and _hex(previous.get("finalization_sha256"), 64)
+          and previous_runtime.get("deployment_receipt_sha256")
+              == previous.get("deployment_receipt_sha256")
+          and previous_runtime.get("finalization_sha256")
+              == previous.get("finalization_sha256"),
           "published runtime pointer chain differs")
     _need(pointer.get("current_runtime_config_sha256")
               == hashes["published_runtime_pointer"]
@@ -208,16 +227,31 @@ def _identity(artifacts: Mapping[str, Path]) -> dict[str, Any]:
           and published_deployment.get("exit_code") == 0
           and published_deployment.get("source_commit") == published_commit
           and published_deployment.get("candidate_manifest_sha256") == published_candidate_hash
+          and published_deployment.get("installed_verification_sha256")
+              == hashes["published_installed"]
           and published_installed.get("schema_version")
               == "successor-installed-verification-0.1"
           and published_installed.get("source_commit") == published_commit
           and published_installed.get("candidate_manifest_sha256") == published_candidate_hash
+          and published_installed.get("wheel_sha256")
+              == published_candidate.get("artifacts", {}).get("wheel", {}).get("sha256")
           and published_health.get("schema_version") == "successor-health-observation-0.1"
           and published_health.get("accepted") is True
           and published_health.get("source_commit") == published_commit
+          and published_health.get("candidate_manifest_sha256") == published_candidate_hash
+          and published_health.get("deployment_receipt_sha256")
+              == hashes["published_deployment"]
           and published_finalization.get("schema_version")
               == "successor-runtime-verification-candidate-0.1"
-          and published_finalization.get("source_commit") == published_commit,
+          and published_finalization.get("source_commit") == published_commit
+          and published_finalization.get("candidate_manifest_sha256")
+              == published_candidate_hash
+          and published_finalization.get("deployment_receipt_sha256")
+              == hashes["published_deployment"]
+          and published_finalization.get("installed_verification_sha256")
+              == hashes["published_installed"]
+          and published_finalization.get("health_summary_sha256")
+              == hashes["published_health"],
           "published receipt references differ")
 
     source = manifest.get("source")
@@ -243,13 +277,22 @@ def _identity(artifacts: Mapping[str, Path]) -> dict[str, Any]:
           and deployment.get("candidate_manifest_sha256") == hashes["failed_manifest"],
           "failed deployment history differs")
     snapshot = deployment.get("fresh_rollback_snapshot")
+    historical_root = Path(str(snapshot.get("path", ""))) if isinstance(snapshot, Mapping) else Path("")
+    historical_state = historical_root / "state-files"
+    historical_initial_path = historical_root / "initial-state.json"
+    historical_initial, historical_initial_bytes = _read(historical_initial_path)
+    supplied_initial_bytes = Path(artifacts["rollback_initial"]).read_bytes()
+    supplied_state = Path(artifacts["rollback_state"])
+    protected_hash = rollback_initial.get("protected_state_sha256")
+    writer_hash = prestart.get("writer_tokens", {}).get("snapshot_sha256")
     _need(isinstance(snapshot, Mapping)
-          and Path(str(snapshot.get("path", ""))).resolve()
-              == Path(artifacts["rollback_state"]).resolve().parent
-          and rollback_initial.get("protected_state_sha256")
-              == _full_protected_state_hash(Path(artifacts["rollback_state"]))
-          and _sha((Path(artifacts["rollback_state"]) / "writer-tokens.json").read_bytes())
-              == prestart.get("writer_tokens", {}).get("snapshot_sha256"),
+          and historical_root.is_dir() and not historical_root.is_symlink()
+          and historical_initial_bytes == supplied_initial_bytes
+          and historical_initial == rollback_initial
+          and protected_hash == _full_protected_state_hash(historical_state)
+          and protected_hash == _full_protected_state_hash(supplied_state)
+          and _sha((historical_state / "writer-tokens.json").read_bytes()) == writer_hash
+          and _sha((supplied_state / "writer-tokens.json").read_bytes()) == writer_hash,
           "rollback protected-state authority differs")
     _need(prestart.get("schema_version")
               == "foundation-r21-recovery-prestart-verification-0.1"
