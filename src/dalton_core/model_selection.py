@@ -152,6 +152,7 @@ PURPOSE_LABELS: dict[str, str] = {
     "earnings_preview_verifier": "核验业绩前瞻",
     "earnings_calibration": "业绩后对账",
     "earnings_calibration_verifier": "核验业绩对账",
+    "research_localization": "整理研究内容的中文初稿",
     "research_language_check": "检查最终研究文字是否易读",
     "research_language_revision": "按语言建议修订最终研究文字",
     "research_localization_verifier": "独立核验研究中文版本",
