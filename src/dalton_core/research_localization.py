@@ -10,6 +10,7 @@ import copy
 import json
 import re
 from collections import Counter
+from decimal import Decimal, ROUND_HALF_UP
 from hashlib import sha256
 from typing import Any, Mapping, Sequence
 
@@ -21,6 +22,7 @@ SCHEMA_VERSION = "research-localization:0.1"
 TARGET_LOCALE = "zh-CN"
 VERIFIER_PURPOSE = register_purpose("research_localization_verifier")
 _NUMBER = re.compile(r"[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?%?")
+_ISO_DATE = re.compile(r"(?<!\d)(\d{4})-(\d{2})-(\d{2})(?!\d)")
 _OPAQUE_ID = re.compile(
     r"\b(?:claim|claim-version|dossier|dossier-version|memo|memo-version|"
     r"debate|debate-map|forecast-model-version|company-model-spec|mission|"
@@ -64,8 +66,40 @@ def _text_hash(value: str) -> str:
 
 
 def _numbers(*values: str) -> list[str]:
-    return sorted(token for value in values
-                  for token in _NUMBER.findall(_OPAQUE_ID.sub("", value)))
+    return sorted(_canonical_number(token) for value in values
+                  for token in _NUMBER.findall(_numeric_text(value)))
+
+
+def _numeric_text(value: str) -> str:
+    """Remove opaque IDs and make ISO date separators unambiguously non-signs."""
+
+    cleaned = _OPAQUE_ID.sub("", value)
+    return _ISO_DATE.sub(r"\1 \2 \3", cleaned)
+
+
+def _canonical_number(token: str) -> str:
+    suffix = "%" if token.endswith("%") else ""
+    value = token[:-1] if suffix else token
+    value = value.replace(",", "")
+    if "." not in value:
+        sign = value[:1] if value[:1] in "+-" else ""
+        digits = value[1:] if sign else value
+        value = sign + (digits.lstrip("0") or "0")
+    return value + suffix
+
+
+def _display_variants(token: str, kind: str) -> list[str]:
+    rendered = format_display_number(token, kind=kind)  # type: ignore[arg-type]
+    variants = [rendered]
+    number = Decimal(token.replace(",", ""))
+    # Large 亿 amounts remain faithful at either one or two decimal places.
+    # This accepts 180.4 and 180.44 for 18,044,066,000, never 180.5.
+    if kind == "amount_usd" and abs(number) >= Decimal("10000000000"):
+        scaled = number / Decimal("100000000")
+        for quantum in (Decimal("0.1"), Decimal("0.01")):
+            shown = scaled.quantize(quantum, rounding=ROUND_HALF_UP)
+            variants.append(f"{shown} 亿美元")
+    return variants
 
 
 def _number_differences(source_values: Sequence[str], target_values: Sequence[str]) -> tuple[list[str], list[str]]:
@@ -80,6 +114,11 @@ def _number_differences(source_values: Sequence[str], target_values: Sequence[st
     target_numbers = Counter(_numbers(*target_values))
     missing_counter = source_numbers - target_numbers
     added = target_numbers - source_numbers
+    # A parenthetical display aid may repeat a value already present in the
+    # source. It cannot introduce a value absent from the source.
+    for token in tuple(added):
+        if token in source_numbers:
+            del added[token]
     aliases: Counter[str] = Counter()
     for value in source_values:
         cleaned = _OPAQUE_ID.sub("", value)
@@ -101,12 +140,12 @@ def _number_differences(source_values: Sequence[str], target_values: Sequence[st
     target_compact = re.sub(r"\s+", "", " ".join(target_values))
     # Consume only a formatting result computed from the exact missing source
     # token and an explicit source unit. Unlabelled numbers remain strict.
-    for token in list(missing_counter.elements()):
+    for token in list(source_numbers.elements()):
         numeric_token = token[:-1] if token.endswith("%") else token
         escaped = re.escape(numeric_token)
         kinds: list[str] = []
-        if (re.search(rf"(?<![\d.]){escaped}\s*(?:USD|美元)\b", source_joined, re.I)
-                or re.search(rf"\bUSD\s*{escaped}(?![\d.])", source_joined, re.I)):
+        if (re.search(rf"(?<![\d.]){escaped}\s*(?:USD(?![A-Za-z])|美元)", source_joined, re.I)
+                or re.search(rf"(?<![A-Za-z])USD\s*{escaped}(?![\d.])", source_joined, re.I)):
             kinds.append("amount_usd")
         if re.search(rf"(?<![\d.]){escaped}\s*%", source_joined):
             kinds.append("percent")
@@ -117,14 +156,19 @@ def _number_differences(source_values: Sequence[str], target_values: Sequence[st
                      source_joined, re.I):
             kinds.append("arpu")
         for kind in kinds:
-            rendered = format_display_number(numeric_token, kind=kind)  # type: ignore[arg-type]
-            rendered_compact = rendered.replace(" ", "")
-            rendered_numbers = _numbers(rendered)
-            if rendered_compact in target_compact and all(added[number] for number in rendered_numbers):
-                missing_counter[token] -= 1
-                for number in rendered_numbers:
-                    added[number] -= 1
-                break
+            for rendered in _display_variants(numeric_token, kind):
+                rendered_compact = rendered.replace(" ", "")
+                rendered_numbers = _numbers(rendered)
+                if (rendered_compact in target_compact
+                        and all(added[number] for number in rendered_numbers)):
+                    if missing_counter[token]:
+                        missing_counter[token] -= 1
+                    for number in rendered_numbers:
+                        added[number] -= 1
+                    break
+            else:
+                continue
+            break
     return sorted(missing_counter.elements()), sorted(added.elements())
 
 

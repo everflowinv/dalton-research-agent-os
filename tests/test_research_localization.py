@@ -111,8 +111,8 @@ class ResearchLocalizationTests(unittest.TestCase):
         validate_localized_text(source, bad)
     message = str(caught.exception)
     self.assertIn('"section_index": 0', message)
-    self.assertIn('"missing_tokens": ["1,234.50", "5.2%"]', message)
-    self.assertIn('"added_tokens": ["1,235.50", "6.2%"]', message)
+    self.assertIn('"missing_tokens": ["1234.50", "5.2%"]', message)
+    self.assertIn('"added_tokens": ["1235.50", "6.2%"]', message)
 
  def test_preflight_allows_only_unit_bound_deterministic_display_rounding(self):
     source = product()
@@ -124,6 +124,30 @@ class ResearchLocalizationTests(unittest.TestCase):
     translated["sections"][0]["body"] = "收入为 1563 万美元，利润率为 5.2%。"
     with self.assertRaisesRegex(ResearchLocalizationError, "number tokens"):
         validate_localized_text(source, translated)
+
+ def test_preflight_handles_iso_dates_grouping_and_large_amount_precision(self):
+    source = product()
+    source["sections"][0]["body"] = (
+        "On 2026-06-30 revenue was USD 18044066000 and margin was 1.12%.")
+    for amount in ("180.44", "180.4"):
+        translated = {"sections": [{"index": 0, "title": "财务摘要",
+            "body": f"2026-06-30收入为{amount}亿美元，利润率为1.1%。",
+            "gaps": ["缺少 FY2027 利润率"]}]}
+        self.assertEqual(validate_localized_text(source, translated)[0]["index"], 0)
+    grouped = {"sections": [{"index": 0, "title": "财务摘要",
+        "body": "2026-06-30收入为18,044,066,000美元（原值18,044,066,000美元），利润率为1.12%。",
+        "gaps": ["缺少 FY2027 利润率"]}]}
+    self.assertEqual(validate_localized_text(source, grouped)[0]["index"], 0)
+
+ def test_preflight_never_discards_real_negative_signs(self):
+    for source_number, changed in (("-12", "12"), ("-10.5", "10.5")):
+        source = product()
+        source["sections"][0]["body"] = f"Operating result was {source_number} USD."
+        translated = {"sections": [{"index": 0, "title": "经营结果",
+            "body": f"经营结果为{changed}美元。",
+            "gaps": ["缺少 FY2027 利润率"]}]}
+        with self.assertRaisesRegex(ResearchLocalizationError, "number tokens"):
+            validate_localized_text(source, translated)
 
  def test_preflight_rejects_an_all_english_display_section(self):
     source = product()
