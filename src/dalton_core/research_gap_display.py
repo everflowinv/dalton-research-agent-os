@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any
 from .driver_template import COST_DRIVER_TEMPLATES
+from .numeric_display import format_prose_usd_amounts
 
 _QUESTIONS = {
  "Which product/input spread drives realised gross cost?":"哪项产品与投入品价差决定实际毛成本？",
@@ -41,6 +42,11 @@ _CLOSED_WORDING = {
         "由你确定研究方向、提出初始投资判断，并确认关键决策；系统按研究手册、研究章程、授权范围和预算自主推进其余工作。",
     "人类负责方向、初始论点和检查点裁决，automation 在既定规则与预算内执行。":
         "你负责研究方向、初始判断和关键决策，系统按既定规则和预算执行。",
+    "花费占 mission 周预算上限": "花费占任务周预算上限",
+    "本周实际花费不足 mission 预算上限": "本周实际花费不足任务预算上限",
+    "计价调用共": "计费调用共",
+    "本记录只读不写：不写入 Ledger、不修改 policy、不登记问题。":
+        "这是一份只读检查记录。",
 }
 
 _DISPLAY_TERMS = {
@@ -125,7 +131,8 @@ def display_metadata_text(value: Any) -> str:
     # Translate those only when the entire value is an exact metadata key.
     if text in _DISPLAY_TERMS:
         return _DISPLAY_TERMS[text]
-    return _TERM_PATTERN.sub(lambda match: _DISPLAY_TERMS[match.group(1).lower()], text)
+    return format_prose_usd_amounts(
+        _TERM_PATTERN.sub(lambda match: _DISPLAY_TERMS[match.group(1).lower()], text))
 
 def gap_display_text(value: Any) -> str:
     """Return friendly Chinese for a closed known gap; preserve everything else."""

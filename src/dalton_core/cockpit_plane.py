@@ -4807,8 +4807,9 @@ class CockpitPlane:
             if language_review.get("status") != "ready_for_publication":
                 raise CockpitError("回答已生成，但仍在等待语言审查，尚未发布")
             section = language_review["brain_revision"]["sections"][0]
-            reviewed_display_answer = section["body"]
-            reviewed_display_gaps = section["gaps"]
+            from .research_gap_display import display_metadata_text
+            reviewed_display_answer = display_metadata_text(section["body"])
+            reviewed_display_gaps = [display_metadata_text(gap) for gap in section["gaps"]]
             cost_micros += int(language_review.get("review_cost_micros") or 0)
             replayed = replayed and (language_review.get("artifact_replayed") is True
                                      or language_review.get("replayed") is True)

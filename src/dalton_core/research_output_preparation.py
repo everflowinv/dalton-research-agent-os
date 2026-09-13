@@ -584,6 +584,20 @@ def build(args, data=None):
     return 0 if not failures else 1
 
 
+def prepare_ui_batch(args, mission, product):
+    """Replay one sealed UI batch through publication, including its mapping.
+
+    An existing reviewed attachment is not enough: its UI dictionary entry
+    may still need merging after an interrupted publication.
+    """
+    from types import SimpleNamespace
+    result_path = args.work_dir / 'ui-text-build-results' / (source_content_hash(product) + '.json')
+    ui_args = SimpleNamespace(**{**vars(args), 'result_output': result_path})
+    code = build(ui_args, {'mission': mission, 'products': [product]})
+    return {'status': 'completed' if code == 0 else 'pending',
+            'receipt': read_json(result_path)}
+
+
 def validate_worker_config(cfg):
     """Validate the scheduled worker before opening databases or making calls."""
     paths = {'core_db', 'scheduler_db', 'model_config', 'verifier_config',
@@ -662,6 +676,13 @@ def run_worker(config_path):
                 result=poll_once(connection,mission,state_dir=root/'products',prepare=prepare,
                     extra_reader=lambda con,mis,company:final_surface_products(con,mis,company,
                         weekly_renderer=weekly.render_markdown))
+                from .ui_text_discovery import poll_ui_texts
+                from .research_localization_store import load_ui_texts
+                ui_result=poll_ui_texts(connection,mission,state_dir=root/'ui-text-products',
+                    mapping=load_ui_texts(core),
+                    prepare=lambda product:prepare_ui_batch(args,mission,product))
+                result['ui_texts']=ui_result
+                result['pending']+=ui_result['pending']
                 result['status']='healthy' if not result['pending'] else 'pending'
         finally:
             connection.close()
