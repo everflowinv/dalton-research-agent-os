@@ -19,6 +19,7 @@ from scripts.run_successor_copied_state_rehearsal import (
     validate_external_market_digest_preservation,
     validate_existing_install_authorities, validate_successor_snapshots,
     verify_scratch_bootstrap_writer_append,
+    run as run_successor_rehearsal,
 )
 from scripts.prepare_successor_config_transition import (
     apply_transition_to_scratch, canonical_hash,
@@ -212,6 +213,147 @@ class SuccessorCopiedStateRehearsalTests(unittest.TestCase):
             self.assertTrue(proof_path.is_file())
         finally:
             fixture.doCleanups()
+
+    def test_schema_v05_main_path_stages_openclaw_then_bootstraps_and_applies(self):
+        root = self.state.parent
+        packet = root / "main-packet"; packet.mkdir()
+        source = root / "source"; source.mkdir()
+        live = root / "live"; live.mkdir()
+        temp = Path(tempfile.mkdtemp(dir="/private/tmp"))
+        temp.rmdir()
+        before = b'{"principals":[{"id":"core","operations":["a"]}]}\n'
+        after = b'{"principals":[{"id":"core","operations":["a","b"]}]}\n'
+        openclaw = packet / "openclaw.json"
+        openclaw.write_text('{"owner":{"signature":"kept"}}\n')
+        service = packet / "service.json"; service.write_text("{}\n")
+        baseline = packet / "models.json"; baseline.write_text("{}\n")
+        writer_before = packet / "writer-before.json"; writer_before.write_bytes(before)
+        proof = {
+            "kind": "bootstrap_source_operations_append", "target": "writer-tokens.json",
+            "principal_id": "core", "before_sha256": hashlib.sha256(before).hexdigest(),
+            "predicted_after_sha256": hashlib.sha256(after).hexdigest(),
+            "predecessor": {"commit": "c" * 40, "operations": ["a"],
+                            "operations_hash": "1" * 64},
+            "successor": {"commit": "d" * 40, "operations": ["a", "b"],
+                          "operations_hash": "2" * 64},
+            "added_operations": ["b"],
+        }
+        manifest = {
+            "schema_version": "successor-config-transition-0.5",
+            "status": "prepared_inert", "source_commit": "d" * 40,
+            "acceptance": {"state": "pending"},
+            "supporting_evidence": {"baseline_model_snapshot": {
+                "file": baseline.name,
+                "sha256": hashlib.sha256(baseline.read_bytes()).hexdigest()}},
+            "writer_operation_transition": {
+                "before": {"file": writer_before.name,
+                           "sha256": hashlib.sha256(before).hexdigest()},
+                "predecessor_source_root": str(root / "predecessor"),
+                "proof": proof},
+        }
+        manifest_path = packet / "transition.json"
+        manifest_path.write_text(json.dumps(manifest))
+        transition_sha = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+        log, report, binding = (root / name for name in
+                                ("main.log", "main.md", "main-binding.json"))
+
+        class FakeBase:
+            def __init__(self, _live, temp_root, **_kwargs):
+                self.temp_root = temp_root; self.temp_state = temp_root / "state"
+                self.temp_config = temp_root / "config/service.json"
+                self.launch_agents_dir = temp_root / "LaunchAgents"
+                self.replacements = {}; self.real_home = root
+                self.steps = []; self.rows = []; self.confined = True
+            def copy_state(self):
+                self.temp_state.mkdir(parents=True)
+                self.temp_config.parent.mkdir(parents=True)
+                self.temp_config.write_text("{}\n")
+                (self.temp_state / "writer-tokens.json").write_bytes(before)
+                (self.temp_state / "document-research-config.json").write_text("{}\n")
+                (self.temp_state / "mission-document-research-lane.json").write_text("{}\n")
+                return "copied", []
+            def confine_to_temp_root(self): return "confined", []
+            def run_bootstrap(self):
+                (self.temp_state / "writer-tokens.json").write_bytes(after)
+                return "bootstrapped", []
+            def run(self):
+                self.copy_state()
+                self.run_bootstrap()
+                for _name, operation in self.post_catalog_sync_steps(): operation()
+                return 0
+            def report(self): return "passed"
+
+        class FakeModule:
+            Rehearsal = FakeBase
+            STATE_SUBDIR = Path("state")
+            validate_cli_paths = staticmethod(lambda **_kwargs: None)
+            model_config_inventory = staticmethod(lambda _state: {})
+            rewrite_paths = staticmethod(lambda value, _replacements: value)
+            invert = staticmethod(lambda replacements: replacements)
+            foreign_paths = staticmethod(lambda value, root: [
+                item for item in []])
+
+        def fake_derive(_module, rehearsal, **_kwargs):
+            derived_root = rehearsal.temp_root / "derived"; derived_root.mkdir()
+            derived = derived_root / "transition.json"; derived.write_text("{}\n")
+            proof_path = derived_root / "proof.json"; proof_path.write_text("{}\n")
+            return derived, proof_path, {"status": "derived"}
+
+        def fake_apply(**kwargs):
+            self.assertTrue(kwargs["external_config_path"].is_file())
+            self.assertEqual(source.resolve(), kwargs["successor_source_root"])
+            kwargs["receipt_path"].write_text("{}\n")
+            return {"status": "configured_controller_start_pending"}
+
+        args = SimpleNamespace(
+            source_root=source, live_root=live, packet_root=packet, temp_root=temp,
+            log=log, report=report, binding=binding,
+            code_commit="d" * 40, ops_code_commit="700bde7c" + "0" * 32,
+            transition_manifest=manifest_path,
+            transition_manifest_sha256=transition_sha,
+            service_config_snapshot=service,
+            service_config_snapshot_sha256=hashlib.sha256(service.read_bytes()).hexdigest(),
+            openclaw_config_snapshot=openclaw,
+            openclaw_config_snapshot_sha256=hashlib.sha256(openclaw.read_bytes()).hexdigest(),
+        )
+        actual_ops = __import__("subprocess").check_output(
+            ["git", "rev-parse", "HEAD"], text=True).strip()
+        args.ops_code_commit = actual_ops
+        with patch("scripts.run_successor_copied_state_rehearsal._verify_frozen_source"), \
+             patch("scripts.run_successor_copied_state_rehearsal._load_frozen_rehearsal",
+                   return_value=FakeModule), \
+             patch("scripts.run_successor_copied_state_rehearsal.expected_transition_state",
+                   return_value=({}, {}, {})), \
+             patch("scripts.run_successor_copied_state_rehearsal."
+                   "expected_service_transition_state", return_value=({}, {})), \
+             patch("scripts.run_successor_copied_state_rehearsal."
+                   "expected_writer_operation_transition_state",
+                   return_value=(before, after, manifest["writer_operation_transition"])), \
+             patch("scripts.run_successor_copied_state_rehearsal."
+                   "expected_preserved_openclaw_state", return_value=openclaw.read_bytes()), \
+             patch("scripts.run_successor_copied_state_rehearsal."
+                   "stage_existing_install_authorities", return_value={}), \
+             patch("scripts.run_successor_copied_state_rehearsal."
+                   "capture_external_market_digest_preservation", return_value={}), \
+             patch("scripts.run_successor_copied_state_rehearsal."
+                   "stage_preserved_runtime_configs"), \
+             patch("scripts.run_successor_copied_state_rehearsal."
+                   "replay_preserved_production_setup", return_value=("kept", [])), \
+             patch("scripts.run_successor_copied_state_rehearsal."
+                   "derive_confined_transition", side_effect=fake_derive), \
+             patch("scripts.run_successor_copied_state_rehearsal."
+                   "apply_transition_to_scratch", side_effect=fake_apply), \
+             patch("scripts.run_successor_copied_state_rehearsal."
+                   "validate_successor_snapshots", return_value={}), \
+             patch("scripts.run_successor_copied_state_rehearsal."
+                   "validate_existing_install_authorities", return_value={}), \
+             patch("scripts.run_successor_copied_state_rehearsal."
+                   "validate_external_market_digest_preservation", return_value={}):
+            result = run_successor_rehearsal(args)
+        self.assertEqual(hashlib.sha256(after).hexdigest(),
+                         result["results"]["writer_operation_transition"]["after_sha256"])
+        self.assertEqual(openclaw.read_bytes(),
+                         (temp / "openclaw/openclaw.json").read_bytes())
 
     def test_final_snapshot_binds_configs_and_writer_lane_consumption(self):
         result = self.validate()

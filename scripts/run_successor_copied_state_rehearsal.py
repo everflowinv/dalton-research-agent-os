@@ -808,7 +808,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 detail += "; 2 present install authorities preserved"
             self.successor_openclaw = None
             if manifest.get("schema_version") in {
-                    EXTERNAL_CAS_SCHEMA_VERSION, PURE_PRESERVE_SCHEMA_VERSION}:
+                    EXTERNAL_CAS_SCHEMA_VERSION, PURE_PRESERVE_SCHEMA_VERSION,
+                    WRITER_APPEND_SCHEMA_VERSION}:
                 self.successor_openclaw = self.temp_root / "openclaw/openclaw.json"
                 self.successor_openclaw.parent.mkdir(mode=0o700)
                 _write_exclusive(
