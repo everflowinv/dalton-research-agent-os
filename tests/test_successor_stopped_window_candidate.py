@@ -5,6 +5,8 @@ import json
 import tempfile
 import unittest
 import subprocess
+import plistlib
+import zipfile
 from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -153,6 +155,98 @@ class SuccessorStoppedWindowCandidateTests(unittest.TestCase):
             execute.validate_recovery_writer_preservation(
                 {"schema_version": execute.WRITER_APPEND_SCHEMA_VERSION},
                 {"results": {"writer_token_preservation": preservation}}, recovery)
+
+    def test_real_verify_successor_binds_pure_preserve_plugin_to_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); packet = root / "packet"; packet.mkdir()
+            state = root / "state"; state.mkdir()
+            launch_agents = root / "agents"; launch_agents.mkdir()
+            venv = root / "venv"
+            package = venv / "lib/python3.14/site-packages/dalton_core"
+            package.mkdir(parents=True)
+            package.joinpath("fixture.py").write_text("VALUE = 1\n")
+            service = root / "service.json"
+            service.write_text('{"thesis_impact":{"enabled":false}}\n')
+            openclaw = root / "openclaw.json"; openclaw.write_text("{}\n")
+            document = state / DOCUMENT_CONFIG; write_json(document, {"version": 1})
+            lane = state / LANE_CONFIG; write_json(lane, {"version": 1})
+            writer_plist = launch_agents / "space.lumos.dalton.writer.plist"
+            writer_plist.write_bytes(plistlib.dumps({
+                "ProgramArguments": ["writer", "--mission-document-research-lane", str(lane)]}))
+            wheel = packet / "runtime.whl"
+            with zipfile.ZipFile(wheel, "w") as archive:
+                archive.writestr("dalton_core/fixture.py", "VALUE = 1\n")
+            transition_path = packet / "transition.json"
+            write_json(transition_path, {
+                "schema_version": PURE_PRESERVE_SCHEMA_VERSION, "targets": []})
+            rollback = root / "rollback"; rollback.mkdir()
+            write_json(rollback / "successor-config-transition-receipt.json",
+                       {"model_config_byte_sha256": {}})
+            write_json(rollback / "initial-state.json",
+                       {"protected_state_sha256": "protected",
+                        "reviewed_rendered_plist_sha256": {}})
+            selected = packet / "selected.json"; selected.write_text("{}\n")
+            web = packet / "web.json"
+            write_json(web, {"selected_plan": {
+                "path": str(selected), "file_sha256": execute.sha(selected)}})
+            alpha = packet / "alpha.json"; write_json(alpha, {"owned_targets": {}})
+            service_snapshot = packet / "service.snapshot.json"
+            service_snapshot.write_bytes(service.read_bytes())
+            openclaw_snapshot = packet / "openclaw.snapshot.json"
+            openclaw_snapshot.write_bytes(openclaw.read_bytes())
+            placeholder = packet / "placeholder.json"; placeholder.write_text("{}\n")
+            artifacts = {
+                "transition_manifest": transition_path, "wheel": wheel,
+                "service_config_snapshot": service_snapshot,
+                "openclaw_config_snapshot": openclaw_snapshot,
+                "provider_plugin_snapshot": placeholder,
+                "web_v6_activation_receipt": web,
+                "alpha_v3_activation_receipt": alpha,
+                "model_config_after_snapshot": placeholder,
+            }
+            broker_hash = "b" * 64
+            recovery = {"external_dependency": {"authority": {
+                "broker_tree_sha256": broker_hash}}}
+            manifest = {"schema_version": execute.RECOVERY_SCHEMA_VERSION,
+                        "source": {"root": str(root), "commit": "a" * 40},
+                        "predecessor_recovery": recovery}
+            worker = execute.SuccessorOrchestrator(packet, io.StringIO())
+            worker.rollback_root = rollback; worker.initially_loaded = []
+            worker.loaded = lambda _label: False
+            healthy = subprocess.CompletedProcess(
+                [], 0, json.dumps({"ok": True}), "")
+            worker.command = lambda *_args, **_kwargs: healthy
+            patches = (
+                patch.object(execute.r11, "STATE", state),
+                patch.object(execute.r11, "SERVICE_CONFIG", service),
+                patch.object(execute.r11, "OPENCLAW", openclaw),
+                patch.object(execute.r11, "LAUNCH_AGENTS", launch_agents),
+                patch.object(execute.r11, "VENV", venv),
+                patch.object(execute.r11, "LABELS", []),
+                patch.object(execute.r11, "current_models", return_value={}),
+                patch.object(execute.r11, "protected_state_hash", return_value="protected"),
+                patch.object(execute.r11, "verify_provider_plugin", return_value=broker_hash),
+                patch.object(execute.r11, "verify_runtime_authorities", return_value={"ok": True}),
+                patch.object(execute, "expected_transition_state",
+                             return_value=({}, {"version": 1}, {"version": 1})),
+                patch.object(execute, "verify_preserved_state_authorities", return_value={}),
+                patch.object(execute, "expected_service_transition_state",
+                             return_value=(json.loads(service.read_text()), json.loads(service.read_text()))),
+                patch.object(execute, "expected_preserved_service_bytes", return_value=service.read_bytes()),
+                patch.object(execute, "expected_preserved_openclaw_state", return_value=openclaw.read_bytes()),
+                patch.object(execute, "validate_predecessor_recovery", return_value=({}, recovery)),
+            )
+            with patches[0], patches[1], patches[2], patches[3], patches[4], \
+                 patches[5], patches[6], patches[7], patches[8], patches[9], \
+                 patches[10], patches[11], patches[12], patches[13], patches[14], \
+                 patches[15]:
+                result = worker.verify_successor(manifest, artifacts)
+                self.assertEqual(recovery, result["predecessor_recovery"])
+                execute.r11.verify_provider_plugin.return_value = "c" * 64
+                with self.assertRaisesRegex(
+                        execute.SuccessorExecuteError,
+                        "recovered external broker tree changed"):
+                    worker.verify_successor(manifest, artifacts)
 
     def test_recovered_inventory_uses_historical_receipt_exclusions(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

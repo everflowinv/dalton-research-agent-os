@@ -906,7 +906,7 @@ class SuccessorOrchestrator(r11.Orchestrator):
             need(target.is_file() and not target.is_symlink() and sha(target) == expected,
                  f"installed LaunchAgent bytes differ: {label}")
         if transition.get("schema_version") == EXTERNAL_CAS_SCHEMA_VERSION:
-            verify_provider_plugin_for_config(
+            plugin = verify_provider_plugin_for_config(
                 artifacts["provider_plugin_snapshot"],
                 hashlib.sha256(expected_openclaw_bytes).hexdigest())
             _before, _after, broker_row = expected_openclaw_frame_transition_state(
@@ -930,8 +930,9 @@ class SuccessorOrchestrator(r11.Orchestrator):
                     receipt_dir=(self.rollback_root /
                                  "openclaw-broker-transition"))
         else:
-            need(r11.verify_provider_plugin(artifacts["provider_plugin_snapshot"]),
-                 "provider plugin authority differs")
+            plugin = r11.verify_provider_plugin(
+                artifacts["provider_plugin_snapshot"])
+            need(plugin, "provider plugin authority differs")
         web = load_json(artifacts["web_v6_activation_receipt"])
         selected = web.get("selected_plan", {})
         selected_path = Path(selected.get("path", ""))
