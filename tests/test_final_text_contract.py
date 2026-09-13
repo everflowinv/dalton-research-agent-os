@@ -22,6 +22,10 @@ class FinalTextContractTests(unittest.TestCase):
         self.assertIn("ThesisRevisionCandidate→论点修订建议", text)
         self.assertIn("Internal system vocabulary is not a proper noun", text)
         self.assertIn("不改动任何权威", text)
+        from dalton_core.research_language_review import build_brain_prompt, build_checker_prompt
+        product = {"kind": "ui_text", "sections": [{"title": "t", "body": "b", "gaps": []}]}
+        self.assertIn("Claim/Claims→已核实结论", build_checker_prompt(product))
+        self.assertIn("ThesisRevisionCandidate→论点修订建议", build_brain_prompt(product, {"overall": "", "suggestions": []}))
 
     def test_every_human_facing_research_drafter_uses_the_shared_contract(self):
         producers = (

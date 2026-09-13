@@ -9,6 +9,7 @@ from hashlib import sha256
 from typing import Any
 
 from .cockpit_model import register_purpose
+from .final_text_contract import final_text_instructions
 from .research_localization import validate_localized_text
 
 SCHEMA_VERSION = "research-language-review:0.1"
@@ -65,6 +66,7 @@ def build_checker_prompt(product: Mapping[str, Any]) -> str:
     return "\n".join((
         "你是中文投研成品的语言检查员。逐句判断一位有正常文化程度、具备基础金融知识的读者，"
         "能否轻松读懂这份简体中文材料。只检查语言，不核实事实、数字、来源或投资结论。",
+        *final_text_instructions(),
         "指出生硬机翻、语法病句、含混指代、无必要的工程黑话、重复防御句和中英文混排问题。"
         "保留专有名词、原文引用；Excel 标题和文字说明需要检查，公式与数据单元格不在范围内，"
         "Excel 正文可保留英文。每条建议必须对应一个 section 和原句，不得提出新事实或新数字。",
@@ -166,6 +168,7 @@ def build_brain_prompt(product: Mapping[str, Any], review: Mapping[str, Any]) ->
         "你是负责该研究成品的大脑。语言检查员只评估表达，没有核实事实或数字。逐条决定采纳或拒绝，"
         "给出具体理由，然后返回修订后的全部章节。只改语言；不得新增、删除或改变事实、数字、来源、"
         "审批状态和章节结构。不要再次要求语言检查。",
+        *final_text_instructions(),
         "只输出 JSON："
         '{"decisions":[{"suggestion_index":0,"decision":"adopt|reject","reason":"理由"}],'
         '"sections":[{"index":0,"title":"...","body":"...","gaps":[]}]}',
