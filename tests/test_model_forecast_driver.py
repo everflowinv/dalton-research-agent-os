@@ -838,6 +838,11 @@ class RenderTests(unittest.TestCase):
         self.assertIn("  营业收入", text)
         self.assertIn("translated:Quoted source says Revenues increased.", text)
         self.assertNotIn("translated:Revenues", text)
+        for bilingual in ("Revenues（营业收入）", "营业收入（Revenues）"):
+            record["drivers"][0]["label"] = bilingual
+            text = render_forecast_model(record)
+            self.assertIn("  营业收入", text)
+            self.assertNotIn(bilingual, text)
 
     def test_browser_forecast_report_preserves_per_share_and_unknown_units(self):
         record = model()

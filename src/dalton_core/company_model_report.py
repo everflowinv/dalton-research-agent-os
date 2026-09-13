@@ -38,6 +38,8 @@ CELL_WIDTH = 12
 _CHINESE_MODEL_LABELS = {
     "Revenue": "营业收入",
     "Revenues": "营业收入",
+    "Revenues（营业收入）": "营业收入",
+    "营业收入（Revenues）": "营业收入",
     "Gross Profit": "毛利润",
     "Operating Income": "营业利润",
     "Net Income": "净利润",
