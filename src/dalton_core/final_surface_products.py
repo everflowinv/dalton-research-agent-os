@@ -20,6 +20,11 @@ def _has(connection: Any, table: str) -> bool:
     ).fetchone() is not None
 
 
+def _has_column(connection: Any, table: str, column: str) -> bool:
+    return any(row[1] == column for row in connection.execute(
+        f"PRAGMA table_info({table})").fetchall())
+
+
 def _sections(title: str, *values: Any) -> list[dict[str, Any]]:
     """One exact source string per section so UI displayText can key it."""
     return [{"title": title, "body": value, "gaps": []}
@@ -158,6 +163,40 @@ def final_surface_products(connection: Any, mission: Mapping[str, Any],
             products.append(_product("surface_deep_insight", company_ref, row["version_id"],
                                      row["content_hash"], sections))
 
+    if _has(connection, "zero_base_revision_candidates") and _has(
+            connection, "zero_base_review_versions"):
+        if _has(connection, "thesis_revision_decisions"):
+            terminal = " AND d.terminal=1" if _has_column(
+                connection, "thesis_revision_decisions", "terminal") else ""
+            decision_join = (" LEFT JOIN thesis_revision_decisions d "
+                             "ON d.candidate_ref=c.candidate_id" + terminal
+                             + " WHERE d.rowid IS NULL AND ")
+        else:
+            decision_join = " WHERE "
+        row = connection.execute(
+            "SELECT c.candidate_id,c.content_hash,c.record_json "
+            "FROM zero_base_revision_candidates c" + decision_join
+            + "json_extract(c.record_json,'$.company_ref')=? "
+              "ORDER BY c.created_at DESC,c.candidate_id DESC LIMIT 1",
+            (company_ref,)).fetchone()
+        if row:
+            candidate = _record(row)
+            review = connection.execute(
+                "SELECT record_json FROM zero_base_review_versions WHERE version_id=?",
+                (candidate.get("review_version_ref"),)).fetchone()
+            if review:
+                review_body = _record(review); narrative = review_body.get("narrative") or {}
+                values = [narrative.get("title"), narrative.get("authority_note")]
+                for section in narrative.get("sections") or []:
+                    if isinstance(section, Mapping):
+                        values.extend((section.get("heading"), section.get("body")))
+                products.append(_product(
+                    "surface_zero_base_review", company_ref, row["candidate_id"],
+                    _hash({"candidate": row["content_hash"],
+                           "review_version_ref": candidate.get("review_version_ref"),
+                           "review": review_body}),
+                    _sections("从零复盘", *values)))
+
     if _has(connection, "conviction_call_proposals"):
         join = (" LEFT JOIN conviction_call_decisions d ON d.proposal_ref=p.proposal_id "
                 "WHERE d.decision_id IS NULL AND p.company_ref=? "
@@ -181,7 +220,8 @@ def final_surface_products(connection: Any, mission: Mapping[str, Any],
             (mission["mission_ref"],)).fetchone()
         if row:
             body = _record(row); narrative = body.get("narrative") or {}
-            values = [narrative.get("prose"), *(body.get("policy_suggestions") or []),
+            values = [narrative.get("title"), narrative.get("prose"),
+                      *(body.get("policy_suggestions") or []),
                       body.get("authority_note")]
             for item in narrative.get("table") or []:
                 if isinstance(item, Mapping):

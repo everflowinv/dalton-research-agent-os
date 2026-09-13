@@ -123,3 +123,42 @@ class FinalSurfaceProductsTests(unittest.TestCase):
         self.assertEqual(product['version_ref'],'model:2')
         self.assertEqual([s['body'] for s in product['sections']],
                          ['Current driver','Exact note','Exact rationale','Exact reason'])
+
+    def test_cycle_reflection_discovers_every_gated_visible_string(self):
+        self.db.execute("CREATE TABLE research_cycle_reflection_versions "
+                        "(version_id TEXT,content_hash TEXT,record_json TEXT,mission_ref TEXT,"
+                        "iso_week TEXT,version_number INTEGER)")
+        body={"narrative":{"title":"Exact title","prose":"Exact prose","table":[
+            {"pool":"agenda","lane":"research_plan","cost_usd":1}]},
+            "backlog_candidates":[{"question":"Exact question","because":"Exact because"}],
+            "policy_suggestions":["Exact suggestion"],"authority_note":"Exact authority"}
+        self.db.execute("INSERT INTO research_cycle_reflection_versions VALUES (?,?,?,?,?,?)",
+                        ("cycle:1","cycle-hash",json.dumps(body),MISSION["mission_ref"],"2026-W36",1))
+        product=next(row for row in final_surface_products(self.db,MISSION,COMPANY)
+                     if row["kind"]=="surface_cycle_reflection")
+        self.assertEqual([row["body"] for row in product["sections"]],
+                         ["Exact title","Exact prose","Exact suggestion","Exact authority",
+                          "agenda","research_plan","Exact question","Exact because"])
+
+    def test_pending_zero_base_review_discovers_titles_sections_and_authority(self):
+        self.db.executescript("""
+        CREATE TABLE zero_base_revision_candidates(candidate_id TEXT,content_hash TEXT,
+          created_at TEXT,record_json TEXT);
+        CREATE TABLE zero_base_review_versions(version_id TEXT,record_json TEXT);
+        CREATE TABLE thesis_revision_decisions(candidate_ref TEXT,terminal INTEGER);
+        """)
+        review={"narrative":{"title":"Exact review title","sections":[
+            {"heading":"Exact heading","body":"Exact body"}],
+            "authority_note":"Exact review authority"}}
+        self.db.execute("INSERT INTO zero_base_review_versions VALUES (?,?)",
+                        ("review:1",json.dumps(review)))
+        candidate={"company_ref":COMPANY,"review_version_ref":"review:1"}
+        self.db.execute("INSERT INTO zero_base_revision_candidates VALUES (?,?,?,?)",
+                        ("candidate:1","candidate-hash","2026-09-13",json.dumps(candidate)))
+        product=next(row for row in final_surface_products(self.db,MISSION,COMPANY)
+                     if row["kind"]=="surface_zero_base_review")
+        self.assertEqual([row["body"] for row in product["sections"]],
+                         ["Exact review title","Exact review authority","Exact heading","Exact body"])
+        self.db.execute("INSERT INTO thesis_revision_decisions VALUES ('candidate:1',1)")
+        self.assertFalse(any(row["kind"]=="surface_zero_base_review"
+                             for row in final_surface_products(self.db,MISSION,COMPANY)))
