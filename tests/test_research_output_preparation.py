@@ -107,6 +107,18 @@ class PreparationTests(unittest.TestCase):
         with self.assertRaisesRegex(CockpitModelError,'broker busy'):self.run_one()
         self.assertEqual(self.calls.count(prep.BRAIN_PURPOSE),0)
 
+    def test_invalid_completed_draft_repair_is_rechecked_without_new_calls(self):
+        bad = {'sections': [{'index': 0, 'title': '收入', 'body': '收入为 124 USD。', 'gaps': []}]}
+        self.responses['research_localization'] = bad
+        self.responses[prep.BRAIN_PURPOSE] = bad
+        with self.assertRaises(prep.ResearchLocalizationError):
+            self.run_one()
+        calls = list(self.calls)
+        self.assertEqual(calls.count(prep.BRAIN_PURPOSE), 1)
+        with self.assertRaises(prep.ResearchLocalizationError):
+            self.run_one()
+        self.assertEqual(self.calls, calls)
+
     def test_worker_two_attempt_budget_still_gets_one_content_repair(self):
         self.args['attempts'] = 2
         bad = {'sections': [{'index': 0, 'title': '收入', 'body': '收入为 124 USD。', 'gaps': []}]}

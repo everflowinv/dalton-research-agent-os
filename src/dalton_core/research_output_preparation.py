@@ -226,6 +226,18 @@ def run_chunk(task, *, mission, draft_config, verifier_config, checker_config,
                             timeout_seconds=600)
     draft = model(draft_config, 10000)
     prompt = build_prompt(product)
+    if 'draft_localized' not in evidence and evidence.get('draft_repair_call'):
+        # A completed repair stays the one repair for this source/style. A
+        # validator fix can resume it; a rerun must not buy a new draft or
+        # derive another paid repair from the previous failed repair.
+        repair = evidence['draft_repair_call']
+        localized = parse_stage_output(repair['text'], stage='draft')
+        validate_localized_text(product, localized)
+        evidence['draft'] = copy.deepcopy(repair)
+        evidence['draft_localized'] = localized
+        for key in ('status', 'error', 'attempt'):
+            evidence.pop(key, None)
+        write_json(stage_path, evidence)
     if 'draft_localized' not in evidence:
         final_validation_error = None
         for attempt in range(attempts):
