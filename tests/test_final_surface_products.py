@@ -47,6 +47,8 @@ class FinalSurfaceProductsTests(unittest.TestCase):
         rendered = json.dumps(events, ensure_ascii=False)
         self.assertNotIn("另一家公司", rendered)
         self.assertNotIn("claim-version", rendered)
+        self.assertEqual([section["body"] for section in events[0]["sections"]],
+                         ["判断 6", "说明"])
 
     def test_projection_executes_no_sqlite_write(self):
         self.insert("thesis_reflections", "reflection:1", COMPANY,
@@ -62,7 +64,45 @@ class FinalSurfaceProductsTests(unittest.TestCase):
         self.assertEqual(writes, [])
         self.assertIn("需求改善", products[0]["sections"][0]["body"])
         self.assertNotIn("secret-ref", json.dumps(products, ensure_ascii=False))
+        self.assertEqual([section["body"] for section in products[0]["sections"]],
+                         ["需求改善", "需求持平", "预算延后"])
+
+    def test_current_thesis_uses_updated_chain_head_not_only_version_one(self):
+        self.db.executescript("""
+        CREATE TABLE thesis_admission_candidates (candidate_id TEXT, company_ref TEXT);
+        CREATE TABLE thesis_admission_decisions (decision_id TEXT, candidate_id TEXT);
+        CREATE TABLE thesis_versions (version_id TEXT, thesis_id TEXT, version_number INTEGER,
+          admission_decision_id TEXT, content_hash TEXT, content_json TEXT);
+        CREATE TABLE current_pointers (thesis_id TEXT, version_id TEXT, updated_at TEXT);
+        """)
+        self.db.execute("INSERT INTO thesis_admission_candidates VALUES ('c1',?)", (COMPANY,))
+        self.db.execute("INSERT INTO thesis_admission_decisions VALUES ('d1','c1')")
+        self.db.execute("INSERT INTO thesis_versions VALUES "
+                        "('v1','thesis:1',1,'d1','h1',?)",
+                        (json.dumps({"statement": "旧论点"}),))
+        self.db.execute("INSERT INTO thesis_versions VALUES "
+                        "('v2','thesis:1',2,NULL,'h2',?)",
+                        (json.dumps({"statement": "当前论点"}),))
+        self.db.execute("INSERT INTO current_pointers VALUES ('thesis:1','v2','2026-09-13')")
+        thesis = next(row for row in final_surface_products(self.db, MISSION, COMPANY)
+                      if row["kind"] == "surface_thesis")
+        self.assertEqual(thesis["version_ref"], "v2")
+        self.assertEqual(thesis["sections"][0]["body"], "当前论点")
 
     def test_outside_company_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "outside"):
             final_surface_products(self.db, MISSION, "company:outside")
+
+    def test_weekly_renderer_projects_the_exact_full_markdown_as_one_ui_string(self):
+        self.db.execute("CREATE TABLE weekly_brief_issue_versions "
+                        "(version_id TEXT,content_hash TEXT,record_json TEXT,version_number INTEGER)")
+        self.db.execute("INSERT INTO weekly_brief_issue_versions VALUES (?,?,?,1)",
+                        ("weekly:1", "weekly-hash", json.dumps({"thesis_bindings": [
+                            {"company_ref": COMPANY, "statement": "周观点"}]})))
+        exact = "# 每周研究简报\n\n完整正文与原始引用 claim-version:abc 保持原样。\n"
+        products = final_surface_products(
+            self.db, MISSION, COMPANY,
+            weekly_renderer=lambda version: {"body": exact})
+        weekly = next(row for row in products if row["kind"] == "surface_weekly_brief")
+        self.assertEqual(weekly["sections"], [
+            {"title": "每周研究简报", "body": exact, "gaps": []}])

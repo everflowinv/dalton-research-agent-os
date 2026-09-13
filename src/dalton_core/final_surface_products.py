@@ -20,15 +20,15 @@ def _has(connection: Any, table: str) -> bool:
     ).fetchone() is not None
 
 
-def _section(title: str, *values: Any) -> dict[str, Any] | None:
-    text = "\n".join(str(value).strip() for value in values
-                     if isinstance(value, str) and value.strip())
-    return None if not text else {"title": title, "body": text, "gaps": []}
+def _sections(title: str, *values: Any) -> list[dict[str, Any]]:
+    """One exact source string per section so UI displayText can key it."""
+    return [{"title": title, "body": value, "gaps": []}
+            for value in values if isinstance(value, str) and value.strip()]
 
 
 def _product(kind: str, subject: str, version: str, binding_hash: str,
-             sections: list[dict[str, Any] | None]) -> dict[str, Any] | None:
-    kept = [row for row in sections if row is not None]
+             sections: list[dict[str, Any]]) -> dict[str, Any] | None:
+    kept = list(sections)
     if not kept:
         return None
     value = {"kind": kind, "subject_ref": subject, "version_ref": version,
@@ -46,7 +46,8 @@ def _record(row: Any) -> dict[str, Any]:
 
 
 def final_surface_products(connection: Any, mission: Mapping[str, Any],
-                           company_ref: str) -> list[dict[str, Any]]:
+                           company_ref: str, *,
+                           weekly_renderer: Any | None = None) -> list[dict[str, Any]]:
     """Return only prose currently exposed by Cockpit for one covered company."""
 
     if company_ref not in {row.get("company_ref") for row in mission.get("universe") or []}:
@@ -55,18 +56,20 @@ def final_surface_products(connection: Any, mission: Mapping[str, Any],
 
     if _has(connection, "current_pointers") and _has(connection, "thesis_versions"):
         row = connection.execute(
-            "SELECT v.version_id,v.content_hash,v.content_json FROM thesis_admission_candidates c "
+            "WITH owned AS (SELECT v.thesis_id FROM thesis_admission_candidates c "
             "JOIN thesis_admission_decisions d ON d.candidate_id=c.candidate_id "
             "JOIN thesis_versions v ON v.admission_decision_id=d.decision_id "
-            "JOIN current_pointers p ON p.version_id=v.version_id "
-            "WHERE c.company_ref=? AND v.version_number=1 "
+            "WHERE c.company_ref=? AND v.version_number=1) "
+            "SELECT v.version_id,v.content_hash,v.content_json FROM owned o "
+            "JOIN current_pointers p ON p.thesis_id=o.thesis_id "
+            "JOIN thesis_versions v ON v.version_id=p.version_id "
             "ORDER BY p.updated_at DESC LIMIT 1", (company_ref,)
         ).fetchone()
         if row:
             body = json.loads(row["content_json"])
             products.append(_product("surface_thesis", company_ref, row["version_id"],
                                      row["content_hash"],
-                                     [_section("当前投资论点", body.get("statement"))]))
+                                     [*_sections("当前投资论点", body.get("statement"))]))
 
     if _has(connection, "weekly_brief_issue_versions"):
         rows = connection.execute(
@@ -81,8 +84,14 @@ def final_surface_products(connection: Any, mission: Mapping[str, Any],
                 continue
             statements = [item.get("statement") for item in bindings
                           if isinstance(item, Mapping) and item.get("company_ref") == company_ref]
+            weekly_sections = _sections("本周观点", *statements)
+            if weekly_renderer is not None:
+                rendered = weekly_renderer(row["version_id"])
+                rendered_body = (rendered.get("body") if isinstance(rendered, Mapping)
+                                 else rendered)
+                weekly_sections = _sections("每周研究简报", rendered_body)
             products.append(_product("surface_weekly_brief", company_ref, row["version_id"],
-                                     row["content_hash"], [_section("本周观点", *statements)]))
+                                     row["content_hash"], weekly_sections))
             break
 
     for table, kind, id_col, fields, limit in (
@@ -101,7 +110,7 @@ def final_surface_products(connection: Any, mission: Mapping[str, Any],
         for row in rows:
             body = _record(row)
             products.append(_product(kind, company_ref, row[id_col], row["content_hash"],
-                                     [_section("事件研判" if kind.endswith("judgement") else "观点复盘",
+                                     [*_sections("事件研判" if kind.endswith("judgement") else "观点复盘",
                                                *(body.get(field) for field in fields))]))
 
     if _has(connection, "deep_insight_gate_versions"):
@@ -124,8 +133,8 @@ def final_surface_products(connection: Any, mission: Mapping[str, Any],
                 gaps = list(item.get("gaps") or [])
                 if isinstance(unknown, Mapping):
                     gaps += [unknown.get("missing"), unknown.get("evidence_that_would_answer")]
-                sections.append(_section(str(item.get("question") or item.get("question_ref")
-                                                     or "深度认知"), *sentences, *gaps))
+                sections.extend(_sections(str(item.get("question") or item.get("question_ref")
+                                                    or "深度认知"), *sentences, *gaps))
             products.append(_product("surface_deep_insight", company_ref, row["version_id"],
                                      row["content_hash"], sections))
 
@@ -139,7 +148,7 @@ def final_surface_products(connection: Any, mission: Mapping[str, Any],
         for row in rows:
             body = _record(row); variant = body.get("variant_view") or {}
             products.append(_product("surface_conviction", company_ref, row["proposal_id"],
-                row["content_hash"], [_section("投资判断",
+                row["content_hash"], [*_sections("投资判断",
                     *((variant.get(key) or {}).get("statement") or (variant.get(key) or {}).get("reason")
                       for key in ("our_view", "market_view", "where_market_is_wrong")),
                     *(item.get("signal") for item in body.get("event_pathway") or []
@@ -154,7 +163,7 @@ def final_surface_products(connection: Any, mission: Mapping[str, Any],
             body = _record(row); narrative = body.get("narrative") or {}
             products.append(_product("surface_cycle_reflection", mission["mission_ref"],
                 row["version_id"], row["content_hash"],
-                [_section(narrative.get("title") or "每周研究复盘", narrative.get("prose"),
+                [*_sections(narrative.get("title") or "每周研究复盘", narrative.get("prose"),
                           *(body.get("policy_suggestions") or []))]))
 
     if _has(connection, "mission_deliverable_pointer") and _has(connection, "mission_deliverable_versions"):
@@ -165,11 +174,13 @@ def final_surface_products(connection: Any, mission: Mapping[str, Any],
             (company_ref,)).fetchall()
         for row in rows:
             body = _record(row)
+            sections = []
+            for item in body.get("sections") or []:
+                if isinstance(item, Mapping):
+                    sections.extend(_sections(item.get("title") or row["kind"],
+                                              item.get("body"), *(item.get("gaps") or [])))
             products.append(_product("surface_" + row["kind"], company_ref, row["version_id"],
-                row["content_hash"], [_section(item.get("title") or row["kind"], item.get("body"),
-                                                 *(item.get("gaps") or []))
-                                       for item in body.get("sections") or []
-                                       if isinstance(item, Mapping)]))
+                                     row["content_hash"], sections))
     return [row for row in products if row is not None]
 
 
