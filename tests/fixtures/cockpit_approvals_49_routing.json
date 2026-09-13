@@ -1,0 +1,886 @@
+[
+  {
+    "kind": "gate_reopen",
+    "who": "ACN · Accenture",
+    "title": "一道已经过掉的闸，现在有证据说可以重开",
+    "ref": "gate-reopen-proposal:9b4000aa91b195c94f306a1cad0e2b05",
+    "hash": "4ab2e39b1d8fa86fe11deafba575835e72166e212e0b3bed7f35a75602d99c59",
+    "evaluation_id": null,
+    "actions": [
+      {
+        "decision": "approve",
+        "label": "重出一版"
+      },
+      {
+        "decision": "decline",
+        "label": "不重出"
+      }
+    ]
+  },
+  {
+    "kind": "gate_reopen",
+    "who": "EPAM",
+    "title": "一道已经过掉的闸，现在有证据说可以重开",
+    "ref": "gate-reopen-proposal:0f83539902ab1616fe94fbbe8704dc5e",
+    "hash": "76aeed830052f129e9f3d3809d9d5ce80fb6dfbbc82818605a8e5590c615f102",
+    "evaluation_id": null,
+    "actions": [
+      {
+        "decision": "approve",
+        "label": "重出一版"
+      },
+      {
+        "decision": "decline",
+        "label": "不重出"
+      }
+    ]
+  },
+  {
+    "kind": "gate_reopen",
+    "who": "IBM",
+    "title": "一道已经过掉的闸，现在有证据说可以重开",
+    "ref": "gate-reopen-proposal:456cdc657bc4b3b202f55a5c3434d585",
+    "hash": "72f7c07d089bdc355471f5915bc9d004490873299ffd62c324731b45d0e69a06",
+    "evaluation_id": null,
+    "actions": [
+      {
+        "decision": "approve",
+        "label": "重出一版"
+      },
+      {
+        "decision": "decline",
+        "label": "不重出"
+      }
+    ]
+  },
+  {
+    "kind": "gate_reopen",
+    "who": "DXC · DXC Technology",
+    "title": "一道已经过掉的闸，现在有证据说可以重开",
+    "ref": "gate-reopen-proposal:6bfbbd64a234b5ac131627c89f6777fa",
+    "hash": "b1e1aae0ed7e865a1766c4b44bbcd6eb1806beb45e45cfaa6430a8eb067a4e0a",
+    "evaluation_id": null,
+    "actions": [
+      {
+        "decision": "approve",
+        "label": "重出一版"
+      },
+      {
+        "decision": "decline",
+        "label": "不重出"
+      }
+    ]
+  },
+  {
+    "kind": "gate_reopen",
+    "who": "ACN · Accenture",
+    "title": "一道已经过掉的闸，现在有证据说可以重开",
+    "ref": "gate-reopen-proposal:07140a4806d5526af46fef023064dbac",
+    "hash": "46bb14aa9fdeb68737bffa7ee740c778b395ecddacc4c107490deb79bbd4337c",
+    "evaluation_id": null,
+    "actions": [
+      {
+        "decision": "approve",
+        "label": "重出一版"
+      },
+      {
+        "decision": "decline",
+        "label": "不重出"
+      }
+    ]
+  },
+  {
+    "kind": "gate_reopen",
+    "who": "IBM",
+    "title": "一道已经过掉的闸，现在有证据说可以重开",
+    "ref": "gate-reopen-proposal:61108a26b09e50a64f89035120873991",
+    "hash": "04ea891472bc3b3cb9090825c407ea39b6f4f967cc9b3ca3cde44bd44bc98bba",
+    "evaluation_id": null,
+    "actions": [
+      {
+        "decision": "approve",
+        "label": "重出一版"
+      },
+      {
+        "decision": "decline",
+        "label": "不重出"
+      }
+    ]
+  },
+  {
+    "kind": "gate_reopen",
+    "who": "DXC · DXC Technology",
+    "title": "一道已经过掉的闸，现在有证据说可以重开",
+    "ref": "gate-reopen-proposal:f5b9c494f2e9d0416d210727bba9d946",
+    "hash": "d0627d6127415a4ab1a440f5b9e16d7fc3d250eb3e7582505ebea86f8401ce4d",
+    "evaluation_id": null,
+    "actions": [
+      {
+        "decision": "approve",
+        "label": "重出一版"
+      },
+      {
+        "decision": "decline",
+        "label": "不重出"
+      }
+    ]
+  },
+  {
+    "kind": "gate_reopen",
+    "who": "DXC · DXC Technology",
+    "title": "一道已经过掉的闸，现在有证据说可以重开",
+    "ref": "gate-reopen-proposal:185deb89278638c72ed90ee3400f38e4",
+    "hash": "7c9b26ac3f2ecc1bbcc6a402ffff8de2df6e477570edb62ce0dd48c7c1bdf782",
+    "evaluation_id": null,
+    "actions": [
+      {
+        "decision": "approve",
+        "label": "重出一版"
+      },
+      {
+        "decision": "decline",
+        "label": "不重出"
+      }
+    ]
+  },
+  {
+    "kind": "gate_reopen",
+    "who": "ACN · Accenture",
+    "title": "一道已经过掉的闸，现在有证据说可以重开",
+    "ref": "gate-reopen-proposal:fc616ffd8b8747d5db60f89c6afaa9a5",
+    "hash": "72682032cb9e3f1289c8d5c4363d2c66a43cbc9eff57083c28011f1aa52c3448",
+    "evaluation_id": null,
+    "actions": [
+      {
+        "decision": "approve",
+        "label": "重出一版"
+      },
+      {
+        "decision": "decline",
+        "label": "不重出"
+      }
+    ]
+  },
+  {
+    "kind": "gate_reopen",
+    "who": "EPAM",
+    "title": "一道已经过掉的闸，现在有证据说可以重开",
+    "ref": "gate-reopen-proposal:933c51ddb0169a76312794fc74d52991",
+    "hash": "7a2b9edd229c73e9220c2552475a0663ed173d9653098f824e89300322ecbf21",
+    "evaluation_id": null,
+    "actions": [
+      {
+        "decision": "approve",
+        "label": "重出一版"
+      },
+      {
+        "decision": "decline",
+        "label": "不重出"
+      }
+    ]
+  },
+  {
+    "kind": "gate_reopen",
+    "who": "IBM",
+    "title": "一道已经过掉的闸，现在有证据说可以重开",
+    "ref": "gate-reopen-proposal:6e366e0c7d0bc36de55166a8e2ecfbd4",
+    "hash": "989e92042ceaa0d5b8721f83b6c9df5e33d0568727aa999e39a429bb5dc59a38",
+    "evaluation_id": null,
+    "actions": [
+      {
+        "decision": "approve",
+        "label": "重出一版"
+      },
+      {
+        "decision": "decline",
+        "label": "不重出"
+      }
+    ]
+  },
+  {
+    "kind": "gate_reopen",
+    "who": "DXC · DXC Technology",
+    "title": "一道已经过掉的闸，现在有证据说可以重开",
+    "ref": "gate-reopen-proposal:1ae694ec3323f2926b28a64a7b0299bf",
+    "hash": "03fa1859042a88b26ee821320fbfe15e71bea2b7617bb2faf4dc1c756fffe53a",
+    "evaluation_id": null,
+    "actions": [
+      {
+        "decision": "approve",
+        "label": "重出一版"
+      },
+      {
+        "decision": "decline",
+        "label": "不重出"
+      }
+    ]
+  },
+  {
+    "kind": "gate_reopen",
+    "who": "ACN · Accenture",
+    "title": "一道已经过掉的闸，现在有证据说可以重开",
+    "ref": "gate-reopen-proposal:505126569598c61b5a3cbb899790d585",
+    "hash": "dd1a9e69110eb85a8ea06087f27b873d4d50fcf4b2bf22905824c41d562642f3",
+    "evaluation_id": null,
+    "actions": [
+      {
+        "decision": "approve",
+        "label": "重出一版"
+      },
+      {
+        "decision": "decline",
+        "label": "不重出"
+      }
+    ]
+  },
+  {
+    "kind": "gate_reopen",
+    "who": "EPAM",
+    "title": "一道已经过掉的闸，现在有证据说可以重开",
+    "ref": "gate-reopen-proposal:d843a0725b7ebb975c3842b1dcde46bd",
+    "hash": "f432ab54b88f5aeb2110720cdc8e521e5ef8d0adb78b560dabd88e2f5caa7864",
+    "evaluation_id": null,
+    "actions": [
+      {
+        "decision": "approve",
+        "label": "重出一版"
+      },
+      {
+        "decision": "decline",
+        "label": "不重出"
+      }
+    ]
+  },
+  {
+    "kind": "gate_reopen",
+    "who": "DXC · DXC Technology",
+    "title": "一道已经过掉的闸，现在有证据说可以重开",
+    "ref": "gate-reopen-proposal:346ecca7c3c263a44dcefcdd9cbff3da",
+    "hash": "628fe52afdad66db7a95e12291a897839008e1dca35f837f22efc6b84c79df6a",
+    "evaluation_id": null,
+    "actions": [
+      {
+        "decision": "approve",
+        "label": "重出一版"
+      },
+      {
+        "decision": "decline",
+        "label": "不重出"
+      }
+    ]
+  },
+  {
+    "kind": "thesis_revision_candidate",
+    "who": "ACN · Accenture",
+    "title": "从零复盘后，提议改我们对这家公司的判断",
+    "ref": "thesis-revision-candidate:83708bc58761dfafca0296b6ac25f52d",
+    "hash": "6ce1b7b1a7457b988177304f3eba7fb5e60f31f557fe6b51b765d8659fb16b1e",
+    "evaluation_id": null,
+    "actions": [
+      {
+        "decision": "accept",
+        "label": "接受，出新版本"
+      },
+      {
+        "decision": "reject",
+        "label": "不接受"
+      },
+      {
+        "decision": "defer",
+        "label": "先放着，再看看"
+      }
+    ]
+  },
+  {
+    "kind": "thesis_revision_candidate",
+    "who": "ACN · Accenture",
+    "title": "从零复盘后，提议改我们对这家公司的判断",
+    "ref": "thesis-revision-candidate:b3939ceeb2c084979a0ad764ea9bb1ef",
+    "hash": "ddffa9da02a8b7022d2fca66a8a10bef2982b3899517caa8229264001fd0eda9",
+    "evaluation_id": null,
+    "actions": [
+      {
+        "decision": "accept",
+        "label": "接受，出新版本"
+      },
+      {
+        "decision": "reject",
+        "label": "不接受"
+      },
+      {
+        "decision": "defer",
+        "label": "先放着，再看看"
+      }
+    ]
+  },
+  {
+    "kind": "thesis_revision_candidate",
+    "who": "EPAM",
+    "title": "从零复盘后，提议改我们对这家公司的判断",
+    "ref": "thesis-revision-candidate:93bd77c59429f7fde4e69c754bbc5e8c",
+    "hash": "94817b0508e44f35744b67bee20b24ca471f3abc03991329158b07ca71826fca",
+    "evaluation_id": null,
+    "actions": [
+      {
+        "decision": "accept",
+        "label": "接受，出新版本"
+      },
+      {
+        "decision": "reject",
+        "label": "不接受"
+      },
+      {
+        "decision": "defer",
+        "label": "先放着，再看看"
+      }
+    ]
+  },
+  {
+    "kind": "thesis_revision_candidate",
+    "who": "DXC · DXC Technology",
+    "title": "从零复盘后，提议改我们对这家公司的判断",
+    "ref": "thesis-revision-candidate:8d0f0575e113b54bfcca774ff5e49ead",
+    "hash": "31782c32aeb1dfe757f01d901d01472ef37c6f8a1c08a7f3042829ace8863970",
+    "evaluation_id": null,
+    "actions": [
+      {
+        "decision": "accept",
+        "label": "接受，出新版本"
+      },
+      {
+        "decision": "reject",
+        "label": "不接受"
+      },
+      {
+        "decision": "defer",
+        "label": "先放着，再看看"
+      }
+    ]
+  },
+  {
+    "kind": "thesis_revision_candidate",
+    "who": "IBM",
+    "title": "从零复盘后，提议改我们对这家公司的判断",
+    "ref": "thesis-revision-candidate:d1ec3b0c99ca336f8a5827ca38b76ed4",
+    "hash": "9019eb57146c6695a1878aff0853d0cf34f32759308d190d9e4b877cc331e954",
+    "evaluation_id": null,
+    "actions": [
+      {
+        "decision": "accept",
+        "label": "接受，出新版本"
+      },
+      {
+        "decision": "reject",
+        "label": "不接受"
+      },
+      {
+        "decision": "defer",
+        "label": "先放着，再看看"
+      }
+    ]
+  },
+  {
+    "kind": "gate_reopen",
+    "who": "ACN · Accenture",
+    "title": "一道已经过掉的闸，现在有证据说可以重开",
+    "ref": "gate-reopen-proposal:9cf0e9eb35d132c7888a555f08b7c690",
+    "hash": "0a402d22046aa23a1bf24606516119cddf499a257dba6a07ccab0ea604d74732",
+    "evaluation_id": null,
+    "actions": [
+      {
+        "decision": "approve",
+        "label": "重出一版"
+      },
+      {
+        "decision": "decline",
+        "label": "不重出"
+      }
+    ]
+  },
+  {
+    "kind": "gate_reopen",
+    "who": "EPAM",
+    "title": "一道已经过掉的闸，现在有证据说可以重开",
+    "ref": "gate-reopen-proposal:1f57c9bda7dbe937cda16f7dd0749771",
+    "hash": "189fb3c7229ca687904133d057e87162144ac065b1fb38974d75cd0da1b58abe",
+    "evaluation_id": null,
+    "actions": [
+      {
+        "decision": "approve",
+        "label": "重出一版"
+      },
+      {
+        "decision": "decline",
+        "label": "不重出"
+      }
+    ]
+  },
+  {
+    "kind": "gate_reopen",
+    "who": "IBM",
+    "title": "一道已经过掉的闸，现在有证据说可以重开",
+    "ref": "gate-reopen-proposal:073d33f2caee1deeb1d8d34ab24f56f4",
+    "hash": "d9ff255fe9c8caeb7afd260fb41de464542e9c93d87f14883f2bff32a56c9ee5",
+    "evaluation_id": null,
+    "actions": [
+      {
+        "decision": "approve",
+        "label": "重出一版"
+      },
+      {
+        "decision": "decline",
+        "label": "不重出"
+      }
+    ]
+  },
+  {
+    "kind": "gate_reopen",
+    "who": "DXC · DXC Technology",
+    "title": "一道已经过掉的闸，现在有证据说可以重开",
+    "ref": "gate-reopen-proposal:ec671f1e4501c15a83ab019f9364ef84",
+    "hash": "e014b3cdd7432a4154e55fe4c3de76a86ff6bc6c8f8bdd9132e4e503ec983420",
+    "evaluation_id": null,
+    "actions": [
+      {
+        "decision": "approve",
+        "label": "重出一版"
+      },
+      {
+        "decision": "decline",
+        "label": "不重出"
+      }
+    ]
+  },
+  {
+    "kind": "gate_reopen",
+    "who": "ACN · Accenture",
+    "title": "一道已经过掉的闸，现在有证据说可以重开",
+    "ref": "gate-reopen-proposal:34d30a0d6df08e168db5f5e5cb6f5f50",
+    "hash": "8dc4b59b9fe02da7b9dd4feedc407b12f16b59c832a375cc7fa21327086d1289",
+    "evaluation_id": null,
+    "actions": [
+      {
+        "decision": "approve",
+        "label": "重出一版"
+      },
+      {
+        "decision": "decline",
+        "label": "不重出"
+      }
+    ]
+  },
+  {
+    "kind": "gate_reopen",
+    "who": "EPAM",
+    "title": "一道已经过掉的闸，现在有证据说可以重开",
+    "ref": "gate-reopen-proposal:9af49d9172b7b7c2ccc6815d1d091e79",
+    "hash": "ed403c5b7ce593ffa67e969490d2f627a66e1c37f03d83b7a4db8b573aee1511",
+    "evaluation_id": null,
+    "actions": [
+      {
+        "decision": "approve",
+        "label": "重出一版"
+      },
+      {
+        "decision": "decline",
+        "label": "不重出"
+      }
+    ]
+  },
+  {
+    "kind": "gate_reopen",
+    "who": "IBM",
+    "title": "一道已经过掉的闸，现在有证据说可以重开",
+    "ref": "gate-reopen-proposal:dbb16d56373cf35bf8ff031451b8ed4e",
+    "hash": "cfba4804f132634e5ea01099e0f4d9dcea39f5da17d0a2aa57aa01fcdcdb2c84",
+    "evaluation_id": null,
+    "actions": [
+      {
+        "decision": "approve",
+        "label": "重出一版"
+      },
+      {
+        "decision": "decline",
+        "label": "不重出"
+      }
+    ]
+  },
+  {
+    "kind": "gate_reopen",
+    "who": "DXC · DXC Technology",
+    "title": "一道已经过掉的闸，现在有证据说可以重开",
+    "ref": "gate-reopen-proposal:372b5ced331d0f2eb22956f545934764",
+    "hash": "1cc8cb116580eaa6a360f3141879e70b18b1b3dba3bb54529a4642d0ca761b67",
+    "evaluation_id": null,
+    "actions": [
+      {
+        "decision": "approve",
+        "label": "重出一版"
+      },
+      {
+        "decision": "decline",
+        "label": "不重出"
+      }
+    ]
+  },
+  {
+    "kind": "gate_reopen",
+    "who": "ACN · Accenture",
+    "title": "一道已经过掉的闸，现在有证据说可以重开",
+    "ref": "gate-reopen-proposal:e3c6f79044f1b6ac160f4f32e224f969",
+    "hash": "7172d09c00878b694418797acb08bb474cb4a5b1b9aad0b622d578e29a0db776",
+    "evaluation_id": null,
+    "actions": [
+      {
+        "decision": "approve",
+        "label": "重出一版"
+      },
+      {
+        "decision": "decline",
+        "label": "不重出"
+      }
+    ]
+  },
+  {
+    "kind": "gate_reopen",
+    "who": "EPAM",
+    "title": "一道已经过掉的闸，现在有证据说可以重开",
+    "ref": "gate-reopen-proposal:4ef6c585c17c823f7ffe5bc39591a572",
+    "hash": "3ac64041d36a10750cb39bfb9214c33497c9e024e5cf3d96d5b66acbb75bed2c",
+    "evaluation_id": null,
+    "actions": [
+      {
+        "decision": "approve",
+        "label": "重出一版"
+      },
+      {
+        "decision": "decline",
+        "label": "不重出"
+      }
+    ]
+  },
+  {
+    "kind": "gate_reopen",
+    "who": "IBM",
+    "title": "一道已经过掉的闸，现在有证据说可以重开",
+    "ref": "gate-reopen-proposal:50865c4620fb3bb05389a432451923ca",
+    "hash": "9ea53ca0f237e0f2664aebd1df2bba62d5bc5d82694a6e767357eb916ba9e76d",
+    "evaluation_id": null,
+    "actions": [
+      {
+        "decision": "approve",
+        "label": "重出一版"
+      },
+      {
+        "decision": "decline",
+        "label": "不重出"
+      }
+    ]
+  },
+  {
+    "kind": "gate_reopen",
+    "who": "DXC · DXC Technology",
+    "title": "一道已经过掉的闸，现在有证据说可以重开",
+    "ref": "gate-reopen-proposal:3aa075a77eb964736efc33aa606f0fff",
+    "hash": "4d10c17d260b8b378886143f7a93485a774d9268a99170445d41110a285ac1c7",
+    "evaluation_id": null,
+    "actions": [
+      {
+        "decision": "approve",
+        "label": "重出一版"
+      },
+      {
+        "decision": "decline",
+        "label": "不重出"
+      }
+    ]
+  },
+  {
+    "kind": "gate_reopen",
+    "who": "ACN · Accenture",
+    "title": "一道已经过掉的闸，现在有证据说可以重开",
+    "ref": "gate-reopen-proposal:658b73b2c527e036558a5da0673dea1e",
+    "hash": "93e51991c9e3bf9d88f5188d903d4c772630c6a7b878998503a11f240683b63a",
+    "evaluation_id": null,
+    "actions": [
+      {
+        "decision": "approve",
+        "label": "重出一版"
+      },
+      {
+        "decision": "decline",
+        "label": "不重出"
+      }
+    ]
+  },
+  {
+    "kind": "gate_reopen",
+    "who": "EPAM",
+    "title": "一道已经过掉的闸，现在有证据说可以重开",
+    "ref": "gate-reopen-proposal:61fee43a9d605781e22904374b6621c1",
+    "hash": "8d63c8749f29b79c096d92c9a45c71e0018ebd98825baf1f9f647de0d13a8486",
+    "evaluation_id": null,
+    "actions": [
+      {
+        "decision": "approve",
+        "label": "重出一版"
+      },
+      {
+        "decision": "decline",
+        "label": "不重出"
+      }
+    ]
+  },
+  {
+    "kind": "gate_reopen",
+    "who": "IBM",
+    "title": "一道已经过掉的闸，现在有证据说可以重开",
+    "ref": "gate-reopen-proposal:b5e02e47960e209b1bac1eeae23ade4c",
+    "hash": "0ca16c1c9070c6f0e53c1f904ea4740401468ab1b4d4c318fb84b438310b9b8b",
+    "evaluation_id": null,
+    "actions": [
+      {
+        "decision": "approve",
+        "label": "重出一版"
+      },
+      {
+        "decision": "decline",
+        "label": "不重出"
+      }
+    ]
+  },
+  {
+    "kind": "gate_reopen",
+    "who": "DXC · DXC Technology",
+    "title": "一道已经过掉的闸，现在有证据说可以重开",
+    "ref": "gate-reopen-proposal:f7bba188d81721250c918eb3657bf82f",
+    "hash": "b924f2a2a3194cd1d98246e7b82b17e9f44ab808c0a3f4ee7d3e2d455f040c43",
+    "evaluation_id": null,
+    "actions": [
+      {
+        "decision": "approve",
+        "label": "重出一版"
+      },
+      {
+        "decision": "decline",
+        "label": "不重出"
+      }
+    ]
+  },
+  {
+    "kind": "gate_reopen",
+    "who": "ACN · Accenture",
+    "title": "一道已经过掉的闸，现在有证据说可以重开",
+    "ref": "gate-reopen-proposal:2e0a927c1efdc05aa4bf9db121789d16",
+    "hash": "070874df035f45a9af7ff6dea561eb2f6a68456243d2969b07d8828d7cd9f7b6",
+    "evaluation_id": null,
+    "actions": [
+      {
+        "decision": "approve",
+        "label": "重出一版"
+      },
+      {
+        "decision": "decline",
+        "label": "不重出"
+      }
+    ]
+  },
+  {
+    "kind": "gate_reopen",
+    "who": "EPAM",
+    "title": "一道已经过掉的闸，现在有证据说可以重开",
+    "ref": "gate-reopen-proposal:2d1298a9dbb1eb69e0c669633610bc21",
+    "hash": "74fc7d3cf6ca243937a6e7a7d7917b51a8851159ce4ff862ca5cd49e82a79b3e",
+    "evaluation_id": null,
+    "actions": [
+      {
+        "decision": "approve",
+        "label": "重出一版"
+      },
+      {
+        "decision": "decline",
+        "label": "不重出"
+      }
+    ]
+  },
+  {
+    "kind": "gate_reopen",
+    "who": "IBM",
+    "title": "一道已经过掉的闸，现在有证据说可以重开",
+    "ref": "gate-reopen-proposal:750f53a668deea16892c8393a412856f",
+    "hash": "d2bc12664bb789cb9aad4e2feee62a9488f2750eff81a879b61b5e91740c7a21",
+    "evaluation_id": null,
+    "actions": [
+      {
+        "decision": "approve",
+        "label": "重出一版"
+      },
+      {
+        "decision": "decline",
+        "label": "不重出"
+      }
+    ]
+  },
+  {
+    "kind": "gate_reopen",
+    "who": "DXC · DXC Technology",
+    "title": "一道已经过掉的闸，现在有证据说可以重开",
+    "ref": "gate-reopen-proposal:59f8cd7f4c730f8df1433ecefacfbcae",
+    "hash": "7ee24989d48b3a3217634b7809e2446ae6f55becbf7830eb71621ad45ed1c32f",
+    "evaluation_id": null,
+    "actions": [
+      {
+        "decision": "approve",
+        "label": "重出一版"
+      },
+      {
+        "decision": "decline",
+        "label": "不重出"
+      }
+    ]
+  },
+  {
+    "kind": "gate_reopen",
+    "who": "ACN · Accenture",
+    "title": "一道已经过掉的闸，现在有证据说可以重开",
+    "ref": "gate-reopen-proposal:11099e89dd0d9dda3779f4603c8e6749",
+    "hash": "4100be3e28d1c827a75eb152870270aeaebe1d06b5479e330e8c5f0d220c1346",
+    "evaluation_id": null,
+    "actions": [
+      {
+        "decision": "approve",
+        "label": "重出一版"
+      },
+      {
+        "decision": "decline",
+        "label": "不重出"
+      }
+    ]
+  },
+  {
+    "kind": "gate_reopen",
+    "who": "EPAM",
+    "title": "一道已经过掉的闸，现在有证据说可以重开",
+    "ref": "gate-reopen-proposal:242af1575acbf1ca32464aaeaa1b3411",
+    "hash": "3fca867dc1af8030a0c5c0b124183c39b2b6d388c387e1d935969f65f92b60e5",
+    "evaluation_id": null,
+    "actions": [
+      {
+        "decision": "approve",
+        "label": "重出一版"
+      },
+      {
+        "decision": "decline",
+        "label": "不重出"
+      }
+    ]
+  },
+  {
+    "kind": "gate_reopen",
+    "who": "IBM",
+    "title": "一道已经过掉的闸，现在有证据说可以重开",
+    "ref": "gate-reopen-proposal:447b658c8c9ff95c730169c67bad5322",
+    "hash": "9c9d2cbbfe2dd52f846a03945215b2f6acb6ffa12dd58f7d7a2fd7d9bcf6fc2e",
+    "evaluation_id": null,
+    "actions": [
+      {
+        "decision": "approve",
+        "label": "重出一版"
+      },
+      {
+        "decision": "decline",
+        "label": "不重出"
+      }
+    ]
+  },
+  {
+    "kind": "gate_reopen",
+    "who": "DXC · DXC Technology",
+    "title": "一道已经过掉的闸，现在有证据说可以重开",
+    "ref": "gate-reopen-proposal:2cbc4a57511ac153e9a615dfee5f1120",
+    "hash": "a001b257ffe767f11cd64d278bfa2cdafb06d8638ae70b0c51d0f4380e55b7d9",
+    "evaluation_id": null,
+    "actions": [
+      {
+        "decision": "approve",
+        "label": "重出一版"
+      },
+      {
+        "decision": "decline",
+        "label": "不重出"
+      }
+    ]
+  },
+  {
+    "kind": "gate_reopen",
+    "who": "DXC · DXC Technology",
+    "title": "一道已经过掉的闸，现在有证据说可以重开",
+    "ref": "gate-reopen-proposal:a43b71b2617cbb159daf79064e7f570d",
+    "hash": "f8c58b13e52a0d2941bc13acac200912e1de71ea42958799f97f2b737550780a",
+    "evaluation_id": null,
+    "actions": [
+      {
+        "decision": "approve",
+        "label": "重出一版"
+      },
+      {
+        "decision": "decline",
+        "label": "不重出"
+      }
+    ]
+  },
+  {
+    "kind": "gate_reopen",
+    "who": "DXC · DXC Technology",
+    "title": "一道已经过掉的闸，现在有证据说可以重开",
+    "ref": "gate-reopen-proposal:e8577a38153e6906dbd775bf62fb853d",
+    "hash": "088eacf5b324b11272f405546be706eaed3e9d04ee0ad1d54d6d73184a84069e",
+    "evaluation_id": null,
+    "actions": [
+      {
+        "decision": "approve",
+        "label": "重出一版"
+      },
+      {
+        "decision": "decline",
+        "label": "不重出"
+      }
+    ]
+  },
+  {
+    "kind": "gate_reopen",
+    "who": "ACN · Accenture",
+    "title": "一道已经过掉的闸，现在有证据说可以重开",
+    "ref": "gate-reopen-proposal:d65653302cd2dc41137f24f6e7fd1a6f",
+    "hash": "a84c1693d9b6b3bdcfe1d3517ad440a8728e8bd5d2c9e2060a462fc7066f22a7",
+    "evaluation_id": null,
+    "actions": [
+      {
+        "decision": "approve",
+        "label": "重出一版"
+      },
+      {
+        "decision": "decline",
+        "label": "不重出"
+      }
+    ]
+  },
+  {
+    "kind": "deep_insight_gate",
+    "who": "EPAM",
+    "title": "深度认知门十二问：是否让这家公司进入完整覆盖",
+    "ref": "deep-insight-gate-version:company-sec-cik-0001352010:1",
+    "hash": "3e164967d8994e31576a07c64c983c4248a20af653cdb87b6a8d26b43f327d98",
+    "evaluation_id": null,
+    "actions": []
+  },
+  {
+    "kind": "deep_insight_gate",
+    "who": "DXC · DXC Technology",
+    "title": "深度认知门十二问：是否让这家公司进入完整覆盖",
+    "ref": "deep-insight-gate-version:company-sec-cik-001688568:1",
+    "hash": "e6ac1b94e535727653be45e828e8fa2800c3752ad894e269bf09194ef986ef4a",
+    "evaluation_id": null,
+    "actions": []
+  }
+]

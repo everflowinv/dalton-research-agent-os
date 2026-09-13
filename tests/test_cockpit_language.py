@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import subprocess
 import unittest
+import json
+from collections import defaultdict
 from pathlib import Path
 
 
@@ -43,6 +45,32 @@ class CockpitLanguageTests(unittest.TestCase):
         text = HTML.read_text(encoding="utf-8")
         self.assertIn("r.returned_count??r.items.length", text)
         self.assertIn("if(r.next_cursor!=null||claimPages.length)", text)
+
+    def test_real_approval_snapshot_folds_layout_without_merging_actions(self) -> None:
+        items = json.loads(
+            (ROOT / "tests/fixtures/cockpit_approvals_49_routing.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(49, len(items))
+        groups: dict[tuple[str, str], list[dict]] = defaultdict(list)
+        for item in items:
+            key = (item["kind"], item["who"]) if item["kind"] == "gate_reopen" else (
+                "item", item["ref"]
+            )
+            groups[key].append(item)
+        self.assertEqual(11, len(groups))  # four folded gate groups + seven other cards
+        routed = [
+            (item["ref"], action["decision"], action["label"])
+            for entries in groups.values()
+            for item in entries
+            for action in item["actions"]
+        ]
+        self.assertEqual(sum(len(x["actions"]) for x in items), len(routed))
+        self.assertEqual(len(routed), len(set(routed)))
+        text = HTML.read_text(encoding="utf-8")
+        self.assertIn('it.kind==="gate_reopen"', text)
+        self.assertIn("group.entries.forEach(card=>d.append(card))", text)
 
 
 if __name__ == "__main__":
