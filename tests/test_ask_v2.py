@@ -226,17 +226,33 @@ class ContextOnAnOldCoreTests(unittest.TestCase):
         self.assertNotIn("EPAM", ask_context.render_context(context))
 
     def test_company_owner_is_rendered_before_ambiguous_claim_prose(self):
+        tickers = ("ACN", "CTSH", "EPAM", "IBM", "DXC")
+        company_members = {
+            f"company:test:{ticker.lower()}": {
+                "company_ref": f"company:test:{ticker.lower()}", "ticker": ticker,
+            }
+            for ticker in tickers
+        }
         rows = [
-            claim_row("Management expects demand to improve.",
-                      ref="claim-version:" + "a" * 64),
-            claim_row("Management expects utilization to improve.",
-                      ref="claim-version:" + "b" * 64, subject=EPAM),
+            claim_row(
+                f"Management expects demand signal {index} to improve.",
+                ref=f"claim-version:{index + 1:064d}", subject=company_ref,
+            )
+            for index, company_ref in enumerate(company_members)
         ]
-        context = context_for("行业需求怎么看？", empty_core(), claim_rows=rows)
+        context = ask_context.build_context(
+            empty_core(), question="五家公司需求怎么看？", mission=mission(),
+            members=company_members, claims=rows,
+            company_names={ticker: ticker for ticker in tickers},
+            label=lambda ref: company_members[ref]["ticker"], today=TODAY,
+        )
         rendered = ask_context.render_context(context)
 
-        self.assertLess(rendered.index("（ACN"), rendered.index("Management expects demand"))
-        self.assertLess(rendered.index("（EPAM"), rendered.index("Management expects utilization"))
+        for index, ticker in enumerate(tickers):
+            self.assertLess(
+                rendered.index(f"（{ticker}"),
+                rendered.index(f"Management expects demand signal {index}"),
+            )
 
     def test_a_question_naming_nobody_marks_the_per_company_blocks_as_such(self):
         core = empty_core()
