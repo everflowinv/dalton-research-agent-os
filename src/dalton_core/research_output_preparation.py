@@ -303,6 +303,10 @@ def run_chunk(task, *, mission, draft_config, verifier_config, checker_config,
             review=prior['language_review']
     max_repairs=2 if repair_reviewed else 0
     failure={'stage':'brain_validation','reason':review.get('reason') or review.get('status')}
+    if review.get('status') == 'pending_language_review' or active_brain_call is None:
+        # A still-running or missing call is an infrastructure recovery issue;
+        # issuing a new revision request would bypass its existing lease.
+        raise ValueError(review.get('reason') or review.get('status'))
     while True:
         if review.get('status') != 'ready_for_publication':
             if repairs_used >= max_repairs:
