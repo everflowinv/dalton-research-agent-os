@@ -9,6 +9,7 @@ from __future__ import annotations
 import copy
 import json
 import re
+from collections import Counter
 from hashlib import sha256
 from typing import Any, Mapping, Sequence
 
@@ -23,6 +24,18 @@ _OPAQUE_ID = re.compile(
     r"mission-version|thesis|thesis-version|event|document|document-version)"
     r":[A-Za-z0-9:._-]+|\b[0-9a-f]{64}\b",
     re.IGNORECASE,
+)
+_HAN = re.compile(r"[\u3400-\u9fff]")
+_ENGLISH_NUMBER_VALUES = {
+    "zero": "0", "one": "1", "two": "2", "three": "3", "four": "4",
+    "five": "5", "six": "6", "seven": "7", "eight": "8", "nine": "9",
+    "ten": "10", "eleven": "11", "twelve": "12",
+    "january": "1", "february": "2", "march": "3", "april": "4",
+    "may": "5", "june": "6", "july": "7", "august": "8",
+    "september": "9", "october": "10", "november": "11", "december": "12",
+}
+_ENGLISH_NUMBER = re.compile(
+    r"\b(" + "|".join(_ENGLISH_NUMBER_VALUES) + r")\b", re.IGNORECASE
 )
 
 
@@ -52,6 +65,27 @@ def _numbers(*values: str) -> list[str]:
                   for token in _NUMBER.findall(_OPAQUE_ID.sub("", value)))
 
 
+def _number_differences(source_values: Sequence[str], target_values: Sequence[str]) -> tuple[list[str], list[str]]:
+    """Return lost Arabic tokens and genuinely new target Arabic tokens.
+
+    English number words and month names may become Arabic digits in otherwise
+    Chinese prose. They may explain only an added target token; an Arabic token
+    present in the source must still survive exactly.
+    """
+
+    source_numbers = Counter(_numbers(*source_values))
+    target_numbers = Counter(_numbers(*target_values))
+    missing = sorted((source_numbers - target_numbers).elements())
+    added = target_numbers - source_numbers
+    aliases: Counter[str] = Counter()
+    for value in source_values:
+        cleaned = _OPAQUE_ID.sub("", value)
+        aliases.update(_ENGLISH_NUMBER_VALUES[m.group(1).lower()]
+                       for m in _ENGLISH_NUMBER.finditer(cleaned))
+    unexplained = sorted((added - aliases).elements())
+    return missing, unexplained
+
+
 def build_prompt(product: Mapping[str, Any]) -> str:
     """Build a translation/edit prompt without granting new research work."""
 
@@ -73,7 +107,10 @@ def build_prompt(product: Mapping[str, Any]) -> str:
         "Keep exactly one output section for each input section, in the same order and with the "
         "same index. You may merge repetitive defensive sentences inside a section and repair "
         "awkward wording, but retain every uncertainty that could change the judgement.",
-        "Preserve every financial number token exactly. Do not translate, summarize or reproduce "
+        "Preserve every Arabic financial number token exactly. English number words and month "
+        "names may be translated as Chinese written numerals (for example, one→一 and "
+        "December→十二月); do not introduce Arabic digits for them unless needed. Do not "
+        "translate, summarize or reproduce "
         "source refs; they remain attached from the source product outside this response.",
         "Return raw JSON only with exactly the requested shape.",
         "SOURCE PRODUCT SHA-256: " + source_content_hash(product),
@@ -127,8 +164,18 @@ def validate_localized_text(product: Mapping[str, Any], localized: Mapping[str, 
         source_text = (str(source.get("title") or ""), str(source.get("body") or ""),
                        *(str(x) for x in source.get("gaps") or []))
         target_text = (row["title"], row["body"], *(str(x) for x in row["gaps"]))
-        if _numbers(*source_text) != _numbers(*target_text):
-            raise ResearchLocalizationError("localized section changed financial number tokens")
+        missing, added = _number_differences(source_text, target_text)
+        if missing or added:
+            detail = {"section_index": index, "missing_tokens": missing,
+                      "added_tokens": added}
+            raise ResearchLocalizationError(
+                "localized section changed financial number tokens: "
+                + json.dumps(detail, ensure_ascii=False, sort_keys=True)
+            )
+        if any(value.strip() for value in source_text) and not _HAN.search(" ".join(target_text)):
+            raise ResearchLocalizationError(
+                f"localized section {index} has no Simplified Chinese presentation text"
+            )
         checked.append({
             "index": index,
             "source_title_sha256": _text_hash(source_text[0]),

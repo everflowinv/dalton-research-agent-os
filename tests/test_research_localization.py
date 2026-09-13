@@ -72,7 +72,7 @@ class ResearchLocalizationTests(unittest.TestCase):
     review = build_verifier_prompt(product(), localized())
     self.assertIn("fluent Simplified Chinese", producer)
     self.assertIn("not new research", producer)
-    self.assertIn("Preserve every financial number token exactly", producer)
+    self.assertIn("Preserve every Arabic financial number token exactly", producer)
     self.assertIn("no_new_facts", review)
     self.assertIn("meaning_preserved", review)
 
@@ -88,3 +88,37 @@ class ResearchLocalizationTests(unittest.TestCase):
     translated["sections"][0]["body"] = "收入在2026年为13.5亿元。"
     with self.assertRaisesRegex(ResearchLocalizationError, "number tokens"):
         validate_localized_text(source, translated)
+
+ def test_english_number_words_and_months_may_be_rendered_as_chinese_digits(self):
+    source = product()
+    source["sections"][0]["body"] = (
+        "GIS book-to-bill was below one; management discussed it in December.")
+    translated = {"sections": [{"index": 0, "title": "订单趋势",
+                                  "body": "GIS 订单出货比低于 1；管理层在 12 月讨论了这一点。",
+                                  "gaps": ["缺少 FY2027 利润率"]}]}
+    self.assertEqual(validate_localized_text(source, translated)[0]["index"], 0)
+    translated["sections"][0]["body"] += " 目标为 13。"
+    with self.assertRaises(ResearchLocalizationError) as caught:
+        validate_localized_text(source, translated)
+    self.assertIn('"section_index": 0', str(caught.exception))
+    self.assertIn('"added_tokens": ["13"]', str(caught.exception))
+
+ def test_preflight_reports_missing_and_added_tokens_by_section(self):
+    source = product()
+    bad = localized()
+    bad["sections"][0]["body"] = "收入为 USD 1,235.50，同比增长 6.2%。"
+    with self.assertRaises(ResearchLocalizationError) as caught:
+        validate_localized_text(source, bad)
+    message = str(caught.exception)
+    self.assertIn('"section_index": 0', message)
+    self.assertIn('"missing_tokens": ["1,234.50", "5.2%"]', message)
+    self.assertIn('"added_tokens": ["1,235.50", "6.2%"]', message)
+
+ def test_preflight_rejects_an_all_english_display_section(self):
+    source = product()
+    with self.assertRaisesRegex(ResearchLocalizationError, "no Simplified Chinese"):
+        validate_localized_text(source, {"sections": [{
+            "index": 0, "title": "Demand",
+            "body": "Revenue was USD 1,234.50, up 5.2%.",
+            "gaps": ["Missing FY2027 margin"],
+        }]})
