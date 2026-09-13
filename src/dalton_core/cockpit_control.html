@@ -453,6 +453,48 @@ function technicalDetails(value,label="技术详情"){
   if(value==null||value==="")return null;const d=node("details",null,"technical");d.append(node("summary",label));
   const shown=typeof value==="string"?value:JSON.stringify(value,null,2);d.append(rawNode("pre",shown));return d
 }
+function readableLaneDetail(value){
+  if(typeof value!=="string"||!value)return {display:value,technical:null};
+  const rules=[
+    [/^该写作者没有source:prior-research通道。$/,"尚未接入既有研究资料来源。"],
+    [/^all_grants_refused；跳过原因：CoverageMissionConflict——任务配置将 source:guidepoint 标记为 尚未连接。$/,"专家访谈资料来源尚未连接。"],
+    [/^覆盖公司的刷新操作受阻（not_permitted=\d+）；治理记录：[^；]+；跳过原因：not_permitted。$/,"当前研究任务尚未授权此次数据刷新。"],
+    [/^所有覆盖公司的卖方一致预期均为最新；跳过原因：近期已完成刷新（recently_refreshed）。$/,"近期已经刷新，无需重复获取。"],
+    [/^company:[^： ]+：(?:未满足 Constitution 的 output_rubric|硬性校验失败（numbers_without_refs）)[\s\S]*$/,"研究报告未通过内容结构或数字来源检查。"],
+    [/^market_view_not_supported_by_cited_rows$/,"现有引用不足以支持这项市场判断。"],
+    [/^company:[^： ]+：问题一将该分类定为 (?:insufficient_evidence|contract_compounder)，但其草稿所依据的档案将该分类定为 (?:insufficient_evidence|contract_compounder)。$/,"研究草稿与现有公司档案的分类不一致，需要复核。"],
+  ];
+  const found=rules.find(([pattern])=>pattern.test(value));
+  if(found)return {display:found[1],technical:value};
+  if(looksTechnical(value))return {display:"运行说明见技术详情。",technical:value};
+  return {display:displayText(value),technical:null};
+}
+function readableLogText(value){
+  if(typeof value!=="string"||!value)return {display:value,technical:null};
+  const match=value.match(/^深度认知门十二问草稿 v(\d+)，分类 ([a-z0-9_-]+)，等待人裁决$/i);
+  if(!match)return {display:displayText(value),technical:looksTechnical(value)?value:null};
+  const label={turnaround:"经营改善观察",insufficient_evidence:"证据不足"}[match[2]]||"分类尚未识别";
+  return {display:`深度认知评审草稿第 ${match[1]} 版 · ${label} · 等待人工决定`,technical:value};
+}
+function readableReflectionAuthority(value){
+  if(typeof value!=="string"||!value)return {display:value,technical:null};
+  const legacyNotes=new Map([
+    ["这条记录只读不写：它不写 Ledger、不改 policy、不登记问题。backlog_candidates 是候选，要由 planner 或人经 ResearchQuestionBacklog 的准入路径登记；policy_suggestions 是句子。","这份复盘只总结已记录的信息，不会直接修改研究结论、规则或研究计划。候选研究问题需经研究计划或人工确认后才会纳入；后续研究建议尚未生效。"],
+    ["这是一份只读检查记录。backlog_candidates 属于候选，须由 planner 或人工通过 ResearchQuestionBacklog 的准入路径登记；policy_suggestions 仅为文本建议。","这份复盘只总结已记录的信息，不会直接修改研究结论、规则或研究计划。候选研究问题需经研究计划或人工确认后才会纳入；后续研究建议尚未生效。"],
+    ["这条记录不改 policy，也不登记问题。","这条记录不会修改规则，也不会登记研究问题。"],
+  ]);
+  if(legacyNotes.has(value))return {
+    display:legacyNotes.get(value),
+    technical:value,ready:true,
+  };
+  return {display:displayText(value),technical:null,ready:!FINAL_RESEARCH_REQUIRED||Object.prototype.hasOwnProperty.call(UI_TEXT,value)};
+}
+function displayMissionText(value){
+  if(typeof value!=="string")return value;
+  return displayText(value)
+    .replaceAll("初筛（Initial Screen）","初步筛查报告")
+    .replaceAll("投资逻辑（Thesis）","投资论点");
+}
 function readableError(value,context="操作"){
   const raw=typeof value==="string"?value:(value&&value.message)||"";
   const display=value&&typeof value==="object"&&(value.display_message||value.display_reason);
@@ -589,7 +631,7 @@ function renderOverview(o){
     return;
   }
   const g=o.goal;
-  $("goal-title").textContent=displayText(g.title);$("goal-objective").textContent=displayText(g.objective);
+  $("goal-title").textContent=displayMissionText(g.title);$("goal-objective").textContent=displayMissionText(g.objective);
   const tags=$("goal-tags");tags.replaceChildren(node("span",`第 ${g.version} 版 · ${fmtDate(g.published_at)} 发布`,"tag"),node("span",`${o.companies.length} 家公司`,"tag"),node("span",`${o.totals.theses} 条研究论点`,"tag"));
   const ql=$("goal-questions");ql.replaceChildren(...g.research_questions.map(q=>node("li",q)));
   // P13w: what the system decided to do next, and why. It has been steering
@@ -621,7 +663,7 @@ function renderOverview(o){
   $("totals").replaceChildren(stat(t.found,"找到的资料","网页、研报、电话会"),stat(t.read,"已读完的资料",`还有 ${t.waiting} 份排队`),stat(t.claims,"入库的结论",t.claims_today?`今天新增 ${t.claims_today} 条`:"今天还没有新增"),
     stat(b.model_calls?`${b.model_calls.used}/${b.model_calls.cap}`:"—","今天的模型调用",b.model_calls?`已花 $${b.model_calls.cost_usd}，上限 $${b.model_calls.cost_cap_usd}`:"未接入"));
   $("totals-sub").textContent=`截至 ${fmtDate(o.as_of)}`+(b.web?` · 网页搜索今日 ${b.web.spent}/${b.web.cap}`:"")+(b.alphaengine?` · 研报获取 24 小时 ${b.alphaengine.spent}/${b.alphaengine.cap}`:"");
-  $("lanes").replaceChildren(...o.activity.lanes.map(l=>{const d=node("div",null,"lane");const cls=laneClassOf(l.status);d.append(node("span",null,`st ${cls}`));const c=node("div");c.append(node("b",l.label),node("small",`${laneStatus(l.status)} · ${displayText(l.note)}`));if(l.detail)c.append(node("small",l.detail,"raw"));d.append(c);return d}));
+  $("lanes").replaceChildren(...o.activity.lanes.map(l=>{const d=node("div",null,"lane");const cls=laneClassOf(l.status),detail=readableLaneDetail(l.detail);d.append(node("span",null,`st ${cls}`));const c=node("div");c.append(node("b",l.label),node("small",`${laneStatus(l.status)} · ${displayText(l.note)}`));if(detail.display)c.append(node("small",detail.display,"raw"));const tech=technicalDetails(detail.technical);if(tech)c.append(tech);d.append(c);return d}));
   const run=$("running");run.replaceChildren(...o.activity.running.map(r=>{const d=node("div",null,"r");d.append(node("span",null,"spin"),node("span",displayText(r.title)+(r.detail?` — ${displayText(r.detail)}`:"")));return d}));
   if(!o.activity.running.length)run.append(node("div","此刻没有正在运行的任务；调度器每 5 分钟检查一次。","hint"));
   /* C2: four pools. A pool that is spent refuses every request for the rest
@@ -932,9 +974,10 @@ async function openReflection(){const sheet=prepareReader("研究详情");
 function renderReflection(sheet,r){sheet.replaceChildren(readerClose(),node("h2","每周投研运行复盘"));
   if(!r.available){sheet.append(node("div",r.reason,"empty"));return}
   sheet.append(node("div",`${r.iso_week} · ${fmtDate(r.written_at)} · 第 ${r.version} 版${r.historical?" · 历史记录":""}${r.content_as_of?" · 内容截至 "+fmtDate(r.content_as_of):""}`,"meta"));
+  const authority=readableReflectionAuthority(r.authority_note);
   const finalFields=[r.title,r.prose,...(r.table||[]).flatMap(x=>[x.pool,x.lane]),
     ...(r.backlog_candidates||[]).flatMap(x=>[x.question,x.because]),
-    ...(r.policy_suggestions||[]),r.authority_note];
+    ...(r.policy_suggestions||[]),...(authority.ready?[]:[r.authority_note])];
   if(!finalResearchReady(finalFields)){
     sheet.append(node("div","正文正在检查文字表达，完成后会显示。","empty"));
     const history=technicalDetails({original_reflection:r});if(history)sheet.append(history);return
@@ -953,7 +996,7 @@ function renderReflection(sheet,r){sheet.replaceChildren(readerClose(),node("h2"
     sheet.append(b)}
   if((r.policy_suggestions||[]).length){const ps=node("section");ps.append(node("h3","后续研究建议"));
     const ul=node("ul",null,"latest");r.policy_suggestions.forEach(x=>ul.append(node("li",displayText(x))));ps.append(ul);sheet.append(ps)}
-  if(r.authority_note)sheet.append(node("div",displayText(r.authority_note),"hint"))}
+  if(r.authority_note){sheet.append(node("div",authority.display,"hint"));const tech=technicalDetails(authority.technical);if(tech)sheet.append(tech)}}
 function cardActions(c){const a=node("div",null,"fb");const b=node("button","查看公司研究结论","ghost");
   b.style.cssText="padding:4px 10px;font-size:12px";b.onclick=()=>openClaims(c.company_ref);a.append(b);return a}
 let claimFilters={company:"",aspect:"",importance:"",canonical:"1"},claimCursor=null,claimPages=[];
@@ -1092,7 +1135,7 @@ async function loadSteerHistory(){try{const h=await getJson("/v1/cockpit/history
 let logCursor=null,seen=new Set(),unseen=0,filter="all",allEvents=[];
 $("log-filters").querySelectorAll(".chip").forEach(c=>c.onclick=()=>{filter=c.dataset.f;$("log-filters").querySelectorAll(".chip").forEach(x=>x.classList.toggle("on",x===c));renderLog()});
 function laneClass(k){return k==="claim"?"claim":["question","goal","steer","approval"].includes(k)?"you":""}
-function renderLog(){const fs=filter==="all"?null:new Set(filter.split(","));const tl=$("timeline");const list=allEvents.filter(e=>!fs||fs.has(e.kind));tl.replaceChildren(...list.slice(0,300).map(e=>{const d=node("div",null,`ev ${e.state} ${e.kind}${e._new?" new":""}`);const t=node("div",null,"t");t.append(node("b",clock(e.at)),document.createTextNode(day(e.at)));const m=node("div",null,"m");const body=node("div",null,"body");const meta=node("div",null,"meta");meta.append(node("span",e.lane,`lanetag ${laneClass(e.kind)}`));if(e.company)meta.append(node("span",e.company,"co"));if(e.state==="running")meta.append(node("span","进行中","lanetag"));if(e.state==="failed")meta.append(node("span","失败","lanetag"));body.append(meta,node("div",e.title,"ti"));if(e.detail)body.append(node("div",e.detail,"de"));const tech=technicalDetails(e.technical);if(tech)body.append(tech);d.append(t,m,body);return d}));if(!list.length)tl.append(node("div","这个分类下还没有记录","empty"))}
+function renderLog(){const fs=filter==="all"?null:new Set(filter.split(","));const tl=$("timeline");const list=allEvents.filter(e=>!fs||fs.has(e.kind));tl.replaceChildren(...list.slice(0,300).map(e=>{const d=node("div",null,`ev ${e.state} ${e.kind}${e._new?" new":""}`);const t=node("div",null,"t");t.append(node("b",clock(e.at)),document.createTextNode(day(e.at)));const m=node("div",null,"m");const body=node("div",null,"body");const meta=node("div",null,"meta");meta.append(node("span",e.lane,`lanetag ${laneClass(e.kind)}`));if(e.company)meta.append(node("span",e.company,"co"));if(e.state==="running")meta.append(node("span","进行中","lanetag"));if(e.state==="failed")meta.append(node("span","失败","lanetag"));const title=readableLogText(e.title),detail=readableLogText(e.detail);body.append(meta,node("div",title.display,"ti"));if(detail.display)body.append(node("div",detail.display,"de"));const eventTech=technicalDetails(e.technical);if(eventTech)body.append(eventTech);const raw={};if(title.technical)raw.original_title=title.technical;if(detail.technical)raw.original_detail=detail.technical;const translatedTech=Object.keys(raw).length?technicalDetails(raw,"原始文字"):null;if(translatedTech)body.append(translatedTech);d.append(t,m,body);return d}));if(!list.length)tl.append(node("div","这个分类下还没有记录","empty"))}
 async function loadLog(full){try{const r=await getJson(`/v1/cockpit/log?limit=200`);const fresh=[];r.events.forEach(e=>{if(!seen.has(e.id+e.state)){fresh.push(e);e._new=seen.size>0}});allEvents=r.events;r.events.forEach(e=>seen.add(e.id+e.state));if(fresh.length&&current!=="log"&&seen.size>fresh.length){unseen+=fresh.length;const b=$("log-badge");b.textContent=unseen>99?"99+":String(unseen);b.classList.add("show")}$("log-status").textContent=`${r.events.length} 条记录 · 更新于 ${clock(r.as_of)}`;svc(r.service_state,r.last_tick_at);if(current==="log")renderLog()}catch(e){$("log-status").textContent=readableError(e,"读取研究日志").message}}
 
 // ---------- ask
