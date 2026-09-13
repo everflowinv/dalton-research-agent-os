@@ -150,6 +150,38 @@ class OpsBacklogTests(PanelCase):
         bucket = self.plane.ops_backlog()["dependencies"][0]
         self.assertNotEqual(bucket["dependency_label"], bucket["dependency"])
 
+    def test_real_model_budget_payload_has_readable_company_and_keeps_raw_audit_folded(self) -> None:
+        raw_item = "company:sec-cik:0000051143|" + "a" * 64 + "|" + "b" * 64
+        raw_reason = "CockpitModelError: the model call did not succeed (BUDGET_REFUSED)"
+        with LaneFailureLedger(default_path(self.root)) as ledger:
+            ledger.append_event(
+                lane="mission_model_spec", item_key=raw_item, event="parked",
+                failure_class="dependency_unavailable", dependency="model_budget",
+                reason=raw_reason, rule="model_budget", status=None,
+            )
+        item = self.plane.ops_backlog()["dependencies"][0]["items"][0]
+        self.assertEqual(item["item_label"], "IBM")
+        self.assertEqual(item["display_reason"],
+                         "本次请求超出适用的调用或任务预算限制")
+        self.assertEqual(item["technical_details"]["item_key"], raw_item)
+        self.assertEqual(item["technical_details"]["reason"], raw_reason)
+
+    def test_permission_payload_explains_the_specific_governance_without_raw_exception(self) -> None:
+        raw = ("LaneChildRejected: gated:governance invalid yfinance-calendar "
+               "governance: yfinance calendar governance record is not approved")
+        self.park(lane="mission_catalyst", item="company:sec-cik:0001467373|calendar",
+                  reason=raw)
+        item = self.plane.ops_backlog()["permission_items"][0]
+        self.assertEqual(item["item_label"], "ACN · Accenture")
+        self.assertEqual(item["display_reason"], "行情日历数据源尚未获得使用批准")
+        self.assertEqual(item["technical_details"]["reason"], raw)
+
+    def test_ops_renderer_uses_display_fields_and_folds_raw_values(self) -> None:
+        page = PAGE.read_text(encoding="utf-8")
+        self.assertIn("`${it.lane_label} · ${it.item_label}：${it.display_reason}`", page)
+        self.assertIn("technicalDetails(it.technical_details)", page)
+        self.assertNotIn("`${it.lane_label}：${it.item_key} — ${it.reason}`", page)
+
 
 class FourPanelTests(PanelCase):
     def test_overview_reads_the_ticket_tree_once(self) -> None:

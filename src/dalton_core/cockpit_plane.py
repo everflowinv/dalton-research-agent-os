@@ -345,6 +345,42 @@ def _terminal_display_reason(reason: Any, failure_class: Any = None) -> str:
         return "历史数字未通过勾稽或单位校验"
     return "当前产出未通过内容或证据校验"
 
+
+def _ops_waiting_reason(reason: Any, *, permission: bool = False) -> str:
+    """Describe a parked ledger row without exposing its machine exception."""
+
+    text = str(reason or "").casefold()
+    if "budget_refused" in text or ("budget" in text and "refus" in text):
+        if any(marker in text for marker in ("day_cap", "daily", "mission_budget_exceeded")):
+            return "本研究任务今天的模型预算余额不足"
+        return "本次请求超出适用的调用或任务预算限制"
+    if "model_chain_exhausted" in text:
+        return "可用模型链均未成功完成本次请求"
+    if permission or "governance" in text and "not approved" in text:
+        if "yfinance-calendar" in text:
+            return "行情日历数据源尚未获得使用批准"
+        if "analyst-estimates" in text:
+            return "卖方一致预期数据源尚未获得使用批准"
+        if "daily-prices" in text:
+            return "每日行情数据源尚未获得使用批准"
+        return "相关数据源或操作尚未获得使用批准"
+    if "alphaengine" in text:
+        return "AlphaEngine 桌面端当前不可用"
+    return "任务正在等待依赖恢复，具体原因见技术详情"
+
+
+def _ops_item_label(item_key: Any,
+                    members: Mapping[str, Mapping[str, Any]]) -> str:
+    """Return the human company label bound at the start of a work item key."""
+
+    raw = str(item_key or "")
+    company_ref = raw.split("|", 1)[0]
+    if company_ref.startswith("company:"):
+        return CockpitPlane._label(members, company_ref)
+    if company_ref.startswith("industry:"):
+        return "行业任务"
+    return "任务记录"
+
 OUTCOME_LABELS = {
     "should_have_moved": "当时应调整但未调整（候选）",
     "held": "维持原判断正确",
@@ -2604,6 +2640,12 @@ class CockpitPlane:
                 "permission_items": [], "permission_count": 0,
             }
         backlog = summarise_events(rows)
+        members: dict[str, dict[str, Any]] = {}
+        try:
+            with self._core() as core:
+                members = self._members(self._mission(core))
+        except (CockpitMissionMissing, sqlite3.Error, ValueError, TypeError):
+            pass
         dependencies = []
         for bucket in backlog["dependencies"]:
             dependencies.append({
@@ -2614,19 +2656,40 @@ class CockpitPlane:
                                 for lane in bucket["lanes"]],
                 "items": [
                     {**item,
-                     "lane_label": REGISTRY_LANE_LABELS.get(item["lane"], item["lane"])}
+                     "lane_label": REGISTRY_LANE_LABELS.get(item["lane"], item["lane"]),
+                     "item_label": _ops_item_label(item.get("item_key"), members),
+                     "display_reason": _ops_waiting_reason(item.get("reason")),
+                     "technical_details": {
+                         "item_key": item.get("item_key"),
+                         "reason": item.get("reason"),
+                         "lane": item.get("lane"),
+                     }}
                     for item in bucket["items"]
                 ],
             })
         terminal = [
             {**row,
              "lane_label": REGISTRY_LANE_LABELS.get(row["lane"], row["lane"]),
+             "item_label": _ops_item_label(row.get("item_key"), members),
              "display_reason": _terminal_display_reason(
-                 row.get("reason"), row.get("failure_class") or row.get("classification"))}
+                 row.get("reason"), row.get("failure_class") or row.get("classification")),
+             "technical_details": {
+                 "item_key": row.get("item_key"),
+                 "reason": row.get("reason"),
+                 "lane": row.get("lane"),
+             }}
             for row in backlog["terminal_items"]
         ]
         permissions = [
-            {**row, "lane_label": REGISTRY_LANE_LABELS.get(row["lane"], row["lane"])}
+            {**row,
+             "lane_label": REGISTRY_LANE_LABELS.get(row["lane"], row["lane"]),
+             "item_label": _ops_item_label(row.get("item_key"), members),
+             "display_reason": _ops_waiting_reason(row.get("reason"), permission=True),
+             "technical_details": {
+                 "item_key": row.get("item_key"),
+                 "reason": row.get("reason"),
+                 "lane": row.get("lane"),
+             }}
             for row in backlog["permission_items"]
         ]
         return {
