@@ -14,6 +14,7 @@ from hashlib import sha256
 from typing import Any, Mapping, Sequence
 
 from .final_text_contract import FINAL_TEXT_RULES_VERSION, final_text_instructions
+from .numeric_display import format_display_number
 
 SCHEMA_VERSION = "research-localization:0.1"
 TARGET_LOCALE = "zh-CN"
@@ -75,15 +76,43 @@ def _number_differences(source_values: Sequence[str], target_values: Sequence[st
 
     source_numbers = Counter(_numbers(*source_values))
     target_numbers = Counter(_numbers(*target_values))
-    missing = sorted((source_numbers - target_numbers).elements())
+    missing_counter = source_numbers - target_numbers
     added = target_numbers - source_numbers
     aliases: Counter[str] = Counter()
     for value in source_values:
         cleaned = _OPAQUE_ID.sub("", value)
         aliases.update(_ENGLISH_NUMBER_VALUES[m.group(1).lower()]
                        for m in _ENGLISH_NUMBER.finditer(cleaned))
-    unexplained = sorted((added - aliases).elements())
-    return missing, unexplained
+    added -= aliases
+
+    source_joined = " ".join(source_values)
+    target_compact = re.sub(r"\s+", "", " ".join(target_values))
+    # Consume only a formatting result computed from the exact missing source
+    # token and an explicit source unit. Unlabelled numbers remain strict.
+    for token in list(missing_counter.elements()):
+        numeric_token = token[:-1] if token.endswith("%") else token
+        escaped = re.escape(numeric_token)
+        kinds: list[str] = []
+        if re.search(rf"(?<![\d.]){escaped}\s*(?:USD|美元)\b", source_joined, re.I):
+            kinds.append("amount_usd")
+        if re.search(rf"(?<![\d.]){escaped}\s*%", source_joined):
+            kinds.append("percent")
+        if re.search(rf"(?:EPS|每股收益)[^\d]{{0,20}}{escaped}|{escaped}[^\d]{{0,12}}(?:EPS|每股)",
+                     source_joined, re.I):
+            kinds.append("eps")
+        if re.search(rf"ARPU[^\d]{{0,20}}{escaped}|{escaped}[^\d]{{0,12}}ARPU",
+                     source_joined, re.I):
+            kinds.append("arpu")
+        for kind in kinds:
+            rendered = format_display_number(numeric_token, kind=kind)  # type: ignore[arg-type]
+            rendered_compact = rendered.replace(" ", "")
+            rendered_numbers = _numbers(rendered)
+            if rendered_compact in target_compact and all(added[number] for number in rendered_numbers):
+                missing_counter[token] -= 1
+                for number in rendered_numbers:
+                    added[number] -= 1
+                break
+    return sorted(missing_counter.elements()), sorted(added.elements())
 
 
 def build_prompt(product: Mapping[str, Any]) -> str:
@@ -107,7 +136,10 @@ def build_prompt(product: Mapping[str, Any]) -> str:
         "Keep exactly one output section for each input section, in the same order and with the "
         "same index. You may merge repetitive defensive sentences inside a section and repair "
         "awkward wording, but retain every uncertainty that could change the judgement.",
-        "Preserve every Arabic financial number token exactly. English number words and month "
+        "Preserve every authoritative value. You may format an explicit USD amount into 万美元 or "
+        "亿美元 with normal display rounding, a percentage to one decimal place, and an explicitly "
+        "labelled EPS or ARPU to two decimal places. Do not change the underlying value or unit. "
+        "English number words and month "
         "names may be translated as Chinese written numerals (for example, one→一 and "
         "December→十二月); do not introduce Arabic digits for them unless needed. Do not "
         "translate, summarize or reproduce "

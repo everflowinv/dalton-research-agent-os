@@ -19,7 +19,9 @@ def final_text_instructions() -> tuple[str, ...]:
         "paragraph with both sides after the preferred case is clear.",
         "Preserve the meaning of genuine gaps, source boundaries, numerical limits, approval "
         "boundaries and refusals. Never invent a fact, source, number, approval or completed action "
-        "to make the Chinese more decisive.",
+        "to make the Chinese more decisive. Keep authoritative numeric values unchanged; for "
+        "display, convert large USD amounts to readable 万美元/亿美元 units, show percentages "
+        "to one decimal place, and keep EPS or ARPU as separately labelled small-value measures.",
     )
 
 

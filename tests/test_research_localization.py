@@ -72,7 +72,7 @@ class ResearchLocalizationTests(unittest.TestCase):
     review = build_verifier_prompt(product(), localized())
     self.assertIn("fluent Simplified Chinese", producer)
     self.assertIn("not new research", producer)
-    self.assertIn("Preserve every Arabic financial number token exactly", producer)
+    self.assertIn("Preserve every authoritative value", producer)
     self.assertIn("no_new_facts", review)
     self.assertIn("meaning_preserved", review)
 
@@ -113,6 +113,17 @@ class ResearchLocalizationTests(unittest.TestCase):
     self.assertIn('"section_index": 0', message)
     self.assertIn('"missing_tokens": ["1,234.50", "5.2%"]', message)
     self.assertIn('"added_tokens": ["1,235.50", "6.2%"]', message)
+
+ def test_preflight_allows_only_unit_bound_deterministic_display_rounding(self):
+    source = product()
+    source["sections"][0]["body"] = "Revenue was 15623445 USD and margin was 5.24%."
+    translated = {"sections": [{"index": 0, "title": "财务摘要",
+                                  "body": "收入为 1562 万美元，利润率为 5.2%。",
+                                  "gaps": ["缺少 FY2027 利润率"]}]}
+    self.assertEqual(validate_localized_text(source, translated)[0]["index"], 0)
+    translated["sections"][0]["body"] = "收入为 1563 万美元，利润率为 5.2%。"
+    with self.assertRaisesRegex(ResearchLocalizationError, "number tokens"):
+        validate_localized_text(source, translated)
 
  def test_preflight_rejects_an_all_english_display_section(self):
     source = product()
