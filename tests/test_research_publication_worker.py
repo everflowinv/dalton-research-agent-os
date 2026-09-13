@@ -97,3 +97,16 @@ class ResearchPublicationWorkerTests(unittest.TestCase):
             library_reader=reader)
         self.assertEqual(len(result), 2)
         self.assertEqual(len(calls), 3)
+
+    def test_extra_surface_reader_joins_the_same_hash_state_machine(self):
+        calls = []
+        extra = lambda connection, mission, company: [{
+            "kind": "surface_event_judgement", "subject_ref": company,
+            "version_ref": "judgement:1", "status": "available", "sections": []}]
+        result = poll_once(
+            object(), {**MISSION, "universe": [{"company_ref": "company:a"}]},
+            state_dir=self.state,
+            prepare=lambda product: (calls.append(product["kind"]) or {"status": "completed"}),
+            library_reader=lambda *args: {"products": []}, extra_reader=extra)
+        self.assertEqual(result["completed"], 1)
+        self.assertEqual(calls, ["surface_event_judgement"])

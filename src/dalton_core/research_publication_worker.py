@@ -75,6 +75,7 @@ def poll_once(
     state_dir: Path,
     prepare: Callable[[Mapping[str, Any]], Mapping[str, Any]],
     library_reader: Callable[[Any, Mapping[str, Any], str], Mapping[str, Any]] | None = None,
+    extra_reader: Callable[[Any, Mapping[str, Any], str], list[Mapping[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     """Discover current products and prepare each unseen hash independently.
 
@@ -93,7 +94,10 @@ def poll_once(
             if library_reader is None
             else library_reader(connection, mission, company_ref)
         )
-        for product in library.get("products") or []:
+        candidates = list(library.get("products") or [])
+        if extra_reader is not None:
+            candidates.extend(extra_reader(connection, mission, company_ref))
+        for product in candidates:
             if not isinstance(product, Mapping) or product.get("status") != "available":
                 continue
             identity = _identity(product)
@@ -142,13 +146,15 @@ def run_periodic(
     prepare: Callable[[Mapping[str, Any]], Mapping[str, Any]],
     stop_event: Any, interval_seconds: float, max_loops: int | None = None,
     library_reader: Callable[[Any, Mapping[str, Any], str], Mapping[str, Any]] | None = None,
+    extra_reader: Callable[[Any, Mapping[str, Any], str], list[Mapping[str, Any]]] | None = None,
 ) -> list[dict[str, Any]]:
     if interval_seconds <= 0 or max_loops is not None and max_loops < 1:
         raise ValueError("periodic worker bounds are invalid")
     results = []
     while not stop_event.is_set() and (max_loops is None or len(results) < max_loops):
         results.append(poll_once(connection, mission, state_dir=state_dir,
-                                 prepare=prepare, library_reader=library_reader))
+                                 prepare=prepare, library_reader=library_reader,
+                                 extra_reader=extra_reader))
         if max_loops is not None and len(results) >= max_loops:
             break
         stop_event.wait(interval_seconds)
