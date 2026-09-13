@@ -254,6 +254,35 @@ class PreparationTests(unittest.TestCase):
         self.assertEqual(self.calls.count('research_localization_verifier'),0)
         self.assertFalse(list(Path(self.temp.name).glob('chunks/*.json')))
 
+    def test_explicit_third_repair_reuses_failed_calls_and_original_checker(self):
+        revisions = [copy.deepcopy(REVISION) for _ in range(4)]
+        for index, revision in enumerate(revisions):
+            revision['sections'][0]['body'] = f'收入为 123 美元。说明{chr(65 + index)}。'
+        failed = {**VERDICT, 'verdict': 'fail', 'faithful': False,
+                  'findings': ['删除原文没有的额外比较判断。']}
+        self.responses[prep.BRAIN_PURPOSE] = revisions
+        self.responses['research_localization_verifier'] = [failed, failed, failed, VERDICT]
+        self.args['repair_reviewed'] = True
+        with self.assertRaisesRegex(ValueError, 'verifier'):
+            self.run_one()
+        self.assertEqual(self.calls.count(prep.BRAIN_PURPOSE), 3)
+        self.args['extra_brain_repair'] = True
+        result = self.run_one()
+        self.assertEqual(self.calls.count(prep.BRAIN_PURPOSE), 4)
+        self.assertEqual(self.calls.count(prep.CHECKER_PURPOSE), 1)
+        self.assertEqual(self.calls.count('research_localization'), 1)
+        self.assertEqual(self.calls.count('research_localization_verifier'), 4)
+        self.assertEqual(len(result['repair_brain_calls']), 3)
+        before = len(self.calls)
+        self.assertEqual(self.run_one(), result)
+        self.assertEqual(len(self.calls), before)
+
+    def test_extra_repair_requires_explicit_reviewed_repair_mode(self):
+        self.args['extra_brain_repair'] = True
+        with self.assertRaisesRegex(ValueError, 'requires reviewed repair mode'):
+            self.run_one()
+        self.assertEqual(self.calls, [])
+
     def test_reviewed_repair_reuses_a_legacy_failed_semantic_call(self):
         repaired=copy.deepcopy(REVISION);repaired['sections'][0]['body']='收入是 123 USD。'
         failed={**VERDICT,'verdict':'fail','faithful':False,'findings':['单位表达不一致']}

@@ -125,6 +125,7 @@ def _repair_prompt(*, product, draft_localized, review, failure, attempt):
     return '\n'.join((
         '你是这份研究成品的大脑。此前语言修订未通过确定性校验或独立事实保真核验。',
         '不要再次调用或模拟语言检查员。重新评估原语言建议并返回全部章节；只改表达，不得新增、删除或改变事实、数字、单位、来源、审批状态、缺口或章节结构。',
+        '逐项修正失败反馈指出的问题：原文没有的比较或判断应删除；比较、因果和否定关系须与原文一致。不要因为初稿或上次修订沿用了某种说法，就保留已被指出的错误。',
         '只输出 JSON：{"decisions":[{"suggestion_index":0,"decision":"adopt|reject","reason":"理由"}],"sections":[{"index":0,"title":"...","body":"...","gaps":[]}]}',
         '修订次数：'+str(attempt),
         '失败反馈：'+json.dumps(failure,ensure_ascii=False,sort_keys=True,separators=(',',':')),
@@ -205,7 +206,10 @@ def selected_identity(config, call):
 
 def run_chunk(task, *, mission, draft_config, verifier_config, checker_config,
               brain_config, scheduler_db, work_dir, max_cost, attempts,
-              legacy_verifier_config=None, repair_reviewed=False):
+              legacy_verifier_config=None, repair_reviewed=False,
+              extra_brain_repair=False):
+    if not isinstance(extra_brain_repair, bool) or (extra_brain_repair and not repair_reviewed):
+        raise ValueError('one extra brain repair requires reviewed repair mode')
     product_index, start, product = task
     identity = style_stage_identity(product, draft_config=draft_config,
         checker_config=checker_config, brain_config=brain_config)
@@ -364,7 +368,7 @@ def run_chunk(task, *, mission, draft_config, verifier_config, checker_config,
             evidence['review_history']=history;write_json(stage_path,evidence)
         else:
             review=prior['language_review']
-    max_repairs=2 if repair_reviewed else 0
+    max_repairs=(3 if extra_brain_repair else 2) if repair_reviewed else 0
     failure={'stage':'brain_validation','reason':review.get('reason') or review.get('status')}
     if review.get('status') == 'pending_language_review' or active_brain_call is None:
         # A still-running or missing call is an infrastructure recovery issue;
@@ -513,7 +517,8 @@ def build(args, data=None):
             brain_config=read_json(args.brain_config),scheduler_db=args.scheduler_db,
             work_dir=work_dir,max_cost=args.max_cost_per_call,attempts=args.attempts,
             legacy_verifier_config=legacy_verifier_config,
-            repair_reviewed=getattr(args,'repair_reviewed',False)):t for t in tasks}
+            repair_reviewed=getattr(args,'repair_reviewed',False),
+            extra_brain_repair=getattr(args,'extra_brain_repair',False)):t for t in tasks}
         for future in concurrent.futures.as_completed(futures):
             task = futures[future]
             try:
@@ -657,6 +662,8 @@ def main():
                      help='save this batch receipt separately when processing disjoint product sets')
     run.add_argument('--repair-reviewed',action='store_true',
                      help='allow at most two brain-only repairs after a completed language check')
+    run.add_argument('--extra-brain-repair',action='store_true',
+                     help='explicit recovery: allow a third total brain repair, reusing the original language check')
     run.add_argument('--workers',type=int,default=4,choices=range(1,9))
     run.add_argument('--chunk-chars',type=int,default=4500)
     run.add_argument('--max-cost-per-call',type=float,default=1.0)
