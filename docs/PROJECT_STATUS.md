@@ -8,6 +8,10 @@ Owner 已明确恢复本轮 Cockpit 修复并授权自行调试、部署和迭�
 
 ### 本轮实现与真实验证（2026-09-13，未部署）
 
+README 已按 Owner 提供的《Dalton Research OS README（面向非技术读者）2026-09-13.md》逐字替换；旧版完整存档于 [旧 README](archive/README-before-nontechnical-2026-09-13.md)。README 是项目介绍，当前部署与验证状态仍以本文件顶部为准。
+
+调试期间 OpenClaw 网关遇到启动完整性检查超时：只读 `quick_check` 返回 `ok`，耗时 36.37 秒，超过网关 30 秒阈值。临时 provider 诊断补丁已还原，正在有界调整启动超时并恢复网关；未删用户数据库记录。开发态全量测试主动中断（exit 130），本轮没有全量测试通过结论。正在排查测试访问本机 OpenClaw 状态的路径，并隔离后续测试环境。
+
 已集成旧版入口移除、页面与模型报告文案、EPS/Excel总额缩放、数值展示、结论游标分页、49条审批分组且动作不丢失、UTC当日事件与公司隔离，以及Ask不借用其他公司结论补上下文。原文核对矩阵见 [语言建议逐项验收](COCKPIT_LANGUAGE_REPORT_ACCEPTANCE_2026-09-13.md)，部署后的完整DOM检查尚待完成。
 
 Owner新增发布前一次语言checker要求已写入恢复文档并实现：Antigravity Gemini 3.8 Flash逐句提建议，完整建议MD留档，大脑逐条评估后修订；随后仅做独立事实保真核验，不再重复语言送检。已有15个研究库产物和其他当前可见Thesis/Weekly/Event等表面文字通过只读投影及精确原文hash绑定准备中文附件。Ask已接发布门，后台自动worker正在接部署。仍需完整实测，不能把模块通过当成产品上线。

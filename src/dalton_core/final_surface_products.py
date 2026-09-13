@@ -205,6 +205,21 @@ def final_surface_products(connection: Any, mission: Mapping[str, Any],
                                               item.get("body"), *(item.get("gaps") or [])))
             products.append(_product("surface_" + row["kind"], company_ref, row["version_id"],
                                      row["content_hash"], sections))
+    if _has(connection, "forecast_model_versions"):
+        row=connection.execute(
+            "SELECT record_json,content_hash FROM forecast_model_versions WHERE company_ref=? "
+            "ORDER BY version_number DESC LIMIT 1",(company_ref,)).fetchone()
+        if row:
+            model=_record(row); text=[]
+            for driver in model.get('drivers')or[]:
+                text.extend(driver.get(key) for key in ('label','note'))
+            for assumption in model.get('assumptions')or[]:
+                text.append(assumption.get('because'))
+            for result in model.get('results')or[]:
+                text.extend(result.get(key) for key in ('label','reason'))
+            values=list(dict.fromkeys(value for value in text if isinstance(value,str) and value.strip()))
+            products.append(_product('surface_model_notes',company_ref,model['id'],
+                row['content_hash'],_sections('模型说明',*values)))
     return [row for row in products if row is not None]
 
 

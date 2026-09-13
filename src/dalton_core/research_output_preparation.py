@@ -43,7 +43,7 @@ def write_json(path, value):
     _atomic_json(path, value)
 
 
-def snapshot(core_db: Path):
+def snapshot(core_db: Path, *, include_surfaces: bool = False):
     connection = sqlite3.connect(core_db.resolve().as_uri() + '?mode=ro', uri=True)
     connection.row_factory = sqlite3.Row
     try:
@@ -54,11 +54,20 @@ def snapshot(core_db: Path):
             'ORDER BY p.mission_ref LIMIT 1').fetchone()
         mission = json.loads(row[0])
         products = {}
+        if include_surfaces:
+            from dalton_core.final_surface_products import final_surface_products
+            from dalton_core.weekly_brief import WeeklyBriefAuthority
+            from dalton_core.industry_research import IndustryResearchAuthority
+            industry=IndustryResearchAuthority.__new__(IndustryResearchAuthority);industry.connection=connection
+            weekly=WeeklyBriefAuthority.__new__(WeeklyBriefAuthority);weekly.connection=connection;weekly.industry_research=industry
         for member in mission['universe']:
             library = research_library(connection, mission, member['company_ref'], localize=False)
             for product in library['products']:
                 if product['status'] == 'available' and product.get('sections'):
                     products[source_content_hash(product)] = product
+            if include_surfaces:
+                for product in final_surface_products(connection,mission,member['company_ref'],weekly_renderer=weekly.render_markdown):
+                    products[source_content_hash(product)]=product
         return {'schema_version': 'localization-input:0.1', 'mission': mission,
                 'products': list(products.values())}
     finally:
@@ -272,6 +281,27 @@ def build(args, data=None):
     return 0 if not failures else 1
 
 
+def validate_worker_config(cfg):
+    """Validate the scheduled worker before opening databases or making calls."""
+    paths = {'core_db', 'scheduler_db', 'model_config', 'verifier_config',
+             'checker_config', 'brain_config', 'work_dir', 'output_directory'}
+    required = paths | {'schema_version', 'workers', 'chunk_chars',
+                        'max_cost_per_call', 'draft_attempts', 'publication_gate'}
+    if (not isinstance(cfg, dict) or set(cfg) != required
+            or cfg.get('schema_version') != 'research-publication-worker-config:0.1'):
+        raise ValueError('unsupported research publication worker configuration')
+    for name in paths:
+        if not isinstance(cfg[name], str) or not Path(cfg[name]).is_absolute():
+            raise ValueError('publication worker paths must be absolute')
+    bounds = {'workers': (1, 8), 'chunk_chars': (100, 50000), 'draft_attempts': (1, 5)}
+    for name, (low, high) in bounds.items():
+        if type(cfg[name]) is not int or not low <= cfg[name] <= high:
+            raise ValueError('publication worker bounds are invalid')
+    cost = cfg['max_cost_per_call']
+    if type(cost) not in (int, float) or not 0 < cost <= 1:
+        raise ValueError('publication worker cost bound is invalid')
+
+
 def run_worker(config_path):
     """One scheduled preparation pass; all model calls use the existing ledger."""
     import fcntl
@@ -279,7 +309,17 @@ def run_worker(config_path):
     from dalton_core.research_publication_worker import poll_once
     from dalton_core.final_surface_products import final_surface_products
     cfg=read_json(config_path)
+    validate_worker_config(cfg)
     root=Path(cfg['work_dir']);root.mkdir(parents=True,exist_ok=True,mode=0o700)
+    from dalton_core.research_publication_authority import published_runtime_gate
+    gate=published_runtime_gate(cfg.get('publication_gate')or{})
+    if gate['status']!='active':
+        from datetime import datetime,timezone
+        result={'schema_version':'research-publication-worker-checkpoint:0.1',**gate,
+                'checked_at':datetime.now(timezone.utc).isoformat()}
+        write_json(root/'worker-last-run.json',result)
+        print(json.dumps(result,ensure_ascii=False))
+        return 0 if gate['status']=='waiting_for_release_publication' else 1
     fd=os.open(root/'.worker.lock',os.O_CREAT|os.O_RDWR|getattr(os,'O_NOFOLLOW',0),0o600)
     with os.fdopen(fd,'a+') as lock:
         try:
@@ -312,12 +352,18 @@ def run_worker(config_path):
                     code=build(args,{'mission':mission,'products':[product]})
                     return {'status':'completed' if code==0 else 'pending',
                             'receipt':read_json(root/'result.json')}
+                from dalton_core.weekly_brief import WeeklyBriefAuthority
+                from dalton_core.industry_research import IndustryResearchAuthority
+                industry=IndustryResearchAuthority.__new__(IndustryResearchAuthority);industry.connection=connection
+                weekly=WeeklyBriefAuthority.__new__(WeeklyBriefAuthority);weekly.connection=connection;weekly.industry_research=industry
                 result=poll_once(connection,mission,state_dir=root/'products',prepare=prepare,
-                                 extra_reader=final_surface_products)
+                    extra_reader=lambda con,mis,company:final_surface_products(con,mis,company,
+                        weekly_renderer=weekly.render_markdown))
                 result['status']='healthy' if not result['pending'] else 'pending'
         finally:
             connection.close()
         from datetime import datetime,timezone
+        result['schema_version']='research-publication-worker-checkpoint:0.1'
         result['checked_at']=datetime.now(timezone.utc).isoformat()
         write_json(root/'worker-last-run.json',result)
         print(json.dumps(result,ensure_ascii=False))
@@ -330,6 +376,7 @@ def main():
     worker=sub.add_parser('run-worker');worker.add_argument('--config',type=Path,required=True)
     snap=sub.add_parser('snapshot');snap.add_argument('--core-db',type=Path,required=True)
     snap.add_argument('--output',type=Path,required=True)
+    snap.add_argument('--include-surfaces',action='store_true')
     run=sub.add_parser('build')
     for name in ['input','model-config','verifier-config','checker-config','brain-config','scheduler-db','work-dir','output-directory']:
         run.add_argument('--'+name,type=Path,required=True)
@@ -342,7 +389,7 @@ def main():
     if args.command=='run-worker':
         return run_worker(args.config)
     if args.command=='snapshot':
-        data=snapshot(args.core_db);write_json(args.output,data)
+        data=snapshot(args.core_db,include_surfaces=args.include_surfaces);write_json(args.output,data)
         print(json.dumps({'products':len(data['products']),'sections':sum(len(p['sections']) for p in data['products'])}))
         return 0
     return build(args)
