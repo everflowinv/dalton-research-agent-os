@@ -371,6 +371,29 @@ def run_chunk(task, *, mission, draft_config, verifier_config, checker_config,
             evidence['review_history']=history;write_json(stage_path,evidence)
         else:
             review=prior['language_review']
+            if review.get('status') == 'pending_brain_revision':
+                numeric_hash=source_content_hash(product)
+                revalidated=next((row for row in reversed(history)
+                    if row.get('stage')=='brain_revalidation'
+                    and row.get('brain_call')==active_brain_call
+                    and row.get('numeric_source_hash')==numeric_hash),None)
+                if revalidated is None:
+                    replayed=run_language_review(review_product,
+                        checker=lambda _:parse_stage_output(
+                            evidence['checker_call']['text'],stage='checker'),
+                        brain=lambda _:parse_stage_output(
+                            active_brain_call['text'],stage='brain'),
+                        checker_identity={'provider':CHECKER_PROVIDER,'model':CHECKER_MODEL},
+                        numeric_source_product=product)
+                    revalidated={'stage':'brain_revalidation','attempt':repairs_used,
+                        'brain_call':copy.deepcopy(active_brain_call),
+                        'numeric_source_hash':numeric_hash,
+                        'prior_language_review':copy.deepcopy(review),
+                        'language_review':copy.deepcopy(replayed)}
+                    history.append(revalidated)
+                    evidence['review_history']=history
+                    write_json(stage_path,evidence)
+                review=revalidated['language_review']
     max_repairs=(3 if extra_brain_repair else 2) if repair_reviewed else 0
     failure={'stage':'brain_validation','reason':review.get('reason') or review.get('status')}
     if review.get('status') == 'pending_language_review' or active_brain_call is None:

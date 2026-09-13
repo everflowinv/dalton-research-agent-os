@@ -285,6 +285,50 @@ class PreparationTests(unittest.TestCase):
             self.run_one()
         self.assertEqual(self.calls, [])
 
+    def test_cached_third_pending_revision_revalidates_without_another_brain(self):
+        source = {'kind':'initial_screen','version_ref':'screen:rounded','status':'available',
+            'sections':[{'title':'Revenue','body':'Revenue was 1535000000 USD.','gaps':[]}]}
+        rounded = {'sections':[{'index':0,'title':'收入','body':'收入为15.35亿美元。','gaps':[]}]}
+        restored = {'decisions':[{'suggestion_index':0,'decision':'reject','reason':'恢复原始精度。'}],
+            'sections':[{'index':0,'title':'收入','body':'收入为1535000000美元。','gaps':[]}]}
+        style = {'overall':'表达清楚。','suggestions':[{'section_index':0,
+            'quote':'收入为15.35亿美元。','assessment':'可保留。','suggestion':'收入为15.35亿美元。'}]}
+        self.responses.update(research_localization=rounded,
+            research_language_check=style,research_language_revision=restored)
+        saved = prep.run_chunk((0,0,source),**self.args)[2]
+        stage_path = next(Path(self.temp.name).glob('stages/*.json'))
+        stage = json.loads(stage_path.read_text())
+        call = stage['brain_call']
+        pending = prep.run_language_review(
+            dict(source,sections=rounded['sections']), checker=lambda _:style,
+            brain=lambda _:restored,
+            checker_identity={'provider':prep.CHECKER_PROVIDER,'model':prep.CHECKER_MODEL})
+        self.assertEqual(pending['status'],'pending_brain_revision')
+        stage['repair_brain_calls']=[copy.deepcopy(call) for _ in range(3)]
+        stage['review_history']=[{'stage':'brain_repair','attempt':3,
+            'brain_call':copy.deepcopy(call),'language_review':pending,
+            'prior_brain_call':None,'prior_language_review':None,
+            'trigger':{'stage':'brain_validation'}}]
+        stage_path.write_text(json.dumps(stage))
+        for path in Path(self.temp.name).glob('chunks/*.json'):path.unlink()
+        for path in Path(self.temp.name).glob('semantic-stages/*.json'):path.unlink()
+        before_brain=self.calls.count(prep.BRAIN_PURPOSE)
+        before_checker=self.calls.count(prep.CHECKER_PURPOSE)
+        before_verifier=self.calls.count('research_localization_verifier')
+        args={**self.args,'repair_reviewed':True,'extra_brain_repair':True}
+        recovered=prep.run_chunk((0,0,source),**args)[2]
+        self.assertEqual(recovered['status'],'passed')
+        self.assertEqual(self.calls.count(prep.BRAIN_PURPOSE),before_brain)
+        self.assertEqual(self.calls.count(prep.CHECKER_PURPOSE),before_checker)
+        self.assertEqual(self.calls.count('research_localization_verifier'),before_verifier+1)
+        rows=json.loads(stage_path.read_text())['review_history']
+        self.assertEqual([r['stage'] for r in rows].count('brain_revalidation'),1)
+        before=len(self.calls)
+        self.assertEqual(prep.run_chunk((0,0,source),**args)[2],recovered)
+        self.assertEqual(len(self.calls),before)
+        self.assertEqual([r['stage'] for r in json.loads(stage_path.read_text())[
+            'review_history']].count('brain_revalidation'),1)
+
     def test_reviewed_repair_reuses_a_legacy_failed_semantic_call(self):
         repaired=copy.deepcopy(REVISION);repaired['sections'][0]['body']='收入是 123 USD。'
         failed={**VERDICT,'verdict':'fail','faithful':False,'findings':['单位表达不一致']}
