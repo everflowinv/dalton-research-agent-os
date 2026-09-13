@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from scripts.successor_research_publication_gate_transition import (
     ResearchPublicationGateTransitionError, apply, build_transition, expected_state, rollback,
+    verify_preserved_publication_state,
 )
 from scripts.prepare_successor_config_transition import (
     RESEARCH_PUBLICATION_GATE_SCHEMA_VERSION, apply_transition_to_scratch,
@@ -26,10 +27,12 @@ def config(release:str,commit:str)->dict:
 
 class GateTransitionTests(unittest.TestCase):
     def setUp(self):
-        t=tempfile.TemporaryDirectory();self.addCleanup(t.cleanup);self.root=Path(t.name);self.packet=self.root/'packet';self.packet.mkdir();self.state=self.root/'state';self.state.mkdir()
+        t=tempfile.TemporaryDirectory();self.addCleanup(t.cleanup);self.root=Path(t.name);self.packet=self.root/'packet';self.packet.mkdir();self.state=self.root/'state';self.state.mkdir();self.launch=self.root/'LaunchAgents';self.launch.mkdir()
+        (self.state/'research-localization').mkdir();write(self.state/'research-localization/index.json',{'schema_version':'x'})
+        (self.launch/'com.dalton.research-publication-worker.plist').write_bytes(b'plist');os.chmod(self.launch/'com.dalton.research-publication-worker.plist',0o600)
         self.before=self.packet/'before.json';self.after=self.packet/'after.json'
         write(self.before,config('foundation-r25','a'*40));write(self.after,config('foundation-r25b','b'*40))
-        self.transition=build_transition(packet_root=self.packet,before_path=self.before,after_path=self.after)
+        self.transition=build_transition(packet_root=self.packet,before_path=self.before,after_path=self.after,state_dir=self.state,launch_agents_dir=self.launch)
         (self.state/'research-publication-worker-config.json').write_bytes(self.before.read_bytes());os.chmod(self.state/'research-publication-worker-config.json',0o600)
     def test_apply_and_idempotent_rollback_preserve_every_other_value(self):
         proof=apply(packet_root=self.packet,state_dir=self.state,transition=self.transition)
@@ -41,7 +44,7 @@ class GateTransitionTests(unittest.TestCase):
     def test_rejects_non_gate_change_and_cas_drift(self):
         changed=config('foundation-r25b','b'*40);changed['workers']=8;write(self.after,changed)
         with self.assertRaisesRegex(ResearchPublicationGateTransitionError,'only publication gate'):
-            build_transition(packet_root=self.packet,before_path=self.before,after_path=self.after)
+            build_transition(packet_root=self.packet,before_path=self.before,after_path=self.after,state_dir=self.state,launch_agents_dir=self.launch)
         write(self.after,config('foundation-r25b','b'*40))
         write(self.state/'research-publication-worker-config.json',config('third-party','c'*40))
         with self.assertRaisesRegex(ResearchPublicationGateTransitionError,'CAS'):
@@ -49,12 +52,26 @@ class GateTransitionTests(unittest.TestCase):
     def test_rejects_unknown_worker_field(self):
         changed=config('foundation-r25b','b'*40);changed['unknown']=True;write(self.after,changed)
         with self.assertRaisesRegex(ResearchPublicationGateTransitionError,'closed shape'):
-            build_transition(packet_root=self.packet,before_path=self.before,after_path=self.after)
+            build_transition(packet_root=self.packet,before_path=self.before,after_path=self.after,state_dir=self.state,launch_agents_dir=self.launch)
     def test_rollback_refuses_postinstall_change(self):
         apply(packet_root=self.packet,state_dir=self.state,transition=self.transition)
         changed=config('foundation-r25b','b'*40);changed['workers']=8;write(self.state/'research-publication-worker-config.json',changed)
         with self.assertRaisesRegex(ResearchPublicationGateTransitionError,'changed after'):
             rollback(packet_root=self.packet,state_dir=self.state,transition=self.transition)
+
+    def test_preserved_publication_state_rejects_change_add_remove_and_plist_drift(self):
+        expected=self.transition['preserved_publication_state']
+        verify_preserved_publication_state(state_dir=self.state,launch_agents_dir=self.launch,expected=expected)
+        extra=self.state/'research-localization/extra.json';write(extra,{'x':1})
+        with self.assertRaisesRegex(ResearchPublicationGateTransitionError,'state differs'):
+            verify_preserved_publication_state(state_dir=self.state,launch_agents_dir=self.launch,expected=expected)
+        extra.unlink();(self.state/'research-localization/index.json').unlink()
+        with self.assertRaisesRegex(ResearchPublicationGateTransitionError,'state differs'):
+            verify_preserved_publication_state(state_dir=self.state,launch_agents_dir=self.launch,expected=expected)
+        write(self.state/'research-localization/index.json',{'schema_version':'x'})
+        (self.launch/'com.dalton.research-publication-worker.plist').write_bytes(b'changed')
+        with self.assertRaisesRegex(ResearchPublicationGateTransitionError,'state differs'):
+            verify_preserved_publication_state(state_dir=self.state,launch_agents_dir=self.launch,expected=expected)
 
     def test_apply_rejects_wrong_mode_without_changing_target(self):
         target=self.state/'research-publication-worker-config.json';original=target.read_bytes();os.chmod(target,0o644)
@@ -72,7 +89,8 @@ class GateTransitionTests(unittest.TestCase):
         base.build_pure()
         before=base.packet/'worker.before.json';after=base.packet/'worker.after.json'
         write(before,config('foundation-r25','a'*40));write(after,config('foundation-r25b','b'*40))
-        gate=build_transition(packet_root=base.packet,before_path=before,after_path=after)
+        (base.state/'research-localization').mkdir();write(base.state/'research-localization/index.json',{'schema_version':'x'});launch=base.root/'LaunchAgents';launch.mkdir();(launch/'com.dalton.research-publication-worker.plist').write_bytes(b'plist');os.chmod(launch/'com.dalton.research-publication-worker.plist',0o600)
+        gate=build_transition(packet_root=base.packet,before_path=before,after_path=after,state_dir=base.state,launch_agents_dir=launch)
         manifest=build_preserve_existing_transition(
             packet_root=base.packet,release_ref='foundation-r25b',source_commit='b'*40,
             baseline_models_path=base.packet/'models.json',
@@ -97,7 +115,8 @@ class GateTransitionTests(unittest.TestCase):
         base=PreserveExistingTransitionTests(methodName='runTest');base.setUp();self.addCleanup(base.doCleanups)
         base.build_pure();before=base.packet/'worker.before.json';after=base.packet/'worker.after.json'
         write(before,config('foundation-r25','a'*40));write(after,config('foundation-r25b','b'*40))
-        gate=build_transition(packet_root=base.packet,before_path=before,after_path=after)
+        (base.state/'research-localization').mkdir();write(base.state/'research-localization/index.json',{'schema_version':'x'});launch=base.root/'LaunchAgents';launch.mkdir();(launch/'com.dalton.research-publication-worker.plist').write_bytes(b'plist');os.chmod(launch/'com.dalton.research-publication-worker.plist',0o600)
+        gate=build_transition(packet_root=base.packet,before_path=before,after_path=after,state_dir=base.state,launch_agents_dir=launch)
         manifest=build_preserve_existing_transition(packet_root=base.packet,release_ref='foundation-r25b',source_commit='b'*40,
           baseline_models_path=base.packet/'models.json',model_config_paths={n:base.packet/n for n in base.models},
           preserved_config_paths=base.preserved,preserved_state_authority_paths={'connector-governance/yfinance-analyst-estimates-v1.json':base.packet/'yfinance-approved.json'},
@@ -106,7 +125,7 @@ class GateTransitionTests(unittest.TestCase):
         class Module:
             @staticmethod
             def model_config_inventory(state):return {p.name:json.loads(p.read_text()) for p in state.glob('*-model-config.json')}
-        rehearsal=SimpleNamespace(temp_root=scratch,temp_state=base.state,temp_config=base.service,replacements={})
+        rehearsal=SimpleNamespace(temp_root=scratch,temp_state=base.state,temp_config=base.service,replacements={},launch_agents_dir=launch)
         derived_path,_,proof=derive_confined_transition(Module,rehearsal,packet_root=base.packet,manifest=manifest,original_manifest_sha256='e'*64)
         derived=json.loads(derived_path.read_text());self.assertEqual('successor-confined-transition-derivation-0.8',proof['schema_version'])
         self.assertTrue(all(str(scratch) in json.loads((derived_path.parent/derived['research_publication_gate_transition'][side]['file']).read_text())['publication_gate']['release_pointer'] for side in ('before','after')))

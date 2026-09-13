@@ -7,6 +7,8 @@ from typing import Any, Mapping
 
 SCHEMA_VERSION="successor-research-publication-gate-transition-0.1"
 TARGET="research-publication-worker-config.json"
+PUBLICATION_TREE="research-localization"
+PUBLICATION_PLIST="com.dalton.research-publication-worker.plist"
 HEX40=re.compile(r"[0-9a-f]{40}")
 HEX64=re.compile(r"[0-9a-f]{64}")
 
@@ -43,7 +45,37 @@ def parse(data:bytes)->dict[str,Any]:
 def artifact(packet:Path,path:Path)->dict[str,Any]:
     packet=packet.resolve();path=path.resolve();need(path.is_relative_to(packet),"artifact is outside packet")
     data=read_regular(path);return {"file":path.relative_to(packet).as_posix(),"sha256":sha(data),"size":len(data),"mode":path.stat().st_mode&0o7777}
-def build_transition(*,packet_root:Path,before_path:Path,after_path:Path)->dict[str,Any]:
+def preserved_publication_state(*,state_dir:Path,launch_agents_dir:Path)->list[dict[str,Any]]:
+    root=state_dir/PUBLICATION_TREE
+    need(root.is_dir() and not root.is_symlink(),"publication tree is unavailable")
+    rows=[]
+    for path in sorted([root,*root.rglob("*")]):
+        relative=path.relative_to(state_dir).as_posix();mode=stat.S_IMODE(path.lstat().st_mode)
+        if path.is_symlink(): raise ResearchPublicationGateTransitionError("publication tree contains symlink")
+        if path.is_dir(): rows.append({"path":relative,"kind":"directory","mode":mode})
+        elif path.is_file():
+            data=read_regular(path);rows.append({"path":relative,"kind":"file","mode":mode,"sha256":sha(data),"size":len(data)})
+        else: raise ResearchPublicationGateTransitionError("publication tree contains special entry")
+    plist=launch_agents_dir/PUBLICATION_PLIST
+    data=read_regular(plist);rows.append({"path":PUBLICATION_PLIST,"kind":"launch_agent","mode":stat.S_IMODE(plist.stat().st_mode),"sha256":sha(data),"size":len(data)})
+    return rows
+def validate_preserved_publication_state(rows:Any)->list[dict[str,Any]]:
+    need(isinstance(rows,list) and rows,"preserved publication state is empty")
+    result=[];seen=set();plist=0
+    for row in rows:
+        need(isinstance(row,Mapping) and row.get("kind") in {"directory","file","launch_agent"},"preserved publication row differs")
+        kind=row["kind"];expected={"path","kind","mode"}|({"sha256","size"} if kind!="directory" else set())
+        need(set(row)==expected and isinstance(row["path"],str) and row["path"] not in seen,"preserved publication row shape differs")
+        seen.add(row["path"]);need(isinstance(row["mode"],int),"preserved publication mode differs")
+        if kind=="launch_agent": need(row["path"]==PUBLICATION_PLIST,"publication plist path differs");plist+=1
+        else: need(row["path"]==PUBLICATION_TREE or row["path"].startswith(PUBLICATION_TREE+"/"),"publication state path differs")
+        if kind!="directory": need(HEX64.fullmatch(str(row["sha256"])) and isinstance(row["size"],int) and 0<=row["size"]<=16000000,"preserved publication file identity differs")
+        result.append(dict(row))
+    need(plist==1 and any(r["path"]==PUBLICATION_TREE and r["kind"]=="directory" for r in result),"preserved publication roots differ")
+    return result
+def verify_preserved_publication_state(*,state_dir:Path,launch_agents_dir:Path,expected:Any)->None:
+    need(preserved_publication_state(state_dir=state_dir,launch_agents_dir=launch_agents_dir)==validate_preserved_publication_state(expected),"preserved publication state differs")
+def build_transition(*,packet_root:Path,before_path:Path,after_path:Path,state_dir:Path,launch_agents_dir:Path)->dict[str,Any]:
     before=read_regular(before_path);after=read_regular(after_path);bv=parse(before);av=parse(after)
     bg=bv["publication_gate"];ag=av["publication_gate"]
     expected={**bv,"publication_gate":{**bg,"expected_release_ref":ag["expected_release_ref"],"expected_source_commit":ag["expected_source_commit"]}}
@@ -51,9 +83,10 @@ def build_transition(*,packet_root:Path,before_path:Path,after_path:Path)->dict[
     return validate_transition({"schema_version":SCHEMA_VERSION,"kind":"cas_replace_publication_gate","target":TARGET,
       "before":artifact(packet_root,before_path),"after":artifact(packet_root,after_path),
       "predecessor":{"release_ref":bg["expected_release_ref"],"source_commit":bg["expected_source_commit"]},
-      "successor":{"release_ref":ag["expected_release_ref"],"source_commit":ag["expected_source_commit"]}})
+      "successor":{"release_ref":ag["expected_release_ref"],"source_commit":ag["expected_source_commit"]},
+      "preserved_publication_state":preserved_publication_state(state_dir=state_dir,launch_agents_dir=launch_agents_dir)})
 def validate_transition(v:Mapping[str,Any])->dict[str,Any]:
-    need(isinstance(v,Mapping) and set(v)=={"schema_version","kind","target","before","after","predecessor","successor"},"gate transition shape differs")
+    need(isinstance(v,Mapping) and set(v)=={"schema_version","kind","target","before","after","predecessor","successor","preserved_publication_state"},"gate transition shape differs")
     need(v.get("schema_version")==SCHEMA_VERSION and v.get("kind")=="cas_replace_publication_gate" and v.get("target")==TARGET,"gate transition identity differs")
     for side in ("before","after"):
         a=v[side];need(isinstance(a,Mapping) and set(a)=={"file","sha256","size","mode"},"gate artifact shape differs")
@@ -62,6 +95,7 @@ def validate_transition(v:Mapping[str,Any])->dict[str,Any]:
     for side in ("predecessor","successor"):
         x=v[side];need(isinstance(x,Mapping) and set(x)=={"release_ref","source_commit"} and isinstance(x["release_ref"],str) and x["release_ref"] and HEX40.fullmatch(str(x["source_commit"])),"gate endpoint differs")
     need(v["predecessor"]!=v["successor"],"gate endpoint did not change")
+    validate_preserved_publication_state(v["preserved_publication_state"])
     return dict(v)
 def artifact_bytes(packet:Path,row:Mapping[str,Any])->bytes:
     root=packet.resolve();path=root/row["file"];need(path.is_relative_to(root),"artifact escaped packet")

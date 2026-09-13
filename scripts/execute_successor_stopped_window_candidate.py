@@ -775,7 +775,7 @@ class SuccessorOrchestrator(r11.Orchestrator):
                  "research publication exclusive targets already exist: "
                  + ",".join(sorted(occupied)))
         if transition.get("schema_version") == RESEARCH_PUBLICATION_GATE_SCHEMA_VERSION:
-            from scripts.successor_research_publication_gate_transition import expected_state, TARGET
+            from scripts.successor_research_publication_gate_transition import expected_state, TARGET, verify_preserved_publication_state
             before_gate, _after_gate = expected_state(
                 self.packet, transition["research_publication_gate_transition"])
             target = r11.STATE / TARGET
@@ -783,6 +783,8 @@ class SuccessorOrchestrator(r11.Orchestrator):
                  and stat.S_IMODE(target.stat().st_mode) == 0o600
                  and target.read_bytes() == before_gate,
                  "live publication gate differs from reviewed CAS baseline")
+            verify_preserved_publication_state(state_dir=r11.STATE, launch_agents_dir=r11.LAUNCH_AGENTS,
+                expected=transition["research_publication_gate_transition"]["preserved_publication_state"])
         if transition.get("schema_version") == WRITER_APPEND_SCHEMA_VERSION:
             before_writer, _after_writer, _writer_row = expected_writer_operation_transition_state(
                 packet_root=self.packet, manifest=transition, successor_root=source)
@@ -1194,7 +1196,7 @@ class SuccessorOrchestrator(r11.Orchestrator):
                 "file_count": len(publication["files"]),
             }
         if transition.get("schema_version") == RESEARCH_PUBLICATION_GATE_SCHEMA_VERSION:
-            from scripts.successor_research_publication_gate_transition import expected_state, TARGET
+            from scripts.successor_research_publication_gate_transition import expected_state, TARGET, verify_preserved_publication_state
             _before_gate, after_gate = expected_state(
                 self.packet, transition["research_publication_gate_transition"])
             target = r11.STATE / TARGET
@@ -1202,6 +1204,8 @@ class SuccessorOrchestrator(r11.Orchestrator):
                  and stat.S_IMODE(target.stat().st_mode) == 0o600
                  and target.read_bytes() == after_gate,
                  "installed publication gate differs")
+            verify_preserved_publication_state(state_dir=r11.STATE, launch_agents_dir=r11.LAUNCH_AGENTS,
+                expected=transition["research_publication_gate_transition"]["preserved_publication_state"])
             result["research_publication_gate_transition"] = {
                 "before_sha256": transition["research_publication_gate_transition"]["before"]["sha256"],
                 "after_sha256": transition["research_publication_gate_transition"]["after"]["sha256"],
@@ -1272,6 +1276,10 @@ class SuccessorOrchestrator(r11.Orchestrator):
                     state_dir=r11.STATE, launch_agents_dir=r11.LAUNCH_AGENTS,
                     transition=transition["research_publication_transition"])
             result = super().rollback()
+            if transition.get("schema_version") == RESEARCH_PUBLICATION_GATE_SCHEMA_VERSION:
+                from scripts.successor_research_publication_gate_transition import verify_preserved_publication_state
+                verify_preserved_publication_state(state_dir=r11.STATE, launch_agents_dir=r11.LAUNCH_AGENTS,
+                    expected=transition["research_publication_gate_transition"]["preserved_publication_state"])
             return {**result, "preserved_concurrent_config_targets": [],
                     **({"research_publication_gate_rollback": gate_rollback}
                        if gate_rollback is not None else {}),

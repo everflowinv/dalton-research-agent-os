@@ -634,7 +634,7 @@ def derive_confined_transition(
             }
 
         if manifest.get("schema_version") == RESEARCH_PUBLICATION_GATE_SCHEMA_VERSION:
-            from scripts.successor_research_publication_gate_transition import TARGET, validate_transition
+            from scripts.successor_research_publication_gate_transition import TARGET, validate_transition, preserved_publication_state
             gate_transition = validate_transition(manifest["research_publication_gate_transition"])
             pointer_root = rehearsal.temp_root / "publication-authority"
             pointer_root.mkdir(mode=0o700, exist_ok=True)
@@ -655,6 +655,8 @@ def derive_confined_transition(
                     scratch_target = rehearsal.temp_state / TARGET
                     scratch_target.write_bytes(confined.read_bytes())
                     os.chmod(scratch_target, 0o600)
+            derived["research_publication_gate_transition"]["preserved_publication_state"] = preserved_publication_state(
+                state_dir=rehearsal.temp_state, launch_agents_dir=rehearsal.launch_agents_dir)
 
         if manifest.get("schema_version") == RESEARCH_PUBLICATION_SCHEMA_VERSION:
             from scripts.successor_research_publication_transition import validate_transition
