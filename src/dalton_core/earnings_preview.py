@@ -33,6 +33,7 @@ from typing import Any, Callable
 
 from .cockpit_model import (CockpitModelError, independent_model_call,
                             lane_status_for, unwrap_json_object)
+from .final_text_contract import final_text_instructions
 from .earnings_season import (
     MAX_THESES,
     PREVIEW_KIND,
@@ -177,6 +178,8 @@ def build_preview_prompt(context: Mapping[str, Any]) -> str:
     caveat = occurrence.get("date_caveat") or ""
     lines: list[str] = [
         "你在写一份业绩前瞻（earnings preview）。只输出 JSON，不要 markdown 代码块。",
+        "",
+        *final_text_instructions(),
         "",
         "规则：",
         "1. 只能引用下面出现过的 ref；引用没出现过的 ref，整条回答被拒绝。",
