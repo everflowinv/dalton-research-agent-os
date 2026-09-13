@@ -206,12 +206,15 @@ def _load_ui_cached(path_string: str, inode: int, modified_ns: int, size: int) -
 
 
 def load_ui_texts(database: str | Path) -> dict[str, str]:
+    from .research_gap_display import display_metadata_text
     path = directory_for_database(database) / "ui-texts.json"
     try:
         if path.parent.is_symlink() or path.is_symlink():
             return {}
         stat = path.stat()
-        return dict(_load_ui_cached(str(path), stat.st_ino, stat.st_mtime_ns, stat.st_size))
+        return {original: display_metadata_text(localized)
+                for original, localized in _load_ui_cached(
+                    str(path), stat.st_ino, stat.st_mtime_ns, stat.st_size).items()}
     except (OSError, ValueError, KeyError, TypeError, ResearchLocalizationError):
         return {}
 

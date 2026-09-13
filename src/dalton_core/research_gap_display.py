@@ -25,6 +25,24 @@ _FULL=re.compile(r"^(?P<subject>.+?) 未覆盖成本模板的「(?P<label>[^」]
 _PREFIX=re.compile(r"^(?P<key>[a-z_]+)(?P<sep>\s*[:：/／-]\s*)(?P<rest>.*)$")
 _BAD_TAGS=re.compile(r"^模型引用了不存在的标签：(?P<tags>[^。]+)。?$")
 
+# These are known system explanations, not a general English-word glossary.
+# Match the complete wording so proper names and genuine quotations keep
+# their original language.
+_VALUATION_WORDINGS = (
+    "按 Playbook 的数字纪律留空：市场价格、股本、汇率、利率与 consensus 五类正式 authority 尚未接入，写任何倍数或目标价都会是无来源的数字。",
+    "估值一节按 Playbook 的数字纪律留空：市场价格、股本、汇率、利率与市场一致预期（consensus）五类正式权威数据源（authority）尚未接入，填入任何估值倍数或目标价都会产生无来源的数字。",
+    "估值一节按 Playbook 的数字使用规则留空：市场价格、股本、汇率、利率与市场一致预期（consensus）五类正式 authority 尚未接入，写出任何倍数或目标价都会是无来源的数字。",
+    "估值一节按 Playbook 的数字纪律留空：市场价格、股本、汇率、利率与市场一致预期（consensus）五类正式权威数据源尚未接入，写入任何估值倍数或目标价都会缺乏数据来源支撑。",
+)
+_CLOSED_WORDING = {
+    **{text: "估值部分暂时留空。按研究手册的要求，需要先接入市场价格、股本、汇率、利率和市场一致预期这五类正式数据，再计算估值倍数与目标价。"
+       for text in _VALUATION_WORDINGS},
+    "由人类确定方向、提出初始投资逻辑，并在检查点作出裁决；其余工作由自动化系统（automation）在 playbook、constitution、mandate 与预算规定的范围内自主推进。":
+        "由你确定研究方向、提出初始投资判断，并确认关键决策；系统按研究手册、研究章程、授权范围和预算自主推进其余工作。",
+    "人类负责方向、初始论点和检查点裁决，automation 在既定规则与预算内执行。":
+        "你负责研究方向、初始判断和关键决策，系统按既定规则和预算执行。",
+}
+
 _DISPLAY_TERMS = {
     **_SLOTS,
     **_EVIDENCE,
@@ -101,6 +119,8 @@ _TERM_PATTERN = re.compile(
 def display_metadata_text(value: Any) -> str:
     """Replace only registered machine metadata tokens in reader-facing text."""
     text = str(value) if value is not None else ""
+    for original, readable in _CLOSED_WORDING.items():
+        text = text.replace(original, readable)
     # Ordinary English words may be part of proper names or source quotes.
     # Translate those only when the entire value is an exact metadata key.
     if text in _DISPLAY_TERMS:
