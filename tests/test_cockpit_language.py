@@ -200,6 +200,14 @@ class CockpitLanguageTests(unittest.TestCase):
         self.assertIn('node("span",r.because,"hint")', text)
         self.assertNotIn('` ${r.because}`', text)
 
+    def test_approval_text_refreshes_when_overview_mapping_arrives(self) -> None:
+        text = HTML.read_text(encoding="utf-8")
+        self.assertIn('const fingerprint=JSON.stringify([it,UI_TEXT_REVISION])', text)
+        self.assertIn('if(approvalTextChanged&&approvalCards.size)loadApprovals()', text)
+        self.assertIn('existing.fingerprint===fingerprint||existing.pending', text)
+        self.assertIn('node("span",displayText(String(v)))', text)
+        self.assertIn('displayText(it.summary)', text)
+
     def test_final_research_prose_waits_for_exact_reviewed_text(self) -> None:
         text = HTML.read_text(encoding="utf-8")
         self.assertIn('FINAL_RESEARCH_REQUIRED&&!Object.prototype.hasOwnProperty.call(UI_TEXT,value)', text)
