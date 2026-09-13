@@ -1534,11 +1534,14 @@ def sales_notes_argv(context: Any) -> list[str]:
 
 def company_wiki_argv(context: Any) -> list[str]:
     corpus = context.state / "feeds" / "company-wiki"
+    native_index = corpus / "wiki" / "vectors.db"
+    legacy_index = corpus / "wiki-index.sqlite"
+    index = native_index if native_index.exists() else legacy_index
     argv = _feed_argv(
         context, plan_name="p9-us-it-services-feeds-v2.json",
         governance=COMPANY_WIKI_GOVERNANCE,
         flags=[
-            ("--company-wiki-index-db", corpus / "wiki-index.sqlite"),
+            ("--company-wiki-index-db", index),
             ("--company-wiki-corpus-root", corpus),
             ("--company-wiki-governance-list",
              context.state / "connector-governance" / COMPANY_WIKI_GOVERNANCE[0]),

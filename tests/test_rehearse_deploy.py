@@ -427,6 +427,13 @@ class SeedGateTests(unittest.TestCase):
     def test_the_company_wiki_gate_wants_the_index_file(self) -> None:
         self.workspace.mkdir(parents=True)
         self.assertFalse(gate_open("company-wiki", self.env)[0])
+        native = self.workspace / "wiki" / "vectors.db"
+        native.parent.mkdir()
+        native.write_bytes(b"")
+        self.assertTrue(gate_open("company-wiki", self.env)[0])
+
+    def test_the_company_wiki_gate_accepts_the_explicit_legacy_index(self) -> None:
+        self.workspace.mkdir(parents=True)
         (self.workspace / "wiki-index.sqlite").write_bytes(b"")
         self.assertTrue(gate_open("company-wiki", self.env)[0])
 

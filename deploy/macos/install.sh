@@ -489,7 +489,12 @@ openclaw_workspace=${DALTON_OPENCLAW_WORKSPACE:-$HOME/.openclaw/workspace}
 feed_plan_dir="$state_dir/feed-plans"
 feeds_dir="$state_dir/feeds"
 digest_source="$openclaw_workspace/skills/market-digest/output"
-wiki_index_source="$openclaw_workspace/wiki-index.sqlite"
+wiki_index_source="$openclaw_workspace/wiki/vectors.db"
+if [[ ! -e "$wiki_index_source" ]]; then
+  # Compatibility for installations that explicitly exposed the wiki index
+  # at the historical workspace-root name.
+  wiki_index_source="$openclaw_workspace/wiki-index.sqlite"
+fi
 # W3: the plan is versioned rather than re-copied. Seeding is copy-once by
 # design -- the state directory is the owner's, and a script that overwrites
 # what is there is a script that can undo a hand edit -- so a plan whose
@@ -529,9 +534,10 @@ fi
 # The wiki corpus is 258 MB and its index rows carry paths relative to the
 # workspace root, so the corpus root has to *be* the workspace: a link to a
 # subdirectory would make every document path escape the root and be refused.
-# The index therefore has to be reachable as <workspace>/wiki-index.sqlite,
-# which is the owner's one line to run (see the owner-steps document); this
-# script does not write inside the OpenClaw workspace.
+# The skill's native index is <workspace>/wiki/vectors.db. Older hosts may
+# still expose the same compatible schema at <workspace>/wiki-index.sqlite;
+# keep accepting that explicit path without requiring it on a native layout.
+# This script does not write inside the OpenClaw workspace.
 if [[ -d "$openclaw_workspace" && -e "$wiki_index_source" ]]; then
   seed_feed_plan
   for company_wiki_kind in company-wiki-list-documents company-wiki-get-document; do

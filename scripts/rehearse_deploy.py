@@ -483,8 +483,12 @@ def _gate_market_digest(env: Mapping[str, str]) -> tuple[bool, str]:
 
 def _gate_company_wiki(env: Mapping[str, str]) -> tuple[bool, str]:
     workspace = _openclaw_workspace(env)
-    index = workspace / "wiki-index.sqlite"
-    return (workspace.is_dir() and index.exists()), f"no wiki index at {index}"
+    native_index = workspace / "wiki" / "vectors.db"
+    legacy_index = workspace / "wiki-index.sqlite"
+    found = native_index.exists() or legacy_index.exists()
+    return (workspace.is_dir() and found), (
+        f"no wiki index at {native_index} or {legacy_index}"
+    )
 
 
 def _gate_prior_research(env: Mapping[str, str]) -> tuple[bool, str]:

@@ -207,11 +207,16 @@ class InstallerSeedTests(unittest.TestCase):
                     (state / "feeds" / "market-digest-output").mkdir(parents=True)
                 if lane == "company_wiki":
                     corpus = state / "feeds" / "company-wiki"
-                    corpus.mkdir(parents=True)
-                    (corpus / "wiki-index.sqlite").write_bytes(b"")
+                    (corpus / "wiki").mkdir(parents=True)
+                    (corpus / "wiki" / "vectors.db").write_bytes(b"")
                 if lane == "prior_research":
                     (state / "feeds" / "prior-research").mkdir(parents=True)
                 self.assertIn(flag, self.lane_argv(state), f"{lane} did not switch on")
+                if lane == "company_wiki":
+                    argv = self.lane_argv(state)
+                    self.assertEqual(
+                        argv[argv.index("--company-wiki-index-db") + 1],
+                        str(state / "feeds" / "company-wiki" / "wiki" / "vectors.db"))
                 # And one file short is the whole lane absent.
                 (state / needs[-1]).unlink()
                 self.assertNotIn(flag, self.lane_argv(state),
@@ -284,6 +289,34 @@ class InstallerSeedTests(unittest.TestCase):
         self.assertIn("the sales-note lane is not installed", text)
         self.assertIn("the company-wiki lane is not installed", text)
         self.assertIn("to install the crowd-source lane", text)
+
+    def test_company_wiki_keeps_the_explicit_legacy_index_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "legacy-wiki"
+            repo = self.INSTALL.parents[2]
+            for name in self.LANE_SEEDS["company_wiki"][0]:
+                source = {
+                    "feed-plans/p9-us-it-services-feeds-v2.json":
+                        repo / "deploy/phase9/p9-us-it-services-feeds-v2.json",
+                    "connector-governance/company-wiki-list-documents-v1.json":
+                        repo / "deploy/connector-governance/company-wiki-list-documents-v1.json",
+                    "connector-governance/company-wiki-get-document-v1.json":
+                        repo / "deploy/connector-governance/company-wiki-get-document-v1.json",
+                }[name]
+                target = state / name; target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(source.read_bytes())
+            corpus = state / "feeds" / "company-wiki"; corpus.mkdir(parents=True)
+            legacy = corpus / "wiki-index.sqlite"; legacy.write_bytes(b"")
+            argv = self.lane_argv(state)
+            self.assertEqual(argv[argv.index("--company-wiki-index-db") + 1], str(legacy))
+
+    def test_installer_prefers_native_vector_index_then_legacy_alias(self) -> None:
+        text = self.script()
+        native = '$openclaw_workspace/wiki/vectors.db'
+        legacy = '$openclaw_workspace/wiki-index.sqlite'
+        self.assertIn(f'wiki_index_source="{native}"', text)
+        self.assertIn(f'wiki_index_source="{legacy}"', text)
+        self.assertLess(text.index(native), text.index(legacy))
 
     def test_the_narrowing_record_is_not_put_where_a_lane_would_load_it(self) -> None:
         # It is the note the owner reads before deciding what to do with an
