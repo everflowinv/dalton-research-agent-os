@@ -14,8 +14,10 @@ from scripts.prepare_successor_config_transition import (
     ConfigTransitionError, LANE_CONFIG, MODEL_ADDITIONS, MODEL_REPLACEMENT,
     DOCUMENT_CONFIG, OPENCLAW_FRAME_PATH, OPENCLAW_TARGET_MAX_FRAME_BYTES,
     PRESERVED_TARGETS, PURE_PRESERVE_SCHEMA_VERSION, apply_transition,
+    WRITER_APPEND_SCHEMA_VERSION,
     build_preserve_existing_transition, build_transition, canonical_hash,
     apply_transition_to_scratch,
+    expected_writer_operation_transition_state,
     expected_openclaw_frame_transition_state,
     expected_preserved_openclaw_state, expected_service_transition_state,
 )
@@ -482,6 +484,93 @@ class PreserveExistingTransitionTests(unittest.TestCase):
             service_config_before_path=self.packet / "service.before.json",
             openclaw_config_before_path=self.packet / "openclaw.preserved.json",
         )
+
+    def build_writer_append(self):
+        self.build_pure()
+        before = self.packet / "writer-tokens.before.json"
+        before.write_bytes(b'{"principals":[],"schema_version":"0.1"}\n')
+        proof = {
+            "kind": "bootstrap_source_operations_append",
+            "target": "writer-tokens.json", "principal_id": "core",
+            "before_sha256": hashlib.sha256(before.read_bytes()).hexdigest(),
+            "predicted_after_sha256": "e" * 64,
+            "predecessor": {"commit": "c" * 40, "operations": ["a"],
+                            "operations_hash": "1" * 64},
+            "successor": {"commit": "d" * 40, "operations": ["a", "b"],
+                          "operations_hash": "2" * 64},
+            "added_operations": ["b"],
+        }
+        with patch(
+            "scripts.successor_writer_token_transition.build_transition",
+            return_value=proof,
+        ):
+            return build_preserve_existing_transition(
+                packet_root=self.packet, release_ref="code-successor-writer",
+                source_commit="d" * 40,
+                baseline_models_path=self.packet / "models.json",
+                model_config_paths={name: self.packet / name for name in self.models},
+                preserved_config_paths=self.preserved,
+                preserved_state_authority_paths={
+                    "connector-governance/yfinance-analyst-estimates-v1.json":
+                        self.packet / "yfinance-approved.json"},
+                service_config_before_path=self.packet / "service.before.json",
+                openclaw_config_before_path=self.packet / "openclaw.preserved.json",
+                writer_token_before_path=before,
+                predecessor_source_root=self.root / "predecessor",
+                predecessor_source_commit="c" * 40,
+                successor_source_root=self.root / "successor",
+            )
+
+    def test_writer_append_manifest_and_validator_bind_exact_projected_bytes(self):
+        manifest = self.build_writer_append()
+        self.assertEqual(WRITER_APPEND_SCHEMA_VERSION, manifest["schema_version"])
+        self.assertEqual(1, manifest["boundaries"]["writer_token_mutations"])
+        row = manifest["writer_operation_transition"]
+        self.assertEqual("d" * 40, row["proof"]["successor"]["commit"])
+        after = b'{"projected":true}\n'
+        with patch(
+            "scripts.successor_writer_token_transition.validate_transition",
+            return_value=after,
+        ) as validate:
+            before, projected, validated_row = expected_writer_operation_transition_state(
+                packet_root=self.packet, manifest=manifest,
+                successor_root=self.root / "successor",
+            )
+        self.assertEqual((self.packet / "writer-tokens.before.json").read_bytes(), before)
+        self.assertEqual(after, projected)
+        self.assertEqual(row, validated_row)
+        self.assertEqual(before, validate.call_args.kwargs["before_bytes"])
+
+    def test_apply_records_bootstrap_projection_without_writing_writer_artifact(self):
+        manifest = self.build_writer_append()
+        manifest_path = self.packet / "transition.writer.json"
+        write(manifest_path, manifest)
+        self.install_before()
+        openclaw = self.root / "scratch-writer/openclaw.json"
+        openclaw.parent.mkdir()
+        openclaw.write_bytes((self.packet / "openclaw.preserved.json").read_bytes())
+        writer_before = (self.packet / "writer-tokens.before.json").read_bytes()
+        projected = b'{"projected":true}\n'
+        with patch(
+            "scripts.prepare_successor_config_transition."
+            "expected_writer_operation_transition_state",
+            return_value=(writer_before, projected,
+                          manifest["writer_operation_transition"]),
+        ):
+            receipt = apply_transition_to_scratch(
+                packet_root=self.packet, scratch_root=self.root,
+                state_dir=self.state, manifest_path=manifest_path,
+                expected_manifest_sha256=hashlib.sha256(
+                    manifest_path.read_bytes()).hexdigest(),
+                receipt_path=self.root / "receipt.writer.json",
+                service_config_path=self.service, external_config_path=openclaw,
+                successor_source_root=self.root / "successor",
+            )
+        self.assertEqual("successor-config-transition-receipt-0.5",
+                         receipt["schema_version"])
+        self.assertEqual("pending", receipt["writer_token_apply_status"])
+        self.assertEqual(writer_before,
+                         (self.packet / "writer-tokens.before.json").read_bytes())
 
     def test_pure_preserve_transition_changes_no_configuration_bytes(self):
         manifest = self.build_pure()

@@ -11,9 +11,11 @@ preserves an already-installed model/document/lane configuration and applies
 one separately reviewed planner service-budget CAS. Schema 0.3 preserves those
 bytes and the service config while binding one reviewed external OpenClaw
 config transition. Schema 0.4 is a code-only successor: all reviewed Dalton
-and OpenClaw configuration bytes remain exact. ``--apply`` is intended for an already controlled stopped
-window and writes an exclusive receipt. It does not stop/start services,
-install code, call a model, or publish a release.
+and OpenClaw configuration bytes remain exact. Schema 0.5 additionally proves
+the exact core writer-operation append that bootstrap must apply; this module
+only predicts those bytes. ``--apply`` is intended for an already controlled
+stopped window and writes an exclusive receipt. It does not stop/start
+services, install code, call a model, or publish a release.
 """
 from __future__ import annotations
 
@@ -38,10 +40,12 @@ SCHEMA_VERSION = "successor-config-transition-0.1"
 PRESERVE_SCHEMA_VERSION = "successor-config-transition-0.2"
 EXTERNAL_CAS_SCHEMA_VERSION = "successor-config-transition-0.3"
 PURE_PRESERVE_SCHEMA_VERSION = "successor-config-transition-0.4"
+WRITER_APPEND_SCHEMA_VERSION = "successor-config-transition-0.5"
 RECEIPT_SCHEMA_VERSION = "successor-config-transition-receipt-0.1"
 PRESERVE_RECEIPT_SCHEMA_VERSION = "successor-config-transition-receipt-0.2"
 EXTERNAL_CAS_RECEIPT_SCHEMA_VERSION = "successor-config-transition-receipt-0.3"
 PURE_PRESERVE_RECEIPT_SCHEMA_VERSION = "successor-config-transition-receipt-0.4"
+WRITER_APPEND_RECEIPT_SCHEMA_VERSION = "successor-config-transition-receipt-0.5"
 HEX40 = re.compile(r"[0-9a-f]{40}")
 HEX64 = re.compile(r"[0-9a-f]{64}")
 MODEL_ADDITIONS = (
@@ -635,8 +639,12 @@ def build_preserve_existing_transition(
     model_broker_plugin_before_path: Path | None = None,
     model_broker_host_patch: Mapping[str, Any] | None = None,
     openclaw_broker_journal_path: Path | None = None,
+    writer_token_before_path: Path | None = None,
+    predecessor_source_root: Path | None = None,
+    predecessor_source_commit: str | None = None,
+    successor_source_root: Path | None = None,
 ) -> dict[str, Any]:
-    """Build a 0.2 service delta, 0.3 external CAS, or 0.4 pure preserve.
+    """Build a 0.2 service delta through 0.5 writer-append transition.
 
     The 0.3 form preserves the service and every reviewed Dalton configuration
     byte. It changes the fixed OpenClaw broker ``maxFrameBytes`` leaf and may
@@ -724,6 +732,14 @@ def build_preserve_existing_transition(
 
     service_before, service_before_bytes = _read_json(
         service_config_before_path, "service config before")
+    writer_inputs = (
+        writer_token_before_path, predecessor_source_root,
+        predecessor_source_commit, successor_source_root,
+    )
+    _need(all(value is None for value in writer_inputs)
+          or all(value is not None for value in writer_inputs),
+          "writer operation transition inputs are incomplete")
+    writer_append = all(value is not None for value in writer_inputs)
     pure_preserve = (
         service_delta_path is None
         and openclaw_config_before_path is not None
@@ -736,12 +752,17 @@ def build_preserve_existing_transition(
         and model_broker_host_patch is None
         and openclaw_broker_journal_path is None
     )
+    _need(not writer_append or pure_preserve,
+          "writer operation append requires a pure-preserve transition")
     external_cas = service_delta_path is None and not pure_preserve
     if pure_preserve:
         openclaw_before, openclaw_before_bytes = _read_json(
             openclaw_config_before_path, "OpenClaw config before")
         _need(bool(openclaw_before), "preserved OpenClaw config is empty")
-        schema_version = PURE_PRESERVE_SCHEMA_VERSION
+        schema_version = (
+            WRITER_APPEND_SCHEMA_VERSION if writer_append
+            else PURE_PRESERVE_SCHEMA_VERSION
+        )
         service_transition = {
             "kind": "preserve_exact", "mutation_count": 0,
             "before": _artifact(service_config_before_path, packet_root),
@@ -755,6 +776,7 @@ def build_preserve_existing_transition(
         boundaries = {
             "configuration_mutations": 0, "service_config_mutations": 0,
             "external_config_mutations": 0,
+            **({"writer_token_mutations": 1} if writer_append else {}),
             "live_mutation": False, "manifest_publication": False,
             "service_lifecycle": False, "model_calls": False,
         }
@@ -907,10 +929,30 @@ def build_preserve_existing_transition(
         ],
         "boundaries": boundaries,
     }
-    if schema_version == PURE_PRESERVE_SCHEMA_VERSION:
+    if schema_version in {PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION}:
         body["external_config_transition"] = openclaw_transition
     elif openclaw_transition is not None:
         body["external_config_transitions"] = [openclaw_transition]
+    if schema_version == WRITER_APPEND_SCHEMA_VERSION:
+        from scripts.successor_writer_token_transition import (
+            build_transition as build_writer_transition,
+        )
+        assert writer_token_before_path is not None
+        assert predecessor_source_root is not None
+        assert predecessor_source_commit is not None
+        assert successor_source_root is not None
+        proof = build_writer_transition(
+            before_path=writer_token_before_path,
+            predecessor_root=predecessor_source_root,
+            predecessor_commit=predecessor_source_commit,
+            successor_root=successor_source_root,
+            successor_commit=source_commit,
+        )
+        body["writer_operation_transition"] = {
+            "before": _artifact(writer_token_before_path, packet_root),
+            "predecessor_source_root": str(predecessor_source_root.resolve()),
+            "proof": proof,
+        }
     body["content_hash"] = canonical_hash(body)
     return body
 
@@ -945,7 +987,8 @@ def expected_transition_state(
     _need(isinstance(models, dict), "baseline model snapshot is invalid")
     version = manifest.get("schema_version")
     _need(version in {SCHEMA_VERSION, PRESERVE_SCHEMA_VERSION,
-                      EXTERNAL_CAS_SCHEMA_VERSION, PURE_PRESERVE_SCHEMA_VERSION},
+                      EXTERNAL_CAS_SCHEMA_VERSION, PURE_PRESERVE_SCHEMA_VERSION,
+                      WRITER_APPEND_SCHEMA_VERSION},
           "transition schema version is unsupported")
     document = None
     lane = None
@@ -953,7 +996,8 @@ def expected_transition_state(
         artifact = (row.get("before") if isinstance(row, Mapping)
                     and version in {PRESERVE_SCHEMA_VERSION,
                                     EXTERNAL_CAS_SCHEMA_VERSION,
-                                    PURE_PRESERVE_SCHEMA_VERSION} else row.get("after")
+                                    PURE_PRESERVE_SCHEMA_VERSION,
+                                    WRITER_APPEND_SCHEMA_VERSION} else row.get("after")
                     if isinstance(row, Mapping) else None)
         if not isinstance(row, Mapping) or not isinstance(artifact, Mapping):
             raise ConfigTransitionError("transition target is invalid")
@@ -988,11 +1032,12 @@ def expected_service_transition_state(
 
     version = manifest.get("schema_version")
     _need(version in {PRESERVE_SCHEMA_VERSION, EXTERNAL_CAS_SCHEMA_VERSION,
-                      PURE_PRESERVE_SCHEMA_VERSION}
+                      PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION}
           and manifest.get("transition_kind") == "preserve_existing",
-          "service transition requires preserve-existing schema 0.2 or 0.3")
+          "service transition requires preserve-existing schema 0.2 through 0.5")
     row = manifest.get("service_transition")
-    if version in {EXTERNAL_CAS_SCHEMA_VERSION, PURE_PRESERVE_SCHEMA_VERSION}:
+    if version in {EXTERNAL_CAS_SCHEMA_VERSION, PURE_PRESERVE_SCHEMA_VERSION,
+                   WRITER_APPEND_SCHEMA_VERSION}:
         _need(isinstance(row, Mapping)
               and set(row) == {"kind", "mutation_count", "before", "after_sha256"}
               and row.get("kind") == "preserve_exact"
@@ -1101,8 +1146,9 @@ def expected_preserved_openclaw_state(
 ) -> bytes:
     """Return exact OpenClaw bytes bound by a pure-preserve successor."""
 
-    _need(manifest.get("schema_version") == PURE_PRESERVE_SCHEMA_VERSION,
-          "pure OpenClaw preservation requires schema 0.4")
+    _need(manifest.get("schema_version") in {
+              PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION},
+          "pure OpenClaw preservation requires schema 0.4 or 0.5")
     row = manifest.get("external_config_transition")
     _need(isinstance(row, Mapping)
           and set(row) == {"kind", "mutation_count", "before", "after_sha256"}
@@ -1113,6 +1159,42 @@ def expected_preserved_openclaw_state(
     _need(row.get("after_sha256") == sha256_bytes(before),
           "pure OpenClaw transition hash differs")
     return before
+
+
+def expected_writer_operation_transition_state(
+    *, packet_root: Path, manifest: Mapping[str, Any],
+    successor_root: Path,
+    predecessor_source_root: Path | None = None,
+) -> tuple[bytes, bytes, dict[str, Any]]:
+    """Return exact writer bytes for the bootstrap executor; mutate nothing."""
+
+    _need(manifest.get("schema_version") == WRITER_APPEND_SCHEMA_VERSION,
+          "writer operation append requires schema 0.5")
+    row = manifest.get("writer_operation_transition")
+    _need(isinstance(row, Mapping)
+          and set(row) == {"before", "predecessor_source_root", "proof"}
+          and isinstance(row.get("proof"), Mapping),
+          "writer operation transition shape differs")
+    before_path, before_bytes = _resolve_artifact(packet_root, row["before"])
+    _need(before_path.read_bytes() == before_bytes,
+          "writer token before artifact differs")
+    proof = dict(row["proof"])
+    predecessor = Path(str(row.get("predecessor_source_root", ""))).resolve()
+    if predecessor_source_root is not None:
+        _need(predecessor_source_root.resolve() == predecessor,
+              "writer predecessor source root differs")
+    _need(proof.get("successor", {}).get("commit") == manifest.get("source_commit"),
+          "writer successor source identity differs")
+    from scripts.successor_writer_token_transition import validate_transition
+    try:
+        after_bytes = validate_transition(
+            proof, before_bytes=before_bytes,
+            predecessor_root=predecessor,
+            successor_root=successor_root,
+        )
+    except Exception as exc:
+        raise ConfigTransitionError("writer operation transition differs") from exc
+    return before_bytes, after_bytes, dict(row)
 
 
 def verify_preserved_state_authorities(
@@ -1206,6 +1288,7 @@ def _apply_preserve_transition(
     manifest: Mapping[str, Any], expected_manifest_sha256: str,
     receipt_path: Path, accepted_evidence: Mapping[str, Any] | None,
     fault_hook: Callable[[str], None] | None,
+    successor_source_root: Path | None,
 ) -> dict[str, Any]:
     version = manifest.get("schema_version")
     expected_fields = {
@@ -1227,10 +1310,13 @@ def _apply_preserve_transition(
     }
     if version == EXTERNAL_CAS_SCHEMA_VERSION:
         expected_fields.add("external_config_transitions")
-    elif version == PURE_PRESERVE_SCHEMA_VERSION:
+    elif version in {PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION}:
         expected_fields.add("external_config_transition")
+        if version == WRITER_APPEND_SCHEMA_VERSION:
+            expected_fields.add("writer_operation_transition")
+            expected_boundaries["writer_token_mutations"] = 1
     _need(version in {PRESERVE_SCHEMA_VERSION, EXTERNAL_CAS_SCHEMA_VERSION,
-                      PURE_PRESERVE_SCHEMA_VERSION}
+                      PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION}
           and set(manifest) == expected_fields
           and manifest.get("boundaries") == expected_boundaries,
           "preserve-existing transition boundary differs")
@@ -1302,7 +1388,8 @@ def _apply_preserve_transition(
     verified_state_authorities = verify_preserved_state_authorities(
         packet_root=packet_root, state_dir=state_dir, manifest=manifest)
 
-    if version in {EXTERNAL_CAS_SCHEMA_VERSION, PURE_PRESERVE_SCHEMA_VERSION}:
+    if version in {EXTERNAL_CAS_SCHEMA_VERSION, PURE_PRESERVE_SCHEMA_VERSION,
+                   WRITER_APPEND_SCHEMA_VERSION}:
         service_before_value, service_after_value = expected_service_transition_state(
             packet_root=packet_root, manifest=manifest)
         _, service_before_bytes = _resolve_artifact(
@@ -1326,10 +1413,27 @@ def _apply_preserve_transition(
               and not external_config_path.is_symlink()
               and external_config_path.read_bytes() == external_after,
               "OpenClaw config differs from reviewed applied bytes")
+        writer_projection = None
+        if version == WRITER_APPEND_SCHEMA_VERSION:
+            _need(successor_source_root is not None,
+                  "schema 0.5 requires the accepted successor source root")
+            writer_before, writer_after, _ = expected_writer_operation_transition_state(
+                packet_root=packet_root, manifest=manifest,
+                successor_root=successor_source_root,
+            )
+            writer_projection = {
+                "writer_token_mutations": 1,
+                "writer_token_before_sha256": sha256_bytes(writer_before),
+                "writer_token_predicted_after_sha256": sha256_bytes(writer_after),
+                "writer_token_apply_actor": "bootstrap",
+                "writer_token_apply_status": "pending",
+            }
         receipt = {
             "schema_version": (
                 EXTERNAL_CAS_RECEIPT_SCHEMA_VERSION
                 if version == EXTERNAL_CAS_SCHEMA_VERSION
+                else WRITER_APPEND_RECEIPT_SCHEMA_VERSION
+                if version == WRITER_APPEND_SCHEMA_VERSION
                 else PURE_PRESERVE_RECEIPT_SCHEMA_VERSION
             ),
             "status": "configured_controller_start_pending",
@@ -1356,6 +1460,8 @@ def _apply_preserve_transition(
             "service_lifecycle_mutations": 0, "model_calls": 0,
             "manifest_publication": False,
         }
+        if writer_projection is not None:
+            receipt.update(writer_projection)
         if external_row is not None:
             receipt.update({
                 "historical_unresolved_sha256": external_row[
@@ -1547,6 +1653,7 @@ def apply_transition(
     fault_hook: Callable[[str], None] | None = None,
     _require_accepted: bool = True,
     accepted_evidence: Mapping[str, Any] | None = None,
+    successor_source_root: Path | None = None,
 ) -> dict[str, Any]:
     """Apply only manifest-owned bytes; caller owns the stopped window."""
 
@@ -1561,7 +1668,7 @@ def apply_transition(
     _need(asserted == canonical_hash({k: v for k, v in manifest.items() if k != "content_hash"})
           and manifest.get("schema_version") in {
               SCHEMA_VERSION, PRESERVE_SCHEMA_VERSION, EXTERNAL_CAS_SCHEMA_VERSION,
-              PURE_PRESERVE_SCHEMA_VERSION}
+              PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION}
           and manifest.get("status") == "prepared_inert",
           "transition manifest authority differs")
     acceptance = manifest.get("acceptance", {})
@@ -1581,7 +1688,7 @@ def apply_transition(
 
     if manifest.get("schema_version") in {
             PRESERVE_SCHEMA_VERSION, EXTERNAL_CAS_SCHEMA_VERSION,
-            PURE_PRESERVE_SCHEMA_VERSION}:
+            PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION}:
         _need(service_config_path is not None,
               "preserve-existing transition requires the service config path")
         return _apply_preserve_transition(
@@ -1591,6 +1698,7 @@ def apply_transition(
             expected_manifest_sha256=expected_manifest_sha256,
             receipt_path=receipt_path, accepted_evidence=accepted_evidence,
             fault_hook=fault_hook,
+            successor_source_root=successor_source_root,
         )
 
     rows = manifest.get("targets")
@@ -1756,6 +1864,7 @@ def apply_transition_to_scratch(
     manifest_path: Path, expected_manifest_sha256: str, receipt_path: Path,
     service_config_path: Path | None = None,
     external_config_path: Path | None = None,
+    successor_source_root: Path | None = None,
 ) -> dict[str, Any]:
     """Apply a pending transition only under an explicit scratch root."""
 
@@ -1796,9 +1905,10 @@ def apply_transition_to_scratch(
             _fsync_directory(external_config_path.parent)
         finally:
             temporary.unlink(missing_ok=True)
-    elif manifest.get("schema_version") == PURE_PRESERVE_SCHEMA_VERSION:
+    elif manifest.get("schema_version") in {
+            PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION}:
         _need(external_config_path is not None,
-              "schema 0.4 scratch requires an OpenClaw config path")
+              "schema 0.4/0.5 scratch requires an OpenClaw config path")
         external_config_path = external_config_path.resolve()
         expected = expected_preserved_openclaw_state(
             packet_root=packet_root, manifest=manifest)
@@ -1814,6 +1924,7 @@ def apply_transition_to_scratch(
             expected_manifest_sha256=expected_manifest_sha256,
             receipt_path=receipt_path, service_config_path=service_config_path,
             external_config_path=external_config_path,
+            successor_source_root=successor_source_root,
             _require_accepted=False,
         )
     except Exception:
