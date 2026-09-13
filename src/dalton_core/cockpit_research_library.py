@@ -119,7 +119,15 @@ def research_library(connection: sqlite3.Connection, mission: Mapping[str, Any],
               "mission_version_ref": mission["id"], "products": products}
     if localize:
         from .research_localization_store import localize_library
-        return localize_library(connection, result)
+        from .research_gap_display import gap_display_text
+        # Display-only fields follow the exact-source receipt lookup. Raw
+        # snapshots and the source hashes used by paid reviews stay stable.
+        result = localize_library(connection, result)
+        for product in result["products"]:
+            product["display_gaps"] = [gap_display_text(gap) for gap in product.get("gaps", [])]
+            for section in product.get("sections", []):
+                section["display_gaps"] = [gap_display_text(gap) for gap in section.get("gaps", [])]
+        return result
     return result
 
 
