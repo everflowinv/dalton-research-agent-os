@@ -8,6 +8,7 @@ from typing import Any, Mapping, Sequence
 
 from .cockpit_research_library import research_library
 from .store import content_hash
+from .numeric_display import format_typed_value
 
 _SHA = re.compile(r"^[0-9a-f]{64}$")
 _IMAGE_TYPES = {"image/png": ".png", "image/jpeg": ".jpg", "image/jpg": ".jpeg"}
@@ -219,7 +220,7 @@ def _chart(
             f'<text x="0" y="{y + 14}" class="sl">{_esc(claim.get("period") or item.get("period") or "未知期间")} · {_esc({"actual": "已披露", "estimate": "预测"}[estimate_kind])}</text>'
             f'<line x1="{axis:.2f}" x2="{axis:.2f}" y1="{y-2}" y2="{y+24}" class="axis"/>'
             f'<rect class="{_esc(estimate_kind)}" x="{x:.2f}" y="{y}" width="{width:.2f}" height="20"/>'
-            f'<text x="570" y="{y+15}" class="sv">{_esc(claim["value"])} {_esc(claim.get("currency") or "")} {_esc(claim["unit"])} {_esc(claim.get("scale") or "base")}</text>'
+            f'<text x="570" y="{y+15}" class="sv">{_esc(format_typed_value(claim["value"], unit=claim["unit"], scale=claim.get("scale"), currency=claim.get("currency"), metric=claim.get("metric_or_aspect") or ""))}</text>'
         )
     height = 58 * len(series) + 35
     return (
@@ -403,7 +404,7 @@ def render_research_html(
             )
         if not chunks:
             chunks = [
-                '<p class="unavailable">暂无可阅读的当前章节。</p>'
+                f'<p class="unavailable">{_esc(product.get("display_reason") or "暂无可阅读的当前章节。")}</p>'
             ]
         bodies.append(head + "".join(chunks) + "</section>")
     figs = "".join(

@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import copy
 import functools
-import hashlib
 import json
 import os
 import re
@@ -95,56 +94,98 @@ def publish_attachment(directory: str | Path, product: Mapping[str, Any],
     return target
 
 
-def localize_library(connection: sqlite3.Connection, library: Mapping[str, Any]) -> dict[str, Any]:
-    root = directory_for_connection(connection)
-    if root is None or not root.exists():
-        return dict(library)
-    result = copy.deepcopy(dict(library))
+def _review_required(root: Path) -> bool:
+    policy=root.parent/'research-language-policy.json'
+    if not policy.exists():return False
+    try:return _read_json(policy).get('required') is True
+    except (OSError,ValueError):return True
+
+
+def _publication_receipt_valid(root: Path, product: Mapping[str,Any], candidate: Mapping[str,Any]) -> bool:
+    from .store import content_hash
     try:
-        if root.is_symlink():
-            raise ValueError("unsafe display directory")
-        index = _read_json(root / "index.json")
-        if index.get("schema_version") != "research-localization-index:0.1":
-            raise ValueError("unsupported display index")
-        entries = index["entries"]
-        if not isinstance(entries, dict):
-            raise ValueError("invalid display index entries")
-    except (OSError, ValueError, KeyError):
-        return result
-    for i, product in enumerate(result.get("products") or []):
-        key = entries.get(source_content_hash(product))
-        if not isinstance(key, str) or not _SHA.fullmatch(key):
-            continue
-        try:
-            if (root / "records").is_symlink():
-                raise ValueError("unsafe display records directory")
-            candidate = _read_json(root / "records" / (key + ".json"))
-            if candidate.get("content_hash") != key:
-                raise ValueError("display index binding mismatch")
-            result["products"][i] = select_localized(product, candidate)
-        except (OSError, ValueError, KeyError, TypeError, ResearchLocalizationError):
-            # A stale/invalid translation cannot hide the underlying research.
-            product["localization_status"] = "原文已更新，中文版本待同步"
+        receipt=_read_json(root/'language-reviews'/(candidate['content_hash']+'.json'))
+        if (receipt.get('schema_version')!='publication-language-receipt:0.1'
+            or receipt.get('source_content_hash')!=source_content_hash(product)
+            or receipt.get('localization_content_hash')!=candidate['content_hash']
+            or receipt.get('content_hash')!=content_hash({k:v for k,v in receipt.items() if k!='content_hash'})):
+            return False
+        rows=[]
+        for stage in receipt['reviews']:
+            if (stage.get('status')!='passed'
+                or (stage.get('language_review')or{}).get('status')!='ready_for_publication'
+                or (stage.get('independence')or{}).get('independent') is not True):return False
+            offset=len(rows)
+            rows.extend({**row,'index':offset+i} for i,row in enumerate(stage['localized']['sections']))
+        return rows==[{k:r[k] for k in ('index','title','body','gaps')} for r in candidate['sections']]
+    except (OSError,ValueError,KeyError,TypeError):return False
+
+
+def has_reviewed_attachment(directory: str | Path, product: Mapping[str,Any]) -> bool:
+    root=Path(directory)
+    try:
+        key=_read_json(root/'index.json')['entries'][source_content_hash(product)]
+        if not isinstance(key,str) or not _SHA.fullmatch(key):return False
+        candidate=_read_json(root/'records'/(key+'.json'))
+        validate_localization(product,candidate)
+        return _publication_receipt_valid(root,product,candidate)
+    except (OSError,ValueError,KeyError,TypeError):return False
+
+
+def localize_library(connection: sqlite3.Connection, library: Mapping[str, Any]) -> dict[str, Any]:
+    root=directory_for_connection(connection)
+    if root is None:return dict(library)
+    required=_review_required(root)
+    if not root.exists() and not required:return dict(library)
+    result=copy.deepcopy(dict(library))
+    try:
+        if root.is_symlink():raise ValueError('unsafe display directory')
+        index=_read_json(root/'index.json')
+        if index.get('schema_version')!='research-localization-index:0.1':raise ValueError('unsupported display index')
+        entries=index['entries']
+        if not isinstance(entries,dict):raise ValueError('invalid display index entries')
+    except (OSError,ValueError,KeyError):entries={}
+    for i,product in enumerate(result.get('products')or[]):
+        key=entries.get(source_content_hash(product))
+        ready=False
+        if isinstance(key,str) and _SHA.fullmatch(key):
+            try:
+                if (root/'records').is_symlink():raise ValueError('unsafe display directory')
+                candidate=_read_json(root/'records'/(key+'.json'))
+                if candidate.get('content_hash')!=key:raise ValueError('display index binding mismatch')
+                if required and not _publication_receipt_valid(root,product,candidate):
+                    raise ValueError('language review receipt is missing')
+                result['products'][i]=select_localized(product,candidate)
+                result['products'][i]['publication_status']='ready'
+                ready=True
+            except (OSError,ValueError,KeyError,TypeError):
+                product['localization_status']='原文已更新，中文版本待同步'
+        if required and not ready and product.get('status')=='available':
+            product['sections']=[]
+            product['publication_status']='pending_language_review'
+            product['display_reason']='正文正在进行语言检查，完成后会在这里显示。'
     return result
 
 
 def publish_ui_texts(directory: str | Path, batches: list[dict[str, Any]]) -> Path:
-    """Publish exact-string display mappings after the same fidelity checks."""
-    entries: dict[str, str] = {}
+    """Merge exact-string mappings so one new product cannot erase other pages."""
+    import fcntl
     for batch in batches:
-        source, candidate = batch["source"], batch["localization"]
-        valid = validate_localization(source, candidate)
-        for original, localized in zip(source["sections"], valid["sections"]):
-            old, new = original["body"], localized["body"]
-            if old in entries and entries[old] != new:
-                raise ValueError("conflicting translations for the same exact text")
-            entries[old] = new
-    root = Path(directory)
-    if root.is_symlink():
-        raise ValueError("unsafe display directory")
-    root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    target = root / "ui-texts.json"
-    _atomic_json(target, {"schema_version": "cockpit-ui-texts:0.1", "batches": batches})
+        validate_localization(batch['source'],batch['localization'])
+    root=Path(directory)
+    if root.is_symlink():raise ValueError('unsafe display directory')
+    root.mkdir(parents=True,exist_ok=True,mode=0o700)
+    target=root/'ui-texts.json'
+    fd=os.open(root/'.index.lock',os.O_CREAT|os.O_RDWR|getattr(os,'O_NOFOLLOW',0),0o600)
+    with os.fdopen(fd,'a+') as lock:
+        fcntl.flock(lock,fcntl.LOCK_EX)
+        existing=_read_json(target) if target.exists() else {'schema_version':'cockpit-ui-texts:0.1','batches':[]}
+        if existing.get('schema_version')!='cockpit-ui-texts:0.1':raise ValueError('invalid UI mapping schema')
+        merged={source_content_hash(batch['source']):batch for batch in existing['batches']}
+        for batch in batches:merged[source_content_hash(batch['source'])]=batch
+        # A repeated exact string is intentionally one display entry; preserve
+        # the first approved translation instead of making page context change it.
+        _atomic_json(target,{'schema_version':'cockpit-ui-texts:0.1','batches':list(merged.values())})
     return target
 
 
@@ -159,9 +200,8 @@ def _load_ui_cached(path_string: str, inode: int, modified_ns: int, size: int) -
         valid = validate_localization(source, batch["localization"])
         for original, localized in zip(source["sections"], valid["sections"]):
             old, new = original["body"], localized["body"]
-            if old in entries and entries[old] != new:
-                raise ValueError("conflicting display translation")
-            entries[old] = new
+            if old not in entries:
+                entries[old] = new
     return entries
 
 
@@ -174,3 +214,36 @@ def load_ui_texts(database: str | Path) -> dict[str, str]:
         return dict(_load_ui_cached(str(path), stat.st_ino, stat.st_mtime_ns, stat.st_size))
     except (OSError, ValueError, KeyError, TypeError, ResearchLocalizationError):
         return {}
+
+
+def publish_reviewed_attachment(directory: str | Path, product: Mapping[str, Any],
+                                candidate: Mapping[str, Any], reviews: list[Mapping[str, Any]]) -> Path:
+    """Persist language/author/verifier receipts before making prose visible."""
+    from .store import content_hash
+    valid = validate_localization(product,candidate)
+    sections=[]
+    for stage in reviews:
+        review=stage.get('language_review') or {}
+        if (stage.get('status') != 'passed' or review.get('status') != 'ready_for_publication'
+                or not (stage.get('independence') or {}).get('independent')):
+            raise ValueError('publication language and semantic review are incomplete')
+        for row in stage['localized']['sections']:
+            sections.append({**row,'index':len(sections)})
+    expected=[{key:row[key] for key in ('index','title','body','gaps')} for row in valid['sections']]
+    if sections != expected:
+        raise ValueError('reviewed sections do not match the publication')
+    root=Path(directory)
+    records=root/'language-reviews'
+    if root.is_symlink() or records.is_symlink():
+        raise ValueError('unsafe review directory')
+    records.mkdir(parents=True,exist_ok=True,mode=0o700)
+    receipt={'schema_version':'publication-language-receipt:0.1',
+             'source_content_hash':source_content_hash(product),
+             'localization_content_hash':valid['content_hash'],'reviews':reviews}
+    receipt['content_hash']=content_hash(receipt)
+    _atomic_json(records/(valid['content_hash']+'.json'),receipt)
+    # The human-readable suggestions are all retained, in document order.
+    markdown='\n\n'.join(stage['language_review']['suggestions_markdown'] for stage in reviews)
+    from .research_html_export import _atomic_owner_write
+    _atomic_owner_write(records/(valid['content_hash']+'.md'),markdown.encode())
+    return publish_attachment(root,product,valid)

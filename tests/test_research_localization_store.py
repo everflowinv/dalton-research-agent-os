@@ -7,7 +7,8 @@ from pathlib import Path
 
 from dalton_core.research_localization import build_localization
 from dalton_core.research_localization_store import (
-    localize_library, publish_attachment, publish_ui_texts, load_ui_texts)
+    localize_library, publish_attachment, publish_ui_texts, load_ui_texts,
+    publish_reviewed_attachment, has_reviewed_attachment)
 
 
 class LocalizationStoreTests(unittest.TestCase):
@@ -75,6 +76,34 @@ class LocalizationStoreTests(unittest.TestCase):
         path.symlink_to(moved)
         result = localize_library(self.connection, {'products': [self.product]})['products'][0]
         self.assertEqual(result['sections'], self.product['sections'])
+
+    def test_required_publication_hides_unreviewed_prose_without_changing_authority(self):
+        (self.root/'research-language-policy.json').write_text('{"required":true}')
+        publish_attachment(self.directory,self.product,self.candidate)
+        result=localize_library(self.connection,{'products':[self.product]})['products'][0]
+        self.assertEqual(result['publication_status'],'pending_language_review')
+        self.assertEqual(result['sections'],[])
+        self.assertEqual(result['status'],'available')
+        self.assertEqual(result['approval'],self.product['approval'])
+        self.assertFalse(has_reviewed_attachment(self.directory,self.product))
+        rows=[{k:r[k] for k in ('index','title','body','gaps')} for r in self.candidate['sections']]
+        stages=[{'status':'passed','localized':{'sections':rows},'independence':{'independent':True},
+                 'language_review':{'status':'ready_for_publication','suggestions_markdown':'# 建议\n表达清楚。'}}]
+        publish_reviewed_attachment(self.directory,self.product,self.candidate,stages)
+        self.assertTrue(has_reviewed_attachment(self.directory,self.product))
+        shown=localize_library(self.connection,{'products':[self.product]})['products'][0]
+        self.assertEqual(shown['publication_status'],'ready')
+        self.assertEqual(shown['sections'][0]['body'],'收入增长。')
+        changed=copy.deepcopy(self.product);changed['sections'][0]['body']='Revenue fell.'
+        shown=localize_library(self.connection,{'products':[changed]})['products'][0]
+        self.assertEqual(shown['publication_status'],'pending_language_review')
+
+    def test_new_ui_batch_keeps_other_approved_page_strings(self):
+        publish_ui_texts(self.directory,[{'source':self.product,'localization':self.candidate}])
+        second=copy.deepcopy(self.product);second['sections'][0]['body']='Revenue fell.'
+        translated=build_localization(second,{'sections':[{'index':0,'title':'收入','body':'收入下降。','gaps':[]}]},self.verifier)
+        publish_ui_texts(self.directory,[{'source':second,'localization':translated}])
+        self.assertEqual(load_ui_texts(self.db),{'Revenue increased.':'收入增长。','Revenue fell.':'收入下降。'})
 
 
 if __name__ == '__main__':

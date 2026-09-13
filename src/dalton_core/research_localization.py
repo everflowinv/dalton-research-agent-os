@@ -25,7 +25,7 @@ _OPAQUE_ID = re.compile(
     r"\b(?:claim|claim-version|dossier|dossier-version|memo|memo-version|"
     r"debate|debate-map|forecast-model-version|company-model-spec|mission|"
     r"mission-version|thesis|thesis-version|event|document|document-version)"
-    r":[A-Za-z0-9:._-]+|\b[0-9a-f]{64}\b|\bT[0-9]+\b|\bcausal_chain:[0-9]+\b",
+    r":[A-Za-z0-9:._-]+|\b[0-9a-f]{64}\b|(?<![A-Za-z0-9])T[0-9]+(?![A-Za-z0-9])|\bcausal_chain:[0-9]+\b",
     re.IGNORECASE,
 )
 _HAN = re.compile(r"[\u3400-\u9fff]")
@@ -85,6 +85,16 @@ def _number_differences(source_values: Sequence[str], target_values: Sequence[st
         cleaned = _OPAQUE_ID.sub("", value)
         aliases.update(_ENGLISH_NUMBER_VALUES[m.group(1).lower()]
                        for m in _ENGLISH_NUMBER.finditer(cleaned))
+    # Written Chinese counts/months may become Arabic digits in a language
+    # revision (低于一 → 低于 1, 十二月 → 12 月). The semantic verifier still
+    # checks what the count refers to; this is only a deterministic precheck.
+    written = {"零":"0","〇":"0","一":"1","二":"2","两":"2","三":"3",
+               "四":"4","五":"5","六":"6","七":"7","八":"8","九":"9",
+               "十":"10","十一":"11","十二":"12"}
+    for value in source_values:
+        for match in re.finditer(r"[零〇一二两三四五六七八九十]+", _OPAQUE_ID.sub("",value)):
+            if match.group() in written:
+                aliases[written[match.group()]] += 1
     added -= aliases
 
     source_joined = " ".join(source_values)

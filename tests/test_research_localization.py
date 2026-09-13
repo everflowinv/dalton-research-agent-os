@@ -150,3 +150,8 @@ class ResearchLocalizationTests(unittest.TestCase):
         "gaps": ["Missing FY2027 margin"],
     }]})
     self.assertEqual(checked[0]["title"], "Financial Model")
+
+ def test_language_revision_can_use_digits_for_chinese_counts_and_months(self):
+    source=product();source['sections'][0].update(title='订单',body='GIS订单出货比低于一；十二月继续跟踪。对T1与增长的影响尚待明确。',gaps=[])
+    out={'sections':[{'index':0,'title':'订单','body':'GIS 订单出货比低于1；12月继续跟踪。对 T1 与增长的影响尚待明确。','gaps':[]}]}
+    self.assertEqual(validate_localized_text(source,out)[0]['index'],0)

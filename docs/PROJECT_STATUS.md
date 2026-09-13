@@ -6,6 +6,16 @@ Owner 已明确恢复本轮 Cockpit 修复并授权自行调试、部署和迭�
 
 三个 GPT-5.6 Sol 子代理分别处理前端、后台功能、研究生成与 HTML 导出；主代理负责存量内容的忠实中文呈现、集成和真实部署验收。R24 仍为当前线上版本，本轮修复正在开发，尚未部署。下方“暂停开发”是上一阶段审阅任务的历史记录，不再表示本轮 Cockpit 修复暂停。
 
+### 本轮实现与真实验证（2026-09-13，未部署）
+
+已集成旧版入口移除、页面与模型报告文案、EPS/Excel总额缩放、数值展示、结论游标分页、49条审批分组且动作不丢失、UTC当日事件与公司隔离，以及Ask不借用其他公司结论补上下文。原文核对矩阵见 [语言建议逐项验收](COCKPIT_LANGUAGE_REPORT_ACCEPTANCE_2026-09-13.md)，部署后的完整DOM检查尚待完成。
+
+Owner新增发布前一次语言checker要求已写入恢复文档并实现：Antigravity Gemini 3.8 Flash逐句提建议，完整建议MD留档，大脑逐条评估后修订；随后仅做独立事实保真核验，不再重复语言送检。已有15个研究库产物和其他当前可见Thesis/Weekly/Event等表面文字通过只读投影及精确原文hash绑定准备中文附件。Ask已接发布门，后台自动worker正在接部署。仍需完整实测，不能把模块通过当成产品上线。
+
+Antigravity在OpenClaw中原本存在，Dalton的自动发现也能看到；此前未进入broker调用名单。本轮已用既有allow_patch+catalog sync接通。现有同名Google Gemini配置保持独立，不冒称Antigravity。临时接线probe因将route估价误作结算上限而留下一笔明确未结算失败，证据单独保存；正式CockpitModel采用实际WorkOrder预算预留，真实checker及大脑调用已成功返回。批处理的语义核验随后暴露provider schema和host control proof接线问题，正在修复；没有将未核验译文发布到线上，也没有重复送审已完成的languagechecker。
+
+本轮新增四份模型配置、policy、worker和初始中文附件需要新的部署转换schema 0.7；独立OPS分支 `/Users/everflow/Projects/dalton-r25-language-ops` 正在补受控安装、精确回滚和验收。R24 runtime、原17份配置及已暂停的高级工作仍保持原状态。真实页面部署验收、全量测试及持续健康检查尚未开始本轮最终冻结。
+
 ## 2026-09-13 最新 owner 优先级：暂停开发，完整审阅 Cockpit 显示内容
 
 Owner 已要求暂停下一步开发，先通读每个页面及按钮展开内容，并交付全部原文 Markdown。R24 保持已发布状态；功能可运行与内容质量验收分开记录。本次没有修改产品代码、线上配置或提交审批。

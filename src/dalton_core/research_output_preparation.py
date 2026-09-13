@@ -22,7 +22,7 @@ from dalton_core.cockpit_research_library import research_library
 from dalton_core.model_fallback_chain import register_purpose_tier
 from dalton_core.research_localization import (build_prompt, build_verifier_prompt,
     build_localization, validate_localized_text, source_content_hash)
-from dalton_core.research_localization_store import publish_attachment, publish_ui_texts
+from dalton_core.research_localization_store import publish_attachment, publish_ui_texts, publish_reviewed_attachment, has_reviewed_attachment
 from dalton_core.final_text_contract import FINAL_TEXT_RULES_VERSION
 from dalton_core.research_language_review import (run_language_review, CHECKER_PURPOSE,
     BRAIN_PURPOSE, CHECKER_MODEL, CHECKER_PROVIDER)
@@ -178,6 +178,14 @@ def run_chunk(task, *, mission, draft_config, verifier_config, checker_config,
             report.write_text(review['suggestions_markdown'])
             report.chmod(0o600)
     review = evidence['language_review']
+    if review['status'] == 'pending_brain_revision' and 'brain_call' in evidence:
+        review_product=dict(product,sections=evidence['draft_localized']['sections'])
+        review=run_language_review(review_product,
+            checker=lambda _:unwrap_json_object(evidence['checker_call']['text']),
+            brain=lambda _:unwrap_json_object(evidence['brain_call']['text']),
+            checker_identity={'provider':CHECKER_PROVIDER,'model':CHECKER_MODEL})
+        evidence['language_review']=review
+        write_json(stage_path,evidence)
     if review['status'] != 'ready_for_publication':
         raise ValueError(review.get('reason') or review['status'])
     localized = {'sections':review['brain_revision']['sections']}
@@ -187,7 +195,7 @@ def run_chunk(task, *, mission, draft_config, verifier_config, checker_config,
     routes = [evidence['draft']['route_decision_ref'],evidence['brain_call']['route_decision_ref']]
     check_prompt = build_verifier_prompt(product,localized)
     if 'verifier_call' not in evidence:
-        check_id = hashlib.sha256((identity+check_prompt).encode()).hexdigest()
+        check_id = hashlib.sha256(('semantic-provider-contract:0.1'+identity+check_prompt).encode()).hexdigest()
         verifier = model(verifier_config,5000)
         evidence['verifier_call'] = independent_model_call(verifier,
             producer_route_decision_refs=routes, purpose='research_localization_verifier',
@@ -208,8 +216,8 @@ def run_chunk(task, *, mission, draft_config, verifier_config, checker_config,
     return product_index,start,saved
 
 
-def build(args):
-    data = read_json(args.input)
+def build(args, data=None):
+    data = data if data is not None else read_json(args.input)
     products = data['products']
     if args.only:
         products = [p for p in products if p['kind'] in args.only]
@@ -248,13 +256,13 @@ def build(args):
             'meaning_preserved':all(v['meaning_preserved'] for v in proof_rows),
             'findings':[f for v in proof_rows for f in v['findings']]}
         candidate = build_localization(product,{'sections':rows},verdict)
-        if product['kind']=='ui_text':
+        target=publish_reviewed_attachment(args.output_directory,product,candidate,
+            [saved for _,saved in sorted(found[i],key=lambda x:x[0])])
+        published.append({'source':product['version_ref'],'file':str(target),
+                          'content_hash':candidate['content_hash']})
+        if product['kind']=='ui_text' or product['kind'].startswith('surface_'):
             ui_batches.append({'source':product,'localization':candidate})
-        else:
-            target=publish_attachment(args.output_directory,product,candidate)
-            published.append({'source':product['version_ref'],'file':str(target),
-                              'content_hash':candidate['content_hash']})
-    if ui_batches and not any(products[f['product']]['kind']=='ui_text' for f in failures):
+    if ui_batches and not any((products[f['product']]['kind']=='ui_text' or products[f['product']]['kind'].startswith('surface_')) for f in failures):
         target=publish_ui_texts(args.output_directory,ui_batches)
         published.append({'source':'ui_text','file':str(target),'batches':len(ui_batches)})
     result={'status':'passed' if not failures else 'incomplete','products':len(products),
@@ -264,9 +272,62 @@ def build(args):
     return 0 if not failures else 1
 
 
+def run_worker(config_path):
+    """One scheduled preparation pass; all model calls use the existing ledger."""
+    import fcntl
+    from types import SimpleNamespace
+    from dalton_core.research_publication_worker import poll_once
+    from dalton_core.final_surface_products import final_surface_products
+    cfg=read_json(config_path)
+    root=Path(cfg['work_dir']);root.mkdir(parents=True,exist_ok=True,mode=0o700)
+    fd=os.open(root/'.worker.lock',os.O_CREAT|os.O_RDWR|getattr(os,'O_NOFOLLOW',0),0o600)
+    with os.fdopen(fd,'a+') as lock:
+        try:
+            fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        except BlockingIOError:
+            print(json.dumps({'status':'already_running'}));return 0
+        core=Path(cfg['core_db']).resolve()
+        connection=sqlite3.connect(core.as_uri()+'?mode=ro',uri=True)
+        connection.row_factory=sqlite3.Row
+        connection.execute('PRAGMA query_only=ON')
+        try:
+            row=connection.execute('SELECT v.record_json FROM coverage_mission_pointer p '
+                'JOIN coverage_mission_versions v ON p.mission_version_id=v.mission_version_id '
+                'ORDER BY p.mission_ref LIMIT 1').fetchone()
+            if row is None:
+                result={'status':'no_current_mission'}
+            else:
+                mission=json.loads(row[0])
+                args=SimpleNamespace(input=None,only=None,workers=int(cfg.get('workers',4)),
+                    chunk_chars=int(cfg.get('chunk_chars',4500)),max_cost_per_call=float(cfg.get('max_cost_per_call',1)),
+                    attempts=int(cfg.get('draft_attempts',2)),work_dir=root,
+                    output_directory=Path(cfg['output_directory']),scheduler_db=Path(cfg['scheduler_db']),
+                    model_config=Path(cfg['model_config']),verifier_config=Path(cfg['verifier_config']),
+                    checker_config=Path(cfg['checker_config']),brain_config=Path(cfg['brain_config']))
+                if not 1<=args.workers<=8 or not 1<=args.attempts<=5 or args.chunk_chars<100:
+                    raise ValueError('publication worker bounds are invalid')
+                def prepare(product):
+                    if has_reviewed_attachment(args.output_directory,product):
+                        return {'status':'completed','existing_reviewed_attachment':True}
+                    code=build(args,{'mission':mission,'products':[product]})
+                    return {'status':'completed' if code==0 else 'pending',
+                            'receipt':read_json(root/'result.json')}
+                result=poll_once(connection,mission,state_dir=root/'products',prepare=prepare,
+                                 extra_reader=final_surface_products)
+                result['status']='healthy' if not result['pending'] else 'pending'
+        finally:
+            connection.close()
+        from datetime import datetime,timezone
+        result['checked_at']=datetime.now(timezone.utc).isoformat()
+        write_json(root/'worker-last-run.json',result)
+        print(json.dumps(result,ensure_ascii=False))
+        return 0 if result['status'] in {'healthy','no_current_mission'} else 1
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     sub=parser.add_subparsers(dest='command',required=True)
+    worker=sub.add_parser('run-worker');worker.add_argument('--config',type=Path,required=True)
     snap=sub.add_parser('snapshot');snap.add_argument('--core-db',type=Path,required=True)
     snap.add_argument('--output',type=Path,required=True)
     run=sub.add_parser('build')
@@ -278,6 +339,8 @@ def main():
     run.add_argument('--attempts',type=int,default=3,choices=range(1,6))
     run.add_argument('--only',nargs='+')
     args=parser.parse_args()
+    if args.command=='run-worker':
+        return run_worker(args.config)
     if args.command=='snapshot':
         data=snapshot(args.core_db);write_json(args.output,data)
         print(json.dumps({'products':len(data['products']),'sections':sum(len(p['sections']) for p in data['products'])}))
