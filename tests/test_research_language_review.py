@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 
 from dalton_core.research_language_review import (
-    build_brain_prompt, publish_language_attachment, run_language_review,
+    build_brain_prompt, publish_language_attachment, run_language_review, validate_checker_output,
 )
 
 IDENTITY = {"provider": "antigravity-cli-gateway",
@@ -24,6 +24,16 @@ def review():
 
 
 class ResearchLanguageReviewTests(unittest.TestCase):
+    def test_quote_matches_escaped_zero_width_character_without_losing_visible_content(self):
+        source=[{'title':'状态','body':r"m\u200banagement 分类无效。",'gaps':[]}]
+        value={'overall':'分类名有不可见字符。','suggestions':[
+            {'section_index':0,'quote':'m\u200banagement 分类无效。',
+             'assessment':'分类名应放在技术详情。','suggestion':'该分类尚未启用。'}]}
+        self.assertEqual(validate_checker_output(value,sections=source),value)
+        for wrong in ['另一个分类无效。','\u200b']:
+            value['suggestions'][0]['quote']=wrong
+            with self.assertRaises(ValueError):validate_checker_output(value,sections=source)
+
     def test_publication_adapter_saves_review_before_publishing_attachment(self):
         order = []
         result = publish_language_attachment(

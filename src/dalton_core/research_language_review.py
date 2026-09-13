@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Mapping
 from hashlib import sha256
 from typing import Any
@@ -97,7 +98,12 @@ def validate_checker_output(value: Mapping[str, Any], *, sections: list[Mapping[
         source_text = "\n".join((str(source.get("title") or ""),
                                   str(source.get("body") or ""),
                                   *(str(x) for x in source.get("gaps") or [])))
-        if fields["quote"] not in source_text:
+        def visible_quote(text: str) -> str:
+            text = re.sub(r'\\u(?:200[bcd]|feff)', '', text, flags=re.IGNORECASE)
+            return text.translate({ord(char): None for char in '\u200b\u200c\u200d\ufeff'})
+        visible = visible_quote(fields['quote'])
+        if (not visible.strip() or (fields["quote"] not in source_text
+                and visible not in visible_quote(source_text))):
             raise ResearchLanguageReviewError("language checker quote is not in its source section")
         suggestions.append({"section_index": index, **fields})
     return {"overall": value["overall"].strip(), "suggestions": suggestions}
