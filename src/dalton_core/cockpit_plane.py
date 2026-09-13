@@ -2226,6 +2226,56 @@ class CockpitPlane:
             }
         return result
 
+    @staticmethod
+    def _deliverable_display_product(record: Mapping[str, Any],
+                                     mission: Mapping[str, Any]) -> dict[str, Any]:
+        """Rebuild the exact library projection used to review one screen."""
+        bound = record.get("mission_version_ref")
+        return {
+            "kind": "initial_screen", "label": "初步筛选",
+            "status": "available", "subject_ref": record["subject_ref"],
+            "version_ref": record["id"], "content_hash": record["content_hash"],
+            "created_at": record["created_at"], "mission_version_ref": bound,
+            "mission_binding": "current" if bound == mission["id"] else "historical",
+            "sections": [
+                {"title": section["title"], "body": section.get("body") or "",
+                 "sources": list(section.get("claim_refs") or []),
+                 "numbers": list(section.get("numbers") or []),
+                 "gaps": list(section.get("gaps") or [])}
+                for section in record.get("sections") or []
+            ],
+            "gaps": list(record.get("gaps") or []),
+            "approval": {"status": "not_applicable"},
+        }
+
+    def _localized_deliverable(self, core: sqlite3.Connection,
+                               record: Mapping[str, Any],
+                               mission: Mapping[str, Any]) -> dict[str, Any]:
+        """Select reviewed prose for this exact version, or hide its prose."""
+        from .research_localization_store import (
+            directory_for_connection, has_reviewed_attachment, localize_library)
+
+        product = self._deliverable_display_product(record, mission)
+        root = directory_for_connection(core)
+        if root is None or not has_reviewed_attachment(root, product):
+            return {**dict(record), "sections": [],
+                    "publication_status": "pending_language_review",
+                    "display_reason": "正文正在进行语言检查，完成后会在这里显示。"}
+        shown = localize_library(core, {"products": [product]})["products"][0]
+        if (shown.get("publication_status") != "ready"
+                or not isinstance(shown.get("sections"), list)):
+            return {**dict(record), "sections": [],
+                    "publication_status": "pending_language_review",
+                    "display_reason": "正文正在进行语言检查，完成后会在这里显示。"}
+        sections = []
+        for original, display in zip(record.get("sections") or [], shown["sections"]):
+            sections.append({**original, "title": display["title"],
+                             "body": display["body"],
+                             "gaps": list(display.get("gaps") or [])})
+        return {**dict(record), "sections": sections,
+                "publication_status": "ready",
+                "localization": shown.get("localization")}
+
     def document(self, version_ref: str) -> dict[str, Any]:
         """One deliverable, in full, for reading."""
 
@@ -2236,9 +2286,12 @@ class CockpitPlane:
             if not rows:
                 raise CockpitError("这份文档不存在")
             record = json.loads(rows[0]["record_json"])
-            if record["content_hash"] != rows[0]["content_hash"]:
+            if (record["content_hash"] != rows[0]["content_hash"]
+                    or content_hash({k: v for k, v in record.items()
+                                     if k != "content_hash"}) != rows[0]["content_hash"]):
                 raise CockpitConflict("文档记录与哈希不符")
             mission = self._mission(core)
+            record = self._localized_deliverable(core, record, mission)
             members = self._members(mission)
             # INT1: the reason a gate passed or failed lives inside the stage
             # record, not in a column. Selecting it as one made this whole page

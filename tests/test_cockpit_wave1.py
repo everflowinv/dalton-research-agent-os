@@ -28,6 +28,9 @@ from dalton_core.market_price import MarketPriceSeriesAuthority
 from dalton_core.mission_deliverable import MissionDeliverableAuthority
 from dalton_core.model_forecast_driver import ForecastModelAuthority
 from dalton_core.research_quality_rubrics import RUBRICS
+from dalton_core.research_localization import build_localization
+from dalton_core.research_localization_store import (
+    directory_for_database, publish_reviewed_attachment)
 from dalton_core.research_quality_score import (
     QualityScoreAuthority,
     run_deterministic,
@@ -371,6 +374,43 @@ class QualityAndJournalTests(Wave1Case):
         self.assertEqual([item["rationale"] for item in document["stage_history"]],
                          ["资料底座齐了。"])
         self.assertTrue(document["company"].startswith("ACN"))
+
+    def test_deliverable_requires_reviewed_exact_version_localization(self) -> None:
+        deliverable = self.publish_deliverable(body="Revenue improved.")
+        hidden = self.plane.document(deliverable["id"])
+        self.assertEqual(hidden["publication_status"], "pending_language_review")
+        self.assertEqual(hidden["sections"], [])
+        self.assertEqual(hidden["content_hash"], deliverable["content_hash"])
+
+        mission = self.c.h.missions.active_mission("coverage-mission:us-it-services")
+        product = self.plane._deliverable_display_product(deliverable, mission)
+        localized = build_localization(
+            product, {"sections": [{"index": 0, "title": "结论",
+                                     "body": "营业收入有所改善。", "gaps": []}]},
+            {"verdict": "pass", "faithful": True, "no_new_facts": True,
+             "meaning_preserved": True, "findings": []})
+        review = [{"status": "passed",
+                   "localized": {"sections": [{"index": 0, "title": "结论",
+                                                  "body": "营业收入有所改善。",
+                                                  "gaps": []}]},
+                   "independence": {"independent": True},
+                   "language_review": {"status": "ready_for_publication",
+                                       "suggestions_markdown": "# 建议\n表达清楚。"}}]
+        publish_reviewed_attachment(
+            directory_for_database(self.plane.config.core_db), product, localized, review)
+        shown = self.plane.document(deliverable["id"])
+        self.assertEqual(shown["publication_status"], "ready")
+        self.assertEqual(shown["sections"][0]["body"], "营业收入有所改善。")
+        self.assertEqual(shown["sections"][0]["claim_refs"],
+                         deliverable["sections"][0]["claim_refs"])
+
+        second = self.publish_deliverable(body="Revenue weakened.")
+        historical = self.plane.document(deliverable["id"])
+        self.assertEqual(historical["publication_status"], "ready")
+        self.assertEqual(historical["sections"][0]["body"], "营业收入有所改善。")
+        fresh = self.plane.document(second["id"])
+        self.assertEqual(fresh["publication_status"], "pending_language_review")
+        self.assertEqual(fresh["sections"], [])
 
     def test_a_score_with_no_judge_is_the_checks_alone(self) -> None:
         deliverable = self.publish_deliverable()

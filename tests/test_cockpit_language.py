@@ -149,6 +149,15 @@ class CockpitLanguageTests(unittest.TestCase):
         self.assertIn("display_reason", guarded)
         self.assertIn("return d", guarded)
 
+    def test_deliverable_reader_hides_unreviewed_prose_and_uses_plain_gate_copy(self) -> None:
+        text = HTML.read_text(encoding="utf-8")
+        self.assertIn('if(doc.publication_status==="pending_language_review")', text)
+        self.assertIn('doc.display_reason||"正文正在进行语言检查', text)
+        self.assertIn('(s.display_gaps||s.gaps||[]).forEach', text)
+        self.assertIn('displayText(doc.summary)', text)
+        self.assertIn('"阶段评审：通过"', text)
+        self.assertNotIn('"出口门：通过"', text)
+
     def test_reported_stale_cockpit_phrases_are_removed(self) -> None:
         text = HTML.read_text(encoding="utf-8")
         for stale in (
