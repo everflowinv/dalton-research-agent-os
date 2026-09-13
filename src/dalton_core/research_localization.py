@@ -23,6 +23,7 @@ TARGET_LOCALE = "zh-CN"
 VERIFIER_PURPOSE = register_purpose("research_localization_verifier")
 _NUMBER = re.compile(r"[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?%?")
 _ISO_DATE = re.compile(r"(?<!\d)(\d{4})-(\d{2})-(\d{2})(?!\d)")
+_ISO_YEAR_MONTH = re.compile(r"(?<!\d)(\d{4})-(\d{2})(?![-\d])")
 _SAME_YEAR_ISO_RANGE = re.compile(
     r"(?<!\d)(\d{4})-(\d{2})-(\d{2})\s*(?:\.\.|至|to)\s*\1-(\d{2})-(\d{2})(?!\d)",
     re.IGNORECASE,
@@ -31,7 +32,7 @@ _OPAQUE_ID = re.compile(
     r"\b(?:claim|claim-version|dossier|dossier-version|memo|memo-version|"
     r"debate|debate-map|forecast-model-version|company-model-spec|mission|"
     r"mission-version|thesis|thesis-version|event|document|document-version)"
-    r":[A-Za-z0-9:._-]+|\b[0-9a-f]{64}\b|(?<![A-Za-z0-9])[ST][0-9]+(?![A-Za-z0-9])|\bcausal_chain:[0-9]+\b",
+    r":[A-Za-z0-9:._-]+|\b[0-9a-f]{64}\b|(?<![A-Za-z0-9])[ST][0-9]+(?![A-Za-z0-9])|\bcausal_chain:[0-9]+\b|因果链[0-9]+",
     re.IGNORECASE,
 )
 _HAN = re.compile(r"[\u3400-\u9fff]")
@@ -79,8 +80,10 @@ def _numeric_text(value: str) -> str:
     """Remove opaque IDs and make ISO date separators unambiguously non-signs."""
 
     cleaned = _OPAQUE_ID.sub("", value)
+    cleaned = re.sub(r"(?i)(?<![A-Za-z])pre-(20\d{2})", r"pre \1", cleaned)
     cleaned = _SAME_YEAR_ISO_RANGE.sub(r"\1 \2 \3 \4 \5", cleaned)
-    return _ISO_DATE.sub(r"\1 \2 \3", cleaned)
+    cleaned = _ISO_DATE.sub(r"\1 \2 \3", cleaned)
+    return _ISO_YEAR_MONTH.sub(r"\1 \2", cleaned)
 
 
 def _canonical_number(token: str) -> str:
@@ -152,7 +155,7 @@ def _number_differences(source_values: Sequence[str], target_values: Sequence[st
             fraction = chinese_digits.get(match.group(2) or "零", 0)
             aliases[f"{whole + fraction}%"] += 1
         # FY26 and fiscal 2026 are two spellings of the same fiscal year.
-        for match in re.finditer(r"\bFY\s*([0-9]{2})(?![0-9])", value, re.I):
+        for match in re.finditer(r"(?<![A-Za-z])FY\s*([0-9]{2})(?![0-9])", value, re.I):
             short = str(int(match.group(1)))
             full = str(2000 + int(match.group(1)))
             if missing_counter[short] and added[full]:
@@ -160,8 +163,22 @@ def _number_differences(source_values: Sequence[str], target_values: Sequence[st
                 added[full] -= 1
             else:
                 aliases[full] += 1
-        for match in re.finditer(r"\b(?:FY|fiscal(?:\s+year)?)\s*(20[0-9]{2})\b", value, re.I):
+        for match in re.finditer(r"(?<![A-Za-z])(?:FY|fiscal(?:\s+year)?)\s*(20[0-9]{2})(?![0-9])", value, re.I):
             aliases[str(int(match.group(1)) % 100)] += 1
+        for match in re.finditer(r"(?<![A-Za-z0-9])C([1-4])Q([0-9]{2})(?![0-9])", value, re.I):
+            quarter = match.group(1)
+            short = str(int(match.group(2)))
+            full = str(2000 + int(match.group(2)))
+            if missing_counter[short] and added[full]:
+                missing_counter[short] -= 1
+                added[full] -= 1
+            if missing_counter[quarter] and re.search(
+                    rf"第?[一二三四]\s*(?:个\s*)?季度", " ".join(target_values)):
+                expected = {"1":"一","2":"二","3":"三","4":"四"}[quarter]
+                if re.search(rf"第?{expected}\s*(?:个\s*)?季度", " ".join(target_values)):
+                    missing_counter[quarter] -= 1
+        if re.search(r"(?<![A-Za-z])LTM(?![A-Za-z])", value, re.I):
+            aliases["12"] += 1
         for sentence in re.split(r"[.!?。！？;；]", value):
             if (re.search(r"\bbook[- ]to[- ]bill\b", sentence, re.I)
                     and re.search(r"\babove[- ]parity\b", sentence, re.I)):
@@ -187,6 +204,23 @@ def _number_differences(source_values: Sequence[str], target_values: Sequence[st
         if target_periods[(year, quarter)] and collapsed > 0:
             missing_counter[year] -= min(collapsed, missing_counter[year])
             missing_counter[quarter] -= min(collapsed, missing_counter[quarter])
+    chinese_digits = {1:"一",2:"二",3:"三",4:"四",5:"五",6:"六",
+                      7:"七",8:"八",9:"九",10:"十",11:"十一",12:"十二"}
+    for match in re.finditer(r"(?<!\d)([1-9]|1[0-2])\s*(?:个\s*)?(季度|quarters?|个月|months?)",
+                             source_joined_raw, re.I):
+        number = int(match.group(1)); unit = match.group(2).lower()
+        target_unit = r"(?:个\s*)?季度" if "quarter" in unit or unit == "季度" else r"(?:个\s*)?月"
+        if missing_counter[str(number)] and re.search(
+                rf"{chinese_digits[number]}\s*{target_unit}", target_joined_raw):
+            missing_counter[str(number)] -= 1
+    # Repeating the same calendar year for each date in a list is optional
+    # when the target retains that exact year and all month/day values remain.
+    date_year = re.compile(r"(?<!\d)(20\d{2})(?=-\d{2}(?:-\d{2})?|\s*年)")
+    source_years = Counter(date_year.findall(source_joined_raw))
+    target_years = Counter(date_year.findall(target_joined_raw))
+    for year, count in source_years.items():
+        if target_years[year] and count > target_years[year]:
+            missing_counter[year] -= min(count - target_years[year], missing_counter[year])
 
     source_joined = " ".join(_numeric_text(value) for value in source_values)
     source_joined = _NUMBER.sub(lambda match: _canonical_number(match.group()), source_joined)
@@ -211,6 +245,15 @@ def _number_differences(source_values: Sequence[str], target_values: Sequence[st
                 for number in rendered_numbers:
                     added[number] -= 1
                 break
+    for value in source_values:
+        for match in re.finditer(r"\$\s*(0\.\d+)(?!\d)", value):
+            token = _canonical_number(match.group(1))
+            cents = (Decimal(token) * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+            rendered = f"{cents}美分"
+            rendered_numbers = _numbers(rendered)
+            if (rendered in target_compact and all(added[number] for number in rendered_numbers)):
+                if missing_counter[token]: missing_counter[token] -= 1
+                for number in rendered_numbers: added[number] -= 1
     # Consume only a formatting result computed from the exact missing source
     # token and an explicit source unit. Unlabelled numbers remain strict.
     for token in list(source_numbers.elements()):

@@ -249,3 +249,27 @@ class ResearchLocalizationTests(unittest.TestCase):
     source['sections'][0]['body']='Conversion was above-parity; book-to-bill was discussed elsewhere.'
     with self.assertRaisesRegex(ResearchLocalizationError,'number tokens'):
         validate_localized_text(source,out)
+
+ def test_financial_period_shorthand_and_cents_have_bounded_equivalents(self):
+    cases=(
+      ('Since C4Q24, LTM bookings improved.','自2024年第四季度以来，过去12个月签约额改善。'),
+      ('The average over 4 quarters was stable.','四个季度的平均值稳定。'),
+      ('FY26 improves through FY29.','2026财年改善并延续至2029财年。'),
+      ('Cost was $0.03 and the next cost was $0.02.','成本为3美分，下一项为2美分。'),
+      ('whole-site 403 as of 2026-09; pre-2023 forms differ.',
+       '截至2026年9月整站返回403；2023年以前的表格不同。'),
+    )
+    for original,translated in cases:
+      source=product();source['sections'][0].update(title='期间',body=original,gaps=[])
+      out={'sections':[{'index':0,'title':'期间','body':translated,'gaps':[]}]}
+      self.assertEqual(validate_localized_text(source,out)[0]['index'],0)
+
+ def test_repeated_calendar_year_may_be_omitted_but_dates_may_not_change(self):
+    source=product();source['sections'][0].update(title='期间',
+      body='2025-07-01..2025-09-30 and 2025-10-01..2025-12-31',gaps=[])
+    out={'sections':[{'index':0,'title':'期间',
+      'body':'2025年7月1日至9月30日，以及10月1日至12月31日','gaps':[]}]}
+    self.assertEqual(validate_localized_text(source,out)[0]['index'],0)
+    out['sections'][0]['body']='2025年7月1日至9月30日，以及10月2日至12月31日'
+    with self.assertRaisesRegex(ResearchLocalizationError,'number tokens'):
+      validate_localized_text(source,out)
