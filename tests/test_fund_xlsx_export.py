@@ -11,8 +11,12 @@ from pathlib import Path
 from dalton_core.company_model_inputs import build_model_inputs
 from dalton_core.fund_xlsx_export import (
     FundWorkbookExportError,
+    _display_unit,
     _formula_for,
     _four_quarter_flow_cells,
+    _number_format,
+    _template_number_kind,
+    _template_value,
     _verify_statement_filing,
     export_company_workbook,
     export_fund_workbook,
@@ -25,6 +29,18 @@ from tests.test_model_forecast_driver import ledger, model, spec
 
 
 class FundXlsxExportTests(unittest.TestCase):
+    def test_display_units_scale_once_and_keep_per_unit_precision(self):
+        self.assertEqual(_template_value("12500000", "USD"), 12.5)
+        self.assertEqual(_template_value("12500", "USD_thousands"), 12.5)
+        self.assertEqual(_template_value("12.5", "USD_millions"), 12.5)
+        self.assertNotIn(",,", _number_format("USD"))
+        self.assertEqual(_display_unit("USD_thousands"), "USD millions")
+        self.assertEqual(_display_unit("USD_per_user"), "USD per user")
+        self.assertEqual(_template_value("3.0375", "USD_per_share"), 3.0375)
+        self.assertEqual(_template_number_kind("USD_per_user"), "per_share")
+        self.assertIn("0.00", _number_format("USD_per_user"))
+        self.assertEqual(_number_format("ratio"), "0.0%;(0.0%);-")
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

@@ -569,7 +569,7 @@ class FinancialStructureForecastConsumerTests(unittest.TestCase):
                            if result["role"] == "diluted_eps")
         # No annual EPS is made by summing per-share quarters.
         self.assertIsNone(financials.cell(eps_row, 5).value)
-        self.assertIn(",,", _number_format("usd"))
+        self.assertNotIn(",,", _number_format("usd"))
         self.assertEqual(_display_unit("usd"), "USD millions")
         self.assertEqual(_display_unit("eur_per_share"), "EUR per share")
 

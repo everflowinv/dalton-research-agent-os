@@ -109,22 +109,25 @@ def _number_format(unit: str, *, per_share: bool = False) -> str:
     normalized = str(unit).casefold()
     if normalized == "ratio":
         return "0.0%;(0.0%);-"
-    if per_share or normalized.endswith("_per_share"):
+    if per_share or normalized.endswith(("_per_share", "_per_user", "_per_customer")):
         return '"$"#,##0.00;[Red]("$"#,##0.00);-'
-    if normalized == "usd":
-        return '"$"#,##0.0,,;[Red]("$"#,##0.0,,);-'
-    if re.fullmatch(r"[a-z]{3}", normalized):
-        return "#,##0.0,,;[Red](#,##0.0,,);-"
+    if re.fullmatch(r"[a-z]{3}(?:_(?:thousand|thousands|million|millions))?", normalized):
+        # Monetary authority values have already been converted to workbook
+        # display units by _template_value. Excel commas here would scale a
+        # second time and silently turn millions into single dollars.
+        return ('"$"#,##0.0;[Red]("$"#,##0.0);-' if normalized.startswith("usd")
+                else "#,##0.0;[Red](#,##0.0);-")
     return "#,##0;[Red](#,##0);-"
 
 
 def _display_unit(unit: str) -> str:
     normalized = str(unit).casefold()
-    if re.fullmatch(r"[a-z]{3}", normalized):
-        return f"{normalized.upper()} millions"
-    matched = re.fullmatch(r"([a-z]{3})_per_share", normalized)
+    if re.fullmatch(r"[a-z]{3}(?:_(?:thousand|thousands|million|millions))?", normalized):
+        currency = normalized[:3]
+        return f"{currency.upper()} millions"
+    matched = re.fullmatch(r"([a-z]{3})_per_(share|user|customer)", normalized)
     if matched:
-        return f"{matched.group(1).upper()} per share"
+        return f"{matched.group(1).upper()} per {matched.group(2)}"
     return unit
 
 
@@ -132,7 +135,7 @@ def _template_number_kind(unit: str, *, per_share: bool = False) -> str:
     normalized = str(unit).casefold()
     if normalized == "ratio":
         return "percentage"
-    if per_share or normalized.endswith("_per_share"):
+    if per_share or normalized.endswith(("_per_share", "_per_user", "_per_customer")):
         return "per_share"
     return "amount"
 
@@ -146,6 +149,10 @@ def _template_value(
     normalized = str(unit).casefold()
     if re.fullmatch(r"[a-z]{3}", normalized):
         return number / FUND_MONETARY_DISPLAY_SCALE
+    if re.fullmatch(r"[a-z]{3}_thousands?", normalized):
+        return number / 1_000
+    if re.fullmatch(r"[a-z]{3}_millions?", normalized):
+        return number
     if role == "diluted_weighted_average_shares":
         return number / FUND_MONETARY_DISPLAY_SCALE
     return number
