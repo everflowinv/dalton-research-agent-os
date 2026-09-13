@@ -239,3 +239,13 @@ class ResearchLocalizationTests(unittest.TestCase):
     out['sections'][0]['body']='IBM第二季度改善，第四季度初继续。2026Q1至2026Q2期间，A和B均改善。'
     with self.assertRaisesRegex(ResearchLocalizationError,'number tokens'):
         validate_localized_text(source,out)
+
+ def test_above_parity_book_to_bill_alone_may_be_shown_as_above_one(self):
+    source=product();source['sections'][0].update(title='订单',
+        body='The book-to-bill was above-parity; conversion remains uncertain.',gaps=[])
+    out={'sections':[{'index':0,'title':'订单',
+        'body':'订单收入比高于1，但转化仍不确定。','gaps':[]}]}
+    self.assertEqual(validate_localized_text(source,out)[0]['index'],0)
+    source['sections'][0]['body']='Conversion was above-parity; book-to-bill was discussed elsewhere.'
+    with self.assertRaisesRegex(ResearchLocalizationError,'number tokens'):
+        validate_localized_text(source,out)

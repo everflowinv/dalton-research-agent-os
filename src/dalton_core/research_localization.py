@@ -162,6 +162,10 @@ def _number_differences(source_values: Sequence[str], target_values: Sequence[st
                 aliases[full] += 1
         for match in re.finditer(r"\b(?:FY|fiscal(?:\s+year)?)\s*(20[0-9]{2})\b", value, re.I):
             aliases[str(int(match.group(1)) % 100)] += 1
+        for sentence in re.split(r"[.!?。！？;；]", value):
+            if (re.search(r"\bbook[- ]to[- ]bill\b", sentence, re.I)
+                    and re.search(r"\babove[- ]parity\b", sentence, re.I)):
+                aliases["1"] += 1
     added -= aliases
 
     source_joined_raw = " ".join(source_values)
