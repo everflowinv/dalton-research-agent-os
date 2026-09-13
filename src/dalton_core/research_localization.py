@@ -28,6 +28,13 @@ _SAME_YEAR_ISO_RANGE = re.compile(
     r"(?<!\d)(\d{4})-(\d{2})-(\d{2})\s*(?:\.\.|至|to)\s*\1-(\d{2})-(\d{2})(?!\d)",
     re.IGNORECASE,
 )
+_CALENDAR_QUARTER_RANGE = re.compile(
+    r"(?<!\d)(\d{4})-(\d{2})-(\d{2})\s*(?:\.\.|\u81f3|to)\s*\1-(\d{2})-(\d{2})(?!\d)",
+    re.IGNORECASE,
+)
+_CHINESE_CALENDAR_QUARTER = re.compile(
+    r"(?<!\d)(\d{4})\s*\u5e74\s*\u7b2c?\s*([\u4e00\u4e8c\u4e09\u56db1-4])\s*\u5b63\u5ea6"
+)
 _OPAQUE_ID = re.compile(
     r"\b(?:claim|claim-version|dossier|dossier-version|memo|memo-version|"
     r"debate|debate-map|forecast-model-version|company-model-spec|mission|"
@@ -87,6 +94,71 @@ def _numeric_text(value: str) -> str:
     return re.sub(r"(?<!\d)(\d{1,2})-(\d{1,2})(?=\s*月)", r"\1 \2", cleaned)
 
 
+
+def _normalize_equivalent_calendar_quarters(
+    source_values: Sequence[str], target_values: Sequence[str]
+) -> tuple[list[str], list[str]]:
+    """Pair exact ISO calendar-quarter ranges with exact Chinese quarter names."""
+
+    boundaries = {
+        ("01", "01", "03", "31"): "1",
+        ("04", "01", "06", "30"): "2",
+        ("07", "01", "09", "30"): "3",
+        ("10", "01", "12", "31"): "4",
+    }
+    names = {"一": "1", "二": "2", "三": "3", "四": "4"}
+
+    def range_key(match: re.Match[str]) -> tuple[str, str] | None:
+        quarter = boundaries.get(match.groups()[1:])
+        return (match.group(1), quarter) if quarter else None
+
+    source_text = "\n".join(source_values)
+    target_text = "\n".join(target_values)
+    source_counts = Counter(key for match in _CALENDAR_QUARTER_RANGE.finditer(source_text)
+                            if (key := range_key(match)) is not None)
+    target_counts = Counter(
+        (match.group(1), names.get(match.group(2), match.group(2)))
+        for match in _CHINESE_CALENDAR_QUARTER.finditer(target_text)
+    )
+    # If the target retained the explicit range, ordinary token comparison
+    # already proves its boundaries.  Pair only ranges actually replaced by a
+    # quarter name, so a redundant display label cannot mask added/changed
+    # dates elsewhere in the section.
+    target_ranges = Counter(key for match in _CALENDAR_QUARTER_RANGE.finditer(target_text)
+                            if (key := range_key(match)) is not None)
+    paired = (source_counts - target_ranges) & target_counts
+
+    def normalize(text: str) -> str:
+        def replace_range(match: re.Match[str]) -> str:
+            key = range_key(match)
+            if key is not None and paired[key]:
+                return f" CALQ{key[0]}X{key[1]} "
+            return match.group(0)
+
+        def replace_name(match: re.Match[str]) -> str:
+            key = (match.group(1), names.get(match.group(2), match.group(2)))
+            if paired[key]:
+                return f" CALQ{key[0]}X{key[1]} "
+            return match.group(0)
+
+        normalized = _CALENDAR_QUARTER_RANGE.sub(replace_range, text)
+        normalized = _CHINESE_CALENDAR_QUARTER.sub(replace_name, normalized)
+        # A source may redundantly state “2026 Q2 (2026-04-01 to
+        # 2026-06-30)”.  Once both spellings have proved the same exact
+        # identity, retaining that identity once is sufficient, just as for
+        # an explicitly consolidated repeated YYYYQn period below.
+        seen: set[tuple[str, str]] = set()
+        def collapse(match: re.Match[str]) -> str:
+            key = (match.group(1), match.group(2))
+            if key in seen:
+                return " "
+            seen.add(key)
+            return f" {key[0]} {key[1]} "
+        return re.sub(r"CALQ(20\d{2})X([1-4])", collapse, normalized)
+
+    return [normalize(source_text)], [normalize(target_text)]
+
+
 def _canonical_number(token: str) -> str:
     suffix = "%" if token.endswith("%") else ""
     value = token[:-1] if suffix else token
@@ -123,6 +195,8 @@ def _number_differences(source_values: Sequence[str], target_values: Sequence[st
     present in the source must still survive exactly.
     """
 
+    source_values, target_values = _normalize_equivalent_calendar_quarters(
+        source_values, target_values)
     source_numbers = Counter(_numbers(*source_values))
     target_numbers = Counter(_numbers(*target_values))
     missing_counter = source_numbers - target_numbers

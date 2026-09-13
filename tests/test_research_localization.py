@@ -139,6 +139,34 @@ class ResearchLocalizationTests(unittest.TestCase):
         "gaps": ["缺少 FY2027 利润率"]}]}
     self.assertEqual(validate_localized_text(source, grouped)[0]["index"], 0)
 
+ def test_complete_calendar_quarter_ranges_may_use_exact_chinese_quarter_names(self):
+    source = product()
+    source["sections"][0].update(body=(
+        "2026-04-01\u81f32026-06-30 revenue was USD 17162000000, up 1.09%; "
+        "2026-01-01\u81f32026-03-31 revenue was USD 15917000000, up 9.46%; "
+        "2025-04-01\u81f32025-06-30 revenue was USD 16977000000, up 7.65%; "
+        "2024-07-01\u81f32024-09-30 revenue was USD 14968000000, up 1.46%."), gaps=[])
+    translated = {"sections": [{"index": 0, "title": "\u6536\u5165\u8d8b\u52bf", "body": (
+        "2026\u5e74\u7b2c\u4e8c\u5b63\u5ea6\u6536\u5165\u4e3a171.62\u4ebf\u7f8e\u5143\uff0c\u540c\u6bd4\u589e\u957f1.1%\uff1b"
+        "2026\u5e74\u7b2c\u4e00\u5b63\u5ea6\u6536\u5165\u4e3a159.17\u4ebf\u7f8e\u5143\uff0c\u540c\u6bd4\u589e\u957f9.5%\uff1b"
+        "2025\u5e74\u7b2c\u4e8c\u5b63\u5ea6\u6536\u5165\u4e3a169.77\u4ebf\u7f8e\u5143\uff0c\u540c\u6bd4\u589e\u957f7.7%\uff1b"
+        "2024\u5e74\u7b2c\u4e09\u5b63\u5ea6\u6536\u5165\u4e3a149.68\u4ebf\u7f8e\u5143\uff0c\u540c\u6bd4\u589e\u957f1.5%\u3002"), "gaps": []}]}
+    self.assertEqual(validate_localized_text(source, translated)[0]["index"], 0)
+
+ def test_calendar_quarter_alias_rejects_changed_or_nonstandard_boundaries(self):
+    cases = (
+        ("2026-04-01\u81f32026-06-30", "2026\u5e74\u7b2c\u4e09\u5b63\u5ea6"),
+        ("2026-04-01\u81f32026-06-30", "2025\u5e74\u7b2c\u4e8c\u5b63\u5ea6"),
+        ("2026-04-02\u81f32026-06-30", "2026\u5e74\u7b2c\u4e8c\u5b63\u5ea6"),
+        ("2026-01-01\u81f32026-06-30", "2026\u5e74\u7b2c\u4e00\u5b63\u5ea6"),
+    )
+    for original, body in cases:
+        with self.subTest(original=original, body=body):
+            source = product(); source["sections"][0].update(body=original, gaps=[])
+            translated = {"sections": [{"index": 0, "title": "\u671f\u95f4", "body": body, "gaps": []}]}
+            with self.assertRaisesRegex(ResearchLocalizationError, "number tokens"):
+                validate_localized_text(source, translated)
+
  def test_preflight_never_discards_real_negative_signs(self):
     for source_number, changed in (("-12", "12"), ("-10.5", "10.5")):
         source = product()
