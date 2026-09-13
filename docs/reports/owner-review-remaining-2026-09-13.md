@@ -14,12 +14,22 @@ human gate decision.
 | Sales notes `list_notes` | proposed | `020520e383be963e6db12117b5f7b068bba67d9a45b4f7c4fb43008a2dd8537f` | permits inventory reads |
 | Guidepoint transcript narrowing | proposed | `d2d201f0ea527892a94f1d03e2b60a979ec32471a9bc2e4620ebf48b225a3cd1` | permits the narrower transcript retrieval rule |
 
-The existing Guidepoint search and transcript records are approved, but live
-Core has no Guidepoint connector profile, invocation, discovery, or document.
-Approval of the narrowing proposal alone will not supply endpoint access or a
-working profile. Company wiki and prior research likewise need owner-provided
-corpora and installation configuration; there is no proposal whose signature
-can manufacture absent source material.
+Guidepoint search is already bound to OpenClaw's running local MCP proxy at
+`http://127.0.0.1:8943/mcp`, using `search_library`. The installed endpoint,
+plan and approved search governance exist. Mission v14 marks the source
+`not_connected`, causing grant refusal; an append-only mission correction is
+the activation gap. Zero Core invocation is not evidence of an absent MCP.
+The upstream does not offer `get_transcript`; its narrowing proposal remains
+separate from search activation.
+
+Company Wiki exists at OpenClaw `workspace/wiki/vectors.db` (1,022 documents,
+8,720 chunks), with the workspace as corpus root. The installer previously
+looked for `wiki-index.sqlite`; commit `3715fe1f` corrects that binding and
+retains the legacy fallback, pending a successor deployment. Its list/get
+governance records are still proposed and mission v14 has no wiki source entry.
+Historical research has a prepared owner folder at
+`/Users/everflow/Documents/Dalton 历史研究资料`; actual documents and confirmed
+date/company manifests remain to be supplied and registered.
 
 ## Answer sufficiency candidate
 
@@ -61,9 +71,10 @@ After accepted installation and health verification, existing grants allow the
 fixed Deep Insight lane, current dossier/debate/model lanes, and scheduled brief
 machinery to run normally within their configured budgets. They may create
 drafts and other automation-owned authorities, but cannot make human decisions.
-Guidepoint still needs an active connector profile/access path; sales notes and
-IR remain blocked on proposed governance; company wiki and prior research remain
-blocked on source material; market price and valuation remain blocked on the
+Guidepoint needs its mission connection state corrected; sales notes and IR
+remain blocked on proposed governance. Wiki needs the subsequent binding
+deployment plus governance/mission activation; historical research awaits
+material registration. Market price and valuation remain blocked on the
 unapproved yfinance governance record; Ask policy routing remains blocked until
 an owner publishes a policy.
 
@@ -75,7 +86,10 @@ Insight, conviction, investment memo, research tasks, Ask v2, weekly briefs,
 quality scores, and analyst journal already exist. Historical TODOs describing
 those as absent are stale. Remaining work is accepted release installation,
 actual product execution, source activation, governance, and human review,
-plus a code change only when a reproducible defect appears. Current zero rows
+plus the still-undeveloped advanced contracts listed in
+`vision-owner-coverage-refresh-2026-09-13.md`: Conviction v2, holding-period
+return attribution, buy-side expectations, structured scenarios/tracking and
+reference-template registry/selection. Current zero rows
 must not be converted into greenfield implementation tickets when their lane is
 already correctly gated by missing approval, source material, or a human
 checkpoint.

@@ -1,5 +1,7 @@
 # Remaining development queue — 2026-09-13
 
+**Superseded current status:** use [the vision/owner coverage refresh](vision-owner-coverage-refresh-2026-09-13.md). This original `3dfcd983` queue remains a dated baseline. R22b now has full-suite/wheel/rehearsal and packet-preflight evidence; Guidepoint's MCP and Wiki's corpus already exist. Template candidate import, synthetic workspace acceptance and native Wiki binding have since been integrated. Conviction v2, return attribution, buy-side expectations and structured scenario/tracking remain explicit development work, rather than only activation dependencies.
+
 This audit is bound to integration `3dfcd983`. It separates current evidence from historical roadmap text. It performed no live mutation, service action, connector/provider call, deployment, or credential read.
 
 ## Current boundary

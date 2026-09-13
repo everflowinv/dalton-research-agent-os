@@ -1,5 +1,13 @@
 # Dalton 项目进度
 
+## 2026-09-13 当前：vision / owner 指令复盘与持续开发
+
+当前完整范围与剩余任务以 [最新覆盖复盘](reports/vision-owner-coverage-refresh-2026-09-13.md) 为准，下方按日期保留历史检查点。R22b `5dbe5212` 全量 **7,938 项、0 failures/errors、1 skip**，608 文件/3 JS 与复制状态演练通过，正式 packet preflight 已通过；部署、持续健康和发布继续推进，尚不计完成。
+
+后续集成已加入参考模板样式候选导入、双工作区本地隔离验收，以及 OpenClaw Wiki 原生 `wiki/vectors.db` 路径修复。Guidepoint 本地 MCP 已接好，当前受 mission `not_connected` 阻挡；Wiki 资料确实存在，不能再写成待提供 corpus。历史资料目录已建立，桌面样例保持原样。
+
+仍需开发的高级部分包括 Conviction v2、持有期回报归因、买方预期来源 authority、结构化情景/观察跟踪，以及模板版本注册选择。基础研究产品已有实现，主要待五公司真实结果、质量与人工验收；真实多工作区和最终交付验收单列。三个 GPT-5.6 Sol 并行持续推进。
+
 ## 2026-09-13 恢复开发：修复 R21 writer 权限变更的部署契约
 
 已从最新集成代码 `b1f367ab` 建立隔离分支 `resume/0913-integration`，三个 GPT-5.6 Sol 子代理并行开发与交叉审查。主目录四份既有模型配置改动保留。

@@ -94,11 +94,14 @@ human extraction; another 144, 276, and 10 respectively are staged.
 Guidepoint search and transcript governance are approved and the installed
 writer has its search governance, plan, and endpoint arguments, but Core holds
 no Guidepoint connector profile, invocation, discovery, or document authority.
-The narrower transcript governance remains proposed. This is an activation and
-endpoint-access dependency; current evidence does not establish a compiler or
-lane defect. Company wiki and prior research have no installed writer arguments,
-no corpus/profile authority, and zero prior models. They require owner-supplied
-corpora and configuration. Sales-note arguments are installed, but both
+The narrower transcript governance remains proposed. Follow-up inspection of
+OpenClaw confirms the local MCP and `search_library` are already connected;
+mission v14's `not_connected` source state causes grant refusal. Company Wiki's
+skill, corpus and `workspace/wiki/vectors.db` also exist (1,022 documents,
+8,720 chunks). The missing installed arguments came from an incorrect index
+path, now fixed in integration `3715fe1f`, outside frozen R22b. Wiki governance
+and mission activation remain pending. Prior research has a prepared owner
+folder but no newly registered materials or models. Sales-note arguments are installed, but both
 governance records remain proposed. IR-page governance is also proposed. These
 sources must not be activated by treating configuration presence as approval.
 
