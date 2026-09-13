@@ -4601,7 +4601,7 @@ class CockpitPlane:
             login, "allow_openclaw_model", {"model_ref": model_ref},
             failure="这个模型尚未获准使用")
         self.journal.record_event(
-            kind="model_allow", title=f"你已允许使用模型 {model_ref}",
+            kind="model_allow", title="你已允许使用一个模型",
             detail=result.get("reload_instruction"), login=login,
             refs={"model_ref": model_ref,
                   "backup_path": result.get("backup_path") or ""})
@@ -4613,7 +4613,7 @@ class CockpitPlane:
         """Record owner-declared family/capabilities inside Dalton."""
 
         if not isinstance(value, Mapping):
-            raise CockpitError("模型元数据必须是一个对象")
+            raise CockpitError("模型信息必须是一个对象")
         profile_id = _text(value.get("profile_id"), "profile_id", maximum=256)
         profile_version_ref = _text(
             value.get("profile_version_ref"), "profile_version_ref", maximum=256)
@@ -4634,12 +4634,14 @@ class CockpitPlane:
              "capabilities": capabilities,
              "profile_version_ref": profile_version_ref,
              "profile_hash": profile_hash},
-            failure="模型元数据没有发布",
+            failure="模型信息没有保存",
         )
         declaration = result.get("declaration") or {}
         self.journal.record_event(
-            kind="model_metadata", title=f"你声明了 {profile_id} 的模型元数据",
-            detail=f"家族 {family}；能力 {'、'.join(capabilities)}", login=login,
+            kind="model_metadata", title="你补充了模型信息",
+            detail=(f"模型家族：{self._model_family_label(family)}；能力："
+                    f"{'、'.join(self._model_capability_labels(capabilities))}"),
+            login=login,
             refs={"profile_id": profile_id,
                   "declaration_ref": declaration.get("declaration_ref") or ""},
         )

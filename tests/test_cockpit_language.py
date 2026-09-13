@@ -202,6 +202,20 @@ class CockpitLanguageTests(unittest.TestCase):
         ):
             self.assertNotIn(stale, text)
 
+    def test_model_action_journal_uses_readable_copy(self) -> None:
+        from dalton_core import cockpit_plane
+
+        source = Path(cockpit_plane.__file__).read_text(encoding="utf-8")
+        for expected in (
+            "你已允许使用一个模型", "模型信息必须是一个对象",
+            "模型信息没有保存", "你补充了模型信息",
+            "self._model_family_label(family)",
+            "self._model_capability_labels(capabilities)",
+        ):
+            self.assertIn(expected, source)
+        for stale in ("模型元数据必须", "模型元数据没有发布", "你声明了 {profile_id}"):
+            self.assertNotIn(stale, source)
+
     def test_dynamic_planner_fields_are_mapped_before_composition(self) -> None:
         text = HTML.read_text(encoding="utf-8")
         self.assertIn('${displayText(q.subject)}：${displayText(q.question)}', text)
