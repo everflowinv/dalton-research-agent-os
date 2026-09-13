@@ -10,13 +10,15 @@ Owner 已明确恢复本轮 Cockpit 修复并授权自行调试、部署和迭�
 
 README 已按 Owner 提供的《Dalton Research OS README（面向非技术读者）2026-09-13.md》逐字替换；旧版完整存档于 [旧 README](archive/README-before-nontechnical-2026-09-13.md)。README 是项目介绍，当前部署与验证状态仍以本文件顶部为准。
 
-调试期间 OpenClaw 网关遇到启动完整性检查超时：只读 `quick_check` 返回 `ok`，耗时 36.37 秒，超过网关 30 秒阈值。临时 provider 诊断补丁已还原，正在有界调整启动超时并恢复网关；未删用户数据库记录。开发态全量测试主动中断（exit 130），本轮没有全量测试通过结论。正在排查测试访问本机 OpenClaw 状态的路径，并隔离后续测试环境。
+调试期间 OpenClaw 网关遇到启动完整性检查超时：只读 `quick_check` 返回 `ok`，耗时 36.37 秒，超过网关 30 秒阈值。已将完整性检查上限有界调整为 120 秒，网关与 broker 恢复健康；Discord、飞书已连接，微信两账号 runtime running。未删用户数据库记录。默认测试自动导入本机 OpenClaw 的路径已改为显式启用，其他测试使用仓库 fixture。开发态全量测试此前主动中断（exit 130），本轮尚无冻结全量测试通过结论。
+
+Owner 要求开发与磁盘清理并行。已清理五份过期发布回滚载荷、历史演练副本、三份不完整临时备份及 72 个已合入的干净临时 worktree，当前可用空间约 27 GiB；当前发布、最近三份完整回滚、研究资料、数据库及已付费审校缓存保留。详见 [磁盘清理记录](reports/storage-cleanup-2026-09-13.md)。README 更换、Cockpit 修复与部署工作继续。
 
 已集成旧版入口移除、页面与模型报告文案、EPS/Excel总额缩放、数值展示、结论游标分页、49条审批分组且动作不丢失、UTC当日事件与公司隔离，以及Ask不借用其他公司结论补上下文。原文核对矩阵见 [语言建议逐项验收](COCKPIT_LANGUAGE_REPORT_ACCEPTANCE_2026-09-13.md)，部署后的完整DOM检查尚待完成。
 
 Owner新增发布前一次语言checker要求已写入恢复文档并实现：Antigravity Gemini 3.8 Flash逐句提建议，完整建议MD留档，大脑逐条评估后修订；随后仅做独立事实保真核验，不再重复语言送检。已有15个研究库产物和其他当前可见Thesis/Weekly/Event等表面文字通过只读投影及精确原文hash绑定准备中文附件。Ask已接发布门，后台自动worker正在接部署。仍需完整实测，不能把模块通过当成产品上线。
 
-Antigravity在OpenClaw中原本存在，Dalton的自动发现也能看到；此前未进入broker调用名单。本轮已用既有allow_patch+catalog sync接通。现有同名Google Gemini配置保持独立，不冒称Antigravity。临时接线probe因将route估价误作结算上限而留下一笔明确未结算失败，证据单独保存；正式CockpitModel采用实际WorkOrder预算预留，真实checker及大脑调用已成功返回。批处理的语义核验随后暴露provider schema和host control proof接线问题，正在修复；没有将未核验译文发布到线上，也没有重复送审已完成的languagechecker。
+Antigravity在OpenClaw中原本存在，Dalton的自动发现也能看到；此前未进入broker调用名单。本轮已用既有allow_patch+catalog sync接通。现有同名Google Gemini配置保持独立，不冒称Antigravity。临时接线probe因将route估价误作结算上限而留下一笔明确未结算失败，证据单独保存；正式CockpitModel采用实际WorkOrder预算预留，真实checker及大脑调用已成功返回。语义核验曾因provider schema中的不支持关键字在token计数前被拒，表现为host control proof缺失；删除该关键字后，原Google Gemini 3.8 Flash配置真实核验通过。五份争议分析共11个分块全部通过，中文附件已写入私有发布准备目录，其余产物继续处理。完成的checker/brain与semantic核验已分阶段缓存，修复核验路由无需重复语言送审；尚未向线上发布本轮附件。
 
 本轮新增四份模型配置、policy、worker和初始中文附件需要新的部署转换schema 0.7；独立OPS分支 `/Users/everflow/Projects/dalton-r25-language-ops` 正在补受控安装、精确回滚和验收。R24 runtime、原17份配置及已暂停的高级工作仍保持原状态。真实页面部署验收、全量测试及持续健康检查尚未开始本轮最终冻结。
 
