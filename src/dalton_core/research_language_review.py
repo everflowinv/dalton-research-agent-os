@@ -86,7 +86,16 @@ def validate_checker_output(value: Mapping[str, Any], *, sections: list[Mapping[
     suggestions = []
     for item in value["suggestions"]:
         required = {"section_index", "quote", "assessment", "suggestion"}
-        if not isinstance(item, Mapping) or set(item) not in (required, required | {"title"}):
+        body_alias = {"section_index", "quote", "body", "suggestion"}
+        if not isinstance(item, Mapping):
+            raise ResearchLanguageReviewError("language checker suggestion has an invalid shape")
+        item = dict(item)
+        # One reviewed checker transport emitted its language assessment under
+        # ``body``. Accept only that exact closed alias; mixed or extra fields
+        # remain invalid, and quote anchoring below is unchanged.
+        if set(item) == body_alias and isinstance(item.get("body"), str) and item["body"].strip():
+            item["assessment"] = item.pop("body")
+        if set(item) not in (required, required | {"title"}):
             raise ResearchLanguageReviewError("language checker suggestion has an invalid shape")
         index = item["section_index"]
         if isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < len(sections):

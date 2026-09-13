@@ -51,6 +51,27 @@ class ResearchLanguageReviewTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_checker_output(value, sections=[{'title': '空', 'body': '', 'gaps': []}, *sections, *sections])
 
+    def test_checker_accepts_exact_body_alias_for_assessment(self):
+        sections = [{"title": "标题", "body": "原句。", "gaps": []}]
+        value = {"overall": "可调整。", "suggestions": [{
+            "section_index": 0, "quote": "原句。",
+            "body": "句式略显生硬。", "suggestion": "建议句。",
+        }]}
+        checked = validate_checker_output(value, sections=sections)
+        self.assertEqual(checked["suggestions"][0]["assessment"], "句式略显生硬。")
+        self.assertNotIn("body", checked["suggestions"][0])
+
+    def test_checker_body_alias_remains_closed(self):
+        sections = [{"title": "标题", "body": "原句。", "gaps": []}]
+        for item in (
+            {"section_index": 0, "quote": "原句。", "body": " ", "suggestion": "建议句。"},
+            {"section_index": 0, "quote": "原句。", "body": "说明。", "assessment": "另一说明。", "suggestion": "建议句。"},
+            {"section_index": 0, "quote": "原句。", "body": "说明。", "suggestion": "建议句。", "unexpected": "x"},
+        ):
+            value = {"overall": "可调整。", "suggestions": [item]}
+            with self.assertRaisesRegex(ValueError, "invalid shape"):
+                validate_checker_output(value, sections=sections)
+
     def test_quote_matches_escaped_zero_width_character_without_losing_visible_content(self):
         source=[{'title':'状态','body':r"m\u200banagement 分类无效。",'gaps':[]}]
         value={'overall':'分类名有不可见字符。','suggestions':[
