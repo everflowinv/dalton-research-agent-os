@@ -3986,6 +3986,19 @@ class CockpitPlane:
 
     # -- P14-M2: the 「模型」 page ------------------------------------------------
 
+    @staticmethod
+    def _model_display_name(profile_id: str,
+                            catalogue: Mapping[str, Mapping[str, Any]]) -> str:
+        """Use registered metadata for prose while retaining the ID separately."""
+        profile = catalogue.get(profile_id)
+        if not isinstance(profile, Mapping):
+            return "未登记模型"
+        model = str(profile.get("model") or "").strip()
+        family = str(profile.get("family") or "").strip()
+        if model and family and family.casefold() not in model.casefold():
+            return f"{model}（{family}）"
+        return model or family or "未命名模型"
+
     def models(self) -> dict[str, Any]:
         """Per calling stage: the tier, the chain it will really use, and a choice.
 
@@ -4094,6 +4107,9 @@ class CockpitPlane:
                            } for position, profile_id in enumerate(allowed, 1)]}
             chain = [{
                 "position": link["position"], "model": link["profile_id"],
+                "display_name": self._model_display_name(
+                    link["profile_id"], (bound_catalogue
+                                         if bound_catalogue is not None else catalogue)),
                 "family": link["family"], "unpriced": link["unpriced"],
                 "retired": link["status"] == "retired",
                 "note": (
@@ -4126,13 +4142,26 @@ class CockpitPlane:
                 "run_budget": call_budget_view(self.config.state_dir, purpose, binding=binding, kind="run"),
                 "chain": chain,
                 "superseded_chain": row["superseded_chain"],
+                "superseded_display_names": [
+                    self._model_display_name(
+                        profile_id, (bound_catalogue
+                                     if bound_catalogue is not None else catalogue))
+                    for profile_id in (row["superseded_chain"] or [])
+                ],
                 "superseded_note": (
                     None if not row["superseded_chain"] else
                     "指定模型均已退役，当前暂用该环节的默认模型顺序："
-                    + "、".join(row["superseded_chain"])
+                    + "、".join(
+                        self._model_display_name(
+                            profile_id, (bound_catalogue
+                                         if bound_catalogue is not None else catalogue))
+                        for profile_id in row["superseded_chain"])
                 ),
                 "last_served": None if served is None else {
                     "model": served["profile_id"],
+                    "display_name": self._model_display_name(
+                        served["profile_id"], (bound_catalogue
+                                               if bound_catalogue is not None else catalogue)),
                     "position": served["chain_position"],
                     "at": served["created_at"],
                     "cost_usd": served["estimated_cost_usd"],
@@ -4151,6 +4180,7 @@ class CockpitPlane:
             (
                 {
                     "model": profile_id,
+                    "display_name": self._model_display_name(profile_id, catalogue),
                     "provider": profile.get("provider"),
                     "model_ref": profile.get("model"),
                     "profile_version_ref": profile.get("profile_version_ref"),
@@ -4234,6 +4264,9 @@ class CockpitPlane:
                     openclaw_config=broker if isinstance(broker, Mapping) else None,
                     checked_at=self.clock(),
                 )
+                catalogue = {
+                    profile["id"]: profile for profile in router.latest_profiles()
+                }
         except (FallbackChainError, sqlite3.Error, OSError, ValueError) as exc:
             return {"available": False, "reason": f"路由库读不出来：{_reason(exc)}"}
         tiers = []
@@ -4245,6 +4278,8 @@ class CockpitPlane:
                 # down" is a thing on the page rather than a thing to ask.
                 "chain": [{
                     "position": link["position"], "model": link["profile_id"],
+                    "display_name": self._model_display_name(
+                        link["profile_id"], catalogue),
                     "registered": link["registered"], "status": link["status"],
                     "family": link["family"],
                     "note": (None if link["registered"]
@@ -4252,6 +4287,8 @@ class CockpitPlane:
                 } for link in entry["chain"]],
                 "last_served": None if served is None else {
                     "model": served["profile_id"],
+                    "display_name": self._model_display_name(
+                        served["profile_id"], catalogue),
                     "position": served["chain_position"],
                     "purpose": served["purpose"],
                     "at": served["created_at"],
@@ -4262,7 +4299,10 @@ class CockpitPlane:
                      + ("（也就是第一选择）" if served["chain_position"] == 1
                         else "——第一选择当时没答上"))),
                 "skipped_since_last_served": [
-                    {"model": link["profile_id"], "reason": link["skip_reason"]}
+                    {"model": link["profile_id"],
+                     "display_name": self._model_display_name(
+                         link["profile_id"], catalogue),
+                     "reason": link["skip_reason"]}
                     for link in entry["skipped_since_last_served"][-4:]
                 ],
             })
@@ -4489,10 +4529,27 @@ class CockpitPlane:
         result = self._governance(
             login, "set_model_selection", params, failure="这个选择没有生效")
         label = PURPOSE_LABELS.get(purpose, purpose)
+        display_chain: list[str] = []
+        if mode == "explicit":
+            path = self._model_router_db()
+            catalogue: dict[str, dict[str, Any]] = {}
+            if path is not None:
+                from .model_router import ModelRouter
+                try:
+                    with closing(ModelRouter(path, read_only=True)) as router:
+                        catalogue = {
+                            profile["id"]: profile for profile in router.latest_profiles()
+                        }
+                except (sqlite3.Error, OSError, ValueError):
+                    catalogue = {}
+            display_chain = [self._model_display_name(profile_id, catalogue)
+                             for profile_id in chain]
         self.journal.record_event(
             kind="model_selection", title=f"你给「{label}」选了模型",
-            detail=("使用系统推荐配置" if mode == "tier" else " → ".join(chain)),
-            login=login, refs={"purpose": purpose, "mode": mode})
+            detail=("使用系统推荐配置" if mode == "tier"
+                    else " → ".join(display_chain)),
+            login=login, refs={"purpose": purpose, "mode": mode,
+                               "profile_ids": ",".join(chain)})
         return {**result, "purpose": purpose, "label": label}
 
     def allow_model(self, login: str, value: Mapping[str, Any]) -> dict[str, Any]:

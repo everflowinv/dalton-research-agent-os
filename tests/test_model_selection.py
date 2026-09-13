@@ -1806,11 +1806,16 @@ class CockpitModelPageTests(unittest.TestCase):
         self.assertEqual(
             [link["model"] for link in row["chain"]], list(tier_chain("brain"))
         )
+        self.assertTrue(all(link["display_name"] for link in row["chain"]))
+        self.assertTrue(all("profile:" not in link["display_name"]
+                            for link in row["chain"]))
         self.assertTrue(row["label"] and row["tier_label"])
         self.assertTrue(view["choices"])
         self.assertIn("family", view["choices"][0])
         self.assertIn("provider", view["choices"][0])
         self.assertIn("model_ref", view["choices"][0])
+        self.assertNotEqual(view["choices"][0]["display_name"],
+                            view["choices"][0]["model"])
         self.assertIsInstance(view["choices"][0]["capabilities"], list)
         catalog = view["catalog"]
         self.assertTrue(catalog["available"])
@@ -1940,6 +1945,10 @@ class CockpitModelPageTests(unittest.TestCase):
         page = (Path(__file__).resolve().parents[1]
                 / "src/dalton_core/cockpit_control.html").read_text("utf-8")
         self.assertIn('pp.mode==="candidate_set"?"、":" → "', page)
+        self.assertIn("option.value=choice.model", page)
+        self.assertIn("option.textContent=choice.display_name", page)
+        self.assertIn("const chain=[...picked]", page)
+        self.assertNotIn('picked.value=pp.mode==="explicit"', page)
 
     def test_one_unresolved_binding_does_not_hide_the_other_stages(self) -> None:
         self.install()
@@ -1986,6 +1995,16 @@ class CockpitModelPageTests(unittest.TestCase):
              "declare_model_profile_metadata",
              "acknowledge_model_fallback_notice"],
         )
+        self.assertEqual(
+            self.calls[0][1]["chain"], ["profile:claude-fable-5-1"])
+        event = plane.journal.rows(
+            "SELECT detail,refs_json FROM cockpit_events "
+            "WHERE kind='model_selection' ORDER BY event_id DESC LIMIT 1"
+        )[0]
+        self.assertNotIn("profile:", event["detail"])
+        self.assertIn("claude", event["detail"])
+        self.assertEqual(json.loads(event["refs_json"])["profile_ids"],
+                         "profile:claude-fable-5-1")
         self.assertEqual(self.calls[1][1], {"model_ref": "openai/gpt-6-astra"})
 
     def test_an_impossible_selection_never_reaches_the_writer(self) -> None:
