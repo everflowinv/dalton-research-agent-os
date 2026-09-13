@@ -103,10 +103,31 @@ def style_stage_identity(product, *, draft_config, checker_config, brain_config)
     return pipeline_identity(product, [draft_config, checker_config, brain_config])
 
 
-def semantic_stage_identity(style_identity, verifier_config):
-    return hashlib.sha256(json.dumps({"style_identity": style_identity,
-        "contract": SEMANTIC_CONTRACT_VERSION, "verifier_config": verifier_config},
+def semantic_stage_identity(style_identity, verifier_config, revision_hash=None):
+    value={"style_identity":style_identity,"contract":SEMANTIC_CONTRACT_VERSION,
+           "verifier_config":verifier_config}
+    if revision_hash is not None:value["revision_hash"]=revision_hash
+    return hashlib.sha256(json.dumps(value,
         sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _revision_hash(review):
+    return hashlib.sha256(json.dumps(review['brain_revision']['sections'],ensure_ascii=False,
+        sort_keys=True,separators=(',',':')).encode()).hexdigest()
+
+
+def _repair_prompt(*, product, draft_localized, review, failure, attempt):
+    return '\n'.join((
+        '你是这份研究成品的大脑。此前语言修订未通过确定性校验或独立事实保真核验。',
+        '不要再次调用或模拟语言检查员。重新评估原语言建议并返回全部章节；只改表达，不得新增、删除或改变事实、数字、单位、来源、审批状态、缺口或章节结构。',
+        '只输出 JSON：{"decisions":[{"suggestion_index":0,"decision":"adopt|reject","reason":"理由"}],"sections":[{"index":0,"title":"...","body":"...","gaps":[]}]}',
+        '修订次数：'+str(attempt),
+        '失败反馈：'+json.dumps(failure,ensure_ascii=False,sort_keys=True,separators=(',',':')),
+        '原始权威内容：'+json.dumps(product,ensure_ascii=False,sort_keys=True,separators=(',',':')),
+        '初次中文稿：'+json.dumps(draft_localized,ensure_ascii=False,sort_keys=True,separators=(',',':')),
+        '原语言建议：'+json.dumps(review.get('language_review'),ensure_ascii=False,sort_keys=True,separators=(',',':')),
+        '上次修订：'+json.dumps(review.get('brain_revision'),ensure_ascii=False,sort_keys=True,separators=(',',':')),
+    ))
 
 
 _STYLE_EVIDENCE_KEYS = ('draft', 'draft_localized', 'checker_call', 'brain_call',
@@ -167,14 +188,11 @@ def selected_identity(config, call):
 
 def run_chunk(task, *, mission, draft_config, verifier_config, checker_config,
               brain_config, scheduler_db, work_dir, max_cost, attempts,
-              legacy_verifier_config=None):
+              legacy_verifier_config=None, repair_reviewed=False):
     product_index, start, product = task
     identity = style_stage_identity(product, draft_config=draft_config,
         checker_config=checker_config, brain_config=brain_config)
-    semantic_identity = semantic_stage_identity(identity, verifier_config)
-    target = work_dir / 'chunks' / (semantic_identity + '.json')
     stage_path = work_dir / 'stages' / (identity + '.json')
-    semantic_path = work_dir / 'semantic-stages' / (semantic_identity + '.json')
     resolve = router_family_resolver(draft_config)
     evidence = read_json(stage_path) if stage_path.exists() else _migrate_legacy_style(
         product=product, work_dir=work_dir, draft_config=draft_config,
@@ -185,19 +203,6 @@ def run_chunk(task, *, mission, draft_config, verifier_config, checker_config,
     evidence = evidence or {
         'source_hash': source_content_hash(product), 'pipeline_identity': identity,
         'rules_version': FINAL_TEXT_RULES_VERSION, 'pipeline_version': PIPELINE_VERSION}
-    if target.exists():
-        saved = read_json(target)
-        if (saved['pipeline_identity'] != identity or
-                saved.get('semantic_identity') != semantic_identity):
-            raise ValueError('saved chunk pipeline changed')
-        validate_localized_text(product, saved['localized'])
-        proof = independence(draft_routes=saved['producer_routes'],
-                             verifier_route=saved['verifier_call']['route_decision_ref'], resolve=resolve)
-        if not proof['independent'] or saved['language_review']['status'] != 'ready_for_publication':
-            raise ValueError('saved language review or verifier independence could not be confirmed')
-        build_localization(product, saved['localized'], saved['verifier'])
-        return product_index, start, saved
-
     def model(config, output_tokens):
         return CockpitModel(config, scheduler_db=scheduler_db, max_cost_usd=max_cost,
                             max_input_tokens=120000, max_output_tokens=output_tokens,
@@ -272,43 +277,146 @@ def run_chunk(task, *, mission, draft_config, verifier_config, checker_config,
             checker_identity={'provider':CHECKER_PROVIDER,'model':CHECKER_MODEL})
         evidence['language_review']=review
         write_json(stage_path,evidence)
-    if review['status'] != 'ready_for_publication':
-        raise ValueError(review.get('reason') or review['status'])
-    localized = {'sections':review['brain_revision']['sections']}
-    validate_localized_text(product,localized)
-    # The brain actually rewrote the prose. Its family must also be excluded
-    # from the independent semantic verifier, in addition to the initial drafter.
-    routes = [evidence['draft']['route_decision_ref'],evidence['brain_call']['route_decision_ref']]
-    check_prompt = build_verifier_prompt(product,localized)
-    semantic_evidence = read_json(semantic_path) if semantic_path.exists() else {
-        'source_hash': source_content_hash(product), 'pipeline_identity': identity,
-        'semantic_identity': semantic_identity,
-        'semantic_contract_version': SEMANTIC_CONTRACT_VERSION}
-    if (semantic_evidence.get('pipeline_identity') != identity or
-            semantic_evidence.get('semantic_identity') != semantic_identity):
-        raise ValueError('semantic stage identity changed')
-    if 'verifier_call' not in semantic_evidence:
-        check_id = hashlib.sha256((SEMANTIC_CONTRACT_VERSION+semantic_identity+check_prompt).encode()).hexdigest()
-        verifier = model(verifier_config,5000)
-        semantic_evidence['verifier_call'] = independent_model_call(verifier,
-            producer_route_decision_refs=routes, purpose='research_localization_verifier',
-            request_id='zh-verify-'+check_id,prompt=check_prompt,mission=mission)
-        write_json(semantic_path,semantic_evidence)
-    checked = semantic_evidence['verifier_call']
-    verdict = unwrap_json_object(checked['text'])
-    proof = independence(draft_routes=routes,verifier_route=checked['route_decision_ref'],resolve=resolve)
-    if not proof['independent']:
-        raise ValueError('semantic verifier model is not independent of both authors')
-    build_localization(product,localized,verdict)
-    saved={**evidence,'semantic_identity':semantic_identity,
-           'semantic_contract_version':SEMANTIC_CONTRACT_VERSION,
-           'verifier_call':checked,'localized':localized,'producer_routes':routes,
-           'verifier':verdict,'independence':proof,'status':'passed'}
-    write_json(target,saved)
-    print(json.dumps({'product':product_index,'section_start':start,'status':'passed',
-        'cost_micros':sum(saved[k]['cost_micros'] for k in
-          ['draft','checker_call','brain_call','verifier_call'])},ensure_ascii=False),flush=True)
-    return product_index,start,saved
+
+    review_product=dict(product,sections=evidence['draft_localized']['sections'])
+    active_brain_call=evidence.get('brain_call')
+    history=list(evidence.get('review_history') or [])
+    repair_calls=list(evidence.get('repair_brain_calls') or [])
+    repairs_used=len(repair_calls)
+    if repair_calls:
+        active_brain_call=repair_calls[-1]
+        prior=next((row for row in reversed(history)
+                    if row.get('stage')=='brain_repair'
+                    and row.get('brain_call')==active_brain_call),None)
+        if prior is None:
+            review=run_language_review(review_product,
+                checker=lambda _:parse_stage_output(evidence['checker_call']['text'],stage='checker'),
+                brain=lambda _:parse_stage_output(active_brain_call['text'],stage='brain'),
+                checker_identity={'provider':CHECKER_PROVIDER,'model':CHECKER_MODEL})
+            history.append({'stage':'brain_repair','attempt':repairs_used,
+                'prior_brain_call':None,'prior_language_review':None,
+                'brain_call':copy.deepcopy(active_brain_call),
+                'language_review':copy.deepcopy(review),
+                'trigger':{'stage':'interrupted_after_brain_call'}})
+            evidence['review_history']=history;write_json(stage_path,evidence)
+        else:
+            review=prior['language_review']
+    max_repairs=2 if repair_reviewed else 0
+    failure={'stage':'brain_validation','reason':review.get('reason') or review.get('status')}
+    while True:
+        if review.get('status') != 'ready_for_publication':
+            if repairs_used >= max_repairs:
+                raise ValueError(review.get('reason') or review['status'])
+        else:
+            revision=_revision_hash(review)
+            semantic_identity=semantic_stage_identity(identity,verifier_config,revision)
+            legacy_semantic_identity=semantic_stage_identity(identity,verifier_config)
+            legacy_semantic_path=work_dir/'semantic-stages'/(legacy_semantic_identity+'.json')
+            if repairs_used==0 and legacy_semantic_path.exists():
+                semantic_identity=legacy_semantic_identity
+            target=work_dir/'chunks'/(semantic_identity+'.json')
+            semantic_path=work_dir/'semantic-stages'/(semantic_identity+'.json')
+            if target.exists():
+                saved=read_json(target)
+                if (saved.get('pipeline_identity')!=identity
+                        or saved.get('semantic_identity')!=semantic_identity
+                        or (semantic_identity!=legacy_semantic_identity
+                            and saved.get('revision_hash')!=revision)):
+                    raise ValueError('saved chunk pipeline changed')
+                validate_localized_text(product,saved['localized'])
+                proof=independence(draft_routes=saved['producer_routes'],
+                    verifier_route=saved['verifier_call']['route_decision_ref'],resolve=resolve)
+                if not proof['independent'] or saved['language_review']['status']!='ready_for_publication':
+                    raise ValueError('saved language review or verifier independence could not be confirmed')
+                build_localization(product,saved['localized'],saved['verifier'])
+                return product_index,start,saved
+            semantic_evidence=None
+            try:
+                localized={'sections':review['brain_revision']['sections']}
+                validate_localized_text(product,localized)
+                routes=[evidence['draft']['route_decision_ref'],active_brain_call['route_decision_ref']]
+                check_prompt=build_verifier_prompt(product,localized)
+                semantic_evidence=read_json(semantic_path) if semantic_path.exists() else {
+                    'source_hash':source_content_hash(product),'pipeline_identity':identity,
+                    'semantic_identity':semantic_identity,'revision_hash':revision,
+                    'semantic_contract_version':SEMANTIC_CONTRACT_VERSION}
+                if (semantic_evidence.get('pipeline_identity')!=identity
+                        or semantic_evidence.get('semantic_identity')!=semantic_identity
+                        or (semantic_identity!=legacy_semantic_identity
+                            and semantic_evidence.get('revision_hash')!=revision)):
+                    raise ValueError('semantic stage identity changed')
+                if 'verifier_call' not in semantic_evidence:
+                    check_id=hashlib.sha256((SEMANTIC_CONTRACT_VERSION+semantic_identity+check_prompt).encode()).hexdigest()
+                    verifier=model(verifier_config,5000)
+                    semantic_evidence['verifier_call']=independent_model_call(verifier,
+                        producer_route_decision_refs=routes,purpose='research_localization_verifier',
+                        request_id='zh-verify-'+check_id,prompt=check_prompt,mission=mission)
+                    write_json(semantic_path,semantic_evidence)
+                checked=semantic_evidence['verifier_call']
+                verdict=unwrap_json_object(checked['text'])
+                proof=independence(draft_routes=routes,
+                    verifier_route=checked['route_decision_ref'],resolve=resolve)
+                if not proof['independent']:
+                    raise ValueError('semantic verifier model is not independent of both authors')
+                build_localization(product,localized,verdict)
+            except Exception as exc:
+                semantic_record={'stage':'semantic','revision_hash':revision,
+                    'semantic_identity':semantic_identity,'reason':str(exc),
+                    'brain_call':copy.deepcopy(active_brain_call),'language_review':copy.deepcopy(review)}
+                if semantic_evidence is not None and semantic_evidence.get('verifier_call'):
+                    semantic_record['verifier_call']=copy.deepcopy(semantic_evidence['verifier_call'])
+                    try:semantic_record['verifier']=copy.deepcopy(unwrap_json_object(
+                        semantic_evidence['verifier_call']['text']))
+                    except Exception:pass
+                if not any(row==semantic_record for row in history):history.append(semantic_record)
+                evidence['review_history']=history
+                write_json(stage_path,evidence)
+                failure={'stage':'semantic','reason':str(exc),
+                    'verifier':semantic_record.get('verifier')}
+                if repairs_used >= max_repairs:raise
+            else:
+                all_calls=[evidence['draft'],evidence['checker_call'],evidence.get('brain_call'),
+                    *(evidence.get('repair_brain_calls') or []),checked,
+                    *(row.get('verifier_call') for row in history)]
+                unique_calls={json.dumps(row,sort_keys=True,separators=(',',':')):row
+                    for row in all_calls if isinstance(row,dict)}
+                total_cost=sum(int(row.get('cost_micros') or 0) for row in unique_calls.values())
+                saved={**evidence,'semantic_identity':semantic_identity,'revision_hash':revision,
+                    'semantic_contract_version':SEMANTIC_CONTRACT_VERSION,
+                    'brain_call':active_brain_call,'language_review':review,
+                    'verifier_call':checked,'localized':localized,'producer_routes':routes,
+                    'verifier':verdict,'independence':proof,'review_history':history,
+                    'total_cost_micros':total_cost,'status':'passed'}
+                write_json(target,saved)
+                print(json.dumps({'product':product_index,'section_start':start,'status':'passed',
+                    'cost_micros':total_cost},ensure_ascii=False),flush=True)
+                return product_index,start,saved
+
+        repairs_used+=1
+        repair_prompt=_repair_prompt(product=product,draft_localized=evidence['draft_localized'],
+            review=review,failure=failure,attempt=repairs_used)
+        repair_id=hashlib.sha256((identity+str(repairs_used)+repair_prompt).encode()).hexdigest()
+        brain=model(brain_config,16000)
+        prior_brain_call=copy.deepcopy(active_brain_call)
+        repair_call=brain.call(purpose=BRAIN_PURPOSE,request_id='zh-revise-repair-'+repair_id,
+            prompt=repair_prompt,mission=mission)
+        evidence.setdefault('repair_brain_calls',[]).append(copy.deepcopy(repair_call))
+        write_json(stage_path,evidence)
+        active_brain_call=repair_call
+        prior_review=copy.deepcopy(review)
+        repaired=run_language_review(review_product,
+            checker=lambda _:parse_stage_output(evidence['checker_call']['text'],stage='checker'),
+            brain=lambda _:parse_stage_output(repair_call['text'],stage='brain'),
+            checker_identity={'provider':CHECKER_PROVIDER,'model':CHECKER_MODEL})
+        history.append({'stage':'brain_repair','attempt':repairs_used,
+            'prior_brain_call':prior_brain_call,
+            'prior_language_review':prior_review,
+            'brain_call':copy.deepcopy(repair_call),'language_review':copy.deepcopy(repaired),
+            'trigger':copy.deepcopy(failure)})
+        evidence['review_history']=history
+        write_json(stage_path,evidence)
+        review=repaired
+        failure={'stage':'brain_validation','reason':review.get('reason') or review.get('status')}
 
 
 def build(args, data=None):
@@ -331,7 +439,8 @@ def build(args, data=None):
             verifier_config=read_json(args.verifier_config),checker_config=read_json(args.checker_config),
             brain_config=read_json(args.brain_config),scheduler_db=args.scheduler_db,
             work_dir=work_dir,max_cost=args.max_cost_per_call,attempts=args.attempts,
-            legacy_verifier_config=legacy_verifier_config):t for t in tasks}
+            legacy_verifier_config=legacy_verifier_config,
+            repair_reviewed=getattr(args,'repair_reviewed',False)):t for t in tasks}
         for future in concurrent.futures.as_completed(futures):
             task = futures[future]
             try:
@@ -471,6 +580,8 @@ def main():
         run.add_argument('--'+name,type=Path,required=True)
     run.add_argument('--legacy-verifier-config', type=Path,
                      help='exact old verifier config used only to identify a legacy style cache')
+    run.add_argument('--repair-reviewed',action='store_true',
+                     help='allow at most two brain-only repairs after a completed language check')
     run.add_argument('--workers',type=int,default=4,choices=range(1,9))
     run.add_argument('--chunk-chars',type=int,default=4500)
     run.add_argument('--max-cost-per-call',type=float,default=1.0)

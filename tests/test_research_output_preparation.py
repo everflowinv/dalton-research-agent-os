@@ -34,6 +34,7 @@ class PreparationTests(unittest.TestCase):
                 owner.calls.append(purpose)
                 owner.request_ids.append(kw.get('request_id'))
                 response=owner.responses[purpose]
+                if isinstance(response,list):response=response.pop(0)
                 if isinstance(response,Exception):raise response
                 return {'text':json.dumps(response),'route_decision_ref':purpose,'cost_micros':1}
         def independent(model,*,producer_route_decision_refs,**kw):
@@ -108,7 +109,7 @@ class PreparationTests(unittest.TestCase):
                       if purpose=='research_localization_verifier']
         self.assertEqual(len(set(verifier_ids)),2)
         self.assertEqual(result['semantic_identity'],prep.semantic_stage_identity(
-            result['pipeline_identity'],self.args['verifier_config']))
+            result['pipeline_identity'],self.args['verifier_config'],result['revision_hash']))
 
     def test_style_config_or_source_change_does_not_reuse_style(self):
         self.run_one()
@@ -144,3 +145,59 @@ class PreparationTests(unittest.TestCase):
         self.assertEqual(self.calls,['research_localization_verifier'])
         self.assertNotEqual(result['verifier_call']['route_decision_ref'],'old-verifier')
         self.assertEqual(result['migrated_legacy_pipeline_identity'],old_identity)
+
+    def test_reviewed_repair_reuses_checker_and_preserves_both_failed_stages(self):
+        repaired=copy.deepcopy(REVISION)
+        repaired['sections'][0]['body']='收入是 123 USD。'
+        failed={**VERDICT,'verdict':'fail','faithful':False,
+                'findings':['修订把 USD 改成美元，未保留来源中的单位写法']}
+        self.responses[prep.BRAIN_PURPOSE]=[REVISION,repaired]
+        self.responses['research_localization_verifier']=[failed,VERDICT]
+        with self.assertRaises(ValueError):self.run_one()
+        self.args['repair_reviewed']=True
+        result=self.run_one()
+        self.assertEqual(self.calls.count(prep.CHECKER_PURPOSE),1)
+        self.assertEqual(self.calls.count(prep.BRAIN_PURPOSE),2)
+        self.assertEqual(self.calls.count('research_localization_verifier'),2)
+        verifier_ids=[request_id for purpose,request_id in zip(self.calls,self.request_ids)
+                      if purpose=='research_localization_verifier']
+        self.assertEqual(len(set(verifier_ids)),2)
+        self.assertEqual(result['brain_call']['route_decision_ref'],prep.BRAIN_PURPOSE)
+        self.assertEqual(json.loads(result['brain_call']['text']),repaired)
+        self.assertEqual(result['language_review']['brain_revision'],repaired)
+        self.assertEqual(result['localized']['sections'],repaired['sections'])
+        self.assertEqual(result['total_cost_micros'],6)
+        self.assertEqual([row['stage'] for row in result['review_history']],
+                         ['semantic','brain_repair'])
+        self.assertIn('verifier_call',result['review_history'][0])
+        self.assertEqual(result['review_history'][1]['prior_language_review']['status'],
+                         'ready_for_publication')
+        self.assertEqual(len(list(Path(self.temp.name).glob('semantic-stages/*.json'))),2)
+
+    def test_reviewed_repair_cannot_publish_an_unfixed_number_change(self):
+        bad=copy.deepcopy(REVISION);bad['sections'][0]['body']='收入为 124 美元。'
+        self.responses[prep.BRAIN_PURPOSE]=[copy.deepcopy(bad) for _ in range(3)]
+        self.args['repair_reviewed']=True
+        with self.assertRaisesRegex(ValueError,'number tokens'):self.run_one()
+        self.assertEqual(self.calls.count(prep.CHECKER_PURPOSE),1)
+        self.assertEqual(self.calls.count(prep.BRAIN_PURPOSE),3)
+        self.assertEqual(self.calls.count('research_localization_verifier'),0)
+        self.assertFalse(list(Path(self.temp.name).glob('chunks/*.json')))
+
+    def test_reviewed_repair_reuses_a_legacy_failed_semantic_call(self):
+        repaired=copy.deepcopy(REVISION);repaired['sections'][0]['body']='收入是 123 USD。'
+        failed={**VERDICT,'verdict':'fail','faithful':False,'findings':['单位表达不一致']}
+        self.responses[prep.BRAIN_PURPOSE]=[REVISION,repaired]
+        self.responses['research_localization_verifier']=[failed,VERDICT]
+        with self.assertRaises(ValueError):self.run_one()
+        semantic=next(Path(self.temp.name).glob('semantic-stages/*.json'))
+        row=json.loads(semantic.read_text())
+        legacy=prep.semantic_stage_identity(row['pipeline_identity'],self.args['verifier_config'])
+        row['semantic_identity']=legacy;row.pop('revision_hash')
+        legacy_path=semantic.parent/(legacy+'.json');legacy_path.write_text(json.dumps(row));semantic.unlink()
+        self.args['repair_reviewed']=True
+        result=self.run_one()
+        self.assertEqual(result['status'],'passed')
+        self.assertEqual(self.calls.count(prep.CHECKER_PURPOSE),1)
+        self.assertEqual(self.calls.count(prep.BRAIN_PURPOSE),2)
+        self.assertEqual(self.calls.count('research_localization_verifier'),2)
