@@ -1,0 +1,174 @@
+"""One-pass language review and one-pass brain revision before publication."""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Callable, Mapping
+from hashlib import sha256
+from typing import Any
+
+from .research_localization import validate_localized_text
+
+SCHEMA_VERSION = "research-language-review:0.1"
+CHECKER_PURPOSE = "research_language_check"
+BRAIN_PURPOSE = "research_language_revision"
+CHECKER_PROVIDER = "antigravity"
+CHECKER_MODEL = "antigravity-cli-gateway/gemini-3.8-flash"
+
+
+class ResearchLanguageReviewError(ValueError):
+    pass
+
+
+def _canonical(value: Any) -> bytes:
+    return (json.dumps(value, ensure_ascii=False, sort_keys=True,
+                       separators=(",", ":")) + "\n").encode()
+
+
+def _hash(value: Any) -> str:
+    return sha256(_canonical(value)).hexdigest()
+
+
+def build_checker_prompt(product: Mapping[str, Any]) -> str:
+    sections = [{"index": i, "title": row.get("title") or "",
+                 "body": row.get("body") or "", "gaps": row.get("gaps") or []}
+                for i, row in enumerate(product.get("sections") or [])]
+    return "\n".join((
+        "你是中文投研成品的语言检查员。逐句判断一位有正常文化程度、具备基础金融知识的读者，"
+        "能否轻松读懂这份简体中文材料。只检查语言，不核实事实、数字、来源或投资结论。",
+        "指出生硬机翻、语法病句、含混指代、无必要的工程黑话、重复防御句和中英文混排问题。"
+        "保留专有名词、原文引用；Excel 标题和文字说明需要检查，公式与数据单元格不在范围内，"
+        "Excel 正文可保留英文。每条建议必须对应一个 section 和原句，不得提出新事实或新数字。",
+        "只输出 JSON："
+        '{"overall":"一句话", "suggestions":[{"section_index":0,"quote":"原句",'
+        '"assessment":"为何难懂","suggestion":"建议表述"}]}',
+        "原文 SHA-256：" + _hash(product),
+        "待检查章节：" + json.dumps(sections, ensure_ascii=False, separators=(",", ":")),
+    ))
+
+
+def validate_checker_output(value: Mapping[str, Any], *, sections: list[Mapping[str, Any]]) -> dict[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != {"overall", "suggestions"}:
+        raise ResearchLanguageReviewError("language checker output has an invalid shape")
+    if not isinstance(value["overall"], str) or not value["overall"].strip():
+        raise ResearchLanguageReviewError("language checker overall assessment is missing")
+    if not isinstance(value["suggestions"], list):
+        raise ResearchLanguageReviewError("language checker suggestions must be a list")
+    suggestions = []
+    for item in value["suggestions"]:
+        if not isinstance(item, Mapping) or set(item) != {
+                "section_index", "quote", "assessment", "suggestion"}:
+            raise ResearchLanguageReviewError("language checker suggestion has an invalid shape")
+        index = item["section_index"]
+        if isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < len(sections):
+            raise ResearchLanguageReviewError("language checker section index is invalid")
+        fields = {key: str(item[key]).strip() for key in ("quote", "assessment", "suggestion")}
+        if any(not text for text in fields.values()):
+            raise ResearchLanguageReviewError("language checker suggestion text is missing")
+        source = sections[index]
+        source_text = "\n".join((str(source.get("title") or ""),
+                                  str(source.get("body") or ""),
+                                  *(str(x) for x in source.get("gaps") or [])))
+        if fields["quote"] not in source_text:
+            raise ResearchLanguageReviewError("language checker quote is not in its source section")
+        suggestions.append({"section_index": index, **fields})
+    return {"overall": value["overall"].strip(), "suggestions": suggestions}
+
+
+def render_suggestions_markdown(review: Mapping[str, Any]) -> str:
+    lines = ["# 发布前语言检查建议", "",
+             "> 本检查只评估中文可读性，不核实事实、数字、来源或投资结论。", "",
+             str(review["overall"]), ""]
+    if not review["suggestions"]:
+        lines.append("- 未发现需要修改的语言问题。")
+    for index, item in enumerate(review["suggestions"], 1):
+        lines.extend((f"## 建议 {index}（章节 {item['section_index']}）", "",
+                      f"- 原句：{item['quote']}", f"- 问题：{item['assessment']}",
+                      f"- 建议：{item['suggestion']}", ""))
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def build_brain_prompt(product: Mapping[str, Any], review: Mapping[str, Any]) -> str:
+    return "\n".join((
+        "你是负责该研究成品的大脑。语言检查员只评估表达，没有核实事实或数字。逐条决定采纳或拒绝，"
+        "给出具体理由，然后返回修订后的全部章节。只改语言；不得新增、删除或改变事实、数字、来源、"
+        "审批状态和章节结构。不要再次要求语言检查。",
+        "只输出 JSON："
+        '{"decisions":[{"suggestion_index":0,"decision":"adopt|reject","reason":"理由"}],'
+        '"sections":[{"index":0,"title":"...","body":"...","gaps":[]}]}',
+        "原文：" + json.dumps(product, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        "语言建议：" + json.dumps(review, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+    ))
+
+
+def _validate_brain_output(product: Mapping[str, Any], review: Mapping[str, Any],
+                           value: Mapping[str, Any]) -> dict[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != {"decisions", "sections"}:
+        raise ResearchLanguageReviewError("brain revision output has an invalid shape")
+    decisions = value["decisions"]
+    if not isinstance(decisions, list) or len(decisions) != len(review["suggestions"]):
+        raise ResearchLanguageReviewError("brain must decide every language suggestion exactly once")
+    checked_decisions = []
+    seen = set()
+    for item in decisions:
+        if not isinstance(item, Mapping) or set(item) != {"suggestion_index", "decision", "reason"}:
+            raise ResearchLanguageReviewError("brain decision has an invalid shape")
+        index = item["suggestion_index"]
+        if (isinstance(index, bool) or not isinstance(index, int)
+                or not 0 <= index < len(decisions) or index in seen):
+            raise ResearchLanguageReviewError("brain suggestion decision index is invalid")
+        if item["decision"] not in {"adopt", "reject"}:
+            raise ResearchLanguageReviewError("brain decision must be adopt or reject")
+        if not isinstance(item["reason"], str) or not item["reason"].strip():
+            raise ResearchLanguageReviewError("brain decision reason is missing")
+        seen.add(index)
+        checked_decisions.append({"suggestion_index": index, "decision": item["decision"],
+                                  "reason": item["reason"].strip()})
+    localized = {"sections": value["sections"]}
+    checked_sections = validate_localized_text(product, localized)
+    return {"decisions": checked_decisions,
+            "sections": [{"index": row["index"], "title": row["title"],
+                           "body": row["body"], "gaps": row["gaps"]}
+                          for row in checked_sections]}
+
+
+def run_language_review(
+    product: Mapping[str, Any], *,
+    checker: Callable[[str], Mapping[str, Any]],
+    brain: Callable[[str], Mapping[str, Any]],
+    checker_identity: Mapping[str, str],
+) -> dict[str, Any]:
+    """Call the checker once, then the brain once; fail closed without retry loops."""
+
+    source_hash = _hash(product)
+    if dict(checker_identity) != {"provider": CHECKER_PROVIDER, "model": CHECKER_MODEL}:
+        raise ResearchLanguageReviewError("language checker must be antigravity Gemini 3.8 Flash")
+    try:
+        review = validate_checker_output(
+            checker(build_checker_prompt(product)),
+            sections=list(product.get("sections") or []),
+        )
+    except Exception as exc:
+        return {"schema_version": SCHEMA_VERSION, "status": "pending_language_review",
+                "source_hash": source_hash, "reason": str(exc)}
+    markdown = render_suggestions_markdown(review)
+    try:
+        revision = _validate_brain_output(product, review, brain(build_brain_prompt(product, review)))
+    except Exception as exc:
+        return {"schema_version": SCHEMA_VERSION, "status": "pending_brain_revision",
+                "source_hash": source_hash, "checker_identity": dict(checker_identity),
+                "language_review": review, "suggestions_markdown": markdown,
+                "reason": str(exc)}
+    result = {"schema_version": SCHEMA_VERSION, "status": "ready_for_publication",
+              "source_hash": source_hash, "checker_identity": dict(checker_identity),
+              "language_review": review, "suggestions_markdown": markdown,
+              "brain_revision": revision, "revision_hash": _hash(revision["sections"]),
+              "language_scope": "readability_only_not_fact_or_number_verification"}
+    result["content_hash"] = _hash(result)
+    return result
+
+
+__all__ = ["BRAIN_PURPOSE", "CHECKER_MODEL", "CHECKER_PROVIDER", "CHECKER_PURPOSE",
+           "ResearchLanguageReviewError",
+           "SCHEMA_VERSION", "build_brain_prompt", "build_checker_prompt",
+           "render_suggestions_markdown", "run_language_review", "validate_checker_output"]
