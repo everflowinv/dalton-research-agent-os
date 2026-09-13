@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 import unittest
 
 from dalton_core.research_localization import (
@@ -52,6 +54,20 @@ class ResearchLocalizationTests(unittest.TestCase):
     self.assertEqual(selected["approval"], source["approval"])
     self.assertNotIn("localization", source)
 
+
+ def test_known_legacy_rules_replay_but_unknown_rules_are_rejected(self):
+    source = product()
+    current = build_localization(source, localized(), verifier())
+    legacy = copy.deepcopy(current); legacy["rules_version"] = "simplified-chinese-research-prose:0.2"
+    body = dict(legacy); body.pop("content_hash")
+    legacy["content_hash"] = hashlib.sha256((json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode()).hexdigest()
+    self.assertEqual(validate_localization(source, legacy), legacy)
+    unknown = copy.deepcopy(legacy); unknown["rules_version"] = "simplified-chinese-research-prose:0.1"
+    body = dict(unknown); body.pop("content_hash")
+    unknown["content_hash"] = hashlib.sha256((json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode()).hexdigest()
+    with self.assertRaisesRegex(ResearchLocalizationError, "identity is unsupported"):
+        validate_localization(source, unknown)
+    self.assertEqual(current["rules_version"], "simplified-chinese-research-prose:0.3")
 
  def test_localization_rejects_source_drift_added_number_and_unclean_verifier(self):
     source = product()

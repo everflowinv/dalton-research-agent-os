@@ -1,5 +1,6 @@
 import copy
 import json
+import hashlib
 import sqlite3
 import tempfile
 import unittest
@@ -97,6 +98,15 @@ class LocalizationStoreTests(unittest.TestCase):
         changed=copy.deepcopy(self.product);changed['sections'][0]['body']='Revenue fell.'
         shown=localize_library(self.connection,{'products':[changed]})['products'][0]
         self.assertEqual(shown['publication_status'],'pending_language_review')
+
+    def test_known_legacy_ui_mapping_remains_readable_without_rewrite(self):
+        legacy=copy.deepcopy(self.candidate);legacy['rules_version']='simplified-chinese-research-prose:0.2'
+        body=dict(legacy);body.pop('content_hash')
+        legacy['content_hash']=hashlib.sha256((json.dumps(body,ensure_ascii=False,sort_keys=True,separators=(',',':'))+'\n').encode()).hexdigest()
+        publish_ui_texts(self.directory,[{'source':self.product,'localization':legacy}])
+        before=(self.directory/'ui-texts.json').read_bytes()
+        self.assertEqual(load_ui_texts(self.db),{'Revenue increased.':'收入增长。'})
+        self.assertEqual((self.directory/'ui-texts.json').read_bytes(),before)
 
     def test_new_ui_batch_keeps_other_approved_page_strings(self):
         publish_ui_texts(self.directory,[{'source':self.product,'localization':self.candidate}])

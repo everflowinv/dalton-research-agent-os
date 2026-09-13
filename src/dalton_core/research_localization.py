@@ -20,6 +20,7 @@ from .numeric_display import format_display_number
 
 SCHEMA_VERSION = "research-localization:0.1"
 TARGET_LOCALE = "zh-CN"
+LEGACY_FINAL_TEXT_RULES_VERSIONS = frozenset({"simplified-chinese-research-prose:0.2"})
 VERIFIER_PURPOSE = register_purpose("research_localization_verifier")
 _NUMBER = re.compile(r"[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?%?")
 _ISO_DATE = re.compile(r"(?<!\d)(\d{4})-(\d{2})-(\d{2})(?!\d)")
@@ -570,7 +571,7 @@ def validate_localization(product: Mapping[str, Any], candidate: Mapping[str, An
         raise ResearchLocalizationError("localization has an open or incomplete shape")
     if (candidate["schema_version"] != SCHEMA_VERSION or candidate["status"] != "localized"
             or candidate["target_locale"] != TARGET_LOCALE
-            or candidate["rules_version"] != FINAL_TEXT_RULES_VERSION):
+            or candidate["rules_version"] not in ({FINAL_TEXT_RULES_VERSION} | LEGACY_FINAL_TEXT_RULES_VERSIONS)):
         raise ResearchLocalizationError("localization identity is unsupported")
     source = candidate["source"]
     if source != {"kind": product.get("kind"), "version_ref": product.get("version_ref"),
@@ -580,7 +581,12 @@ def validate_localization(product: Mapping[str, Any], candidate: Mapping[str, An
     localized = {"sections": [{"index": x["index"], "title": x["title"],
                                 "body": x["body"], "gaps": x["gaps"]}
                                for x in candidate["sections"]]}
-    if build_localization(product, localized, candidate["verifier"]) != dict(candidate):
+    replay = build_localization(product, localized, candidate["verifier"])
+    if candidate["rules_version"] in LEGACY_FINAL_TEXT_RULES_VERSIONS:
+        replay["rules_version"] = candidate["rules_version"]
+        unhashed = dict(replay); unhashed.pop("content_hash")
+        replay["content_hash"] = _hash(unhashed)
+    if replay != dict(candidate):
         raise ResearchLocalizationError("localization does not replay exactly")
     return dict(candidate)
 
