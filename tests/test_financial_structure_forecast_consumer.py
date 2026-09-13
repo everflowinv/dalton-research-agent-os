@@ -730,8 +730,8 @@ class FinancialStructureForecastConsumerTests(unittest.TestCase):
         self.assertTrue(all(item.get("model_cell_ref")
                             for item in revenue["source_periods"]))
         rendered = render_forecast_model(record, annual_projection=held)
-        self.assertIn("ANNUAL STRUCTURED FINANCIALS", rendered)
-        self.assertIn("ANNUAL DILUTED EPS", rendered)
+        self.assertIn("年度结构化财务预测", rendered)
+        self.assertIn("年度摊薄每股收益", rendered)
         self.assertIn("FY2025A", rendered)
         self.assertIn(held["content_hash"], rendered)
 

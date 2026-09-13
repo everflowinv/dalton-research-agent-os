@@ -72,6 +72,38 @@ class CockpitLanguageTests(unittest.TestCase):
         self.assertIn('it.kind==="gate_reopen"', text)
         self.assertIn("group.entries.forEach(card=>d.append(card))", text)
 
+    def test_dynamic_lane_snapshot_uses_research_language(self) -> None:
+        from dalton_core.cockpit_plane import REGISTRY_LANE_LABELS
+
+        self.assertGreaterEqual(len(REGISTRY_LANE_LABELS), 41)
+        snapshot = "\n".join(REGISTRY_LANE_LABELS.values())
+        for stale in (
+            "取三张报表", "记下公司下次开口的日子", "看街上预期什么",
+            "算预测行", "市场在吵什么", "值得下注", "读 sales note",
+        ):
+            self.assertNotIn(stale, snapshot)
+        for expected in (
+            "获取完整财务三张表", "同步卖方一致预期",
+            "核心假设敏感性分析", "公司深度投研档案",
+        ):
+            self.assertIn(expected, snapshot)
+
+    def test_goal_and_steer_prompts_share_the_final_text_contract(self) -> None:
+        from dalton_core.cockpit_plane import CockpitPlane
+        from dalton_core.final_text_contract import final_text_instructions
+
+        plane = object.__new__(CockpitPlane)
+        mission = {
+            "title": "测试目标", "objective": "核实事实", "research_questions": ["收入如何变化？"],
+            "universe": [], "source_plan": [],
+        }
+        for prompt in (
+            plane._goal_prompt("更新目标", mission, {}),
+            plane._steer_prompt("增加成本分析", mission, {}),
+        ):
+            for rule in final_text_instructions():
+                self.assertIn(rule, prompt)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -77,23 +77,23 @@ def render_model_inputs(table: Mapping[str, Any], *, entity_name: str | None = N
     readiness = table.get("readiness") or {}
     out: list[str] = []
     title = entity_name or table.get("company_ref") or "company"
-    out.append(f"MODEL INPUTS  {title}")
-    out.append(f"specification {table.get('spec_ref')}")
+    out.append(f"模型输入  {title}")
+    out.append(f"模型规格 {table.get('spec_ref')}")
     out.append(
-        f"{readiness.get('period_count', 0)} quarters "
+        f"{readiness.get('period_count', 0)} 个季度 "
         f"{readiness.get('first_period')} .. {readiness.get('last_period')}"
-        "   totals/counts in millions; per-share/ratios in stated units; * = derived from cumulative"
+        "；总额/数量单位为百万；每股/比率沿用标注单位；* 表示累计值推导"
     )
     out.append("")
 
-    header = "FILED HISTORY".ljust(LABEL_WIDTH) + "".join(
+    header = "已披露历史".ljust(LABEL_WIDTH) + "".join(
         end[2:].rjust(CELL_WIDTH) for end in periods)
     out.append(header)
     out.append("-" * len(header))
     for line in table.get("filed_lines") or []:
         label = str(line.get("label") or line["concept"])[:LABEL_WIDTH - 2]
         if line.get("is_split"):
-            label = f"{label} [split]"
+            label = f"{label} [拆分项]"
         row = label[:LABEL_WIDTH].ljust(LABEL_WIDTH)
         if line.get("status") != FILED:
             row += f"  ({line.get('status')})"
@@ -107,49 +107,49 @@ def render_model_inputs(table: Mapping[str, Any], *, entity_name: str | None = N
         out.append(row)
 
     out.append("")
-    out.append("MODEL ROWS")
+    out.append("模型科目")
     out.append("-" * LABEL_WIDTH)
     for row in table.get("rows") or []:
         status = row.get("status")
         note = {
-            FILED: "filed",
-            SHARED: "share of a filed line",
-            ESTIMATED: "estimated -- no filed counterpart",
+            FILED: "已披露",
+            SHARED: "已披露科目的拆分项",
+            ESTIMATED: "待估算：无对应披露科目",
         }.get(str(status), str(status))
         out.append(f"  {str(row['ref'])[:34]:34} {row['kind'][:14]:14} {note}")
 
     metrics = table.get("operating_metrics") or []
     if metrics:
         out.append("")
-        out.append("OPERATING METRICS (never in the statements)")
+        out.append("经营指标（不属于财务报表科目）")
         out.append("-" * LABEL_WIDTH)
         for item in metrics:
-            disclosed = "company reports it" if item.get("disclosed") else "not reported"
+            disclosed = "公司已披露" if item.get("disclosed") else "公司未披露"
             out.append(f"  {str(item['ref'])[:34]:34} {str(item.get('unit'))[:10]:10} {disclosed}")
 
     out.append("")
-    out.append("WHAT IS STILL MISSING")
+    out.append("仍待补齐")
     out.append("-" * LABEL_WIDTH)
     splits = readiness.get("filed_lines_needing_a_split") or []
     for item in splits:
-        out.append(f"  split {item['concept']} into: {', '.join(item['into'])}")
+        out.append(f"  将 {item['concept']} 拆分为：{', '.join(item['into'])}")
     unmet = readiness.get("rows_with_no_filed_history") or []
     if unmet:
-        out.append(f"  no filed history ({len(unmet)}): {', '.join(unmet)}")
+        out.append(f"  无披露历史（{len(unmet)}项）：{', '.join(unmet)}")
     gaps = readiness.get("filed_lines_with_gaps") or []
     if gaps:
-        out.append(f"  quarters missing from ({len(gaps)}) filed lines "
-                   "-- a 10-Q never covers the fourth quarter")
+        out.append(f"  {len(gaps)} 个披露科目存在季度缺口 "
+                   "（10-Q 不包含第四季度全年补差）")
     empty = readiness.get("filed_lines_with_no_values") or []
     if empty:
         out.append(f"  resolved but empty (look at this): {', '.join(empty)}")
     unused = readiness.get("filed_income_lines_no_row_uses") or []
     if unused:
-        out.append("  filed but no model row uses it:")
+        out.append("  已披露但尚未被模型使用的科目：")
         for item in unused:
             out.append(f"      {item['label'][:40]:40} {item['concept']}")
     if not (splits or unmet or gaps or empty or unused):
-        out.append("  nothing")
+        out.append("  无")
     return "\n".join(out)
 
 
@@ -207,23 +207,23 @@ def render_forecast_model(
     drivers = list(record.get("drivers") or [])
     out: list[str] = []
     title = entity_name or record.get("company_ref") or "company"
-    out.append(f"DRIVER MODEL  {title}")
-    out.append(f"{record.get('id')}  version {record.get('version')}  "
+    out.append(f"驱动模型  {title}")
+    out.append(f"{record.get('id')}  版本 {record.get('version')}  "
                f"({record.get('change_reason')}"
                + (f", decided: {record['decision']}" if record.get("decision") else "")
                + ")")
-    out.append(f"specification {record.get('spec_ref')}   "
-               f"formula {record.get('formula_ref')}")
-    out.append(f"generator {record.get('generator_ref')}   "
-               "totals/counts in millions; per-share/ratios in stated units; "
+    out.append(f"模型规格 {record.get('spec_ref')}   "
+               f"公式 {record.get('formula_ref')}")
+    out.append(f"生成规则 {record.get('generator_ref')}   "
+               "总额/数量单位为百万；每股/比率沿用标注单位；"
                "* = derived from cumulative")
     if realised:
-        out.append(f"filed since this model was made: {', '.join(realised)}")
+        out.append(f"模型生成后新增披露：{', '.join(realised)}")
     out.append("")
     out.append(_row("", [end[2:] for end in history], [end[2:] for end in columns]))
     out.append("-" * (DRIVER_LABEL_WIDTH + CELL_WIDTH * (len(history) + len(columns)) + 2))
 
-    out.append("DRIVERS (filed history)")
+    out.append("驱动因素（已披露历史）")
     for driver in drivers:
         cells = {str(cell["period_end"]): cell for cell in (driver.get("history") or [])}
         label = f"  {driver.get('label') or driver.get('ref')}"
@@ -246,9 +246,9 @@ def render_forecast_model(
     for item in record.get("assumptions") or []:
         assumptions.setdefault(str(item["driver_ref"]), []).append(item)
     out.append("")
-    out.append("ASSUMPTIONS")
+    out.append("预测假设")
     if not assumptions:
-        out.append("  none -- no driver has enough filed history to carry forward")
+        out.append("  暂无：披露历史不足，不能外推")
     for driver in drivers:
         rows = assumptions.get(str(driver.get("ref")))
         if not rows:
@@ -264,14 +264,14 @@ def render_forecast_model(
             str(item.get("because")) for item in rows
             if not item.get("superseded_by") and item.get("kind") != "actual"
         ):
-            out.append(f"        because {because}")
+            out.append(f"        依据：{because}")
         for item in rows:
             if item.get("superseded_by"):
-                out.append(f"        we assumed {_percent(item['value'])} for "
+                out.append(f"        当时假设 {_percent(item['value'])}，期间 "
                            f"{item['period']['end']}: {item.get('because')}")
 
     out.append("")
-    out.append("RESULTS")
+    out.append("预测结果")
     for result in record.get("results") or []:
         live = _live(result.get("cells") or [])
         out.append(_row(
@@ -284,8 +284,8 @@ def render_forecast_model(
             if cell.get("superseded_by") and cell.get("value") is not None:
                 actual = live.get(str(cell["period"]["end"]), {})
                 out.append(
-                    f"        we estimated {_display_value(cell['value'], cell.get('unit') or result.get('unit'))} for "
-                    f"{cell['period']['end']}; filed "
+                    f"        当时预测 {_display_value(cell['value'], cell.get('unit') or result.get('unit'))}，期间 "
+                    f"{cell['period']['end']}；实际披露 "
                     f"{_display_value(actual.get('value'), actual.get('unit') or result.get('unit'))}")
         if result.get("status") != "computed":
             out.append(f"        {result.get('status')}: "
@@ -299,7 +299,7 @@ def render_forecast_model(
         result_labels = {str(item["ref"]): str(item["label"])
                          for item in record.get("results") or []}
         out.append("")
-        out.append("ANNUAL STRUCTURED FINANCIALS")
+        out.append("年度结构化财务预测")
         out.append("-" * DRIVER_LABEL_WIDTH)
         for period in projection["periods"]:
             out.append(f"  {period['label']}")
@@ -311,19 +311,19 @@ def render_forecast_model(
                     )
                 else:
                     out.append(
-                        f"    {label}: unavailable: "
+                        f"    {label}：暂不可得："
                         f"{outcome.get('reason') or 'no reason recorded'}"
                     )
         out.append("")
-        out.append("ANNUAL DILUTED EPS")
+        out.append("年度摊薄每股收益")
         out.append("-" * DRIVER_LABEL_WIDTH)
-        out.append(f"  authority {projection['projection_ref']}  "
+        out.append(f"  权威记录 {projection['projection_ref']}  "
                    f"{projection['content_hash']}")
         rows = [item for item in projection["periods"]
                 if item.get("historical_eps") is not None
                 or item.get("forecast_eps") is not None]
         if not rows:
-            out.append("  unavailable: no complete fiscal year is bound")
+            out.append("  暂不可得：尚未绑定完整财年")
         for item in rows:
             outcome = item.get("historical_eps") or item.get("forecast_eps") or {}
             if outcome.get("status") == "computed":
@@ -333,7 +333,7 @@ def render_forecast_model(
                     shown = "?"
                 out.append(f"  {item['label']:16} {shown:>12}  {outcome.get('unit')}")
             else:
-                out.append(f"  {item['label']:16} unavailable: "
+                out.append(f"  {item['label']:16} 暂不可得："
                            f"{outcome.get('reason') or 'no reason recorded'}")
     # What the chain does not account for, named. A reader looking at operating
     # income has to be able to see which filed lines are not inside it; the
@@ -343,17 +343,17 @@ def render_forecast_model(
         if item.get("role") is None and item.get("history") and item.get("concept"))
     if outside:
         out.append("")
-        out.append("  filed lines this chain does not account for:")
+        out.append("  当前计算链未覆盖的披露科目：")
         for concept in outside:
             out.append(f"      {concept}")
     out.append("")
-    out.append("HOW TO READ IT")
+    out.append("阅读说明")
     out.append("-" * DRIVER_LABEL_WIDTH)
-    out.append("  every assumption is an estimate carried forward from the filings")
-    out.append("  named in its refs; none of them is a view, and all of them are")
-    out.append("  meant to be argued with. A result printed as -- was not computed,")
-    out.append("  and the line under it says what was missing. A quarter that has")
-    out.append("  been filed shows the actual, with what we estimated underneath.")
+    out.append("  每项假设均由披露历史外推，并列出所用依据；")
+    out.append("  它们是可质疑、可复核的估算，不代表投资观点。")
+    out.append("  “--”表示没有完成计算，下方会说明缺少什么。")
+    out.append("  已披露季度显示实际值，并保留当时预测供对照。")
+    out.append("")
     return "\n".join(out)
 
 
@@ -419,18 +419,18 @@ def render_sensitivity(
     horizon = record.get("horizon") or []
     window = record.get("history_window") or {}
     selection = record.get("selection") or {}
-    out.append(f"SENSITIVITY  {title}")
-    out.append(f"{record.get('id')}  version {record.get('version')}  "
+    out.append(f"敏感性分析  {title}")
+    out.append(f"{record.get('id')}  版本 {record.get('version')}  "
                f"({record.get('value_kind')})")
-    out.append(f"model {record.get('model_version_ref')}")
-    out.append(f"rule {record.get('selection_rule_ref')}   "
-               f"ranked on {metric.get('label') or metric.get('result_ref')} "
+    out.append(f"模型 {record.get('model_version_ref')}")
+    out.append(f"选择规则 {record.get('selection_rule_ref')}   "
+               f"按 {metric.get('label') or metric.get('result_ref')} 排序，"
                f"over {len(horizon)} quarters"
-               + (f" to {horizon[-1]['end']}" if horizon else ""))
-    out.append(f"history {window.get('first')} .. {window.get('last')} "
-               f"({window.get('quarters')} quarters)   figures in millions")
+               + (f"，截至 {horizon[-1]['end']}" if horizon else ""))
+    out.append(f"历史区间 {window.get('first')} .. {window.get('last')} "
+               f"（{window.get('quarters')} 个季度）；数值单位为百万")
     if selection.get("status") != "available":
-        out.append(f"selection {selection.get('status')}: {selection.get('reason')}")
+        out.append(f"驱动选择暂不可得（{selection.get('status')}），原因见模型记录")
     out.append("")
 
     drivers = list(record.get("drivers") or [])
@@ -463,26 +463,26 @@ def render_sensitivity(
                         f"      next {edge} in: {_percent(runner['value'])} "
                         f"({runner['period_end']})")
         else:
-            out.append(f"      band unavailable: {band.get('reason')}")
+            out.append("      历史区间暂不可得，原因见模型记录")
         if ours.get("value") is not None:
             out.append(f"      ours {_percent(ours['value'])}"
                        + (f" -- {_where(ours['value'], band)}"
                           if band.get("status") == "available" else ""))
         else:
-            out.append("      ours: not one number across the horizon")
+            out.append("      当前假设：预测期内并非固定值")
         if impact.get("status") == "computed":
             out.append(f"      one point on this assumption moves "
                        f"{metric.get('label')} by "
                        f"{_millions(impact['delta'])}m ({impact.get('percent_of_base')}%)")
         else:
-            out.append(f"      elasticity unavailable: {impact.get('reason')}")
+            out.append("      弹性暂不可得，原因见模型记录")
         if swing.get("status") == "computed":
             out.append(f"      across its own historical range "
                        f"{metric.get('label')} moves "
                        f"{_millions(swing['swing'])}m ({swing.get('percent_of_base')}%)"
                        "  <- this is what ranks it")
         else:
-            out.append(f"      range swing unavailable: {swing.get('reason')}")
+            out.append("      区间影响暂不可得，原因见模型记录")
 
         rows = list(driver.get("what_if") or [])
         header = "".ljust(SENSITIVITY_LABEL_WIDTH) + "".join(
@@ -532,20 +532,20 @@ def render_sensitivity(
                 continue
             shown = ", ".join(named[:MAX_SHOWN_REFS])
             if len(named) > MAX_SHOWN_REFS:
-                shown += f", and {len(named) - MAX_SHOWN_REFS} more filed cells"
-            out.append(f"        {row['scenario']} from {shown}")
+                shown += f"，另有 {len(named) - MAX_SHOWN_REFS} 个披露单元格"
+            out.append(f"        {row['scenario']}，依据：{shown}")
         out.append("")
 
     bridge = record.get("consensus_bridge") or {}
-    out.append("CONSENSUS BRIDGE")
+    out.append("一致预期对照")
     out.append("-" * DRIVER_LABEL_WIDTH)
     if bridge.get("status") != "available":
-        out.append(f"  unavailable: {bridge.get('reason')}")
+        out.append("  暂无可用的一致预期对照，原因见模型记录")
     else:
         detail = {(str(item["metric"]), str(item["period"])): item
                   for item in (record.get("bridge_detail") or [])}
-        out.append("  " + "metric".ljust(16) + "period".ljust(14)
-                   + "ours".rjust(16) + "street".rjust(16) + "gap".rjust(16)
+        out.append("  " + "指标".ljust(16) + "期间".ljust(14)
+                   + "本模型".rjust(16) + "一致预期".rjust(16) + "差额".rjust(16)
                    + "gap %".rjust(10))
         for row in bridge.get("metrics") or []:
             extra = detail.get((str(row["metric"]), str(row["period"])))
@@ -560,21 +560,21 @@ def render_sensitivity(
             out.append(f"    {row['metric']} {row['period']}: {row.get('basis')}")
 
     out.append("")
-    out.append("HOW TO READ IT")
+    out.append("阅读说明")
     out.append("-" * DRIVER_LABEL_WIDTH)
-    out.append("  the band is what the company has filed, not a range anyone chose;")
-    out.append("  the drivers are ranked by how far the metric moves across that")
-    out.append("  band, because every share assumption here is a share of the same")
-    out.append("  revenue and a one-point move in each is the same number. Every")
-    out.append("  column is the model recomputed in memory: none of them was ever")
-    out.append("  published as a forecast, and our own column is the model itself.")
+    out.append("  历史区间来自公司披露，并非人工挑选；")
+    out.append("  驱动因素按目标指标在历史区间内的变化幅度排序。")
+    out.append("  所有份额假设使用同一收入基数，可比较1个百分点的变化。")
+    out.append("  每列均由模型重新计算，未作为正式预测发布；")
+    out.append("  当前假设列代表模型自身。")
     out.append("")
-    out.append("  EVERY COLUMN HOLDS ITS LEVEL FLAT ACROSS ALL THE QUARTERS SHOWN.")
-    out.append("  None of them is a path. The trough column is not the trough")
-    out.append("  quarter happening once -- it is the whole horizon spent there.")
-    out.append("  Where an extreme sits far from the next observation, that peak")
-    out.append("  or trough was one quarter and probably one event; the runner-up")
-    out.append("  is printed beside it so you can see the gap and judge it.")
+    out.append("")
+    out.append("  每个情景列在所示全部季度中保持同一假设水平。")
+    out.append("  情景列不是路径；低点列表示整个预测期均处于低点。")
+    out.append("")
+    out.append("  若极值与次高或次低值相距较远，极值可能只对应单一季度或事件；")
+    out.append("  表中同时列出次高或次低值，便于判断这种差距。")
+    out.append("")
     return "\n".join(out)
 
 

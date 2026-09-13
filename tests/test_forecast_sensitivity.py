@@ -781,9 +781,9 @@ class RenderTests(unittest.TestCase):
         projection.update({"id": "sensitivity-projection:x:1", "version": 1,
                            "created_at": "now"})
         text = render_sensitivity(projection, entity_name="Accenture plc")
-        self.assertIn("SENSITIVITY  Accenture plc", text)
-        self.assertIn("CONSENSUS BRIDGE", text)
-        self.assertIn("unavailable:", text)
+        self.assertIn("敏感性分析  Accenture plc", text)
+        self.assertIn("一致预期对照", text)
+        self.assertIn("暂无可用的一致预期对照", text)
         for scenario in SCENARIOS:
             self.assertIn(scenario, text)
         # The quarter each extreme happened in, beside the number.
@@ -792,7 +792,7 @@ class RenderTests(unittest.TestCase):
         self.assertIn("not_material", text)
         self.assertIn("this is what ranks it", text)
         # The reader is told the columns are flat holds, not paths.
-        self.assertIn("HOLDS ITS LEVEL FLAT", text)
+        self.assertIn("每个情景列在所示全部季度中保持同一假设水平", text)
         self.assertIn("next peak in:", text)
 
     def test_the_view_says_where_our_estimate_sits_in_the_band(self):

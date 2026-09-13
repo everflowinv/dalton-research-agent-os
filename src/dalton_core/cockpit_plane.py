@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from .cockpit_model import CockpitModel, CockpitModelError, unwrap_json_object
+from .final_text_contract import final_text_instructions
 from .claim_retirement import REASON_LABELS as CLAIM_REASON_LABELS
 from .coverage_mission import STAGE_REOPENED
 from .mission_stage import evaluate_mission, planned_spec_refs_from_directory, retired_claim_refs
@@ -180,68 +181,68 @@ QUALITY_CHECK_LABELS = {
 # not grant market_price in autonomy.may_write" is the right sentence in the
 # wrong place -- so it moves to a detail line and the owner reads this instead.
 LANE_STATUS_NOTES = {
-    "launched": "刚起了一个任务",
-    "busy": "上一个任务还在跑",
-    "idle": "装好了，这一轮没有要做的",
-    "held": "上一次没成，暂时不再试同一件事",
-    "rejected": "这次没被接受",
-    "unconfigured": "这台机器上没装这条流水线",
-    "ungranted": "研究目标还没授权它写入，所以一次也没跑",
-    "unavailable": "这一轮读不到它需要的东西",
-    "unstarted": "这台机器上还没有跑过这条流水线",
-    "current": "已经是最新的了",
-    "failed": "出错了",
+    "launched": "任务已启动",
+    "busy": "上一项任务仍在运行",
+    "idle": "配置正常，本轮没有待办",
+    "held": "上次执行未完成，暂不重复尝试",
+    "rejected": "本次结果未被接受",
+    "unconfigured": "当前环境尚未配置该流程",
+    "ungranted": "当前研究目标尚未授权该流程写入",
+    "unavailable": "本轮无法取得所需资料或依赖",
+    "unstarted": "当前环境尚无该流程的执行记录",
+    "current": "当前结果已是最新版本",
+    "failed": "本次执行失败",
 }
 # The lanes the registry knows about, named for the owner. A lane with no name
 # here still appears -- silence about a lane is exactly what this panel exists
 # to end -- under its own key, which is ugly but visible.
 REGISTRY_LANE_LABELS = {
-    "guidepoint_discovery": "找专家访谈纪要",
-    "mission_sec_quarters": "取 SEC 季度数字",
-    "mission_statements": "取三张报表",
-    "mission_market_prices": "取每日股价",
-    "mission_tracking": "每天盯着已覆盖的公司",
-    "mission_catalyst_calendar": "记下公司下次开口的日子",
-    "mission_consensus": "看街上预期什么",
-    "company_model_spec": "写公司模型的规格",
-    "mission_model_spec": "写公司模型的规格",
-    "company_model_forecast": "算预测行",
-    "mission_model_forecast": "算预测行",
-    "forecast_sensitivity": "算哪些假设最要紧、历史上摆到过哪里",
-    "mission_sensitivity": "算哪些假设最要紧、历史上摆到过哪里",
-    "claim_index": "给结论建索引",
-    "mission_claim_index": "给结论建索引",
-    "research_plan": "决定下一步做什么",
-    "initial_screen": "写初步筛选",
-    "event_judgement": "判断新发生的事要不要动",
-    "mission_event_judgement": "判断新发生的事要不要动",
-    "earnings_season": "业绩前写前瞻、业绩后对账",
-    "debate_map": "整理市场在吵什么、我们站哪边",
-    "mission_debate_map": "整理市场在吵什么、我们站哪边",
-    "debate_map_verifier": "独立核验市场争议图",
-    "mission_crowd_sources": "看散户与员工在说什么",
-    "mission_stage": "记录研究阶段",
-    "claim_review": "复核已有结论",
-    "sales_notes_feed": "读 sales note",
-    "company_wiki_feed": "读公司维基与访谈纪要",
-    "prior_research": "读我们自己以前写过的东西",
-    "research_task": "做专项研究",
-    "mission_annual_research": "在已取得的年报里做定向研究",
-    "mission_document_research": "在已取得的原文里做定向研究",
-    "mission_reflection": "每周回头看时间花在哪",
-    "company_dossier": "写公司档案",
-    "deep_insight_gate": "回答深度认知门的十二问，交给你裁决",
-    "mission_ownership": "看谁在买卖这家公司",
-    "mission_hkex_filings": "看港股公司每天回购了多少、董事有没有增减持",
-    "conviction_call": "提出值得下注的判断，等你裁决",
-    "mission_conviction": "提出值得下注的判断，等你裁决",
+    "guidepoint_discovery": "检索第三方专家访谈纪要库",
+    "mission_sec_quarters": "提取 SEC 季度财务报表核心数据",
+    "mission_statements": "获取完整财务三张表",
+    "mission_market_prices": "同步每日收盘行情与成交量",
+    "mission_tracking": "持续跟踪已覆盖公司",
+    "mission_catalyst_calendar": "跟踪业绩披露、投资者交流日与静默期日程",
+    "mission_consensus": "同步卖方一致预期",
+    "company_model_spec": "定义公司财务模型科目与驱动框架",
+    "mission_model_spec": "定义公司财务模型科目与驱动框架",
+    "company_model_forecast": "测算财务预测科目与衍生指标",
+    "mission_model_forecast": "测算财务预测科目与衍生指标",
+    "forecast_sensitivity": "核心假设敏感性分析与历史区间回测",
+    "mission_sensitivity": "核心假设敏感性分析与历史区间回测",
+    "claim_index": "构建研究论点与证据索引库",
+    "mission_claim_index": "构建研究论点与证据索引库",
+    "research_plan": "制定下一步研究计划",
+    "initial_screen": "起草初步研究筛查报告",
+    "event_judgement": "评估最新市场动态对投资观点的影响",
+    "mission_event_judgement": "评估最新市场动态对投资观点的影响",
+    "earnings_season": "财报前瞻与业绩对标复盘",
+    "debate_map": "梳理市场核心分歧与差异化观点",
+    "mission_debate_map": "梳理市场核心分歧与差异化观点",
+    "debate_map_verifier": "独立核验市场分歧分析",
+    "mission_crowd_sources": "监测散户舆情与职场评价",
+    "mission_stage": "记录并推进研究阶段",
+    "claim_review": "复核既有研究结论",
+    "sales_notes_feed": "精读卖方销售快报与晨会纪要",
+    "company_wiki_feed": "提取公司知识库与深度访谈纪要",
+    "prior_research": "检索内部历史投研资料",
+    "research_task": "开展专项研究",
+    "mission_annual_research": "基于已获取年报开展专题研究",
+    "mission_document_research": "基于已获取原文开展专题研究",
+    "mission_reflection": "复盘每周投研资源分配",
+    "company_dossier": "编纂公司深度投研档案",
+    "deep_insight_gate": "完成深度认知十二问并提交人工决策",
+    "mission_ownership": "追踪机构持仓与高管交易披露",
+    "mission_hkex_filings": "监测港股回购与董事增减持披露",
+    "conviction_call": "形成核心投资建议并提交人工决策",
+    "mission_conviction": "形成核心投资建议并提交人工决策",
     "conviction_call_verifier": "独立核验投资判断",
-    "mission_reopen": "看已过闸的公司够不够重写一版",
-    "catalog_sync": "跟住网关有哪些模型可用",
-    "industry_framework": "写行业框架：因果链、驱动、五家横向对比",
-    "model_stage_bridge": "核对行业与公司模型，推进研究阶段",
-    "investment_memo": "起草投资备忘录，独立核验后交给你裁决",
-    "zero_base_review": "每月从零重问：今天第一次看会不会建立观点",
+    "mission_reopen": "评估已通过阶段评审的报告是否需要更新",
+    "catalog_sync": "同步可用模型目录",
+    "industry_framework": "构建行业分析框架与多标的横向对比",
+    "model_stage_bridge": "校验行业与公司模型勾稽并推进研究阶段",
+    "investment_memo": "起草投资备忘录，经独立复核后提交人工决策",
+    "zero_base_review": "月度归零复核：降低锚定偏差并重估投资假设",
 }
 # Already shown by name above the registry rows, with their budgets.
 LANES_SHOWN_ELSEWHERE = frozenset({"mission_source_discovery", "document_extraction"})
@@ -251,8 +252,8 @@ LANES_SHOWN_ELSEWHERE = frozenset({"mission_source_discovery", "document_extract
 # The panel is a count of the rows already on the page, not a second reading of
 # the heartbeat: the number in the tile and the rows below it cannot disagree.
 LANE_STATUS_BUCKETS: dict[str, str] = {
-    "ungranted": "还没授权", "unconfigured": "没装", "unapproved": "等你批准",
-    "idle": "闲着", "running": "在跑", "held": "卡住了",
+    "ungranted": "缺少任务授权", "unconfigured": "尚未配置", "unapproved": "等待审批",
+    "idle": "本轮无待办", "running": "正在运行", "held": "暂停重试",
 }
 # Which lane status word falls in which bucket.  A word this table has never
 # seen is counted under ``other`` rather than silently dropped -- an
@@ -279,12 +280,12 @@ DEPENDENCY_LABELS: dict[str, str] = {
     "market_data": "行情源（yfinance）",
     "openclaw": "OpenClaw 网关",
     "model": "模型服务",
-    "model_budget": "今天的模型额度",
+    "model_budget": "模型调用预算",
     "quota": "数据源配额",
     "transport": "网络 / 连接器",
     "writer_rpc": "写入服务（重启中或忙）",
     "source": "外部数据源",
-    "unknown": "说不出名字的依赖（原文见明细）",
+    "unknown": "未识别的依赖（原始记录见技术详情）",
 }
 FAILURE_CLASS_LABELS: dict[str, str] = {
     "dependency_unavailable": "依赖不可用：等它回来，不算重试次数",
@@ -1932,7 +1933,7 @@ class CockpitPlane:
             elif blocked:
                 note = "能拿到的资料齐了；" + blocked[0]["note"]
             else:
-                note = "资料底座齐了，等着写初步筛选"
+                note = "资料底座齐了，等着起草初步研究筛查报告"
             deliverable = documents.get(company_ref)
             if deliverable is not None:
                 deliverable = {
@@ -2764,19 +2765,20 @@ class CockpitPlane:
                 # the honest word is not "idle" and not "failed": it is
                 # "waiting for you".
                 status = "unapproved"
-                note = f"数据源已经装好，等你批准（{record}）"
+                note = "数据源配置已安装，等待审批"
+                detail = f"{detail}；governance_record={record}" if detail else f"governance_record={record}"
             if note is None:
                 # A status this panel has no sentence for. Shown rather than
                 # hidden, because a lane nobody can read about is the thing
                 # this panel exists to stop -- but it is a gap here, not a
                 # lane's fault, and the raw word is all there is to show.
-                note = f"状态：{status}"
+                note = "出现尚未识别的运行状态，原始状态见技术详情"
             skipped = result.get("skipped")
             if isinstance(skipped, list) and skipped:
                 reasons = [str(item.get("reason")) for item in skipped
                            if isinstance(item, Mapping) and item.get("reason")]
                 if reasons:
-                    joined = "skipped: " + ", ".join(sorted(set(reasons))[:3])
+                    joined = "跳过原因：" + "；".join(sorted(set(reasons))[:3])
                     detail = f"{detail}；{joined}" if detail else joined
             rows.append({"key": f"lane:{key}", "label": label, "status": status,
                          "note": note[:200], "detail": (detail[:300] or None),
@@ -3569,7 +3571,7 @@ class CockpitPlane:
                 )
             except CompanyResearchViewValidationError as exc:
                 raise CockpitError(
-                    "这个 Core 还没有给结论建索引，按主题或来源筛选在这里答不了"
+                    "这个 Core 还没有构建研究论点与证据索引库，按主题或来源筛选在这里答不了"
                     if not indexed else f"筛选条件不对：{exc}"
                 ) from exc
         # Most important first, then newest: a company report outranks a news
@@ -4881,6 +4883,7 @@ class CockpitPlane:
             "calls and public web pages, and a list of the sub-tasks the system will run. Keep the language of the owner",
             "(Chinese if they wrote Chinese). If the owner names companies that are not under coverage, list them under",
             "suggested_companies with a reason; the coverage list itself is changed separately by the owner.",
+            *final_text_instructions(),
             "Return raw JSON only, no markdown fence:",
             '{"summary": "<2-3 sentences telling the owner what you understood and what the system will do>",',
             ' "title": "...", "objective": "...", "research_questions": ["..."], "subtasks": ["..."],',
@@ -4895,6 +4898,7 @@ class CockpitPlane:
             "mission's research questions (add or remove whole questions) and, if the direction changes the goal itself,",
             "a reworded objective. Keep the owner's language. Anything the owner asks that these levers cannot do",
             "(new data sources, new companies, budgets, tools) goes under not_possible so the owner knows.",
+            *final_text_instructions(),
             "Return raw JSON only, no markdown fence:",
             '{"summary": "<2-3 sentences: what will change and why>", "understood_as": "<one sentence restating the instruction>",',
             ' "add_questions": ["..."], "remove_questions": ["<verbatim existing question>"], "objective": "<unchanged or reworded>",',

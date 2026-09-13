@@ -57,7 +57,7 @@ class RenderTests(unittest.TestCase):
         ])
         text = render_model_inputs(self.table(ledger, _spec(expenses=[])))
         self.assertIn("150.0*", text)
-        self.assertIn("derived from cumulative", text)
+        self.assertIn("表示累计值推导", text)
 
     def test_a_split_line_is_marked_and_the_split_is_listed_by_name(self):
         spec = _spec(expenses=[
@@ -71,7 +71,7 @@ class RenderTests(unittest.TestCase):
              "because": "Bought-in delivery flexes."},
         ])
         text = render_model_inputs(self.table(spec=spec))
-        self.assertIn("[split]", text)
+        self.assertIn("[拆分项]", text)
         self.assertIn("delivery-staff, subcontractors", text)
 
     def test_rows_needing_estimates_are_named_not_counted(self):
@@ -82,12 +82,12 @@ class RenderTests(unittest.TestCase):
         }])
         text = render_model_inputs(self.table(spec=spec))
         self.assertIn("billable-capacity", text)
-        self.assertIn("estimated -- no filed counterpart", text)
+        self.assertIn("待估算：无对应披露科目", text)
 
     def test_the_filed_history_and_the_model_rows_are_separate_blocks(self):
         text = render_model_inputs(self.table())
-        self.assertLess(text.index("FILED HISTORY"), text.index("MODEL ROWS"))
-        self.assertIn("WHAT IS STILL MISSING", text)
+        self.assertLess(text.index("已披露历史"), text.index("模型科目"))
+        self.assertIn("仍待补齐", text)
 
     def test_a_period_a_line_does_not_reach_is_blank_not_zero(self):
         ledger = FakeMissions([
@@ -115,7 +115,7 @@ class RenderTests(unittest.TestCase):
                        "basis_concept": "us-gaap:CostOfGoodsAndServicesSold",
                        "behaviour": "variable_with_revenue", "driver_ref": None,
                        "because": "It follows revenue."}])))
-        self.assertIn("  nothing", text.split("WHAT IS STILL MISSING")[1])
+        self.assertIn("  无", text.split("仍待补齐")[1])
 
 
 if __name__ == "__main__":

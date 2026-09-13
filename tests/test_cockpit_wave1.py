@@ -233,7 +233,7 @@ class OldCoreTests(Wave1Case):
         # conclusion about their own data.
         with self.assertRaises(CockpitError) as caught:
             self.plane.claims(index_aspect="demand_drivers")
-        self.assertIn("还没有给结论建索引", str(caught.exception))
+        self.assertIn("还没有构建研究论点与证据索引库", str(caught.exception))
 
     def test_asking_for_a_model_that_does_not_exist_says_so(self) -> None:
         with self.assertRaises(CockpitError):
@@ -561,7 +561,7 @@ class LaneVocabularyTests(Wave1Case):
         lanes = self.lanes({"claim_index": {
             "status": "idle", "reason": "every claim is indexed"}})
         row = lanes["lane:claim_index"]
-        self.assertEqual((row["status"], row["label"]), ("idle", "给结论建索引"))
+        self.assertEqual((row["status"], row["label"]), ("idle", "构建研究论点与证据索引库"))
 
     def test_ungranted_is_not_idle_and_the_note_is_not_the_driver_s_english(self) -> None:
         lanes = self.lanes({
@@ -574,12 +574,12 @@ class LaneVocabularyTests(Wave1Case):
         self.assertEqual(row["status"], "ungranted")
         # The note is the owner's sentence; the driver's own words are the
         # right sentence in the wrong place, so they go to a detail line.
-        self.assertEqual(row["note"], "研究目标还没授权它写入，所以一次也没跑")
+        self.assertEqual(row["note"], "当前研究目标尚未授权该流程写入")
         self.assertNotIn("may_write", row["note"])
         self.assertIn("market_price", row["detail"])
         idle = lanes["lane:company_model_forecast"]
         self.assertEqual((idle["status"], idle["note"]),
-                         ("idle", "装好了，这一轮没有要做的"))
+                         ("idle", "配置正常，本轮没有待办"))
         self.assertEqual(idle["detail"], "nothing to do")
 
     def test_every_note_the_panel_can_show_is_in_the_owner_s_language(self) -> None:
@@ -600,7 +600,7 @@ class LaneVocabularyTests(Wave1Case):
             "skipped": [{"company_ref": ACN, "reason": "recently_current"},
                         {"company_ref": CTSH, "reason": "current"}],
         }})["lane:mission_market_prices"]
-        self.assertEqual(row["note"], "装好了，这一轮没有要做的")
+        self.assertEqual(row["note"], "配置正常，本轮没有待办")
         self.assertIn("recently_current", row["detail"])
 
     def test_a_lane_that_never_ran_says_so_rather_than_reading_as_idle(self) -> None:
@@ -621,7 +621,8 @@ class LaneVocabularyTests(Wave1Case):
                                                       "reason": "no approved record"}})
         row = lanes["lane:mission_market_prices"]
         self.assertEqual(row["status"], "unapproved")
-        self.assertIn("yfinance-daily-prices-v1.json", row["note"])
+        self.assertEqual(row["note"], "数据源配置已安装，等待审批")
+        self.assertIn("yfinance-daily-prices-v1.json", row["detail"])
         # Approving it in place puts the lane back to what the tick reports.
         (governance / "yfinance-daily-prices-v1.json").write_text(
             json.dumps({"id": "connector-governance:yfinance-daily-prices:v1",
@@ -812,7 +813,7 @@ class RouteTests(unittest.TestCase):
         self.assertTrue(value["enabled"])
         self.assertEqual(plane.seen, {
             "company_ref": ACN, "index_aspect": "demand_drivers",
-            "importance": "filing", "canonical_only": False, "limit": 50})
+            "importance": "filing", "canonical_only": False, "limit": 50, "cursor": None})
 
     def test_canonical_only_is_on_unless_it_is_turned_off(self) -> None:
         class Plane:
