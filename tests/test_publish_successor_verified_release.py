@@ -316,6 +316,29 @@ class SuccessorPublisherTests(unittest.TestCase):
         self.assertEqual((owner / "current-release.json").read_bytes(), release_after)
         self.assertEqual((owner / "current-runtime-config.json").read_bytes(), runtime_after)
 
+    def test_retry_after_both_pointers_advanced_does_not_require_waiting_checkpoint(self):
+        packet, owner, state, manifest, artifacts, accepted, args = self.fixture()
+        with self.verified_context((packet, owner, state, manifest, artifacts, accepted, args)):
+            publish.publish(**args)
+        args["receipt_path"].unlink()
+        # Represents the publication worker legally advancing immediately after
+        # the exact pointer pair became visible. A fresh finalizer would reject
+        # its no-longer-waiting checkpoint, so this seam must not invoke it.
+        with patch.object(publish.execute, "packet_preflight",
+                          return_value=(manifest, artifacts)), \
+             patch.object(publish.finalizer, "finalize",
+                          side_effect=AssertionError("fresh waiting check is stale")), \
+             patch.object(publish, "expected_transition_state",
+                          return_value=(json.loads((packet / "models.after.json").read_text()),
+                                        {"policy": "active"},
+                                        {"schema_version": "0.1", "enabled": True})), \
+             patch.object(publish.execute.r11, "STATE", state), \
+             patch.object(publish.execute.r11, "current_models",
+                          return_value=json.loads((packet / "models.after.json").read_text())):
+            result = publish.publish(**args)
+        self.assertEqual(result["status"], "publication_already_complete")
+        self.assertTrue(args["receipt_path"].is_file())
+
 
 if __name__ == "__main__":
     unittest.main()

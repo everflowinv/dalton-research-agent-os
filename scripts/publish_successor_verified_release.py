@@ -207,21 +207,6 @@ def publish(
 
     with tempfile.TemporaryDirectory(prefix=".successor-publish-check-", dir=packet) as raw:
         check = Path(raw)
-        verified = finalizer.finalize(
-            packet, deployment_path, health_path, installed_path,
-            check / "runtime-verification.json", check / "post-observation.log")
-        need(
-            verified["status"] == "passed_pending_publication"
-            and verified["source_commit"] == commit
-            and verified["candidate_manifest_sha256"] == expected_manifest_sha256
-            and verified["deployment_receipt_sha256"] == expected_deployment_sha256
-            and verified["health_summary_sha256"] == expected_health_sha256
-            and verified["installed_verification_sha256"] == expected_installed_sha256
-            and canonical_hash(verified["runtime_verification"])
-                == canonical_hash(accepted["runtime_verification"]),
-            "fresh publication verification differs from accepted finalization",
-        )
-
         expected_models, expected_document, expected_lane = expected_transition_state(
             packet_root=packet,
             manifest=execute.load_json(artifacts["transition_manifest"]),
@@ -316,6 +301,30 @@ def publish(
 
         current_release_bytes = regular_bytes(current_release, "current release pointer")
         current_runtime_bytes = regular_bytes(current_runtime, "current runtime config pointer")
+        pointers_already_published = (
+            current_release_bytes == release_after
+            and current_runtime_bytes == runtime_after)
+        # Before first publication the worker must still be behind its release
+        # gate, so retain the fresh finalizer and its waiting-checkpoint proof.
+        # Once both exact pointers are durable the worker is allowed to advance
+        # that checkpoint.  A crash before the receipt must therefore recover
+        # from the accepted finalization plus the exact derived pointer pair,
+        # without demanding a state that publication itself intentionally ends.
+        if not pointers_already_published:
+            verified = finalizer.finalize(
+                packet, deployment_path, health_path, installed_path,
+                check / "runtime-verification.json", check / "post-observation.log")
+            need(
+                verified["status"] == "passed_pending_publication"
+                and verified["source_commit"] == commit
+                and verified["candidate_manifest_sha256"] == expected_manifest_sha256
+                and verified["deployment_receipt_sha256"] == expected_deployment_sha256
+                and verified["health_summary_sha256"] == expected_health_sha256
+                and verified["installed_verification_sha256"] == expected_installed_sha256
+                and canonical_hash(verified["runtime_verification"])
+                    == canonical_hash(accepted["runtime_verification"]),
+                "fresh publication verification differs from accepted finalization",
+            )
         if current_release_bytes == release_after and current_runtime_bytes == runtime_after:
             exclusive_or_exact(receipt_path, receipt_bytes)
             return {**receipt, "status": "publication_already_complete"}
