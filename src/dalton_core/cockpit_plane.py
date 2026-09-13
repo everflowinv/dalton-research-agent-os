@@ -2267,11 +2267,14 @@ class CockpitPlane:
             return {**dict(record), "sections": [],
                     "publication_status": "pending_language_review",
                     "display_reason": "正文正在进行语言检查，完成后会在这里显示。"}
+        from .research_gap_display import gap_display_text
         sections = []
         for original, display in zip(record.get("sections") or [], shown["sections"]):
             sections.append({**original, "title": display["title"],
                              "body": display["body"],
-                             "gaps": list(display.get("gaps") or [])})
+                             "gaps": list(display.get("gaps") or []),
+                             "display_gaps": [gap_display_text(gap)
+                                              for gap in display.get("gaps") or []]})
         return {**dict(record), "sections": sections,
                 "publication_status": "ready",
                 "localization": shown.get("localization")}
