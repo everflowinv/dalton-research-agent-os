@@ -174,7 +174,7 @@ class CockpitPanelTests(unittest.TestCase):
         })
         self.assertTrue(found["available"])
         labels = {row["outcome"]: row["label"] for row in found["rows"]}
-        self.assertEqual(labels["should_have_moved"], "当时该动没动（候选）")
+        self.assertEqual(labels["should_have_moved"], "当时应调整但未调整（候选）")
         self.assertEqual(set(labels), {"should_have_moved", "held", "moved_right"})
         self.assertEqual(found["rows"][0]["this_week"], 1)
         self.assertIn("不是绩效考核", found["note"])
