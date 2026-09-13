@@ -81,3 +81,46 @@ and an overlength event signal. Those are evidence and output-quality outcomes;
 they do not justify weakening the precheck. Quality scores and Deep Insight
 decisions are downstream of a gate draft. Journal entries require analyst
 feedback and remain expected-zero until a reviewable product exists.
+
+## P3 source activation and P5 analyst surfaces
+
+The active source engine is substantial but concentrated. Core holds 55
+AlphaEngine discoveries across five companies, 132 public-web discoveries
+across five, and five SEC discoveries. Document inventory includes 640 acquired
+AlphaEngine, 967 acquired public-web, and 25 acquired SEC documents. Review
+backlogs remain large: 141 AlphaEngine, 305 public-web, and 11 SEC reviews await
+human extraction; another 144, 276, and 10 respectively are staged.
+
+Guidepoint search and transcript governance are approved and the installed
+writer has its search governance, plan, and endpoint arguments, but Core holds
+no Guidepoint connector profile, invocation, discovery, or document authority.
+The narrower transcript governance remains proposed. This is an activation and
+endpoint-access dependency; current evidence does not establish a compiler or
+lane defect. Company wiki and prior research have no installed writer arguments,
+no corpus/profile authority, and zero prior models. They require owner-supplied
+corpora and configuration. Sales-note arguments are installed, but both
+governance records remain proposed. IR-page governance is also proposed. These
+sources must not be activated by treating configuration presence as approval.
+
+Management-transcript events exist for ACN (11), EPAM (16), IBM (16), and DXC
+(17); CTSH has none because it has not passed Initial Screen. Sell-side event
+coverage exists for ACN (12), IBM (20), and DXC (20), but not CTSH or EPAM.
+Consensus versions exist for all five companies (29 total), while report-derived
+consensus covers only one company and the rest rely on vendor observations.
+This is usable market context with an explicit breadth/authority limitation.
+
+Ask v2 code can assemble dossiers, debates, forecasts, consensus, catalysts,
+events, judgements, reflections, valuation, prices, and analyst feedback. Live
+data leaves valuation, price, and journal blocks empty; CTSH also lacks a
+dossier and event history. There is no published answer-sufficiency policy in
+Core, so policy-bound direct/refresh routing cannot claim readiness. Publishing
+that policy and any refresh admission remains a governance step; the context
+reader must continue to label absent blocks rather than fill them from prose.
+
+Weekly Brief is live authority rather than missing code: three issues and three
+deliveries exist, with one feedback record. The latest issue (content hash
+`074a00f42b7242762f9445d540c5e1de87fcd76013e3dc8b23f5a767a7b6ae98`)
+binds five companies, five carried claims, five open questions, eight sections,
+and five thesis bindings, but contains zero new claims and zero changed theses.
+Its next quality improvement depends on newly admitted source/product authority;
+regenerating the same inputs would create activity without new insight.
