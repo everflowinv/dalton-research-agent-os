@@ -124,11 +124,11 @@ def granted_scope(mission: Mapping[str, Any]) -> str | None:
 def screened_companies(missions: Any, mission: Mapping[str, Any]) -> list[str]:
     """Companies whose Initial Screen has passed, in mission priority order."""
 
-    passed = {
-        record["company_ref"]
-        for record in missions.stage_records(mission["id"])
-        if record["stage_ref"] == "initial_screen" and record["status"] == "gate_passed"
-    }
+    # Stage progress belongs to the mission, rather than only to the active
+    # version that happened to record it.  The authority owns the folded,
+    # monotone ladder semantics, including reopened and later failed gates.
+    passed = set(missions.companies_at_or_past(
+        "deep_insight_gate", mission["mission_ref"]))
     return [
         str(member["company_ref"])
         for member in mission.get("universe") or []

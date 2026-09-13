@@ -52,3 +52,32 @@ unchanged. After release acceptance, IBM needs one normal new-identity run and
 then the same read-only spec/model audit. Product acceptance still requires
 dossiers for CTSH, quality scoring, deep-insight decisions, conviction, price,
 valuation, and journal authorities; child or wrapper success is insufficient.
+
+## P2 zero-product classification
+
+The live mission v14 grants the relevant product scopes and checkpoints, and
+the installed writer carries Deep Insight producer, verifier and policy
+arguments, plus conviction and market-price configuration. Empty authorities
+are not explained by missing runtime switches.
+
+Deep Insight has an executable eligibility defect. Seven runs ended
+`no_screened_company`, with reason hash
+`ef36d268859b1c8194f6396f3351a6537af62cf0a01705b33cbb38fe735e4f6c`.
+The active v14 mission has no stage rows, while ACN, EPAM, IBM, and DXC passed
+Initial Screen under v13. The selector reads only the active version even
+though the mission authority defines stage progress as folded across a
+`mission_ref`. The bounded correction is to use that authority-owned folded
+ladder and retain its reopen/failure semantics.
+
+Market price and valuation are blocked by expected governance. All five price
+attempts refused the unapproved yfinance governance record with reason hash
+`59240022068918e94c1273eb6f156fc668548f51aad1cffe566bc1055bdbd044`;
+valuation has no price authority to consume. This requires source-governance
+approval or replacement, not a validator waiver.
+
+Conviction is configured and executed eleven times. Its deterministic refusal
+classes were unsupported cited market view, absence of a real disagreement,
+and an overlength event signal. Those are evidence and output-quality outcomes;
+they do not justify weakening the precheck. Quality scores and Deep Insight
+decisions are downstream of a gate draft. Journal entries require analyst
+feedback and remain expected-zero until a reviewable product exists.
