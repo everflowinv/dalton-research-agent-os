@@ -378,7 +378,7 @@ class StructuredCashFlowCompanionTests(unittest.TestCase):
         self.assertEqual(
             historical["line_outcomes"]["result:free_cash_flow"]["value"], "368")
         report = render_forecast_model(held, annual_projection=annual)
-        self.assertIn("Free cash flow", report)
+        self.assertIn("自由现金流", report)
 
     def test_annual_cash_cells_keep_every_accession_and_derived_operand(self):
         inputs, spec, _structure, _replay, _binding = authorities()

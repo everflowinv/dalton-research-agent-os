@@ -812,7 +812,7 @@ class RenderTests(unittest.TestCase):
         self.assertIn("carried forward unchanged", text)
         self.assertIn("1,464.1", text)
         # An unavailable result prints its reason where its number would be.
-        self.assertIn("状态：unavailable；原因：the specification marks the cash flow statement",
+        self.assertIn("状态：暂无结果；原因：the specification marks the cash flow statement",
                       text)
         self.assertIn(" |", text)
 
@@ -864,11 +864,11 @@ class RenderTests(unittest.TestCase):
         })
         text = render_forecast_model(record)
         eps_history = next(line for line in text.splitlines()
-                           if line.startswith("  Diluted EPS [eps]"))
+                           if line.startswith("  摊薄每股收益 [eps]"))
         score = next(line for line in text.splitlines()
                      if line.startswith("  Custom score [other]"))
         eps_result = next(line for line in text.splitlines()
-                          if line.startswith("  Diluted EPS") and "[eps]" not in line)
+                          if line.startswith("  摊薄每股收益") and "[eps]" not in line)
         self.assertIn("3.03", eps_history)
         self.assertIn("42.00", score)
         self.assertIn("3.25", eps_result)
