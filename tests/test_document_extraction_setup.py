@@ -94,6 +94,43 @@ class ExtractionSetupTests(unittest.TestCase):
                     install(config_path)
                 self.assertEqual(target.read_bytes(), before)
 
+    def test_invalid_existing_ref_refuses_route_change_before_router_append(self) -> None:
+        for existing_ref in (
+            "model-routing-policy-version:missing:1",
+            "model-routing-policy-version:other:1",
+        ):
+            with self.subTest(existing_ref=existing_ref), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory); config_path = _service(root)
+                install(config_path, profile_ids=["profile:deepseek-v4-flash"])
+                target = root / "state" / CONFIG_FILE_NAME
+                wire = json.loads(target.read_text())
+                if existing_ref.endswith("other:1"):
+                    with ModelRouter(str(root / "state" / "model-router.sqlite")) as router:
+                        other = router.get_policy(wire["routing_policy_ref"])
+                        other = {k: v for k, v in other.items() if k != "content_hash"}
+                        other.update({"id": "model-routing-policy:other",
+                                      "policy_version_ref": existing_ref})
+                        other["content_hash"] = content_hash(other)
+                        router.register_policy(other)
+                wire["routing_policy_ref"] = existing_ref
+                target.write_text(json.dumps(wire))
+                before = target.read_bytes()
+                router_path = root / "state" / "model-router.sqlite"
+                with ModelRouter(str(router_path)) as router:
+                    count_before = router.connection.execute(
+                        "SELECT COUNT(*) FROM model_routing_policy_versions"
+                    ).fetchone()[0]
+                with self.assertRaises(Exception):
+                    install(config_path, profile_ids=[
+                        "profile:deepseek-v4-flash", "profile:gemini-3-7-flash",
+                    ])
+                with ModelRouter(str(router_path)) as router:
+                    count_after = router.connection.execute(
+                        "SELECT COUNT(*) FROM model_routing_policy_versions"
+                    ).fetchone()[0]
+                self.assertEqual(count_after, count_before)
+                self.assertEqual(target.read_bytes(), before)
+
     def test_duplicate_latest_does_not_preserve_structurally_stale_prior_ref(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); config_path = _service(root)

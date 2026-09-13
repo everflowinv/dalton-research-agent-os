@@ -145,18 +145,25 @@ def install(
     state_dir = Path(service["core_db"]).parent
     router_db = str(Path(service["model_router_db"]).resolve())
     target = state_dir / CONFIG_FILE_NAME
+    from .budget_config_install import preserved_budget_overrides
+    budget_overrides = preserved_budget_overrides(target)
     with ModelRouter(router_db) as router:
-        policy = ensure_extraction_policy(
-            router, profile_ids=list(profile_ids) if profile_ids else None,
-            now=now, tier=tier)
-        routing_policy_ref = policy["policy_version_ref"]
-        if policy.get("status") == "duplicate" and target.exists():
+        existing_ref = None
+        existing_policy = None
+        if target.exists():
             existing = json.loads(target.read_text(encoding="utf-8"))
+            if not isinstance(existing, dict):
+                raise ValueError("existing extraction config is not an object")
             existing_ref = existing.get("routing_policy_ref")
             existing_policy = router.get_policy(existing_ref)
             if existing_policy.get("id") != POLICY_ID:
                 raise ValueError(
                     "existing extraction config names a different routing policy")
+        policy = ensure_extraction_policy(
+            router, profile_ids=list(profile_ids) if profile_ids else None,
+            now=now, tier=tier)
+        routing_policy_ref = policy["policy_version_ref"]
+        if policy.get("status") == "duplicate" and existing_policy is not None:
             latest_policy = router.get_policy(policy["policy_version_ref"])
             structural_fields = (
                 "filters", "ordered_preferences", "fallback_chains",
@@ -176,8 +183,6 @@ def install(
             credential_slots = credential_slots_for(
                 router, list(tier_chain(tier)),
                 policy_version_ref=routing_policy_ref)
-    from .budget_config_install import preserved_budget_overrides
-    budget_overrides = preserved_budget_overrides(target)
     model_config = validate_model_config({
         "routing_policy_ref": routing_policy_ref,
         "credential_slot_refs": list(credential_slots or DEFAULT_CREDENTIAL_SLOTS),
