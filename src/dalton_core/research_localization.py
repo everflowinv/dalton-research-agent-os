@@ -261,7 +261,11 @@ def _number_differences(source_values: Sequence[str], target_values: Sequence[st
             if (re.search(r"\bbook[- ]to[- ]bill\b", sentence, re.I)
                     and re.search(r"\babove[- ]parity\b", sentence, re.I)):
                 aliases["1"] += 1
-    added -= aliases
+    # A proved spelling alias may be repeated in a heading and its body,
+    # just like an Arabic source value above. Repetition adds no new value;
+    # the independent verifier still checks each value's economic meaning.
+    added = Counter({token: count for token, count in added.items()
+                     if not aliases[token]})
 
     source_joined_raw = " ".join(source_values)
     target_joined_raw = " ".join(target_values)
