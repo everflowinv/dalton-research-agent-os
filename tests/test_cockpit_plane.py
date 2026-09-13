@@ -244,6 +244,34 @@ class CockpitPlaneTests(unittest.TestCase):
             with self.assertRaises(CockpitError):
                 self.c.plane.claims(limit=2, cursor=malformed)
 
+    def test_claim_cursor_round_trips_real_nested_index_order(self) -> None:
+        company_ref = self.c.h.mission["universe"][0]["company_ref"]
+        rows = [{
+            "ref": f"claim:{n}", "statement": f"claim {n}",
+            "subject_ref": company_ref, "period": None,
+            "created_at": f"2026-09-0{n}T00:00:00+00:00",
+            "index_aspect": "company", "importance": "core",
+            "as_of": None, "as_of_basis": None, "is_canonical": True,
+            "index_order": (3, (0, f"7973-90-9{n}"),
+                            f"2026-09-0{n}T00:00:00+00:00", f"claim:{n}"),
+        } for n in (1, 2, 3)]
+        with patch("dalton_core.company_research_view.annotate_with_index",
+                   return_value=rows), patch(
+                       "dalton_core.claim_index_authority.table_exists",
+                       return_value=True):
+            first = self.c.plane.claims(company_ref=company_ref, limit=2)
+            second = self.c.plane.claims(company_ref=company_ref, limit=2,
+                                         cursor=first["next_cursor"])
+            self.assertEqual(first["returned_count"], 2)
+            self.assertEqual(second["returned_count"], 1)
+            self.assertIsNone(second["next_cursor"])
+            payload = json.loads(base64.urlsafe_b64decode(
+                first["next_cursor"] + "=" * (-len(first["next_cursor"]) % 4)))
+            payload["after"][0][1][0] = True
+            forged = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
+            with self.assertRaises(CockpitError):
+                self.c.plane.claims(company_ref=company_ref, limit=2, cursor=forged)
+
     def test_exit_zero_child_with_failed_product_summary_is_not_shown_done(self) -> None:
         for field, value in (("map_status", "refused"),
                              ("judgement_status", "refused"),

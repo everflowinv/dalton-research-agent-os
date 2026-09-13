@@ -3727,12 +3727,28 @@ class CockpitPlane:
                         or payload.get("filters") != fingerprint
                         or not isinstance(payload.get("after"), list)
                         or len(payload["after"]) != 3
-                        or not isinstance(payload["after"][0], int)
-                        or isinstance(payload["after"][0], bool)
                         or not all(isinstance(value, str) and len(value) <= 1024
                                    for value in payload["after"][1:])):
                     raise ValueError("cursor binding changed")
-                after = tuple(payload["after"])
+                raw_order = payload["after"][0]
+                if isinstance(raw_order, bool):
+                    raise ValueError("cursor order is invalid")
+                if isinstance(raw_order, int):
+                    index_order: Any = raw_order
+                elif (isinstance(raw_order, list) and len(raw_order) == 4
+                      and isinstance(raw_order[0], int)
+                      and not isinstance(raw_order[0], bool)
+                      and isinstance(raw_order[1], list) and len(raw_order[1]) == 2
+                      and isinstance(raw_order[1][0], int)
+                      and not isinstance(raw_order[1][0], bool)
+                      and raw_order[1][0] in {0, 1}
+                      and all(isinstance(value, str) and len(value) <= 1024
+                              for value in (raw_order[1][1], raw_order[2], raw_order[3]))):
+                    index_order = (raw_order[0], (raw_order[1][0], raw_order[1][1]),
+                                   raw_order[2], raw_order[3])
+                else:
+                    raise ValueError("cursor order is invalid")
+                after = (index_order, payload["after"][1], payload["after"][2])
             except (ValueError, KeyError, TypeError, UnicodeDecodeError,
                     binascii.Error, json.JSONDecodeError) as exc:
                 raise CockpitError("分页位置无效或筛选条件已经改变") from exc
