@@ -82,6 +82,7 @@ class ModelDeploymentTests(unittest.TestCase):
                 # profile for, plus the flash GLM the broker should offer.
                 ("claude-cli-gateway", "claude-fable-5-1"),
                 ("google", "gemini-3.8-flash"),
+                ("antigravity-cli-gateway", "gemini-3.8-flash"),
                 ("zai", "glm-5.3"),
                 ("zai", "glm-5.3-flash"),
             },

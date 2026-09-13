@@ -458,6 +458,23 @@ _ENDPOINTS: tuple[dict[str, Any], ...] = (
         "output_cost": 3.75,
     },
     {
+        # Owner-selected language checker through the host's Antigravity CLI.
+        # This is a distinct endpoint from google/gemini-3.8-flash even though
+        # both declare the same model family; transport identity is part of
+        # the profile and must remain visible in every route decision.
+        "name": "gemini-3-8-flash-antigravity",
+        "provider": "antigravity-cli-gateway",
+        "model": "gemini-3.8-flash",
+        "family": "google-gemini-3",
+        "credential_slot_ref": "credential-slot:openclaw:antigravity-cli-gateway",
+        "capabilities": ["research", "summarize", "format"],
+        "max_context_tokens": 1_048_576,
+        "max_output_tokens": 65_536,
+        "max_input_tokens": 983_040,
+        "input_cost": 0.75,
+        "output_cost": 3.75,
+    },
+    {
         # The broker's low-thinking twin of the 0731 route. Same model, same
         # family, a separate profile because the thinking level is part of what
         # was calibrated and a calibration is not transferable between them.
