@@ -319,7 +319,13 @@ class SuccessorCopiedStateRehearsalTests(unittest.TestCase):
         actual_ops = __import__("subprocess").check_output(
             ["git", "rev-parse", "HEAD"], text=True).strip()
         args.ops_code_commit = actual_ops
-        with patch("scripts.run_successor_copied_state_rehearsal._verify_frozen_source"), \
+        def frozen_ops_git(command, **_kwargs):
+            return "" if "status" in command else actual_ops + "\n"
+        with patch("scripts.successor_ops_binding.frozen_ops_binding",
+                   return_value={"fixture": "bound-ops"}), \
+             patch("scripts.run_successor_copied_state_rehearsal."
+                   "subprocess.check_output", side_effect=frozen_ops_git), \
+             patch("scripts.run_successor_copied_state_rehearsal._verify_frozen_source"), \
              patch("scripts.run_successor_copied_state_rehearsal._load_frozen_rehearsal",
                    return_value=FakeModule), \
              patch("scripts.run_successor_copied_state_rehearsal.expected_transition_state",
