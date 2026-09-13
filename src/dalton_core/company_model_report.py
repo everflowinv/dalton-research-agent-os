@@ -179,12 +179,12 @@ DRIVER_LABEL_WIDTH = 42
 HISTORY_COLUMNS = 4
 
 
-def _percent(value: Any) -> str:
+def _percent(value: Any, *, decimals: int = 2) -> str:
     try:
         number = Decimal(str(value)) * Decimal(100)
     except (InvalidOperation, ValueError, TypeError):
         return "?"
-    return f"{number:,.2f}%"
+    return f"{number:,.{decimals}f}%"
 
 
 def _visual_width(value: str) -> int:
@@ -244,7 +244,8 @@ def render_forecast_model(
     out.append(f"驱动模型  {title}")
     out.append(f"版本 {record.get('version')} · 更新原因：{show(str(record.get('change_reason') or '未记录'))}"
                + (f" · 决策：{show(str(record['decision']))}" if record.get("decision") else ""))
-    out.append("总额/数量单位为百万；每股/比率沿用标注单位；"
+    out.append("金额单位为百万美元；股数单位为百万股；每股数据以美元/股显示；"
+               "百分比显示到1位小数；"
                "* 表示由累计披露值推导")
     if realised:
         out.append(f"模型生成后新增披露：{', '.join(realised)}")
@@ -293,7 +294,7 @@ def render_forecast_model(
         out.append(_row(
             f"  {show(str(driver.get('label') or driver.get('ref')))}  [{measure}, {'/'.join(kinds)}]",
             ["" for _ in history],
-            [_percent(live[end]["value"]) if end in live else "--" for end in columns]))
+            [_percent(live[end]["value"], decimals=1) if end in live else "--" for end in columns]))
         for because in dict.fromkeys(
             str(item.get("because")) for item in rows
             if not item.get("superseded_by") and item.get("kind") != "actual"
@@ -301,7 +302,7 @@ def render_forecast_model(
             out.append(f"        依据：{show(because)}")
         for item in rows:
             if item.get("superseded_by"):
-                out.append(f"        当时假设 {_percent(item['value'])}，期间 "
+                out.append(f"        当时假设 {_percent(item['value'], decimals=1)}，期间 "
                            f"{item['period']['end']}：{show(str(item.get('because') or '未记录依据'))}")
 
     out.append("")

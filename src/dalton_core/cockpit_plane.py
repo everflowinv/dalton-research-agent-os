@@ -4066,8 +4066,10 @@ class CockpitPlane:
         def display_model_text(value: str) -> str:
             if value in model_text:
                 return model_text[value]
-            if any("\u4e00" <= char <= "\u9fff" for char in value):
-                return value
+            from .cockpit_model_display import native_chinese_model_text
+            native = native_chinese_model_text(value)
+            if native is not None:
+                return native
             return ("正文正在检查文字表达，完成后会显示。"
                     if review_required else value)
         return {

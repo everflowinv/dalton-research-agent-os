@@ -95,6 +95,9 @@ def field_label(value: Any, translate: Callable[[str], str] | None = None) -> st
     if raw.startswith(('result:', 'row:', 'driver:')):
         key = raw.split(':', 2)[1]
         return FIELD_LABELS.get(key, '模型项目（标识见技术详情）')
+    registered = model_metadata_text(raw)
+    if registered != raw:
+        return registered
     shown = translate(raw) if translate else raw
     return model_metadata_text(shown)
 
@@ -103,6 +106,32 @@ def model_metadata_text(value: Any) -> str:
     """Replace only registered accounting concepts and model field roles."""
 
     text = str(value or '')
+    fixed_notes = {
+        'the specification names no filed counterpart for this line':
+            '尚未关联这项指标的历史披露数据',
+        '规范中未为该科目指定已申报的对应项':
+            '尚未关联这项指标的历史披露数据',
+        'this concept holds no frozen model role, so nothing is computed from it':
+            '这项披露数据暂未用于预测计算',
+        '该概念没有冻结的模型角色，因此不据此计算任何数值':
+            '这项披露数据暂未用于预测计算',
+        'this concept is not in the statements held':
+            '现有财务报表中没有这项披露数据',
+        'this concept appears in more than one statement':
+            '这项披露数据同时出现在多张报表中，暂不用于预测计算',
+    }
+    for source, replacement in fixed_notes.items():
+        text = text.replace(source, replacement)
+    text = re.sub(
+        r"(\d+) specification rows split this filed line; the total is forecast and the split is not filed",
+        lambda match: f"模型将该科目拆成{match.group(1)}项；预测按合计数计算，尚无各分项的披露数据",
+        text,
+    )
+    text = re.sub(
+        r"规范中的(\d+)行对该已申报科目进行拆分；总额为预测值，拆分明细未申报",
+        lambda match: f"模型将该科目拆成{match.group(1)}项；预测按合计数计算，尚无各分项的披露数据",
+        text,
+    )
     text = text.replace(
         'Net income attributable to non-controlling interest, net of tax'
         '（归属于非控制性权益的净利润，税后）',
@@ -128,6 +157,18 @@ def model_metadata_text(value: Any) -> str:
     return text
 
 
+def native_chinese_model_text(value: Any) -> str | None:
+    """Accept native Chinese metadata, but not a mixed untranslated sentence."""
+
+    text = model_metadata_text(value)
+    if not any('\u4e00' <= char <= '\u9fff' for char in text):
+        return None
+    allowed = {'AI', 'IT', 'GAAP', 'EPS', 'FCF', 'USD', 'SG', 'A', 'NCI',
+               'Q', 'FY', 'EBIT', 'EBITDA'}
+    words = re.findall(r'[A-Za-z]+', text)
+    return text if all(word.upper() in allowed for word in words) else None
+
+
 def readiness_labels(record: Mapping[str, Any], readiness: Mapping[str, Any],
                      translate: Callable[[str], str]) -> dict[str, Any]:
     labels = {str(row['ref']): field_label(row.get('label') or row['ref'], translate)
@@ -146,10 +187,10 @@ def present_invariants(values: dict[str, dict[str, Any]]) -> dict[str, dict[str,
                 CHECK_LABELS.get(str(row.get('invariant')), '模型一致性检查') + '未通过。'
                 for row in item.get('failed') or []]
             if item.get('status') == 'unavailable' and not item['display_reasons']:
-                item['display_reasons'] = ['模型检查未通过，判定依据保存在技术详情中。']
+                item['display_reasons'] = ['模型检查暂无结论，具体原因保存在技术详情中。']
             item['display_not_checked'] = [{
                 'label': CHECK_LABELS.get(str(row.get('invariant')), '模型一致性检查'),
-                'findings': [REASON_LABELS.get(str(reason), '当前资料不足以执行此项检查，原始说明见技术详情。')
+                'findings': [REASON_LABELS.get(str(reason), '此项检查未完成，原始说明见技术详情。')
                              for reason in row.get('findings') or []],
             } for row in item.get('not_checked') or []]
     return values
