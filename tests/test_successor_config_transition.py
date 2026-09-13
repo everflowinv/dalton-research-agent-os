@@ -23,6 +23,7 @@ from scripts.prepare_successor_config_transition import (
     expected_preserved_openclaw_state, expected_service_transition_state,
 )
 from scripts.run_successor_copied_state_rehearsal import derive_confined_transition
+from scripts.execute_successor_stopped_window_candidate import expected_preserved_service_bytes
 
 
 def write(path: Path, value: object) -> None:
@@ -491,9 +492,9 @@ class PreserveExistingTransitionTests(unittest.TestCase):
         write(self.packet / "research-planner-model-config.json",
               self.models["research-planner-model-config.json"])
         write(self.packet / "models.json", self.models)
-        old = "/tmp/state/document-extraction-model-config.json"
+        old = str(self.state / "document-extraction-model-config.json")
         self.service_before["control"] = {"config": {"cockpit": {
-            "model_config_path": old}}}
+            "model_config_path": old, "core_db": str(self.state / "core.sqlite")}}}
         write(self.packet / "service.before.json", self.service_before)
         self.build_pure()
         return build_preserve_existing_transition(
@@ -533,6 +534,14 @@ class PreserveExistingTransitionTests(unittest.TestCase):
             service_config_path=self.service, external_config_path=openclaw)
         self.assertEqual("successor-config-transition-receipt-0.6",
                          receipt["schema_version"])
+        self.assertEqual(1, receipt["service_config_mutations"])
+        self.assertEqual(0, receipt["external_config_mutations"])
+        self.assertEqual(hashlib.sha256(openclaw.read_bytes()).hexdigest(),
+                         receipt["external_config_before_sha256"])
+        self.assertEqual(receipt["external_config_before_sha256"],
+                         receipt["external_config_after_sha256"])
+        self.assertEqual((json.dumps(after, ensure_ascii=False, indent=2) + "\n").encode(),
+                         expected_preserved_service_bytes(self.packet, manifest))
         self.assertEqual(after, json.loads(self.service.read_text()))
         self.assertEqual(0o600, self.service.stat().st_mode & 0o777)
         self.assertEqual((self.packet / "openclaw.preserved.json").read_bytes(),
@@ -543,6 +552,29 @@ class PreserveExistingTransitionTests(unittest.TestCase):
         manifest["service_transition"]["json_path"][-1] = "other"
         with self.assertRaisesRegex(ConfigTransitionError, "shape differs"):
             expected_service_transition_state(packet_root=self.packet, manifest=manifest)
+
+    def test_cockpit_brain_binding_rejects_model_path_outside_core_state(self):
+        self.models["research-planner-model-config.json"] = model("brain")
+        write(self.packet / "research-planner-model-config.json",
+              self.models["research-planner-model-config.json"])
+        write(self.packet / "models.json", self.models)
+        self.service_before["control"] = {"config": {"cockpit": {
+            "model_config_path": "/tmp/other/document-extraction-model-config.json",
+            "core_db": "/tmp/state/core.sqlite"}}}
+        write(self.packet / "service.before.json", self.service_before)
+        self.build_pure()
+        with self.assertRaisesRegex(ConfigTransitionError, "reviewed extraction baseline"):
+            build_preserve_existing_transition(
+                packet_root=self.packet, release_ref="bad", source_commit="d" * 40,
+                baseline_models_path=self.packet / "models.json",
+                model_config_paths={name: self.packet / name for name in self.models},
+                preserved_config_paths=self.preserved,
+                preserved_state_authority_paths={
+                    "connector-governance/yfinance-analyst-estimates-v1.json":
+                        self.packet / "yfinance-approved.json"},
+                service_config_before_path=self.packet / "service.before.json",
+                openclaw_config_before_path=self.packet / "openclaw.preserved.json",
+                cockpit_brain_binding=True)
 
     def build_writer_append(self):
         self.build_pure()

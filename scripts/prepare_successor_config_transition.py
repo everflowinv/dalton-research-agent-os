@@ -326,9 +326,14 @@ def _cockpit_brain_service_after(before: Mapping[str, Any]) -> dict[str, Any]:
         cursor = cursor[part]
     leaf = COCKPIT_MODEL_PATH[-1]
     old = cursor.get(leaf) if isinstance(cursor, dict) else None
-    _need(isinstance(old, str) and Path(old).name == EXTRACTION_MODEL_CONFIG,
+    core_db = before.get("control", {}).get("config", {}).get("cockpit", {}).get("core_db")
+    old_path = Path(old) if isinstance(old, str) else Path()
+    core_path = Path(core_db) if isinstance(core_db, str) else Path()
+    _need(old_path.is_absolute() and core_path.is_absolute()
+          and old_path.name == EXTRACTION_MODEL_CONFIG
+          and old_path.parent == core_path.parent,
           "cockpit model config is not the reviewed extraction baseline")
-    cursor[leaf] = str(Path(old).with_name(BRAIN_MODEL_CONFIG))
+    cursor[leaf] = str(old_path.with_name(BRAIN_MODEL_CONFIG))
     return after
 
 
@@ -1605,8 +1610,12 @@ def _apply_preserve_transition(
               and external_config_path.read_bytes() == expected_preserved_openclaw_state(
                   packet_root=packet_root, manifest=manifest),
               "OpenClaw config differs from reviewed preserved bytes")
+        preserved_openclaw_bytes = external_config_path.read_bytes()
         service_before_value, service_after_value = expected_service_transition_state(
             packet_root=packet_root, manifest=manifest)
+        _need(Path(service_after_value["control"]["config"]["cockpit"]["model_config_path"])
+              == state_dir / BRAIN_MODEL_CONFIG,
+              "cockpit brain target is not the installed model inventory path")
         _, service_before = _resolve_artifact(packet_root, service_row["before"])
         service_after = _json_bytes(service_after_value)
         delta = None
@@ -1729,6 +1738,10 @@ def _apply_preserve_transition(
             "preserved state authority changed during service transition")
         _need(service_config_path.read_bytes() == service_after,
               "installed service config differs from reviewed result")
+        if version == COCKPIT_BRAIN_SCHEMA_VERSION:
+            _need(external_config_path is not None
+                  and external_config_path.read_bytes() == preserved_openclaw_bytes,
+                  "OpenClaw config changed during cockpit service transition")
         receipt = {
             "schema_version": (COCKPIT_BRAIN_RECEIPT_SCHEMA_VERSION
                                if version == COCKPIT_BRAIN_SCHEMA_VERSION
@@ -1751,6 +1764,10 @@ def _apply_preserve_transition(
             "service_config_mutations": 1,
             "service_config_before_sha256": sha256_bytes(service_before),
             "service_config_after_sha256": sha256_bytes(service_after),
+            **({"external_config_mutations": 0,
+                "external_config_before_sha256": sha256_bytes(preserved_openclaw_bytes),
+                "external_config_after_sha256": sha256_bytes(preserved_openclaw_bytes)}
+               if version == COCKPIT_BRAIN_SCHEMA_VERSION else {}),
             "service_lifecycle_mutations": 0, "model_calls": 0,
             "manifest_publication": False,
         }

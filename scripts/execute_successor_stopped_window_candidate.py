@@ -16,6 +16,7 @@ import json
 import os
 import plistlib
 import re
+import stat
 import subprocess
 import zipfile
 from datetime import datetime, timezone
@@ -125,8 +126,8 @@ def expected_preserved_service_bytes(
     before, after = expected_service_transition_state(
         packet_root=packet, manifest=transition)
     if transition.get("schema_version") not in {
-            EXTERNAL_CAS_SCHEMA_VERSION, PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION,
-            COCKPIT_BRAIN_SCHEMA_VERSION}:
+            EXTERNAL_CAS_SCHEMA_VERSION, PURE_PRESERVE_SCHEMA_VERSION,
+            WRITER_APPEND_SCHEMA_VERSION}:
         return _json_bytes(after)
     need(before == after, "schema 0.3 service semantics are not preserved")
     row = transition["service_transition"]["before"]
@@ -765,8 +766,7 @@ class SuccessorOrchestrator(r11.Orchestrator):
                     expected_preserved_service_bytes(self.packet, transition)
                     if transition.get("schema_version") in {
                         EXTERNAL_CAS_SCHEMA_VERSION,
-                        PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION,
-            COCKPIT_BRAIN_SCHEMA_VERSION}
+                        PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION}
                     else _json_bytes(service_after)
                 )
                 stream.write(service_after_bytes); stream.flush(); os.fsync(stream.fileno())
@@ -878,6 +878,10 @@ class SuccessorOrchestrator(r11.Orchestrator):
         need(r11.SERVICE_CONFIG.read_bytes() == expected_service_bytes
              and r11.OPENCLAW.read_bytes() == expected_openclaw_bytes,
              "installer changed reviewed service result or preserved OpenClaw config")
+        if transition.get("schema_version") == COCKPIT_BRAIN_SCHEMA_VERSION:
+            need(r11.SERVICE_CONFIG.is_file() and not r11.SERVICE_CONFIG.is_symlink()
+                 and stat.S_IMODE(r11.SERVICE_CONFIG.stat().st_mode) == 0o600,
+                 "installed cockpit brain service config is not owner-only")
         need(load_json(r11.SERVICE_CONFIG).get("thesis_impact", {}).get("enabled") is False
              and not (r11.LAUNCH_AGENTS / "space.lumos.dalton.thesis-impact.plist").exists()
              and not self.loaded("space.lumos.dalton.thesis-impact"),
@@ -971,8 +975,7 @@ class SuccessorOrchestrator(r11.Orchestrator):
                 "service_config_mutations": (
                     0 if transition.get("schema_version") in {
                         EXTERNAL_CAS_SCHEMA_VERSION,
-                        PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION,
-            COCKPIT_BRAIN_SCHEMA_VERSION} else 1),
+                        PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION} else 1),
                 "external_config_mutations": (
                     1 if transition.get("schema_version")
                     == EXTERNAL_CAS_SCHEMA_VERSION else 0),

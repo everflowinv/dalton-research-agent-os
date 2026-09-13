@@ -22,8 +22,9 @@ from scripts.prepare_successor_config_transition import (
     DOCUMENT_CONFIG, EXTERNAL_CAS_SCHEMA_VERSION, LANE_CONFIG,
     OPENCLAW_FRAME_PATH, OPENCLAW_TARGET_MAX_FRAME_BYTES,
     PRESERVE_SCHEMA_VERSION, PURE_PRESERVE_SCHEMA_VERSION,
-    WRITER_APPEND_SCHEMA_VERSION,
-    _json_bytes, _record_hash, _service_after, _set_leaf,
+    WRITER_APPEND_SCHEMA_VERSION, COCKPIT_BRAIN_SCHEMA_VERSION,
+    BRAIN_MODEL_CONFIG, COCKPIT_MODEL_PATH,
+    _cockpit_brain_service_after, _json_bytes, _record_hash, _service_after, _set_leaf,
     _validated_service_delta,
     apply_transition_to_scratch, canonical_hash,
     expected_openclaw_frame_transition_state,
@@ -34,6 +35,7 @@ from scripts.prepare_successor_config_transition import (
 PRESERVE_SCHEMA_VERSIONS = {
     PRESERVE_SCHEMA_VERSION, EXTERNAL_CAS_SCHEMA_VERSION,
     PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION,
+    COCKPIT_BRAIN_SCHEMA_VERSION,
 }
 from scripts.run_release_copied_state_rehearsal import (
     RehearsalBindingError, _artifact, _canonical_sha256,
@@ -488,6 +490,37 @@ def derive_confined_transition(
             service_row["delta"] = {
                 "file": delta_path.name, "sha256": _sha(delta_path)}
             service_row["after_sha256"] = delta["expected_after_sha256"]
+        elif manifest.get("schema_version") == COCKPIT_BRAIN_SCHEMA_VERSION:
+            scratch_before = json.loads(service_before_path.read_text())
+            cockpit = scratch_before["control"]["config"]["cockpit"]
+            cockpit["model_config_path"] = str(
+                rehearsal.temp_state / "document-extraction-model-config.json")
+            cockpit["core_db"] = str(rehearsal.temp_state / "core.sqlite")
+            service_before_path.unlink()
+            _write_json(service_before_path, scratch_before)
+            service_row["before"] = {"file": service_before_path.name,
+                                     "sha256": _sha(service_before_path)}
+            scratch_after = _cockpit_brain_service_after(scratch_before)
+            service_row.update({
+                "before_value": scratch_before["control"]["config"]["cockpit"]["model_config_path"],
+                "after_value": scratch_after["control"]["config"]["cockpit"]["model_config_path"],
+                "after_sha256": hashlib.sha256(_json_bytes(scratch_after)).hexdigest(),
+                "target_model_config": {"name": BRAIN_MODEL_CONFIG,
+                    "sha256": confined_model_hashes[BRAIN_MODEL_CONFIG]},
+            })
+            original_external = manifest["external_config_transition"]
+            original_before = packet_root / original_external["before"]["file"]
+            _artifact(original_before, original_external["before"]["sha256"],
+                      "original preserved OpenClaw config")
+            scratch_openclaw = rehearsal.temp_root / "openclaw/openclaw.json"
+            _need(scratch_openclaw.is_file() and not scratch_openclaw.is_symlink()
+                  and scratch_openclaw.read_bytes() == original_before.read_bytes(),
+                  "confined OpenClaw baseline differs from preserved bytes")
+            confined_before = derived_root / "openclaw-config.preserved.json"
+            _write_exclusive(confined_before, scratch_openclaw.read_bytes())
+            derived["external_config_transition"]["before"] = {
+                "file": confined_before.name, "sha256": _sha(confined_before)}
+            derived["external_config_transition"]["after_sha256"] = _sha(confined_before)
         elif manifest.get("schema_version") == EXTERNAL_CAS_SCHEMA_VERSION:
             service_row["after_sha256"] = _sha(service_before_path)
 
@@ -660,7 +693,7 @@ def derive_confined_transition(
 def validate_successor_snapshots(
     module: Any, rehearsal: Any, *, expected_models: Mapping[str, Any],
     expected_document: Mapping[str, Any], expected_service: Mapping[str, Any],
-    expected_lane: Mapping[str, Any],
+    expected_lane: Mapping[str, Any], expected_service_mode: int | None = None,
 ) -> dict[str, Any]:
     models = _normalised_model_configs(module, rehearsal)
     service = _normalised_service_config(module, rehearsal)
@@ -684,6 +717,12 @@ def validate_successor_snapshots(
           "copied-state mission document lane configuration drifted")
     _need(service == expected_service,
           "copied-state preserved service configuration drifted")
+    if expected_service_mode is not None:
+        _need(rehearsal.temp_config.is_file()
+              and not rehearsal.temp_config.is_symlink()
+              and stat.S_IMODE(rehearsal.temp_config.stat().st_mode)
+                  == expected_service_mode,
+              "copied-state service configuration mode drifted")
     writer_plist = rehearsal.launch_agents_dir / "space.lumos.dalton.writer.plist"
     _need(writer_plist.is_file() and not writer_plist.is_symlink(),
           "copied-state writer LaunchAgent is unavailable")
@@ -831,7 +870,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             self.successor_openclaw = None
             if manifest.get("schema_version") in {
                     EXTERNAL_CAS_SCHEMA_VERSION, PURE_PRESERVE_SCHEMA_VERSION,
-                    WRITER_APPEND_SCHEMA_VERSION}:
+                    WRITER_APPEND_SCHEMA_VERSION, COCKPIT_BRAIN_SCHEMA_VERSION}:
                 self.successor_openclaw = self.temp_root / "openclaw/openclaw.json"
                 self.successor_openclaw.parent.mkdir(mode=0o700)
                 _write_exclusive(
@@ -945,7 +984,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     final = validate_successor_snapshots(
         module, rehearsal, expected_models=expected_models,
         expected_document=expected_document, expected_lane=expected_lane,
-        expected_service=expected_service)
+        expected_service=expected_service,
+        expected_service_mode=(0o600 if manifest.get("schema_version")
+                               == COCKPIT_BRAIN_SCHEMA_VERSION else None))
     if rehearsal.existing_install_authorities is not None:
         final["existing_install_authorities"] = (
             validate_existing_install_authorities(
