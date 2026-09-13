@@ -43,9 +43,12 @@ def format_display_number(value: object, *, kind: NumericKind) -> str:
 
 
 _HAN = re.compile(r"[\u3400-\u9fff]")
+_DECIMAL_TOKEN = r"[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?"
 _BASE_USD = re.compile(
-    r"(?i)(?P<prefix>\bUSD\s+)(?P<prefix_number>[+-]?\d[\d,]*(?:\.\d+)?)"
-    r"|(?P<suffix_number>[+-]?\d[\d,]*(?:\.\d+)?)\s*(?P<suffix>USD\b|美元)"
+    rf"(?i)(?P<prefix>\bUSD\s+)(?P<prefix_number>{_DECIMAL_TOKEN})"
+    rf"(?![A-Za-z0-9.,])|(?<![A-Za-z0-9.,])"
+    rf"(?P<suffix_number>{_DECIMAL_TOKEN})\s*(?P<suffix>USD\b|美元)"
+    rf"(?![A-Za-z0-9.,])"
 )
 _EXPLICIT_SCALE = re.compile(r"(?i)^\s*(?:(?:thousand|million|billion)\b|[万亿])")
 
@@ -62,6 +65,15 @@ def _format_unquoted_usd(text: str) -> str:
     return _BASE_USD.sub(replace, text)
 
 
+def _is_escaped_quote(text: str, index: int) -> bool:
+    backslashes = 0
+    index -= 1
+    while index >= 0 and text[index] == "\\":
+        backslashes += 1
+        index -= 1
+    return backslashes % 2 == 1
+
+
 def format_prose_usd_amounts(text: str) -> str:
     """Format explicit base-USD amounts in reviewed Chinese presentation prose.
 
@@ -71,15 +83,18 @@ def format_prose_usd_amounts(text: str) -> str:
     if not isinstance(text, str):
         raise ValueError("display prose must be a string")
     rendered = []
+    quote_end = None
     for line in text.splitlines(keepends=True):
         content = line.rstrip("\r\n")
         ending = line[len(content):]
-        if content.lstrip().startswith(">") or not _HAN.search(content):
+        if content.lstrip().startswith(">"):
+            rendered.append(line)
+            continue
+        if quote_end is None and not _HAN.search(content):
             rendered.append(line)
             continue
         pieces = []
         start = 0
-        quote_end = None
         index = 0
         while index < len(content):
             char = content[index]
@@ -87,7 +102,8 @@ def format_prose_usd_amounts(text: str) -> str:
                 pieces.append(_format_unquoted_usd(content[start:index]))
                 quote_end = '"' if char == '"' else '”'
                 start = index
-            elif quote_end is not None and char == quote_end:
+            elif (quote_end is not None and char == quote_end
+                  and not (char == '"' and _is_escaped_quote(content, index))):
                 pieces.append(content[start:index + 1])
                 start = index + 1
                 quote_end = None

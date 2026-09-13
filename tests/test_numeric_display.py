@@ -31,6 +31,24 @@ class NumericDisplayTests(unittest.TestCase):
             'Revenue was 1535000000 USD.\n'
             '中文正文为15.35 亿美元。\n')
 
+    def test_rejects_partial_scientific_and_malformed_numeric_tokens(self):
+        text = ('保留1e100000 USD、USD 1e100000、1,53,500000 USD、'
+                'USD 1,53,500000；转换1535000000 USD。')
+        self.assertEqual(format_prose_usd_amounts(text),
+            '保留1e100000 USD、USD 1e100000、1,53,500000 USD、'
+            'USD 1,53,500000；转换15.35 亿美元。')
+
+    def test_preserves_multiline_and_escaped_quoted_source_text(self):
+        text = ('引文“第一行 1535000000 USD\n'
+                '第二行 14968000000 USD”；正文1535000000 USD。\n'
+                '记录"source says \\"1535000000 USD\\" and 14968000000 USD"；'
+                '正文1535000000美元。')
+        self.assertEqual(format_prose_usd_amounts(text),
+            '引文“第一行 1535000000 USD\n'
+            '第二行 14968000000 USD”；正文15.35 亿美元。\n'
+            '记录"source says \\"1535000000 USD\\" and 14968000000 USD"；'
+            '正文15.35 亿美元。')
+
     def test_amounts_use_readable_chinese_units(self):
         self.assertEqual(FINAL_TEXT_RULES_VERSION, "simplified-chinese-research-prose:0.2")
         self.assertEqual(format_display_number("15623445", kind="amount_usd"), "1562 万美元")
