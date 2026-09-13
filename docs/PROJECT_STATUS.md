@@ -8,7 +8,7 @@
 
 本批补齐源码声明的 core operation 严格追加证明、配置转换 schema 0.5、真实 scratch bootstrap 字节对照、安装后精确校验与并发安全回滚。原 token、其他 principal、其他 owner state、配置和历史 schema 行为继续受验证。财务累计配对与带负值增长预测已独立复核。
 
-当前批次验证和后续步骤见 [本轮开发记录](reports/development-resume-2026-09-13.md)。本轮未运行 live 安装、权限写入或发布操作。
+**本批冻结 `d1d012ed` 完整 7,909 项通过（0 failures/errors，1 skip），wheel 608 文件逐字一致、3 JS 检查通过；已合回 `continuous-integration-wave4`。** 当前批次验证和后续步骤见 [本轮开发记录](reports/development-resume-2026-09-13.md)。本轮未运行 live 安装、权限写入或发布操作。
 
 
 Current checkpoint (2026-09-12 23:32 UTC): Published R20 `b994b09c` remains healthy and has four fresh model specifications (CTSH, EPAM, ACN, DXC). CTSH and EPAM forecast publication failed because SEC `usdPerShare` was compared with model `usd_per_share`; exact values, periods and filings match. R21 integration `232a2a2a` fixes only this structured unit projection and versions the local forecast validator to v5, preserving all numerical/source checks and legacy behavior. Strict isolated CTSH full build/publish now succeeds; this is not an actual production model claim. Earlier next-wave prompt, transport-authority compatibility and settlement-only polling improvements passed 352 combined root tests plus 35 writer/acceptance tests. Financial-proof independent regression passed 153 tests. The combined source is entering a clean R21 full-suite/wheel/copied-state freeze; no R21 deployment or full-suite pass is claimed yet. Exact R20 publication authority and separate R18b external dependencies remain preserved. See [resumed development and next steps](reports/session-resume-r16a-financial-notes-2026-09-12.md).
