@@ -90,7 +90,10 @@ def final_surface_products(connection: Any, mission: Mapping[str, Any],
                 rendered_body = (rendered.get("body") if isinstance(rendered, Mapping)
                                  else rendered)
                 weekly_sections = _sections("每周研究简报", rendered_body)
-            products.append(_product("surface_weekly_brief", company_ref, row["version_id"],
+            # A rendered issue is the same complete document on every company
+            # card; use its mission identity so it is reviewed only once.
+            subject = mission['mission_ref'] if weekly_renderer is not None else company_ref
+            products.append(_product("surface_weekly_brief", subject, row["version_id"],
                                      row["content_hash"], weekly_sections))
             break
 

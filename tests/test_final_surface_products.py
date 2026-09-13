@@ -104,5 +104,22 @@ class FinalSurfaceProductsTests(unittest.TestCase):
             self.db, MISSION, COMPANY,
             weekly_renderer=lambda version: {"body": exact})
         weekly = next(row for row in products if row["kind"] == "surface_weekly_brief")
+        self.assertEqual(weekly['subject_ref'], MISSION['mission_ref'])
         self.assertEqual(weekly["sections"], [
             {"title": "每周研究简报", "body": exact, "gaps": []}])
+
+    def test_latest_model_notes_preserve_exact_fields_and_company(self):
+        self.db.execute('CREATE TABLE forecast_model_versions '
+                        '(company_ref TEXT,record_json TEXT,content_hash TEXT,version_number INTEGER)')
+        for company, version, label in [(COMPANY, 1, 'old'), (COMPANY, 2, 'Current driver'),
+                                        ('company:b', 3, 'Other company')]:
+            model={'id':f'model:{version}', 'drivers':[{'label':label,'note':'Exact note'}],
+                   'assumptions':[{'because':'Exact rationale'}],
+                   'results':[{'label':label,'reason':'Exact reason','value':12345}]}
+            self.db.execute('INSERT INTO forecast_model_versions VALUES (?,?,?,?)',
+                            (company,json.dumps(model),f'hash:{version}',version))
+        product=next(row for row in final_surface_products(self.db,MISSION,COMPANY)
+                     if row['kind']=='surface_model_notes')
+        self.assertEqual(product['version_ref'],'model:2')
+        self.assertEqual([s['body'] for s in product['sections']],
+                         ['Current driver','Exact note','Exact rationale','Exact reason'])
