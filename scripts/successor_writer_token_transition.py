@@ -29,7 +29,8 @@ def _canonical(value: Any) -> bytes:
 
 
 def _read_regular_file(path: Path, reason: str) -> bytes:
-    _need(path.is_file() and not path.is_symlink(), reason)
+    _need(path.is_file() and not path.is_symlink()
+          and path.absolute() == path.resolve(), reason)
     try:
         return path.read_bytes()
     except OSError as exc:
@@ -40,7 +41,8 @@ def source_core_operations(root: Path, commit: str) -> list[str]:
     """Read the effective operation set from one exact clean source checkout."""
     _need(isinstance(commit, str) and re.fullmatch(r"[0-9a-f]{40}", commit),
           "source commit is invalid")
-    _need(root.is_dir() and not root.is_symlink(), "source root is unavailable")
+    _need(root.is_dir() and not root.is_symlink()
+          and root.absolute() == root.resolve(), "source root is unavailable")
     root = root.resolve()
     try:
         head = subprocess.check_output(
@@ -62,6 +64,17 @@ def source_core_operations(root: Path, commit: str) -> list[str]:
         value = json.loads(raw)
     except (OSError, subprocess.CalledProcessError, json.JSONDecodeError) as exc:
         raise WriterTokenTransitionError("source operations are unavailable") from exc
+    try:
+        final_head = subprocess.check_output(
+            ["git", "-C", str(root), "rev-parse", "HEAD"], text=True,
+            stderr=subprocess.DEVNULL).strip()
+        final_dirty = subprocess.check_output(
+            ["git", "-C", str(root), "status", "--porcelain", "--untracked-files=all"],
+            text=True, stderr=subprocess.DEVNULL)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise WriterTokenTransitionError("source checkout is unavailable") from exc
+    _need(final_head == head == commit and not final_dirty,
+          "source checkout identity changed during operation discovery")
     _need(isinstance(value, list) and value == sorted(set(value))
           and all(isinstance(x, str) and x for x in value), "source operations are invalid")
     return value

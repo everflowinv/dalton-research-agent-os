@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from collections import OrderedDict
 from pathlib import Path
 from unittest.mock import patch
 
@@ -88,6 +89,57 @@ class WriterTokenTransitionTests(unittest.TestCase):
                 source_core_operations(link, "a" * 40)
             with self.assertRaisesRegex(WriterTokenTransitionError, "commit"):
                 source_core_operations(root, "HEAD")
+
+    def test_source_and_baseline_reject_symlinked_ancestor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            actual = root / "actual"
+            actual.mkdir()
+            checkout = actual / "checkout"
+            checkout.mkdir()
+            (checkout / "writer-tokens.json").write_bytes(wire())
+            alias = root / "alias"
+            alias.symlink_to(actual, target_is_directory=True)
+            with self.assertRaisesRegex(WriterTokenTransitionError, "root"):
+                source_core_operations(alias / "checkout", "a" * 40)
+            with self.assertRaisesRegex(WriterTokenTransitionError, "baseline"):
+                build_transition(before_path=alias / "checkout/writer-tokens.json",
+                                 predecessor_root=checkout,
+                                 predecessor_commit="a" * 40,
+                                 successor_root=checkout,
+                                 successor_commit="b" * 40)
+
+    @patch("scripts.successor_writer_token_transition.subprocess.check_output")
+    def test_source_rechecks_identity_after_discovery(self, check_output):
+        check_output.side_effect = [
+            "a" * 40 + "\n", "", '["a"]\n', "b" * 40 + "\n", "",
+        ]
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as directory:
+            with self.assertRaisesRegex(WriterTokenTransitionError, "changed"):
+                source_core_operations(Path(directory), "a" * 40)
+
+    def test_projection_matches_real_writer_serializer(self):
+        from dalton_core.writer_server import Principal, replace_token_config
+
+        before = wire()
+        value = json.loads(before, object_pairs_hook=OrderedDict)
+        principals = [Principal(
+            principal_id=row["principal_id"], token=row["token"],
+            operations=frozenset(
+                [*row["operations"], "settle"]
+                if row["principal_id"] == "core" else row["operations"]),
+            allowed_invocation_refs=frozenset(row["allowed_invocation_refs"]),
+            work_order_refs=frozenset(row["work_order_refs"]),
+            unrestricted=row["unrestricted"], actor_ref=row["actor_ref"],
+        ) for row in value["principals"]]
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "writer-tokens.json"
+            replace_token_config(target, principals)
+            self.assertEqual(
+                target.read_bytes(),
+                bootstrap_serialized_after(before, ["a", "b"],
+                                           ["a", "b", "settle"]),
+            )
 
     @patch("scripts.successor_writer_token_transition.source_core_operations")
     def test_validation_rejects_malformed_nested_proof_closed(self, operations):
