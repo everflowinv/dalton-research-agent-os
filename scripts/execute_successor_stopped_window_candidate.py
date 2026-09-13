@@ -353,6 +353,19 @@ def packet_preflight(packet: Path) -> tuple[dict[str, Any], dict[str, Path]]:
     if version == RECOVERY_SCHEMA_VERSION:
         validate_recovery_writer_preservation(
             transition, binding, recovery_identity)
+    if transition.get("schema_version") == COCKPIT_BRAIN_SCHEMA_VERSION:
+        writer_preservation = binding.get("results", {}).get(
+            "writer_token_preservation")
+        need(isinstance(writer_preservation, Mapping)
+             and set(writer_preservation) == {
+                 "before_sha256", "after_sha256", "before_mode", "after_mode"}
+             and HEX64.fullmatch(str(writer_preservation.get("before_sha256", "")))
+                 is not None
+             and writer_preservation["before_sha256"]
+                 == writer_preservation["after_sha256"]
+             and writer_preservation["before_mode"]
+                 == writer_preservation["after_mode"] == 0o600,
+             "copied-state rehearsal does not prove writer token preservation")
     if transition.get("schema_version") in PRESERVE_SCHEMA_VERSIONS:
         service_before, service_after = expected_service_transition_state(
             packet_root=packet, manifest=transition)

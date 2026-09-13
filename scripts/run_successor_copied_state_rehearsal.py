@@ -646,6 +646,8 @@ def derive_confined_transition(
         "schema_version": (
             "successor-confined-transition-derivation-0.3"
             if manifest.get("schema_version") == EXTERNAL_CAS_SCHEMA_VERSION
+            else "successor-confined-transition-derivation-0.6"
+            if manifest.get("schema_version") == COCKPIT_BRAIN_SCHEMA_VERSION
             else "successor-confined-transition-derivation-0.5"
             if manifest.get("schema_version") == WRITER_APPEND_SCHEMA_VERSION
             else "successor-confined-transition-derivation-0.4"
@@ -880,7 +882,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             return detail, findings
 
         def run_bootstrap(self):
-            if manifest.get("schema_version") == PURE_PRESERVE_SCHEMA_VERSION:
+            if manifest.get("schema_version") in {
+                    PURE_PRESERVE_SCHEMA_VERSION, COCKPIT_BRAIN_SCHEMA_VERSION}:
                 detail, findings, preservation = (
                     verify_scratch_bootstrap_writer_preservation(
                         token_path=self.temp_state / "writer-tokens.json",
@@ -1053,7 +1056,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     **({"writer_token_preservation":
                            rehearsal.writer_token_preservation}
                        if manifest.get("schema_version")
-                       == PURE_PRESERVE_SCHEMA_VERSION else {}),
+                       in {PURE_PRESERVE_SCHEMA_VERSION,
+                           COCKPIT_BRAIN_SCHEMA_VERSION} else {}),
                     "confined_transition_derivation":
                         rehearsal.successor_derivation},
         "ops_helpers": {

@@ -582,10 +582,12 @@ class PreserveExistingTransitionTests(unittest.TestCase):
 
         rehearsal = SimpleNamespace(temp_root=copied_root, temp_state=copied_state,
                                     temp_config=copied_service, replacements={})
-        derived_path, _proof_path, _proof = derive_confined_transition(
+        derived_path, _proof_path, derivation_proof = derive_confined_transition(
             Module, rehearsal, packet_root=self.packet, manifest=manifest,
             original_manifest_sha256=hashlib.sha256(
                 manifest_path.read_bytes()).hexdigest())
+        self.assertEqual("successor-confined-transition-derivation-0.6",
+                         derivation_proof["schema_version"])
         derived = json.loads(derived_path.read_text())
         _, derived_after = expected_service_transition_state(
             packet_root=derived_path.parent, manifest=derived)
