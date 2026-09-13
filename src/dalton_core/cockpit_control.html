@@ -972,7 +972,8 @@ function renderOps(sheet,r){sheet.replaceChildren(readerClose(),node("h2","运�
     s.append(ul);sheet.append(s)}}
 function laneStatus(s){return{launched:"运行中",busy:"运行中",running:"运行中",idle:"待命",ready:"就绪",held:"暂停等待",failed:"出错",budget_exhausted:"今日额度用完",paused:"已暂停",ungranted:"缺授权，一次也没跑",unconfigured:"还没装上",unapproved:"等你批准数据源",unstarted:"这台机器上还没跑过",rejected:"被拒绝",unavailable:"暂时读不到",current:"已经是最新"}[s]||s||"待命"}
 function svc(state,tick){const d=$("svc-dot"),t=$("svc-text");const stale=tick&&(Date.now()-new Date(tick).getTime())>10*60*1000;if(state==="running"&&!stale){d.className="dot";t.textContent=`系统运行中 · 最近活动 ${ago(tick)}`}else if(state){d.className="dot warn";t.textContent=`系统${stale?"可能停了":state} · 最近活动 ${ago(tick)}`}else{d.className="dot off";t.textContent="读不到系统状态"}}
-async function loadOverview(){try{renderOverview(await getJson("/v1/cockpit/overview"))}catch(e){$("goal-title").textContent="读取失败";$("goal-objective").textContent=e.message;$("svc-dot").className="dot off";$("svc-text").textContent="连接失败"}}
+let overviewLoad=null;
+function loadOverview(){if(overviewLoad)return overviewLoad;overviewLoad=(async()=>{try{renderOverview(await getJson("/v1/cockpit/overview"))}catch(e){$("goal-title").textContent="读取失败";$("goal-objective").textContent=e.message;$("svc-dot").className="dot off";$("svc-text").textContent="连接失败"}finally{overviewLoad=null}})();return overviewLoad}
 
 // ---------- jobs
 async function waitJob(id,onTick){for(;;){await new Promise(r=>setTimeout(r,1800));const j=await getJson(`/v1/cockpit/job?id=${encodeURIComponent(id)}`);if(onTick)onTick(j);if(j.status==="done")return j.result;if(j.status==="failed")throw new Error(j.error||"处理失败")}}
