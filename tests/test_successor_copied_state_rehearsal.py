@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 from scripts.run_release_copied_state_rehearsal import RehearsalBindingError
 from scripts.run_successor_copied_state_rehearsal import (
+    _run_successor_production_setup,
     capture_external_market_digest_preservation, derive_confined_transition,
     replay_preserved_production_setup,
     stage_existing_install_authorities, stage_preserved_runtime_configs,
@@ -587,24 +588,23 @@ class SuccessorCopiedStateRehearsalTests(unittest.TestCase):
         self.config.write_text(json.dumps(service))
         rehearsal = SimpleNamespace(
             confined=True, temp_root=self.state.parent.resolve(), temp_state=self.state,
-            temp_config=self.config, confine_to_temp_root=lambda: ("", []),
+            temp_config=self.config, successor_source_root=self.state.parent,
+            confine_to_temp_root=lambda: ("", []),
         )
-        module = SimpleNamespace(configuration_setup_guard=lambda _path: nullcontext())
+        module = SimpleNamespace(REPO_ROOT=self.state.parent)
         extraction = {"policy": {"status": "duplicate"}}
         annual = {"created": []}
         cockpit = {"service_config_changed": False}
-        with patch("dalton_core.document_extraction_setup.install",
-                   return_value=extraction) as extraction_install, \
-             patch("dalton_core.annual_report_setup.install",
-                   return_value=annual) as annual_install, \
-             patch("dalton_core.cockpit_setup.install",
-                   return_value=cockpit) as cockpit_install:
+        with patch(
+            "scripts.run_successor_copied_state_rehearsal._run_successor_production_setup",
+            return_value={"first": [extraction, annual, cockpit],
+                          "second": [extraction, annual, cockpit],
+                          "module_files": [str(self.state / "candidate.py")] * 4},
+        ) as child:
             detail, findings = replay_preserved_production_setup(module, rehearsal)
         self.assertIn("3 model configs", detail)
         self.assertEqual([], findings)
-        self.assertEqual(2, extraction_install.call_count)
-        self.assertEqual(2, annual_install.call_count)
-        self.assertEqual(2, cockpit_install.call_count)
+        self.assertEqual(1, child.call_count)
 
     def test_preserved_setup_replay_refuses_installer_owned_config_drift(self):
         router = self.state / "model-router.sqlite"; router.touch()
@@ -613,9 +613,10 @@ class SuccessorCopiedStateRehearsalTests(unittest.TestCase):
         self.config.write_text(json.dumps(service))
         rehearsal = SimpleNamespace(
             confined=True, temp_root=self.state.parent.resolve(), temp_state=self.state,
-            temp_config=self.config, confine_to_temp_root=lambda: ("", []),
+            temp_config=self.config, successor_source_root=self.state.parent,
+            confine_to_temp_root=lambda: ("", []),
         )
-        module = SimpleNamespace(configuration_setup_guard=lambda _path: nullcontext())
+        module = SimpleNamespace(REPO_ROOT=self.state.parent)
 
         def drift(_config):
             value = json.loads(self.config.read_text())
@@ -623,14 +624,52 @@ class SuccessorCopiedStateRehearsalTests(unittest.TestCase):
             self.config.write_text(json.dumps(value))
             return {"service_config_changed": False}
 
-        with patch("dalton_core.document_extraction_setup.install",
-                   return_value={"policy": {"status": "duplicate"}}), \
-             patch("dalton_core.annual_report_setup.install",
-                   return_value={"created": []}), \
-             patch("dalton_core.cockpit_setup.install", side_effect=drift):
+        def child(*_args):
+            drift(self.config)
+            return {"first": [{"policy": {"status": "duplicate"}},
+                               {"created": []}, {"service_config_changed": False}],
+                    "second": [{"policy": {"status": "duplicate"}},
+                                {"created": []}, {"service_config_changed": False}],
+                    "module_files": [str(self.state / "candidate.py")] * 4}
+
+        with patch(
+            "scripts.run_successor_copied_state_rehearsal._run_successor_production_setup",
+            side_effect=child,
+        ):
             with self.assertRaisesRegex(
                     RehearsalBindingError, "changed preserved configuration"):
                 replay_preserved_production_setup(module, rehearsal)
+
+    def test_production_setup_child_uses_only_successor_modules(self):
+        source = self.state.parent / "successor"
+        (source / "scripts").mkdir(parents=True)
+        (source / "src/dalton_core").mkdir(parents=True)
+        (source / "scripts/__init__.py").write_text("")
+        (source / "src/dalton_core/__init__.py").write_text("")
+        (source / "src/dalton_core/model_fallback_chain.py").write_text(
+            "MARKER='successor-four-purpose-registry'\n")
+        (source / "scripts/rehearse_deploy.py").write_text(
+            "from contextlib import contextmanager\n"
+            "@contextmanager\n"
+            "def configuration_setup_guard(_):\n yield\n")
+        common = (
+            "from .model_fallback_chain import MARKER\n"
+            "assert MARKER=='successor-four-purpose-registry'\n")
+        (source / "src/dalton_core/document_extraction_setup.py").write_text(
+            common + "def install(config,tier): return {'policy':{'status':'duplicate'}}\n")
+        (source / "src/dalton_core/annual_report_setup.py").write_text(
+            common + "def install(config): return {'created':[]}\n")
+        (source / "src/dalton_core/cockpit_setup.py").write_text(
+            common + "def install(config): return {'service_config_changed':False}\n")
+        config = self.state / "child-service.json"; config.write_text("{}")
+        router = self.state / "child-router.sqlite"; router.touch()
+        # This process has already imported OPS dalton_core.  The isolated
+        # child must still resolve every setup module from the successor.
+        result = _run_successor_production_setup(
+            source, self.state.parent, config, router)
+        self.assertEqual(result["first"], result["second"])
+        self.assertTrue(all(Path(path).is_relative_to(source.resolve())
+                            for path in result["module_files"]))
 
     def test_confined_transition_derives_scratch_paths_without_weakening_original(self):
         root = self.state.parent

@@ -796,14 +796,72 @@ def validate_successor_snapshots(
     }
 
 
+def _run_successor_production_setup(
+    source_root: Path, temp_root: Path, temp_config: Path, router_db: Path,
+) -> dict[str, Any]:
+    """Run setup in an interpreter that has never imported OPS dalton_core."""
+    source_root = source_root.resolve()
+    temp_root = temp_root.resolve()
+    temp_config = temp_config.resolve()
+    router_db = router_db.resolve()
+    # This runner itself is deliberately imported from the independently
+    # frozen OPS checkout.  Consequently ``dalton_core`` may already exist in
+    # this interpreter from OPS/src.  Production setup is runtime behavior, so
+    # execute it in a clean child whose only project import roots are the exact
+    # accepted successor checkout.  A sys.path insertion in this process is
+    # insufficient because Python reuses already-imported package modules.
+    child = r'''import json,sys
+from pathlib import Path
+source=Path(sys.argv[1]).resolve(); config=Path(sys.argv[2]).resolve(); router=Path(sys.argv[3]).resolve()
+sys.path[:0]=[str(source),str(source/'src')]
+from scripts import rehearse_deploy
+from dalton_core import annual_report_setup,cockpit_setup,document_extraction_setup
+mods=(rehearse_deploy,annual_report_setup,cockpit_setup,document_extraction_setup)
+for mod in mods:
+    if not Path(mod.__file__).resolve().is_relative_to(source):
+        raise RuntimeError('production setup imported outside accepted successor source')
+def once():
+    return [document_extraction_setup.install(config,tier='cheap'),annual_report_setup.install(config),cockpit_setup.install(config)]
+with rehearse_deploy.configuration_setup_guard(router):
+    first=once();second=once()
+print('DALTON_SETUP_RESULT='+json.dumps({'first':first,'second':second,'module_files':[str(Path(m.__file__).resolve()) for m in mods]},sort_keys=True,separators=(',',':')))
+'''
+    environment = {
+        **os.environ, "HOME": str(temp_root / "home"),
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
+    environment.pop("PYTHONPATH", None)
+    completed = subprocess.run(
+        [sys.executable, "-I", "-c", child, str(source_root),
+         str(temp_config), str(router_db)],
+        cwd=temp_root, env=environment, stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300,
+        check=False, text=True,
+    )
+    _need(completed.returncode == 0,
+          "successor production setup child failed: " + completed.stderr[-1000:])
+    try:
+        marked = [line.removeprefix("DALTON_SETUP_RESULT=")
+                  for line in completed.stdout.splitlines()
+                  if line.startswith("DALTON_SETUP_RESULT=")]
+        _need(len(marked) == 1,
+              "successor production setup child result marker is ambiguous")
+        result = json.loads(marked[0])
+    except (KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise RehearsalBindingError(
+            "successor production setup child returned invalid evidence") from exc
+    _need(len(result["first"]) == len(result["second"]) == 3
+          and len(result.get("module_files", [])) == 4
+          and all(Path(path).resolve().is_relative_to(source_root)
+                  for path in result["module_files"]),
+          "successor production setup child source identity is invalid")
+    return result
+
+
 def replay_preserved_production_setup(module: Any, rehearsal: Any) -> tuple[str, list[str]]:
     """Run the install.sh setup entrypoints twice against only the confined copy."""
 
     _need(rehearsal.confined, "production setup replay is not confined")
-    from dalton_core import (
-        annual_report_setup, cockpit_setup, document_extraction_setup,
-    )
-
     model_before = {
         path.name: path.read_bytes()
         for path in sorted(rehearsal.temp_state.glob("*-model-config.json"))
@@ -815,17 +873,13 @@ def replay_preserved_production_setup(module: Any, rehearsal: Any) -> tuple[str,
     router_db = Path(service["model_router_db"]).expanduser().resolve()
     _need(router_db.is_relative_to(rehearsal.temp_root),
           "production setup replay Router escapes scratch root")
-
-    def setup_once() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
-        extraction = document_extraction_setup.install(
-            rehearsal.temp_config, tier="cheap")
-        annual = annual_report_setup.install(rehearsal.temp_config)
-        cockpit = cockpit_setup.install(rehearsal.temp_config)
-        return extraction, annual, cockpit
-
-    with module.configuration_setup_guard(router_db):
-        first = setup_once()
-        second = setup_once()
+    source_root = Path(rehearsal.successor_source_root).resolve()
+    _need(Path(module.REPO_ROOT).resolve() == source_root,
+          "loaded rehearsal and accepted successor source disagree")
+    result = _run_successor_production_setup(
+        source_root, rehearsal.temp_root, rehearsal.temp_config, router_db)
+    first = tuple(result["first"])
+    second = tuple(result["second"])
     for extraction, annual, cockpit in (first, second):
         _need(extraction.get("policy", {}).get("status") == "duplicate"
               and annual.get("created") == []
@@ -1063,6 +1117,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             rehearse_reviewed_model_setup=False,
             log=lambda line: print(line, file=log_stream, flush=True),
         )
+        rehearsal.successor_source_root = source_root
         code = rehearsal.run()
         summary = rehearsal.report()
         print(summary, file=log_stream, flush=True)
