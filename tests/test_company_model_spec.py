@@ -249,7 +249,7 @@ class CompanyModelSpecTests(unittest.TestCase):
         self.assertEqual(json.loads(pretty), json.loads(compact))
         self.assertEqual(
             TASK_HASH,
-            "c2f56cdca5828a40159fefb09ea31b7c5f2836b4edb014ad84d08fb085d7decc",
+            "9d49c0f4828c096b7d238ef1d797ee9a37d6efe9b6fa198ad2cb360bc9c3eb14",
         )
         self.assertNotEqual(
             TASK_HASH,
@@ -667,6 +667,30 @@ class CompanyModelSpecTests(unittest.TestCase):
                     self.verify(body, state=state)
                 self.assertEqual(caught.exception.code, "semantic")
                 self.assertEqual(body, invalid)
+
+    def test_prompt_closes_the_selected_expense_structure_contract(self):
+        body = _spec()
+        omitted = copy.deepcopy(body)
+        omitted["financial_statement_structure"]["lines"] = [
+            line for line in omitted["financial_statement_structure"]["lines"]
+            if line["concept"] != "us-gaap:SellingGeneralAndAdministrativeExpense"
+        ]
+        with self.assertRaisesRegex(
+            CompanyModelSpecError,
+            "structure omits expense concepts selected by the company spec",
+        ) as caught:
+            self.verify(omitted)
+        self.assertEqual(caught.exception.code, "semantic")
+
+        self.assertIn(
+            "Every non-null expense_lines[].basis_concept selected above must also "
+            "appear as the concept of a filed line",
+            build_prompt(STATE),
+        )
+
+        before = copy.deepcopy(body)
+        self.verify(body)
+        self.assertEqual(body, before)
 
 
 if __name__ == "__main__":

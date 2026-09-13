@@ -313,7 +313,7 @@ TASK_HASH = content_hash({
         "ref": COST_REGISTRY_REF, "hash": COST_REGISTRY_HASH,
     },
     "authority_projection": "company-model-state-with-financial-notes:0.4",
-    "prompt_contract": "company-model-spec-prompt:0.14",
+    "prompt_contract": "company-model-spec-prompt:0.15",
     "structured_output_repair": "company-model-spec-repair:0.1",
 })
 
@@ -490,6 +490,10 @@ def build_prompt(state: Mapping[str, Any]) -> str:
         "\"concept\":null} and its formula with "
         "{\"output_ref\":\"operating-income\","
         "\"tie_out_concept\":\"us-gaap:OperatingIncomeLoss\"}. "
+        "Every non-null expense_lines[].basis_concept selected above must also "
+        "appear as the concept of a filed line in "
+        "financial_statement_structure; when it cannot participate in an exact "
+        "forecast bridge, retain that filed line with forecast_method unavailable. "
         "For each filed leaf choose quarterly_growth, "
         "share_of_line with an exact base ref, or unavailable. Derived lines "
         "use formula. Missing non-operating, tax, attribution, preferred-dividend, "
