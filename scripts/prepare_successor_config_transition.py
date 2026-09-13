@@ -43,6 +43,7 @@ PURE_PRESERVE_SCHEMA_VERSION = "successor-config-transition-0.4"
 WRITER_APPEND_SCHEMA_VERSION = "successor-config-transition-0.5"
 COCKPIT_BRAIN_SCHEMA_VERSION = "successor-config-transition-0.6"
 RESEARCH_PUBLICATION_SCHEMA_VERSION = "successor-config-transition-0.7"
+RESEARCH_PUBLICATION_GATE_SCHEMA_VERSION = "successor-config-transition-0.8"
 RECEIPT_SCHEMA_VERSION = "successor-config-transition-receipt-0.1"
 PRESERVE_RECEIPT_SCHEMA_VERSION = "successor-config-transition-receipt-0.2"
 EXTERNAL_CAS_RECEIPT_SCHEMA_VERSION = "successor-config-transition-receipt-0.3"
@@ -50,6 +51,7 @@ PURE_PRESERVE_RECEIPT_SCHEMA_VERSION = "successor-config-transition-receipt-0.4"
 WRITER_APPEND_RECEIPT_SCHEMA_VERSION = "successor-config-transition-receipt-0.5"
 COCKPIT_BRAIN_RECEIPT_SCHEMA_VERSION = "successor-config-transition-receipt-0.6"
 RESEARCH_PUBLICATION_RECEIPT_SCHEMA_VERSION = "successor-config-transition-receipt-0.7"
+RESEARCH_PUBLICATION_GATE_RECEIPT_SCHEMA_VERSION = "successor-config-transition-receipt-0.8"
 HEX40 = re.compile(r"[0-9a-f]{40}")
 HEX64 = re.compile(r"[0-9a-f]{64}")
 MODEL_ADDITIONS = (
@@ -684,6 +686,7 @@ def build_preserve_existing_transition(
     successor_source_root: Path | None = None,
     cockpit_brain_binding: bool = False,
     research_publication_transition: Mapping[str, Any] | None = None,
+    research_publication_gate_transition: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a 0.2 service delta through 0.5 writer-append transition.
 
@@ -783,6 +786,8 @@ def build_preserve_existing_transition(
     writer_append = all(value is not None for value in writer_inputs)
     _need(not cockpit_brain_binding or research_publication_transition is None,
           "cockpit brain and research publication transitions cannot be combined")
+    _need(not research_publication_transition or research_publication_gate_transition is None,
+          "publication add and gate update cannot be combined")
     pure_preserve = (
         service_delta_path is None and not cockpit_brain_binding
         and openclaw_config_before_path is not None
@@ -802,13 +807,21 @@ def build_preserve_existing_transition(
         openclaw_before, openclaw_before_bytes = _read_json(
             openclaw_config_before_path, "OpenClaw config before")
         _need(bool(openclaw_before), "preserved OpenClaw config is empty")
+        publication = None
+        publication_gate = None
         if research_publication_transition is not None:
             from scripts.successor_research_publication_transition import validate_transition
             publication = validate_transition(research_publication_transition)
             _need(not writer_append, "research publication transition cannot append writer operations")
             schema_version = RESEARCH_PUBLICATION_SCHEMA_VERSION
+        elif research_publication_gate_transition is not None:
+            from scripts.successor_research_publication_gate_transition import validate_transition
+            publication_gate = validate_transition(research_publication_gate_transition)
+            _need(not writer_append, "publication gate transition cannot append writer operations")
+            _need(publication_gate["successor"] == {"release_ref": release_ref, "source_commit": source_commit},
+                  "publication gate successor differs from candidate")
+            schema_version = RESEARCH_PUBLICATION_GATE_SCHEMA_VERSION
         else:
-            publication = None
             schema_version = (WRITER_APPEND_SCHEMA_VERSION if writer_append
                               else PURE_PRESERVE_SCHEMA_VERSION)
         service_transition = {
@@ -822,7 +835,7 @@ def build_preserve_existing_transition(
             "after_sha256": sha256_bytes(openclaw_before_bytes),
         }
         boundaries = {
-            "configuration_mutations": (0 if publication is None else
+            "configuration_mutations": (1 if publication_gate is not None else 0 if publication is None else
                                         sum(row["kind"] != "launch_agent" for row in publication["files"])),
             "service_config_mutations": 0,
             "external_config_mutations": 0,
@@ -1018,8 +1031,11 @@ def build_preserve_existing_transition(
         body["external_config_transitions"] = [openclaw_transition]
     elif schema_version in {PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION,
                           COCKPIT_BRAIN_SCHEMA_VERSION,
-                          RESEARCH_PUBLICATION_SCHEMA_VERSION}:
+                          RESEARCH_PUBLICATION_SCHEMA_VERSION,
+                          RESEARCH_PUBLICATION_GATE_SCHEMA_VERSION}:
         body["external_config_transition"] = openclaw_transition
+    if schema_version == RESEARCH_PUBLICATION_GATE_SCHEMA_VERSION:
+        body["research_publication_gate_transition"] = publication_gate
     if schema_version == RESEARCH_PUBLICATION_SCHEMA_VERSION:
         body["research_publication_transition"] = publication
         added_models = {}
@@ -1094,7 +1110,7 @@ def expected_transition_state(
     _need(version in {SCHEMA_VERSION, PRESERVE_SCHEMA_VERSION,
                       EXTERNAL_CAS_SCHEMA_VERSION, PURE_PRESERVE_SCHEMA_VERSION,
                       WRITER_APPEND_SCHEMA_VERSION, COCKPIT_BRAIN_SCHEMA_VERSION,
-                      RESEARCH_PUBLICATION_SCHEMA_VERSION},
+                      RESEARCH_PUBLICATION_SCHEMA_VERSION, RESEARCH_PUBLICATION_GATE_SCHEMA_VERSION},
           "transition schema version is unsupported")
     document = None
     lane = None
@@ -1137,6 +1153,14 @@ def expected_transition_state(
             if row["kind"] == "authority" and row["path"].endswith("-model-config.json"):
                 _, data = _resolve_artifact(packet_root, {"file": row["artifact"], "sha256": row["sha256"]})
                 models[row["path"]] = json.loads(data)
+    if version == RESEARCH_PUBLICATION_GATE_SCHEMA_VERSION:
+        from scripts.successor_research_publication_gate_transition import expected_state
+        _, gate_after = expected_state(
+            packet_root, manifest.get("research_publication_gate_transition"))
+        gate_value = json.loads(gate_after)
+        _need(gate_value["publication_gate"]["expected_release_ref"] == manifest["release_ref"]
+              and gate_value["publication_gate"]["expected_source_commit"] == manifest["source_commit"],
+              "publication gate successor differs from transition")
     _need(isinstance(document, dict), "document research target is absent")
     _need(lane == {"schema_version": "0.1", "enabled": True},
           "mission document lane target is absent or invalid")
@@ -1155,7 +1179,8 @@ def expected_service_transition_state(
     version = manifest.get("schema_version")
     _need(version in {PRESERVE_SCHEMA_VERSION, EXTERNAL_CAS_SCHEMA_VERSION,
                       PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION,
-                      COCKPIT_BRAIN_SCHEMA_VERSION, RESEARCH_PUBLICATION_SCHEMA_VERSION}
+                      COCKPIT_BRAIN_SCHEMA_VERSION, RESEARCH_PUBLICATION_SCHEMA_VERSION,
+                      RESEARCH_PUBLICATION_GATE_SCHEMA_VERSION}
           and manifest.get("transition_kind") == "preserve_existing",
           "service transition requires preserve-existing schema 0.2 through 0.5")
     row = manifest.get("service_transition")
@@ -1186,7 +1211,8 @@ def expected_service_transition_state(
               "cockpit brain service transition hashes differ")
         return before, after
     if version in {EXTERNAL_CAS_SCHEMA_VERSION, PURE_PRESERVE_SCHEMA_VERSION,
-                   WRITER_APPEND_SCHEMA_VERSION, RESEARCH_PUBLICATION_SCHEMA_VERSION}:
+                   WRITER_APPEND_SCHEMA_VERSION, RESEARCH_PUBLICATION_SCHEMA_VERSION,
+                   RESEARCH_PUBLICATION_GATE_SCHEMA_VERSION}:
         _need(isinstance(row, Mapping)
               and set(row) == {"kind", "mutation_count", "before", "after_sha256"}
               and row.get("kind") == "preserve_exact"
@@ -1297,7 +1323,8 @@ def expected_preserved_openclaw_state(
 
     _need(manifest.get("schema_version") in {
               PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION,
-                   COCKPIT_BRAIN_SCHEMA_VERSION, RESEARCH_PUBLICATION_SCHEMA_VERSION},
+                   COCKPIT_BRAIN_SCHEMA_VERSION, RESEARCH_PUBLICATION_SCHEMA_VERSION,
+                      RESEARCH_PUBLICATION_GATE_SCHEMA_VERSION},
           "pure OpenClaw preservation requires schema 0.4 or 0.5")
     row = manifest.get("external_config_transition")
     _need(isinstance(row, Mapping)
@@ -1466,7 +1493,7 @@ def _apply_preserve_transition(
         "boundaries", "content_hash",
     }
     expected_boundaries = {
-        "configuration_mutations": (sum(row.get("kind") != "launch_agent" for row in
+        "configuration_mutations": (1 if version == RESEARCH_PUBLICATION_GATE_SCHEMA_VERSION else sum(row.get("kind") != "launch_agent" for row in
                                         manifest.get("research_publication_transition", {}).get("files", ()))
                                     if version == RESEARCH_PUBLICATION_SCHEMA_VERSION else 0),
         "service_config_mutations": 1 if version in {PRESERVE_SCHEMA_VERSION,
@@ -1482,18 +1509,22 @@ def _apply_preserve_transition(
     if version == EXTERNAL_CAS_SCHEMA_VERSION:
         expected_fields.add("external_config_transitions")
     elif version in {PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION,
-                   COCKPIT_BRAIN_SCHEMA_VERSION, RESEARCH_PUBLICATION_SCHEMA_VERSION}:
+                   COCKPIT_BRAIN_SCHEMA_VERSION, RESEARCH_PUBLICATION_SCHEMA_VERSION,
+                      RESEARCH_PUBLICATION_GATE_SCHEMA_VERSION}:
         expected_fields.add("external_config_transition")
         if version == RESEARCH_PUBLICATION_SCHEMA_VERSION:
             expected_fields.add("research_publication_transition")
             _need(launch_agents_dir is not None,
                   "research publication transition requires a LaunchAgents directory")
+        if version == RESEARCH_PUBLICATION_GATE_SCHEMA_VERSION:
+            expected_fields.add("research_publication_gate_transition")
         if version == WRITER_APPEND_SCHEMA_VERSION:
             expected_fields.add("writer_operation_transition")
             expected_boundaries["writer_token_mutations"] = 1
     _need(version in {PRESERVE_SCHEMA_VERSION, EXTERNAL_CAS_SCHEMA_VERSION,
                       PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION,
-                   COCKPIT_BRAIN_SCHEMA_VERSION, RESEARCH_PUBLICATION_SCHEMA_VERSION}
+                   COCKPIT_BRAIN_SCHEMA_VERSION, RESEARCH_PUBLICATION_SCHEMA_VERSION,
+                      RESEARCH_PUBLICATION_GATE_SCHEMA_VERSION}
           and set(manifest) == expected_fields
           and manifest.get("boundaries") == expected_boundaries,
           "preserve-existing transition boundary differs: "
@@ -1571,7 +1602,8 @@ def _apply_preserve_transition(
         packet_root=packet_root, state_dir=state_dir, manifest=manifest)
 
     if version in {EXTERNAL_CAS_SCHEMA_VERSION, PURE_PRESERVE_SCHEMA_VERSION,
-                   WRITER_APPEND_SCHEMA_VERSION, RESEARCH_PUBLICATION_SCHEMA_VERSION}:
+                   WRITER_APPEND_SCHEMA_VERSION, RESEARCH_PUBLICATION_SCHEMA_VERSION,
+                   RESEARCH_PUBLICATION_GATE_SCHEMA_VERSION}:
         service_before_value, service_after_value = expected_service_transition_state(
             packet_root=packet_root, manifest=manifest)
         _, service_before_bytes = _resolve_artifact(
@@ -1611,6 +1643,12 @@ def _apply_preserve_transition(
                 "writer_token_apply_status": "pending",
             }
         publication_created = []
+        publication_gate_result = None
+        if version == RESEARCH_PUBLICATION_GATE_SCHEMA_VERSION:
+            from scripts.successor_research_publication_gate_transition import apply as apply_gate
+            publication_gate_result = apply_gate(
+                packet_root=packet_root, state_dir=state_dir,
+                transition=manifest["research_publication_gate_transition"])
         if version == RESEARCH_PUBLICATION_SCHEMA_VERSION:
             from scripts.successor_research_publication_transition import apply as apply_publication
             publication_created = apply_publication(
@@ -1630,6 +1668,8 @@ def _apply_preserve_transition(
                 if version == WRITER_APPEND_SCHEMA_VERSION
                 else RESEARCH_PUBLICATION_RECEIPT_SCHEMA_VERSION
                 if version == RESEARCH_PUBLICATION_SCHEMA_VERSION
+                else RESEARCH_PUBLICATION_GATE_RECEIPT_SCHEMA_VERSION
+                if version == RESEARCH_PUBLICATION_GATE_SCHEMA_VERSION
                 else PURE_PRESERVE_RECEIPT_SCHEMA_VERSION
             ),
             "status": "configured_controller_start_pending",
@@ -1639,7 +1679,8 @@ def _apply_preserve_transition(
             "acceptance_evidence_hash": (
                 None if accepted_evidence is None
                 else canonical_hash(dict(accepted_evidence))),
-            "configuration_mutations": len(publication_created),
+            "configuration_mutations": (1 if publication_gate_result is not None
+                                            else len(publication_created)),
             "model_config_byte_sha256": {
                 path.name: sha256_bytes(path.read_bytes())
                 for path in sorted(state_dir.glob("*-model-config.json"))},
@@ -1661,6 +1702,8 @@ def _apply_preserve_transition(
         }
         if writer_projection is not None:
             receipt.update(writer_projection)
+        if publication_gate_result is not None:
+            receipt["research_publication_gate_transition"] = publication_gate_result
         if external_row is not None:
             receipt.update({
                 "historical_unresolved_sha256": external_row[
@@ -1673,6 +1716,10 @@ def _apply_preserve_transition(
                 fault_hook("before_receipt")
             _publish_exclusive_json(receipt_path, receipt)
         except BaseException:
+            if publication_gate_result is not None:
+                from scripts.successor_research_publication_gate_transition import rollback as rollback_gate
+                rollback_gate(packet_root=packet_root, state_dir=state_dir,
+                              transition=manifest["research_publication_gate_transition"])
             if publication_created:
                 from scripts.successor_research_publication_transition import rollback
                 rollback(state_dir=state_dir, launch_agents_dir=launch_agents_dir,
@@ -1907,7 +1954,8 @@ def apply_transition(
           and manifest.get("schema_version") in {
               SCHEMA_VERSION, PRESERVE_SCHEMA_VERSION, EXTERNAL_CAS_SCHEMA_VERSION,
               PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION,
-                   COCKPIT_BRAIN_SCHEMA_VERSION, RESEARCH_PUBLICATION_SCHEMA_VERSION}
+                   COCKPIT_BRAIN_SCHEMA_VERSION, RESEARCH_PUBLICATION_SCHEMA_VERSION,
+                      RESEARCH_PUBLICATION_GATE_SCHEMA_VERSION}
           and manifest.get("status") == "prepared_inert",
           "transition manifest authority differs")
     acceptance = manifest.get("acceptance", {})
@@ -1928,7 +1976,8 @@ def apply_transition(
     if manifest.get("schema_version") in {
             PRESERVE_SCHEMA_VERSION, EXTERNAL_CAS_SCHEMA_VERSION,
             PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION,
-                   COCKPIT_BRAIN_SCHEMA_VERSION, RESEARCH_PUBLICATION_SCHEMA_VERSION}:
+                   COCKPIT_BRAIN_SCHEMA_VERSION, RESEARCH_PUBLICATION_SCHEMA_VERSION,
+                      RESEARCH_PUBLICATION_GATE_SCHEMA_VERSION}:
         _need(service_config_path is not None,
               "preserve-existing transition requires the service config path")
         return _apply_preserve_transition(
@@ -2149,7 +2198,8 @@ def apply_transition_to_scratch(
             temporary.unlink(missing_ok=True)
     elif manifest.get("schema_version") in {
             PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION,
-                   COCKPIT_BRAIN_SCHEMA_VERSION, RESEARCH_PUBLICATION_SCHEMA_VERSION}:
+                   COCKPIT_BRAIN_SCHEMA_VERSION, RESEARCH_PUBLICATION_SCHEMA_VERSION,
+                      RESEARCH_PUBLICATION_GATE_SCHEMA_VERSION}:
         _need(external_config_path is not None,
               "schema 0.4/0.5 scratch requires an OpenClaw config path")
         external_config_path = external_config_path.resolve()

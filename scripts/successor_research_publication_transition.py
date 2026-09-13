@@ -42,7 +42,8 @@ _OWNER_ROOT = Path("/Users/everflow/Projects/dalton-owner-activation-20260910")
 
 
 def validate_worker_config_bytes(data: bytes, *,
-                                 expected_source_commit: str | None = None) -> dict[str, Any]:
+                                 expected_source_commit: str | None = None,
+                                 expected_release_ref: str = "foundation-r25") -> dict[str, Any]:
     try:
         value = json.loads(data)
     except (UnicodeError, json.JSONDecodeError) as exc:
@@ -78,7 +79,7 @@ def validate_worker_config_bytes(data: bytes, *,
         "release_pointer", "runtime_pointer", "expected_release_ref",
         "expected_source_commit"}
         and (canonical_pointers or confined_pointers)
-        and gate["expected_release_ref"] == "foundation-r25"
+        and gate["expected_release_ref"] == expected_release_ref
         and isinstance(gate["expected_source_commit"], str)
         and re.fullmatch(r"[0-9a-f]{40}", gate["expected_source_commit"])
         and (expected_source_commit is None

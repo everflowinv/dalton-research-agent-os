@@ -187,6 +187,10 @@ def finalize(
         need(exact["research_publication_transition"]
              == installed.get("research_publication_transition"),
              "post-observation research publication transition differs")
+    if "research_publication_gate_transition" in exact:
+        need(exact["research_publication_gate_transition"]
+             == installed.get("research_publication_gate_transition"),
+             "post-observation publication gate transition differs")
     need(manifest_path.read_bytes() == manifest_bytes,
          "accepted successor manifest changed during finalization")
     result = {

@@ -34,7 +34,7 @@ from scripts.successor_ops_binding import OpsBindingError, verify_ops_binding
 from scripts.prepare_successor_config_transition import (
     DOCUMENT_CONFIG, EXTERNAL_CAS_SCHEMA_VERSION, LANE_CONFIG,
     PRESERVE_SCHEMA_VERSION, PURE_PRESERVE_SCHEMA_VERSION,
-    WRITER_APPEND_SCHEMA_VERSION, COCKPIT_BRAIN_SCHEMA_VERSION, RESEARCH_PUBLICATION_SCHEMA_VERSION, _json_bytes,
+    WRITER_APPEND_SCHEMA_VERSION, COCKPIT_BRAIN_SCHEMA_VERSION, RESEARCH_PUBLICATION_SCHEMA_VERSION, RESEARCH_PUBLICATION_GATE_SCHEMA_VERSION, _json_bytes,
     expected_writer_operation_transition_state,
     apply_transition, expected_service_transition_state,
     expected_openclaw_frame_transition_state, expected_transition_state,
@@ -64,7 +64,7 @@ RECOVERY_MANIFEST_FIELDS = MANIFEST_FIELDS | {"predecessor_recovery"}
 PRESERVE_SCHEMA_VERSIONS = frozenset({
     PRESERVE_SCHEMA_VERSION, EXTERNAL_CAS_SCHEMA_VERSION,
     PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION,
-    COCKPIT_BRAIN_SCHEMA_VERSION, RESEARCH_PUBLICATION_SCHEMA_VERSION,
+    COCKPIT_BRAIN_SCHEMA_VERSION, RESEARCH_PUBLICATION_SCHEMA_VERSION, RESEARCH_PUBLICATION_GATE_SCHEMA_VERSION,
 })
 
 
@@ -336,7 +336,7 @@ def packet_preflight(packet: Path) -> tuple[dict[str, Any], dict[str, Path]]:
     binding = load_json(paths["copied_state_rehearsal_binding"])
     if transition.get("schema_version") in {
             EXTERNAL_CAS_SCHEMA_VERSION, PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION,
-            COCKPIT_BRAIN_SCHEMA_VERSION, RESEARCH_PUBLICATION_SCHEMA_VERSION}:
+            COCKPIT_BRAIN_SCHEMA_VERSION, RESEARCH_PUBLICATION_SCHEMA_VERSION, RESEARCH_PUBLICATION_GATE_SCHEMA_VERSION}:
         ops_helpers = binding.get("ops_helpers", {})
         execution_binding = ops_helpers.get("execution_binding", {})
         need(execution_binding.get("git_commit") == ops_helpers.get("git_commit"),
@@ -382,6 +382,16 @@ def packet_preflight(packet: Path) -> tuple[dict[str, Any], dict[str, Path]]:
              and proof["worker_run_once"].get("exit_code") == 0
              and proof["worker_run_once"].get("provider_calls") == 0,
              "copied-state rehearsal does not prove research publication files")
+    if transition.get("schema_version") == RESEARCH_PUBLICATION_GATE_SCHEMA_VERSION:
+        from scripts.successor_research_publication_gate_transition import expected_state
+        before_gate, after_gate = expected_state(
+            packet, transition["research_publication_gate_transition"])
+        proof = binding.get("results", {}).get("research_publication_gate_transition")
+        need(proof == {
+            "before_sha256": sha256_bytes(before_gate),
+            "after_sha256": sha256_bytes(after_gate),
+            "successor": transition["research_publication_gate_transition"]["successor"],
+        }, "copied-state rehearsal does not prove publication gate update")
     if transition.get("schema_version") in PRESERVE_SCHEMA_VERSIONS:
         service_before, service_after = expected_service_transition_state(
             packet_root=packet, manifest=transition)
@@ -402,7 +412,7 @@ def packet_preflight(packet: Path) -> tuple[dict[str, Any], dict[str, Path]]:
                  == canonical_hash(json.loads(external_after)),
                  "copied-state rehearsal does not prove the OpenClaw result")
         elif transition.get("schema_version") in {PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION,
-            COCKPIT_BRAIN_SCHEMA_VERSION, RESEARCH_PUBLICATION_SCHEMA_VERSION}:
+            COCKPIT_BRAIN_SCHEMA_VERSION, RESEARCH_PUBLICATION_SCHEMA_VERSION, RESEARCH_PUBLICATION_GATE_SCHEMA_VERSION}:
             expected_openclaw = expected_preserved_openclaw_state(
                 packet_root=packet, manifest=transition)
             need(results.get("openclaw_config_sha256")
@@ -764,6 +774,15 @@ class SuccessorOrchestrator(r11.Orchestrator):
             need(not occupied,
                  "research publication exclusive targets already exist: "
                  + ",".join(sorted(occupied)))
+        if transition.get("schema_version") == RESEARCH_PUBLICATION_GATE_SCHEMA_VERSION:
+            from scripts.successor_research_publication_gate_transition import expected_state, TARGET
+            before_gate, _after_gate = expected_state(
+                self.packet, transition["research_publication_gate_transition"])
+            target = r11.STATE / TARGET
+            need(target.is_file() and not target.is_symlink()
+                 and stat.S_IMODE(target.stat().st_mode) == 0o600
+                 and target.read_bytes() == before_gate,
+                 "live publication gate differs from reviewed CAS baseline")
         if transition.get("schema_version") == WRITER_APPEND_SCHEMA_VERSION:
             before_writer, _after_writer, _writer_row = expected_writer_operation_transition_state(
                 packet_root=self.packet, manifest=transition, successor_root=source)
@@ -810,7 +829,7 @@ class SuccessorOrchestrator(r11.Orchestrator):
         else:
             plugin = r11.verify_provider_plugin(artifacts["provider_plugin_snapshot"])
         if transition.get("schema_version") in {PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION,
-            COCKPIT_BRAIN_SCHEMA_VERSION, RESEARCH_PUBLICATION_SCHEMA_VERSION}:
+            COCKPIT_BRAIN_SCHEMA_VERSION, RESEARCH_PUBLICATION_SCHEMA_VERSION, RESEARCH_PUBLICATION_GATE_SCHEMA_VERSION}:
             need(expected_preserved_openclaw_state(
                      packet_root=self.packet, manifest=transition)
                  == artifacts["openclaw_config_snapshot"].read_bytes(),
@@ -913,7 +932,7 @@ class SuccessorOrchestrator(r11.Orchestrator):
                 r11.OPENCLAW if transition.get("schema_version")
                 in {EXTERNAL_CAS_SCHEMA_VERSION,
                     PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION,
-            COCKPIT_BRAIN_SCHEMA_VERSION, RESEARCH_PUBLICATION_SCHEMA_VERSION} else None),
+            COCKPIT_BRAIN_SCHEMA_VERSION, RESEARCH_PUBLICATION_SCHEMA_VERSION, RESEARCH_PUBLICATION_GATE_SCHEMA_VERSION} else None),
             accepted_evidence=manifest["acceptance"],
             launch_agents_dir=(
                 r11.LAUNCH_AGENTS
@@ -1011,7 +1030,7 @@ class SuccessorOrchestrator(r11.Orchestrator):
                 expected_openclaw_frame_transition_state(
                     packet_root=self.packet, manifest=transition))
         elif transition.get("schema_version") in {PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION,
-            COCKPIT_BRAIN_SCHEMA_VERSION, RESEARCH_PUBLICATION_SCHEMA_VERSION}:
+            COCKPIT_BRAIN_SCHEMA_VERSION, RESEARCH_PUBLICATION_SCHEMA_VERSION, RESEARCH_PUBLICATION_GATE_SCHEMA_VERSION}:
             expected_openclaw_bytes = expected_preserved_openclaw_state(
                 packet_root=self.packet, manifest=transition)
         need(r11.SERVICE_CONFIG.read_bytes() == expected_service_bytes
@@ -1046,6 +1065,12 @@ class SuccessorOrchestrator(r11.Orchestrator):
         if transition.get("schema_version") in PRESERVE_SCHEMA_VERSIONS:
             if transition.get("schema_version") == WRITER_APPEND_SCHEMA_VERSION:
                 self._verify_writer_protected_state(initial, require_after=True)
+            elif transition.get("schema_version") == RESEARCH_PUBLICATION_GATE_SCHEMA_VERSION:
+                from scripts.successor_research_publication_gate_transition import TARGET
+                rollback_state = self.rollback_root / "state-files"
+                need(self._protected_hash_excluding(r11.STATE, {TARGET})
+                     == self._protected_hash_excluding(rollback_state, {TARGET}),
+                     "installer changed protected predecessor state outside publication gate")
             elif transition.get("schema_version") == RESEARCH_PUBLICATION_SCHEMA_VERSION:
                 from scripts.successor_research_publication_transition import FIXED_FILES
                 rollback_state = self.rollback_root / "state-files"
@@ -1124,12 +1149,13 @@ class SuccessorOrchestrator(r11.Orchestrator):
                     sum(row["kind"] != "launch_agent" for row in
                         transition.get("research_publication_transition", {}).get("files", ()))
                     if transition.get("schema_version") == RESEARCH_PUBLICATION_SCHEMA_VERSION
+                    else 1 if transition.get("schema_version") == RESEARCH_PUBLICATION_GATE_SCHEMA_VERSION
                     else 0),
                 "service_config_mutations": (
                     0 if transition.get("schema_version") in {
                         EXTERNAL_CAS_SCHEMA_VERSION,
                         PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION,
-                        RESEARCH_PUBLICATION_SCHEMA_VERSION} else 1),
+                        RESEARCH_PUBLICATION_SCHEMA_VERSION, RESEARCH_PUBLICATION_GATE_SCHEMA_VERSION} else 1),
                 "external_config_mutations": (
                     1 if transition.get("schema_version")
                     == EXTERNAL_CAS_SCHEMA_VERSION else 0),
@@ -1166,6 +1192,20 @@ class SuccessorOrchestrator(r11.Orchestrator):
                 "file_sha256": {row["path"]: row["sha256"]
                                 for row in publication["files"]},
                 "file_count": len(publication["files"]),
+            }
+        if transition.get("schema_version") == RESEARCH_PUBLICATION_GATE_SCHEMA_VERSION:
+            from scripts.successor_research_publication_gate_transition import expected_state, TARGET
+            _before_gate, after_gate = expected_state(
+                self.packet, transition["research_publication_gate_transition"])
+            target = r11.STATE / TARGET
+            need(target.is_file() and not target.is_symlink()
+                 and stat.S_IMODE(target.stat().st_mode) == 0o600
+                 and target.read_bytes() == after_gate,
+                 "installed publication gate differs")
+            result["research_publication_gate_transition"] = {
+                "before_sha256": transition["research_publication_gate_transition"]["before"]["sha256"],
+                "after_sha256": transition["research_publication_gate_transition"]["after"]["sha256"],
+                "successor": transition["research_publication_gate_transition"]["successor"],
             }
         if transition.get("schema_version") == WRITER_APPEND_SCHEMA_VERSION:
             before_writer, after_writer, writer_row = self._verify_writer_protected_state(
@@ -1215,8 +1255,14 @@ class SuccessorOrchestrator(r11.Orchestrator):
             return {**result, "preserved_concurrent_config_targets": []}
         if transition.get("schema_version") in {
                 PRESERVE_SCHEMA_VERSION, PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION,
-            COCKPIT_BRAIN_SCHEMA_VERSION, RESEARCH_PUBLICATION_SCHEMA_VERSION}:
+            COCKPIT_BRAIN_SCHEMA_VERSION, RESEARCH_PUBLICATION_SCHEMA_VERSION, RESEARCH_PUBLICATION_GATE_SCHEMA_VERSION}:
             publication_rollback = None
+            gate_rollback = None
+            if transition.get("schema_version") == RESEARCH_PUBLICATION_GATE_SCHEMA_VERSION:
+                from scripts.successor_research_publication_gate_transition import rollback as rollback_gate
+                gate_rollback = rollback_gate(
+                    packet_root=self.packet, state_dir=r11.STATE,
+                    transition=transition["research_publication_gate_transition"])
             if transition.get("schema_version") == RESEARCH_PUBLICATION_SCHEMA_VERSION:
                 from scripts.successor_research_publication_transition import (
                     LAUNCH_AGENT_LABEL, rollback_preserving_changed,
@@ -1227,6 +1273,8 @@ class SuccessorOrchestrator(r11.Orchestrator):
                     transition=transition["research_publication_transition"])
             result = super().rollback()
             return {**result, "preserved_concurrent_config_targets": [],
+                    **({"research_publication_gate_rollback": gate_rollback}
+                       if gate_rollback is not None else {}),
                     **({"research_publication_rollback": publication_rollback}
                        if publication_rollback is not None else {})}
         conflicts = []

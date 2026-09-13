@@ -24,7 +24,7 @@ from scripts.prepare_successor_config_transition import (
     OPENCLAW_FRAME_PATH, OPENCLAW_TARGET_MAX_FRAME_BYTES,
     PRESERVE_SCHEMA_VERSION, PURE_PRESERVE_SCHEMA_VERSION,
     WRITER_APPEND_SCHEMA_VERSION, COCKPIT_BRAIN_SCHEMA_VERSION,
-    RESEARCH_PUBLICATION_SCHEMA_VERSION,
+    RESEARCH_PUBLICATION_SCHEMA_VERSION, RESEARCH_PUBLICATION_GATE_SCHEMA_VERSION,
     BRAIN_MODEL_CONFIG, COCKPIT_MODEL_PATH,
     _cockpit_brain_service_after, _json_bytes, _record_hash, _service_after, _set_leaf,
     _validated_service_delta,
@@ -37,7 +37,7 @@ from scripts.prepare_successor_config_transition import (
 PRESERVE_SCHEMA_VERSIONS = {
     PRESERVE_SCHEMA_VERSION, EXTERNAL_CAS_SCHEMA_VERSION,
     PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION,
-    COCKPIT_BRAIN_SCHEMA_VERSION, RESEARCH_PUBLICATION_SCHEMA_VERSION,
+    COCKPIT_BRAIN_SCHEMA_VERSION, RESEARCH_PUBLICATION_SCHEMA_VERSION, RESEARCH_PUBLICATION_GATE_SCHEMA_VERSION,
 }
 from scripts.run_release_copied_state_rehearsal import (
     RehearsalBindingError, _artifact, _canonical_sha256,
@@ -633,6 +633,29 @@ def derive_confined_transition(
                 "sha256": _sha(writer_before_path),
             }
 
+        if manifest.get("schema_version") == RESEARCH_PUBLICATION_GATE_SCHEMA_VERSION:
+            from scripts.successor_research_publication_gate_transition import TARGET, validate_transition
+            gate_transition = validate_transition(manifest["research_publication_gate_transition"])
+            pointer_root = rehearsal.temp_root / "publication-authority"
+            pointer_root.mkdir(mode=0o700, exist_ok=True)
+            release_pointer = pointer_root / "current-release.json"
+            runtime_pointer = pointer_root / "current-runtime-config.json"
+            for side in ("before", "after"):
+                original = packet_root / gate_transition[side]["file"]
+                _artifact(original, gate_transition[side]["sha256"], f"publication gate {side}")
+                value = json.loads(original.read_text())
+                value["publication_gate"]["release_pointer"] = str(release_pointer)
+                value["publication_gate"]["runtime_pointer"] = str(runtime_pointer)
+                confined = derived_root / f"publication-gate.{side}.json"
+                _write_json(confined, value)
+                derived["research_publication_gate_transition"][side] = {
+                    "file": confined.name, "sha256": _sha(confined),
+                    "size": confined.stat().st_size, "mode": 0o600}
+                if side == "before":
+                    scratch_target = rehearsal.temp_state / TARGET
+                    scratch_target.write_bytes(confined.read_bytes())
+                    os.chmod(scratch_target, 0o600)
+
         if manifest.get("schema_version") == RESEARCH_PUBLICATION_SCHEMA_VERSION:
             from scripts.successor_research_publication_transition import validate_transition
             publication = validate_transition(manifest["research_publication_transition"])
@@ -697,7 +720,9 @@ def derive_confined_transition(
     _write_json(manifest_path, derived)
     proof = {
         "schema_version": (
-            "successor-confined-transition-derivation-0.3"
+            "successor-confined-transition-derivation-0.8"
+            if manifest.get("schema_version") == RESEARCH_PUBLICATION_GATE_SCHEMA_VERSION
+            else "successor-confined-transition-derivation-0.3"
             if manifest.get("schema_version") == EXTERNAL_CAS_SCHEMA_VERSION
             else "successor-confined-transition-derivation-0.6"
             if manifest.get("schema_version") == COCKPIT_BRAIN_SCHEMA_VERSION
@@ -979,7 +1004,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             self.successor_openclaw = None
             if manifest.get("schema_version") in {
                     EXTERNAL_CAS_SCHEMA_VERSION, PURE_PRESERVE_SCHEMA_VERSION,
-                    WRITER_APPEND_SCHEMA_VERSION, COCKPIT_BRAIN_SCHEMA_VERSION, RESEARCH_PUBLICATION_SCHEMA_VERSION}:
+                    WRITER_APPEND_SCHEMA_VERSION, COCKPIT_BRAIN_SCHEMA_VERSION, RESEARCH_PUBLICATION_SCHEMA_VERSION, RESEARCH_PUBLICATION_GATE_SCHEMA_VERSION}:
                 self.successor_openclaw = self.temp_root / "openclaw/openclaw.json"
                 self.successor_openclaw.parent.mkdir(mode=0o700)
                 _write_exclusive(
@@ -990,7 +1015,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
         def run_bootstrap(self):
             if manifest.get("schema_version") in {
-                    PURE_PRESERVE_SCHEMA_VERSION, COCKPIT_BRAIN_SCHEMA_VERSION, RESEARCH_PUBLICATION_SCHEMA_VERSION}:
+                    PURE_PRESERVE_SCHEMA_VERSION, COCKPIT_BRAIN_SCHEMA_VERSION, RESEARCH_PUBLICATION_SCHEMA_VERSION, RESEARCH_PUBLICATION_GATE_SCHEMA_VERSION}:
                 detail, findings, preservation = (
                     verify_scratch_bootstrap_writer_preservation(
                         token_path=self.temp_state / "writer-tokens.json",
@@ -1129,6 +1154,22 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         expected_service=expected_service,
         expected_service_mode=(0o600 if manifest.get("schema_version")
                                == COCKPIT_BRAIN_SCHEMA_VERSION else None))
+    if manifest.get("schema_version") == RESEARCH_PUBLICATION_GATE_SCHEMA_VERSION:
+        from scripts.successor_research_publication_gate_transition import expected_state, TARGET
+        confined_manifest = json.loads(Path(
+            rehearsal.successor_derivation["proof_path"]).with_name(
+                "successor-config-transition.confined.json").read_text())
+        before_gate, after_gate = expected_state(
+            Path(rehearsal.successor_derivation["proof_path"]).parent,
+            confined_manifest["research_publication_gate_transition"])
+        target = rehearsal.temp_state / TARGET
+        _need(target.is_file() and not target.is_symlink() and target.read_bytes() == after_gate,
+              "publication gate rehearsal target differs")
+        final["research_publication_gate_transition"] = {
+            "before_sha256": manifest["research_publication_gate_transition"]["before"]["sha256"],
+            "after_sha256": manifest["research_publication_gate_transition"]["after"]["sha256"],
+            "successor": manifest["research_publication_gate_transition"]["successor"],
+        }
     if manifest.get("schema_version") == RESEARCH_PUBLICATION_SCHEMA_VERSION:
         from scripts.successor_research_publication_transition import (
             artifact_bytes, validate_transition,
@@ -1191,7 +1232,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         final["openclaw_config_semantic_sha256"] = canonical_hash(actual_openclaw)
     elif manifest.get("schema_version") in {
             PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION,
-            COCKPIT_BRAIN_SCHEMA_VERSION, RESEARCH_PUBLICATION_SCHEMA_VERSION}:
+            COCKPIT_BRAIN_SCHEMA_VERSION, RESEARCH_PUBLICATION_SCHEMA_VERSION, RESEARCH_PUBLICATION_GATE_SCHEMA_VERSION}:
         expected_openclaw = expected_preserved_openclaw_state(
             packet_root=packet_root, manifest=manifest)
         _need(rehearsal.successor_openclaw.is_file()
