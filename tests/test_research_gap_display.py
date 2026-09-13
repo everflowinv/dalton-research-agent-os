@@ -23,5 +23,5 @@ class GapDisplayTests(unittest.TestCase):
    for slot in template['cost_slots']:
     self.assertNotIn(slot['slot_id'],display_metadata_text('观察 '+slot['slot_id']+' 的变化'))
  def test_unknown_and_existing_chinese_are_preserved_exactly(self):
-  for raw in ('仍需管理层说明。','IBM-specific proper name','unknown_metric: keep raw',None):
+  for raw in ('仍需管理层说明。','IBM-specific proper name','unknown_metric: keep raw','T. Rowe Price','管理层说："Revenue and price improved."',None):
    self.assertEqual(gap_display_text(raw),'' if raw is None else raw)

@@ -74,9 +74,9 @@ _DISPLAY_TERMS = {
     "list_notes": "笔记列表",
     "management_minutes": "管理层会议纪要",
     "margin_balance": "融资余额",
-    "monthly_returns": "月度回报",
+    "monthly_returns": "月报表",
     "news_media": "新闻媒体",
-    "next_day_disclosure_returns": "披露次日回报",
+    "next_day_disclosure_returns": "翌日披露报表",
     "northbound_flow": "北向资金流",
     "not_connected": "尚未连接",
     "primary_filing": "公司正式公告",
@@ -95,12 +95,16 @@ _DISPLAY_TERMS = {
 }
 _TERM_PATTERN = re.compile(
     r"(?<![A-Za-z0-9_])("
-    + "|".join(re.escape(key) for key in sorted(_DISPLAY_TERMS, key=len, reverse=True))
+    + "|".join(re.escape(key) for key in sorted((key for key in _DISPLAY_TERMS if "_" in key), key=len, reverse=True))
     + r")(?![A-Za-z0-9_])", re.IGNORECASE)
 
 def display_metadata_text(value: Any) -> str:
     """Replace only registered machine metadata tokens in reader-facing text."""
     text = str(value) if value is not None else ""
+    # Ordinary English words may be part of proper names or source quotes.
+    # Translate those only when the entire value is an exact metadata key.
+    if text in _DISPLAY_TERMS:
+        return _DISPLAY_TERMS[text]
     return _TERM_PATTERN.sub(lambda match: _DISPLAY_TERMS[match.group(1).lower()], text)
 
 def gap_display_text(value: Any) -> str:
