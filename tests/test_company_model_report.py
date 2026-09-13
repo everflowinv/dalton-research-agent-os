@@ -35,6 +35,21 @@ class RenderTests(unittest.TestCase):
                     if item["concept"] == "us-gaap:Revenues")
         self.assertEqual(line["cells"]["2026-05-31"]["value"], "18718144000")
 
+    def test_per_share_values_are_not_scaled_as_millions(self):
+        concept = "us-gaap:EarningsPerShareDiluted"
+        table = self.table(FakeMissions([
+            _line(concept, "2026-03-01", "2026-05-31", "3.03",
+                  unit="USDPerShare"),
+        ]), _spec(drivers=[{
+            "ref": "diluted-eps", "label": "Diluted EPS", "kind": "price",
+            "basis_concept": concept, "unit": "USDPerShare",
+            "because": "Per-share authority.",
+        }], expenses=[]))
+        text = render_model_inputs(table)
+        eps = next(line for line in text.splitlines() if line.startswith("EarningsPerShareDiluted"))
+        self.assertIn("3.03", eps)
+        self.assertNotIn("0.0", eps)
+
     def test_a_derived_figure_is_marked_where_it_is_shown(self):
         ledger = FakeMissions([
             _line("us-gaap:Revenues", "2026-01-01", "2026-03-31", "100000000"),

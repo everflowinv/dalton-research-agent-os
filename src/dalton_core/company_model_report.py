@@ -16,8 +16,9 @@ Two decisions in the layout, both about not flattering the work:
   capacity, bookings conversion, currency translation, acquired revenue ..."
   reads like the work it actually is.
 
-Figures print in millions for width, and the underlying value is never touched
--- the table is a view, and the ledger keeps what was filed.
+Currency totals and counts print in millions for width. Per-share and ratio
+figures retain their declared unit. The underlying value is never touched --
+the table is a view, and the ledger keeps what was filed.
 """
 
 from __future__ import annotations
@@ -43,6 +44,28 @@ def _millions(value: Any) -> str:
     return f"{number:,.1f}"
 
 
+def _display_value(value: Any, unit: Any) -> str:
+    """Scale totals and counts, while preserving per-share and ratio values."""
+    normalized = str(unit or "").casefold().replace("-", "_")
+    if "per_share" in normalized or "pershare" in normalized or normalized in {
+        "ratio", "percent", "percentage", "pure",
+    }:
+        try:
+            return f"{Decimal(str(value)):,.2f}"
+        except (InvalidOperation, ValueError, TypeError):
+            return "?"
+    if normalized in {
+        "usd", "eur", "gbp", "jpy", "cny", "shares", "share", "headcount",
+        "count", "employees",
+    }:
+        return _millions(value)
+    # An unknown or absent unit is not evidence that the value is currency.
+    try:
+        return f"{Decimal(str(value)):,.2f}"
+    except (InvalidOperation, ValueError, TypeError):
+        return "?"
+
+
 def _mark(cell: Mapping[str, Any]) -> str:
     # A derived figure is marked wherever it is shown. A reader who does not
     # look up the legend still sees that this one is not like the others.
@@ -59,7 +82,7 @@ def render_model_inputs(table: Mapping[str, Any], *, entity_name: str | None = N
     out.append(
         f"{readiness.get('period_count', 0)} quarters "
         f"{readiness.get('first_period')} .. {readiness.get('last_period')}"
-        "   figures in millions, * = derived from cumulative"
+        "   totals/counts in millions; per-share/ratios in stated units; * = derived from cumulative"
     )
     out.append("")
 
@@ -80,7 +103,7 @@ def render_model_inputs(table: Mapping[str, Any], *, entity_name: str | None = N
         for end in periods:
             cell = cells.get(end)
             row += ("--" if cell is None
-                    else _millions(cell["value"]) + _mark(cell)).rjust(CELL_WIDTH)
+                    else _display_value(cell["value"], cell.get("unit")) + _mark(cell)).rjust(CELL_WIDTH)
         out.append(row)
 
     out.append("")
@@ -192,7 +215,8 @@ def render_forecast_model(
     out.append(f"specification {record.get('spec_ref')}   "
                f"formula {record.get('formula_ref')}")
     out.append(f"generator {record.get('generator_ref')}   "
-               "figures in millions, * = derived from cumulative")
+               "totals/counts in millions; per-share/ratios in stated units; "
+               "* = derived from cumulative")
     if realised:
         out.append(f"filed since this model was made: {', '.join(realised)}")
     out.append("")
@@ -211,7 +235,8 @@ def render_forecast_model(
             continue
         out.append(_row(
             label,
-            [(_millions(cells[end]["value"]) + _mark(cells[end])) if end in cells else "--"
+            [(_display_value(cells[end]["value"], cells[end].get("unit") or driver.get("unit"))
+              + _mark(cells[end])) if end in cells else "--"
              for end in history],
             ["" for _ in columns]))
         if driver.get("note"):
@@ -252,15 +277,16 @@ def render_forecast_model(
         out.append(_row(
             f"  {result.get('label')}",
             ["" for _ in history],
-            [(_millions(live[end]["value"]) if live.get(end, {}).get("status") == "computed"
+            [(_display_value(live[end]["value"], live[end].get("unit") or result.get("unit"))
+              if live.get(end, {}).get("status") == "computed"
               else "--") if end in live else "--" for end in columns]))
         for cell in result.get("cells") or []:
             if cell.get("superseded_by") and cell.get("value") is not None:
                 actual = live.get(str(cell["period"]["end"]), {})
                 out.append(
-                    f"        we estimated {_millions(cell['value'])} for "
+                    f"        we estimated {_display_value(cell['value'], cell.get('unit') or result.get('unit'))} for "
                     f"{cell['period']['end']}; filed "
-                    f"{_millions(actual.get('value'))}")
+                    f"{_display_value(actual.get('value'), actual.get('unit') or result.get('unit'))}")
         if result.get("status") != "computed":
             out.append(f"        {result.get('status')}: "
                        f"{result.get('reason') or 'no reason recorded'}")

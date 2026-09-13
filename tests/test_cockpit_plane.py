@@ -1,16 +1,20 @@
 """P9d-18 / ADR-0006: the owner's cockpit — goal, steer, log, ask, approve."""
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
+import sqlite3
 import tempfile
 import time
 import unittest
 from datetime import timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 from dalton_core.cockpit_model import CockpitModel, CockpitModelError, unwrap_json_object
-from dalton_core.cockpit_plane import CockpitConfig, CockpitConflict, CockpitError, CockpitPlane
+from dalton_core.cockpit_plane import (CockpitConfig, CockpitConflict, CockpitError,
+                                       CockpitPlane, _terminal_display_reason)
 from dalton_core.cockpit_setup import install as install_cockpit
 from dalton_core.document_extraction import HermeticExtractionAdapter, build_prompt
 from dalton_core.store import content_hash
@@ -128,6 +132,7 @@ class CockpitPlaneTests(unittest.TestCase):
         company = next(c for c in view["companies"] if c["progress"]["found"])
         self.assertEqual(company["stage"], "还没开始")
         self.assertEqual(company["gate_decision"]["status"], None)
+
         self.assertEqual(company["source_readiness"]["scope"], "initial_screen")
         self.assertIn("当前资料", company["journey_status"])
         self.assertEqual([i["item_ref"] for i in company["checklist"]],
@@ -159,6 +164,79 @@ class CockpitPlaneTests(unittest.TestCase):
         self.assertNotIn("alphaengine-doc:", ticket_event["title"])
         self.assertEqual(log["cursor"], log["events"][0]["at"])
         self.assertEqual(self.c.plane.log(since=log["cursor"])["events"], [])
+
+    def test_sources_separate_connector_installation_from_mission_state(self) -> None:
+        rows = self.c.plane.sources()["sources"]
+        guidepoint = next(row for row in rows if row["slug"] == "guidepoint")
+        self.assertIn("connector", guidepoint)
+        self.assertIn("mission", guidepoint)
+        self.assertNotEqual(guidepoint["connector"]["status"], guidepoint["mission"]["status"])
+
+    def test_terminal_budget_reason_does_not_always_claim_daily_cap(self) -> None:
+        self.assertEqual(
+            _terminal_display_reason("BUDGET_REFUSED: request maximum", "content_refused"),
+            "本次请求超出适用的调用或任务预算限制",
+        )
+        self.assertEqual(
+            _terminal_display_reason("pool_exhausted daily budget_refused", "content_refused"),
+            "当天适用的预算池或日额度已用尽",
+        )
+
+    def test_events_are_today_only_and_remain_bound_to_exact_company(self) -> None:
+        core = sqlite3.connect(":memory:")
+        core.row_factory = sqlite3.Row
+        core.execute("CREATE TABLE research_events (event_id TEXT, company_ref TEXT, "
+                     "kind TEXT, evidence_tier TEXT, occurred_at TEXT, record_json TEXT)")
+        today = self.c.h.h.clock().date().isoformat()
+        rows = [
+            ("today-acn", "company:ACN", "claim", "company_primary",
+             today + "T10:00:00+00:00", {"id": "today-acn", "payload": {"statement": "peer comparison"}}),
+            ("today-ibm", "company:IBM", "claim", "company_primary",
+             today + "T11:00:00+00:00", {"id": "today-ibm", "payload": {"statement": "IBM fact"}}),
+            ("old-acn", "company:ACN", "claim", "company_primary",
+             "2020-01-01T00:00:00+00:00", {"id": "old-acn", "payload": {"statement": "old"}}),
+        ]
+        core.executemany("INSERT INTO research_events VALUES(?,?,?,?,?,?)",
+                         [row[:5] + (json.dumps(row[5]),) for row in rows])
+        projected = self.c.plane._events(core)
+        self.assertEqual(set(projected), {"company:ACN", "company:IBM"})
+        self.assertEqual(projected["company:ACN"]["total"], 1)
+        self.assertEqual(projected["company:ACN"]["latest"][0]["ref"], "today-acn")
+        core.close()
+
+    def test_claim_pages_have_stable_opaque_cursor_and_exact_total(self) -> None:
+        company_ref = self.c.h.mission["universe"][0]["company_ref"]
+        rows = [{
+            "ref": f"claim:{n}", "statement": f"claim {n}",
+            "subject_ref": company_ref, "period": None,
+            "created_at": f"2026-09-0{n}T00:00:00+00:00",
+            "index_aspect": "company", "importance": "core",
+            "as_of": None, "as_of_basis": None, "is_canonical": True,
+            "index_order": n,
+        } for n in (1, 2, 3)]
+        with patch("dalton_core.company_research_view.annotate_with_index",
+                   return_value=rows), patch(
+                       "dalton_core.claim_index_authority.table_exists",
+                       return_value=True):
+            first = self.c.plane.claims(limit=2)
+            second = self.c.plane.claims(limit=2, cursor=first["next_cursor"])
+            self.assertEqual((first["total"], first["returned_count"]), (3, 2))
+            self.assertEqual((second["total"], second["returned_count"], second["next_cursor"]),
+                             (3, 1, None))
+            self.assertEqual({row["ref"] for row in first["items"]}.intersection(
+                row["ref"] for row in second["items"]), set())
+            with self.assertRaises(CockpitError):
+                self.c.plane.claims(company_ref=company_ref, limit=2,
+                                    cursor=first["next_cursor"])
+            malformed = base64.urlsafe_b64encode(json.dumps({
+                "filters": hashlib.sha256(json.dumps({
+                    "company_ref": None, "aspect": None, "importance": None,
+                    "canonical_only": True,
+                }, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
+                "after": [{}, None, []],
+            }).encode()).decode().rstrip("=")
+            with self.assertRaises(CockpitError):
+                self.c.plane.claims(limit=2, cursor=malformed)
 
     def test_exit_zero_child_with_failed_product_summary_is_not_shown_done(self) -> None:
         for field, value in (("map_status", "refused"),

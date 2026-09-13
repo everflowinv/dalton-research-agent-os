@@ -816,6 +816,36 @@ class RenderTests(unittest.TestCase):
                       text)
         self.assertIn(" |", text)
 
+    def test_browser_forecast_report_preserves_per_share_and_unknown_units(self):
+        record = model()
+        end = record["history_periods"][-1]
+        record["drivers"].extend([
+            {"ref": "diluted-eps", "label": "Diluted EPS", "unit": "USDPerShare",
+             "status": "filed", "role": "eps", "history": [{
+                 "period_end": end, "value": "3.03", "basis": "reported"}]},
+            {"ref": "custom-score", "label": "Custom score", "unit": "widgets",
+             "status": "filed", "role": "other", "history": [{
+                 "period_end": end, "value": "42", "basis": "reported"}]},
+        ])
+        forecast_end = record["forecast_periods"][0]["end"]
+        record["results"].append({
+            "ref": "result:eps", "label": "Diluted EPS", "unit": "USDPerShare",
+            "status": "computed", "formula": "net income / diluted shares",
+            "cells": [{"period": {"end": forecast_end}, "value": "3.25",
+                       "status": "computed", "superseded_by": None}],
+        })
+        text = render_forecast_model(record)
+        eps_history = next(line for line in text.splitlines()
+                           if line.startswith("  Diluted EPS [eps]"))
+        score = next(line for line in text.splitlines()
+                     if line.startswith("  Custom score [other]"))
+        eps_result = next(line for line in text.splitlines()
+                          if line.startswith("  Diluted EPS") and "[eps]" not in line)
+        self.assertIn("3.03", eps_history)
+        self.assertIn("42.00", score)
+        self.assertIn("3.25", eps_result)
+        self.assertNotIn("0.0", eps_history + eps_result)
+
 
 def filed_quarter(missions, end="2026-08-31", start="2026-06-01", *, values=None,
                   accession="0001467373-26-000099"):

@@ -843,6 +843,7 @@ class AgendaControlApplication:
                 importance=query.get("importance") or None,
                 canonical_only=query.get("canonical", "1") not in {"0", "false", "no"},
                 limit=int(limit) if limit.isdigit() else MAX_CLAIMS_IN_VIEW,
+                cursor=query.get("cursor") or None,
             ), "enabled": True}
         # P13-M2: one company's forecast model, printed by the lane's own
         # renderer rather than re-laid-out here.

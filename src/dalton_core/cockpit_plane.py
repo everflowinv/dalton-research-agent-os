@@ -24,6 +24,9 @@ principal, exactly as the review plane does.  Model calls go through
 from __future__ import annotations
 
 import json
+import base64
+import binascii
+import hashlib
 import os
 import re
 import secrets
@@ -291,7 +294,7 @@ FAILURE_CLASS_LABELS: dict[str, str] = {
 }
 
 
-def _terminal_display_reason(reason: Any) -> str:
+def _terminal_display_reason(reason: Any, failure_class: Any = None) -> str:
     """Translate a terminal ledger reason without changing its audit record.
 
     These matches describe closed validator outcomes already emitted by the
@@ -300,6 +303,17 @@ def _terminal_display_reason(reason: Any) -> str:
     """
 
     text = str(reason or "").casefold()
+    category = str(failure_class or "")
+    if "budget_refused" in text or "budget" in text and "refus" in text:
+        if any(marker in text for marker in ("day_cap", "daily", "pool_exhausted")):
+            return "当天适用的预算池或日额度已用尽"
+        return "本次请求超出适用的调用或任务预算限制"
+    if category and category != "content_refused":
+        return {
+            "dependency_unavailable": "依赖当前不可用",
+            "not_permitted": "当前任务或治理规则尚未授权",
+            "transient": "临时失败已达到本次重试上限",
+        }.get(category, "任务已结束，具体原因见技术详情")
     if "numbers_without_refs" in text or "number_not_in_source" in text:
         return "数字缺少可核验来源"
     if any(marker in text for marker in (
@@ -1524,12 +1538,15 @@ class CockpitPlane:
         if not _table_exists(core, "research_events"):
             return {}
         out: dict[str, dict[str, Any]] = {}
+        today = self.clock().date().isoformat()
         for row in self._rows(core,
             "SELECT company_ref, kind, evidence_tier, occurred_at, record_json "
-            "FROM research_events ORDER BY occurred_at, event_id",
+            "FROM research_events WHERE substr(occurred_at,1,10)=? "
+            "ORDER BY occurred_at, event_id", (today,),
         ):
             entry = out.setdefault(row["company_ref"], {
                 "total": 0, "by_kind": {}, "latest": [],
+                "date": today, "date_basis": "cockpit_clock_calendar_date",
             })
             entry["total"] += 1
             entry["by_kind"][row["kind"]] = entry["by_kind"].get(row["kind"], 0) + 1
@@ -1830,6 +1847,15 @@ class CockpitPlane:
     # -- overview ------------------------------------------------------------------
 
     def overview(self) -> dict[str, Any]:
+        # UI translations are a read-only adjunct to authority text. Older
+        # installations retain their exact payload when the cache is absent.
+        try:
+            from .research_localization_store import load_ui_texts
+            text_localizations = load_ui_texts(self.config.core_db)
+            if len(json.dumps(text_localizations, ensure_ascii=False).encode()) > 2_000_000:
+                text_localizations = {}
+        except (ImportError, OSError, sqlite3.Error, ValueError, TypeError):
+            text_localizations = {}
         heartbeat = _load_json(self.config.heartbeat_path) or {}
         with self._core() as core:
             try:
@@ -2068,6 +2094,7 @@ class CockpitPlane:
             # that fail when pressed.
             "feedback_enabled": journal["enabled"],
             "model_available": self._model_status(),
+            "text_localizations": text_localizations,
         }
 
     def _stage_rows(self, core: sqlite3.Connection, mission: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -2399,7 +2426,8 @@ class CockpitPlane:
         terminal = [
             {**row,
              "lane_label": REGISTRY_LANE_LABELS.get(row["lane"], row["lane"]),
-             "display_reason": _terminal_display_reason(row.get("reason"))}
+             "display_reason": _terminal_display_reason(
+                 row.get("reason"), row.get("failure_class") or row.get("classification"))}
             for row in backlog["terminal_items"]
         ]
         permissions = [
@@ -2417,7 +2445,7 @@ class CockpitPlane:
             "permission_count": backlog["permission_count"],
             "class_labels": dict(FAILURE_CLASS_LABELS),
             "note": ("挂起 = 依赖不可用，等依赖回来自动重试，不消耗重试预算；"
-                     "待授权 = 权限或治理配置改变后再继续；终态 = 当前产出未通过内容或证据校验，"
+                     "待授权 = 权限或治理配置改变后再继续；终态 = 这次工作已经结束，"
                      "不会原样重试"),
         }
 
@@ -3510,7 +3538,7 @@ class CockpitPlane:
 
     def claims(self, *, company_ref: str | None = None, index_aspect: str | None = None,
                importance: str | None = None, canonical_only: bool = True,
-               limit: int = MAX_CLAIMS_IN_VIEW) -> dict[str, Any]:
+               limit: int = MAX_CLAIMS_IN_VIEW, cursor: str | None = None) -> dict[str, Any]:
         """The Ledger's conclusions, read through P12b's index.
 
         Canonical-only by default, which is what the index is for: the owner
@@ -3546,7 +3574,35 @@ class CockpitPlane:
                 ) from exc
         # Most important first, then newest: a company report outranks a news
         # item about it, and among equals the recent one is the one to read.
-        annotated.sort(key=lambda row: (row["index_order"], row["created_at"]))
+        annotated.sort(key=lambda row: (row["index_order"], row["created_at"], row["ref"]))
+        fingerprint = hashlib.sha256(json.dumps({
+            "company_ref": company_ref, "aspect": index_aspect,
+            "importance": importance, "canonical_only": canonical_only,
+        }, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        remaining = annotated
+        if cursor:
+            try:
+                if not isinstance(cursor, str) or len(cursor) > 4096:
+                    raise ValueError("cursor is not bounded")
+                payload = json.loads(base64.urlsafe_b64decode(
+                    cursor + "=" * (-len(cursor) % 4)))
+                if (not isinstance(payload, dict)
+                        or payload.get("filters") != fingerprint
+                        or not isinstance(payload.get("after"), list)
+                        or len(payload["after"]) != 3
+                        or not isinstance(payload["after"][0], int)
+                        or isinstance(payload["after"][0], bool)
+                        or not all(isinstance(value, str) and len(value) <= 1024
+                                   for value in payload["after"][1:])):
+                    raise ValueError("cursor binding changed")
+                after = tuple(payload["after"])
+            except (ValueError, KeyError, TypeError, UnicodeDecodeError,
+                    binascii.Error, json.JSONDecodeError) as exc:
+                raise CockpitError("分页位置无效或筛选条件已经改变") from exc
+            remaining = [row for row in annotated if (
+                row["index_order"], row["created_at"], row["ref"]) > after]
+        page_limit = max(1, min(int(limit), MAX_CLAIMS_IN_VIEW))
+        selected = remaining[:page_limit]
         items = [{
             "ref": row["ref"], "statement": row["statement"],
             "company": self._label(members, row["subject_ref"]),
@@ -3561,10 +3617,18 @@ class CockpitPlane:
             # An untagged claim says so rather than looking like a tagged one
             # with nothing interesting in it.
             "indexed": row["index_aspect"] is not None,
-        } for row in annotated[:max(1, min(int(limit), MAX_CLAIMS_IN_VIEW))]]
+        } for row in selected]
+        next_cursor = None
+        if len(remaining) > len(selected):
+            last = selected[-1]
+            next_cursor = base64.urlsafe_b64encode(json.dumps({
+                "filters": fingerprint,
+                "after": [last["index_order"], last["created_at"], last["ref"]],
+            }, sort_keys=True, separators=(",", ":")).encode()).decode().rstrip("=")
         return {
             "as_of": _iso(self.clock()), "indexed": indexed,
-            "total": len(annotated), "items": items,
+            "total": len(annotated), "returned_count": len(items),
+            "next_cursor": next_cursor, "items": items,
             "filters": {
                 "company_ref": company_ref, "aspect": index_aspect,
                 "importance": importance, "canonical_only": canonical_only,
@@ -3697,6 +3761,18 @@ class CockpitPlane:
                 # 状态
                 "status": status,
                 "status_label": CONNECTION_STATUS_LABELS.get(status, status),
+                "connector": {
+                    "installed": bool(entry["in_inventory"]),
+                    "status": "installed" if entry["in_inventory"] else "not_installed",
+                    "status_label": ("本机连接器目录已登记" if entry["in_inventory"]
+                                     else "本机连接器目录未登记"),
+                },
+                "mission": {
+                    "declared": status != "undeclared",
+                    "permitted": status in {"connected", "probe_only"},
+                    "status": status,
+                    "status_label": CONNECTION_STATUS_LABELS.get(status, status),
+                },
                 "installed": entry["in_inventory"],
                 "installed_note": (None if entry["in_inventory"]
                                    else "这条来源还没装进目录"),
@@ -4071,6 +4147,8 @@ class CockpitPlane:
         narrative = record.get("narrative") or {}
         return {
             "as_of": _iso(self.clock()), "available": True,
+            "historical": True,
+            "content_as_of": rows[0]["created_at"],
             "iso_week": record.get("iso_week"),
             "window": {"since": record.get("window_start"),
                        "until": record.get("window_end")},
