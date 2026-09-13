@@ -23,6 +23,9 @@ from scripts.prepare_successor_config_transition import (
     expected_preserved_openclaw_state, expected_service_transition_state,
     expected_transition_state,
 )
+from scripts.successor_research_publication_transition import (
+    FIXED_FILES as PUBLICATION_FILES, build_transition as build_publication,
+)
 from scripts.run_successor_copied_state_rehearsal import derive_confined_transition
 from scripts.execute_successor_stopped_window_candidate import expected_preserved_service_bytes
 
@@ -487,6 +490,55 @@ class PreserveExistingTransitionTests(unittest.TestCase):
             service_config_before_path=self.packet / "service.before.json",
             openclaw_config_before_path=self.packet / "openclaw.preserved.json",
         )
+
+    def test_research_publication_adds_closed_inventory_in_scratch(self):
+        self.build_pure()
+        assets = self.packet / "publication"; assets.mkdir()
+        authorities = {}
+        for name in PUBLICATION_FILES:
+            path = assets / name
+            value = model(name) if name.endswith("-model-config.json") else {"schema_version": "0.1"}
+            write(path, value); authorities[name] = path
+        seed = assets / "research-localization/index.json"
+        seed.parent.mkdir(); write(seed, {"schema_version": "0.1", "records": []})
+        plist = assets / "com.dalton.research-publication-worker.plist"
+        plist.write_bytes(b"<?xml version='1.0'?><plist version='1.0'><dict/></plist>\n")
+        publication = build_publication(
+            packet_root=self.packet, authority_files=authorities,
+            seed_files={"research-localization/index.json": seed},
+            launch_agent_path=plist)
+        manifest = build_preserve_existing_transition(
+            packet_root=self.packet, release_ref="research-publication",
+            source_commit="e" * 40, baseline_models_path=self.packet / "models.json",
+            model_config_paths={name: self.packet / name for name in self.models},
+            preserved_config_paths=self.preserved,
+            preserved_state_authority_paths={
+                "connector-governance/yfinance-analyst-estimates-v1.json":
+                    self.packet / "yfinance-approved.json"},
+            service_config_before_path=self.packet / "service.before.json",
+            openclaw_config_before_path=self.packet / "openclaw.preserved.json",
+            research_publication_transition=publication)
+        self.assertEqual("successor-config-transition-0.7", manifest["schema_version"])
+        expected_models, _, _ = expected_transition_state(
+            packet_root=self.packet, manifest=manifest)
+        self.assertEqual(len(self.models) + 4, len(expected_models))
+        self.install_before()
+        openclaw = self.root / "scratch-publication/openclaw.json"
+        openclaw.parent.mkdir(); openclaw.write_bytes(
+            (self.packet / "openclaw.preserved.json").read_bytes())
+        launch = self.root / "LaunchAgents"; launch.mkdir()
+        manifest_path = self.packet / "transition.publication.json"; write(manifest_path, manifest)
+        receipt = apply_transition_to_scratch(
+            packet_root=self.packet, scratch_root=self.root, state_dir=self.state,
+            manifest_path=manifest_path,
+            expected_manifest_sha256=hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+            receipt_path=self.root / "receipt.publication.json",
+            service_config_path=self.service, external_config_path=openclaw,
+            launch_agents_dir=launch)
+        self.assertEqual("successor-config-transition-receipt-0.7", receipt["schema_version"])
+        self.assertEqual(len(publication["files"]),
+                         receipt["configuration_mutations"])
+        self.assertTrue((launch / "com.dalton.research-publication-worker.plist").is_file())
 
     def build_cockpit_brain(self):
         self.models["research-planner-model-config.json"] = model("brain")

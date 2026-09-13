@@ -106,7 +106,7 @@ def validate_transition(value: Mapping[str, Any]) -> dict[str, Any]:
         _need(isinstance(digest, str) and re.fullmatch(_HEX, digest),
               "research publication file hash is invalid")
         _need(isinstance(raw["size"], int) and not isinstance(raw["size"], bool)
-              and 0 <= raw["size"] <= 2_000_000,
+              and 0 <= raw["size"] <= 16_000_000,
               "research publication file size is invalid")
         expected_mode = 0o644 if kind == "launch_agent" else 0o600
         _need(raw["mode"] == expected_mode,
@@ -159,15 +159,17 @@ def artifact_bytes(packet_root: Path, row: Mapping[str, Any]) -> bytes:
     return data
 
 
-def apply(*, packet_root: Path, state_dir: Path, launch_agents_dir: Path,
+def apply(*, packet_root: Path, state_dir: Path, launch_agents_dir: Path | None,
           transition: Mapping[str, Any]) -> list[Path]:
     """Install the closed inventory; an existing target always refuses."""
     value = validate_transition(transition)
-    roots = {"launch_agent": launch_agents_dir.resolve()}
+    roots = {"launch_agent": (None if launch_agents_dir is None else launch_agents_dir.resolve())}
     state = state_dir.resolve()
-    created: list[Path] = []
+    created: list[tuple[Path, dict[str, Any]]] = []
     try:
         for row in value["files"]:
+            if row["kind"] == "launch_agent" and roots["launch_agent"] is None:
+                continue
             target = ((roots["launch_agent"] / row["path"])
                       if row["kind"] == "launch_agent" else state / row["path"])
             root = roots["launch_agent"] if row["kind"] == "launch_agent" else state
@@ -177,19 +179,31 @@ def apply(*, packet_root: Path, state_dir: Path, launch_agents_dir: Path,
             _need(not target.exists() and not target.is_symlink(),
                   f"research publication target already exists: {row['path']}")
             target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            data = artifact_bytes(packet_root, row)
             fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, row["mode"])
             try:
                 with os.fdopen(fd, "wb") as stream:
-                    stream.write(artifact_bytes(packet_root, row)); stream.flush()
+                    stream.write(data); stream.flush()
                     os.fsync(stream.fileno())
             except BaseException:
                 target.unlink(missing_ok=True)
                 raise
-            os.chmod(target, row["mode"]); created.append(target)
-        return created
-    except BaseException:
-        for target in reversed(created):
-            target.unlink()
+            os.chmod(target, row["mode"]); created.append((target, row))
+        return [target for target, _row in created]
+    except BaseException as exc:
+        conflicts = []
+        for target, row in reversed(created):
+            if (target.is_file() and not target.is_symlink()
+                    and stat.S_IMODE(target.stat().st_mode) == row["mode"]
+                    and target.stat().st_size == row["size"]
+                    and _sha(target.read_bytes()) == row["sha256"]):
+                target.unlink()
+            else:
+                conflicts.append(row["path"])
+        if conflicts:
+            raise ResearchPublicationTransitionError(
+                "transition failed and preserved concurrently changed targets: "
+                + ",".join(sorted(conflicts))) from exc
         raise
 
 
@@ -215,3 +229,23 @@ def rollback(*, state_dir: Path, launch_agents_dir: Path,
               f"research publication rollback target changed: {row['path']}")
         target.unlink(); removed.append(target)
     return removed
+
+
+def rollback_preserving_changed(*, state_dir: Path, launch_agents_dir: Path,
+                                transition: Mapping[str, Any]) -> dict[str, list[str]]:
+    """Deployment rollback: delete exact initial bytes and retain later records."""
+    value = validate_transition(transition); state = state_dir.resolve()
+    launch = launch_agents_dir.resolve(); removed = []; preserved = []
+    for row in reversed(value["files"]):
+        target = ((launch / row["path"]) if row["kind"] == "launch_agent"
+                  else state / row["path"])
+        if not target.exists() and not target.is_symlink():
+            continue
+        if (target.is_file() and not target.is_symlink()
+                and stat.S_IMODE(target.stat().st_mode) == row["mode"]
+                and target.stat().st_size == row["size"]
+                and _sha(target.read_bytes()) == row["sha256"]):
+            target.unlink(); removed.append(row["path"])
+        else:
+            preserved.append(row["path"])
+    return {"removed": sorted(removed), "preserved_changed": sorted(preserved)}

@@ -42,12 +42,14 @@ EXTERNAL_CAS_SCHEMA_VERSION = "successor-config-transition-0.3"
 PURE_PRESERVE_SCHEMA_VERSION = "successor-config-transition-0.4"
 WRITER_APPEND_SCHEMA_VERSION = "successor-config-transition-0.5"
 COCKPIT_BRAIN_SCHEMA_VERSION = "successor-config-transition-0.6"
+RESEARCH_PUBLICATION_SCHEMA_VERSION = "successor-config-transition-0.7"
 RECEIPT_SCHEMA_VERSION = "successor-config-transition-receipt-0.1"
 PRESERVE_RECEIPT_SCHEMA_VERSION = "successor-config-transition-receipt-0.2"
 EXTERNAL_CAS_RECEIPT_SCHEMA_VERSION = "successor-config-transition-receipt-0.3"
 PURE_PRESERVE_RECEIPT_SCHEMA_VERSION = "successor-config-transition-receipt-0.4"
 WRITER_APPEND_RECEIPT_SCHEMA_VERSION = "successor-config-transition-receipt-0.5"
 COCKPIT_BRAIN_RECEIPT_SCHEMA_VERSION = "successor-config-transition-receipt-0.6"
+RESEARCH_PUBLICATION_RECEIPT_SCHEMA_VERSION = "successor-config-transition-receipt-0.7"
 HEX40 = re.compile(r"[0-9a-f]{40}")
 HEX64 = re.compile(r"[0-9a-f]{64}")
 MODEL_ADDITIONS = (
@@ -681,6 +683,7 @@ def build_preserve_existing_transition(
     predecessor_source_commit: str | None = None,
     successor_source_root: Path | None = None,
     cockpit_brain_binding: bool = False,
+    research_publication_transition: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a 0.2 service delta through 0.5 writer-append transition.
 
@@ -778,6 +781,8 @@ def build_preserve_existing_transition(
           or all(value is not None for value in writer_inputs),
           "writer operation transition inputs are incomplete")
     writer_append = all(value is not None for value in writer_inputs)
+    _need(not cockpit_brain_binding or research_publication_transition is None,
+          "cockpit brain and research publication transitions cannot be combined")
     pure_preserve = (
         service_delta_path is None and not cockpit_brain_binding
         and openclaw_config_before_path is not None
@@ -797,10 +802,15 @@ def build_preserve_existing_transition(
         openclaw_before, openclaw_before_bytes = _read_json(
             openclaw_config_before_path, "OpenClaw config before")
         _need(bool(openclaw_before), "preserved OpenClaw config is empty")
-        schema_version = (
-            WRITER_APPEND_SCHEMA_VERSION if writer_append
-            else PURE_PRESERVE_SCHEMA_VERSION
-        )
+        if research_publication_transition is not None:
+            from scripts.successor_research_publication_transition import validate_transition
+            publication = validate_transition(research_publication_transition)
+            _need(not writer_append, "research publication transition cannot append writer operations")
+            schema_version = RESEARCH_PUBLICATION_SCHEMA_VERSION
+        else:
+            publication = None
+            schema_version = (WRITER_APPEND_SCHEMA_VERSION if writer_append
+                              else PURE_PRESERVE_SCHEMA_VERSION)
         service_transition = {
             "kind": "preserve_exact", "mutation_count": 0,
             "before": _artifact(service_config_before_path, packet_root),
@@ -812,11 +822,13 @@ def build_preserve_existing_transition(
             "after_sha256": sha256_bytes(openclaw_before_bytes),
         }
         boundaries = {
-            "configuration_mutations": 0, "service_config_mutations": 0,
+            "configuration_mutations": (0 if publication is None else
+                                        sum(row["kind"] != "launch_agent" for row in publication["files"])),
+            "service_config_mutations": 0,
             "external_config_mutations": 0,
             **({"writer_token_mutations": 1} if writer_append else {}),
             "live_mutation": False, "manifest_publication": False,
-            "service_lifecycle": False, "model_calls": False,
+            "service_lifecycle": publication is not None, "model_calls": False,
         }
     elif cockpit_brain_binding:
         _need(service_delta_path is None and openclaw_config_before_path is not None
@@ -1002,11 +1014,22 @@ def build_preserve_existing_transition(
         ],
         "boundaries": boundaries,
     }
-    if schema_version in {PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION,
-                          COCKPIT_BRAIN_SCHEMA_VERSION}:
-        body["external_config_transition"] = openclaw_transition
-    elif openclaw_transition is not None:
+    if schema_version == EXTERNAL_CAS_SCHEMA_VERSION:
         body["external_config_transitions"] = [openclaw_transition]
+    elif schema_version in {PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION,
+                          COCKPIT_BRAIN_SCHEMA_VERSION,
+                          RESEARCH_PUBLICATION_SCHEMA_VERSION}:
+        body["external_config_transition"] = openclaw_transition
+    if schema_version == RESEARCH_PUBLICATION_SCHEMA_VERSION:
+        body["research_publication_transition"] = publication
+        added_models = {}
+        for row in publication["files"]:
+            if row["kind"] == "authority" and row["path"].endswith("-model-config.json"):
+                _, data = _resolve_artifact(packet_root, {"file": row["artifact"], "sha256": row["sha256"]})
+                added_models[row["path"]] = json.loads(data)
+        final_models = {**baseline, **added_models}
+        body["model_inventory"]["after_count"] = len(final_models)
+        body["model_inventory"]["after_semantic_sha256"] = canonical_hash(final_models)
     if schema_version == WRITER_APPEND_SCHEMA_VERSION:
         from scripts.successor_writer_token_transition import (
             build_transition as build_writer_transition,
@@ -1070,7 +1093,8 @@ def expected_transition_state(
     version = manifest.get("schema_version")
     _need(version in {SCHEMA_VERSION, PRESERVE_SCHEMA_VERSION,
                       EXTERNAL_CAS_SCHEMA_VERSION, PURE_PRESERVE_SCHEMA_VERSION,
-                      WRITER_APPEND_SCHEMA_VERSION, COCKPIT_BRAIN_SCHEMA_VERSION},
+                      WRITER_APPEND_SCHEMA_VERSION, COCKPIT_BRAIN_SCHEMA_VERSION,
+                      RESEARCH_PUBLICATION_SCHEMA_VERSION},
           "transition schema version is unsupported")
     document = None
     lane = None
@@ -1080,7 +1104,8 @@ def expected_transition_state(
                                     EXTERNAL_CAS_SCHEMA_VERSION,
                                     PURE_PRESERVE_SCHEMA_VERSION,
                                     WRITER_APPEND_SCHEMA_VERSION,
-                                    COCKPIT_BRAIN_SCHEMA_VERSION} else row.get("after")
+                                    COCKPIT_BRAIN_SCHEMA_VERSION,
+                                    RESEARCH_PUBLICATION_SCHEMA_VERSION} else row.get("after")
                     if isinstance(row, Mapping) else None)
         if not isinstance(row, Mapping) or not isinstance(artifact, Mapping):
             raise ConfigTransitionError("transition target is invalid")
@@ -1098,6 +1123,13 @@ def expected_transition_state(
             document = value
         elif row.get("name") == LANE_CONFIG:
             lane = value
+    if version == RESEARCH_PUBLICATION_SCHEMA_VERSION:
+        from scripts.successor_research_publication_transition import validate_transition
+        publication = validate_transition(manifest.get("research_publication_transition"))
+        for row in publication["files"]:
+            if row["kind"] == "authority" and row["path"].endswith("-model-config.json"):
+                _, data = _resolve_artifact(packet_root, {"file": row["artifact"], "sha256": row["sha256"]})
+                models[row["path"]] = json.loads(data)
     _need(isinstance(document, dict), "document research target is absent")
     _need(lane == {"schema_version": "0.1", "enabled": True},
           "mission document lane target is absent or invalid")
@@ -1116,7 +1148,7 @@ def expected_service_transition_state(
     version = manifest.get("schema_version")
     _need(version in {PRESERVE_SCHEMA_VERSION, EXTERNAL_CAS_SCHEMA_VERSION,
                       PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION,
-                      COCKPIT_BRAIN_SCHEMA_VERSION}
+                      COCKPIT_BRAIN_SCHEMA_VERSION, RESEARCH_PUBLICATION_SCHEMA_VERSION}
           and manifest.get("transition_kind") == "preserve_existing",
           "service transition requires preserve-existing schema 0.2 through 0.5")
     row = manifest.get("service_transition")
@@ -1147,7 +1179,7 @@ def expected_service_transition_state(
               "cockpit brain service transition hashes differ")
         return before, after
     if version in {EXTERNAL_CAS_SCHEMA_VERSION, PURE_PRESERVE_SCHEMA_VERSION,
-                   WRITER_APPEND_SCHEMA_VERSION}:
+                   WRITER_APPEND_SCHEMA_VERSION, RESEARCH_PUBLICATION_SCHEMA_VERSION}:
         _need(isinstance(row, Mapping)
               and set(row) == {"kind", "mutation_count", "before", "after_sha256"}
               and row.get("kind") == "preserve_exact"
@@ -1258,7 +1290,7 @@ def expected_preserved_openclaw_state(
 
     _need(manifest.get("schema_version") in {
               PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION,
-                   COCKPIT_BRAIN_SCHEMA_VERSION},
+                   COCKPIT_BRAIN_SCHEMA_VERSION, RESEARCH_PUBLICATION_SCHEMA_VERSION},
           "pure OpenClaw preservation requires schema 0.4 or 0.5")
     row = manifest.get("external_config_transition")
     _need(isinstance(row, Mapping)
@@ -1416,6 +1448,7 @@ def _apply_preserve_transition(
     receipt_path: Path, accepted_evidence: Mapping[str, Any] | None,
     fault_hook: Callable[[str], None] | None,
     successor_source_root: Path | None,
+    launch_agents_dir: Path | None,
 ) -> dict[str, Any]:
     version = manifest.get("schema_version")
     expected_fields = {
@@ -1426,7 +1459,9 @@ def _apply_preserve_transition(
         "boundaries", "content_hash",
     }
     expected_boundaries = {
-        "configuration_mutations": 0,
+        "configuration_mutations": (sum(row.get("kind") != "launch_agent" for row in
+                                        manifest.get("research_publication_transition", {}).get("files", ()))
+                                    if version == RESEARCH_PUBLICATION_SCHEMA_VERSION else 0),
         "service_config_mutations": 1 if version in {PRESERVE_SCHEMA_VERSION,
                                                        COCKPIT_BRAIN_SCHEMA_VERSION} else 0,
         **({} if version == PRESERVE_SCHEMA_VERSION
@@ -1434,22 +1469,27 @@ def _apply_preserve_transition(
                1 if version == EXTERNAL_CAS_SCHEMA_VERSION else 0
            )}),
         "live_mutation": False, "manifest_publication": False,
-        "service_lifecycle": False, "model_calls": False,
+        "service_lifecycle": version == RESEARCH_PUBLICATION_SCHEMA_VERSION,
+        "model_calls": False,
     }
     if version == EXTERNAL_CAS_SCHEMA_VERSION:
         expected_fields.add("external_config_transitions")
     elif version in {PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION,
-                   COCKPIT_BRAIN_SCHEMA_VERSION}:
+                   COCKPIT_BRAIN_SCHEMA_VERSION, RESEARCH_PUBLICATION_SCHEMA_VERSION}:
         expected_fields.add("external_config_transition")
+        if version == RESEARCH_PUBLICATION_SCHEMA_VERSION:
+            expected_fields.add("research_publication_transition")
         if version == WRITER_APPEND_SCHEMA_VERSION:
             expected_fields.add("writer_operation_transition")
             expected_boundaries["writer_token_mutations"] = 1
     _need(version in {PRESERVE_SCHEMA_VERSION, EXTERNAL_CAS_SCHEMA_VERSION,
                       PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION,
-                   COCKPIT_BRAIN_SCHEMA_VERSION}
+                   COCKPIT_BRAIN_SCHEMA_VERSION, RESEARCH_PUBLICATION_SCHEMA_VERSION}
           and set(manifest) == expected_fields
           and manifest.get("boundaries") == expected_boundaries,
-          "preserve-existing transition boundary differs")
+          "preserve-existing transition boundary differs: "
+          f"fields {set(manifest)!r} != {expected_fields!r}; "
+          f"{manifest.get('boundaries')!r} != {expected_boundaries!r}")
     _need(manifest.get("transition_kind") == "preserve_existing",
           "preserve-existing transition kind differs")
     rows = manifest.get("targets")
@@ -1490,9 +1530,12 @@ def _apply_preserve_transition(
           and set(reviewed_model_files) == set(baseline_models)
           and dict(inventory["file_sha256"]) == model_byte_hashes
           and inventory.get("before_count") == len(baseline_models)
-          and inventory.get("after_count") == len(baseline_models)
+          and inventory.get("after_count") == (len(baseline_models) + 4
+                                                if version == RESEARCH_PUBLICATION_SCHEMA_VERSION
+                                                else len(baseline_models))
           and inventory.get("before_semantic_sha256") == canonical_hash(baseline_models)
-          and inventory.get("after_semantic_sha256") == canonical_hash(baseline_models)
+          and (version == RESEARCH_PUBLICATION_SCHEMA_VERSION
+               or inventory.get("after_semantic_sha256") == canonical_hash(baseline_models))
           and actual_models == baseline_models,
           "full model configuration inventory differs from preserved baseline")
     for name in sorted(baseline_models):
@@ -1519,7 +1562,7 @@ def _apply_preserve_transition(
         packet_root=packet_root, state_dir=state_dir, manifest=manifest)
 
     if version in {EXTERNAL_CAS_SCHEMA_VERSION, PURE_PRESERVE_SCHEMA_VERSION,
-                   WRITER_APPEND_SCHEMA_VERSION}:
+                   WRITER_APPEND_SCHEMA_VERSION, RESEARCH_PUBLICATION_SCHEMA_VERSION}:
         service_before_value, service_after_value = expected_service_transition_state(
             packet_root=packet_root, manifest=manifest)
         _, service_before_bytes = _resolve_artifact(
@@ -1558,12 +1601,26 @@ def _apply_preserve_transition(
                 "writer_token_apply_actor": "bootstrap",
                 "writer_token_apply_status": "pending",
             }
+        publication_created = []
+        if version == RESEARCH_PUBLICATION_SCHEMA_VERSION:
+            from scripts.successor_research_publication_transition import apply as apply_publication
+            publication_created = apply_publication(
+                packet_root=packet_root, state_dir=state_dir,
+                launch_agents_dir=launch_agents_dir,
+                transition=manifest["research_publication_transition"])
+            final_models = {path.name: json.loads(path.read_text())
+                            for path in sorted(state_dir.glob("*-model-config.json"))}
+            _need(len(final_models) == inventory["after_count"]
+                  and canonical_hash(final_models) == inventory["after_semantic_sha256"],
+                  "research publication model inventory differs after install")
         receipt = {
             "schema_version": (
                 EXTERNAL_CAS_RECEIPT_SCHEMA_VERSION
                 if version == EXTERNAL_CAS_SCHEMA_VERSION
                 else WRITER_APPEND_RECEIPT_SCHEMA_VERSION
                 if version == WRITER_APPEND_SCHEMA_VERSION
+                else RESEARCH_PUBLICATION_RECEIPT_SCHEMA_VERSION
+                if version == RESEARCH_PUBLICATION_SCHEMA_VERSION
                 else PURE_PRESERVE_RECEIPT_SCHEMA_VERSION
             ),
             "status": "configured_controller_start_pending",
@@ -1573,8 +1630,10 @@ def _apply_preserve_transition(
             "acceptance_evidence_hash": (
                 None if accepted_evidence is None
                 else canonical_hash(dict(accepted_evidence))),
-            "configuration_mutations": 0,
-            "model_config_byte_sha256": model_byte_hashes,
+            "configuration_mutations": len(publication_created),
+            "model_config_byte_sha256": {
+                path.name: sha256_bytes(path.read_bytes())
+                for path in sorted(state_dir.glob("*-model-config.json"))},
             "preserved_targets": [
                 {"name": row["name"], "sha256": row["after_sha256"]}
                 for row in rows],
@@ -1587,7 +1646,8 @@ def _apply_preserve_transition(
             ),
             "external_config_before_sha256": sha256_bytes(external_before),
             "external_config_after_sha256": sha256_bytes(external_after),
-            "service_lifecycle_mutations": 0, "model_calls": 0,
+            "service_lifecycle_mutations": (1 if version == RESEARCH_PUBLICATION_SCHEMA_VERSION else 0),
+            "model_calls": 0,
             "manifest_publication": False,
         }
         if writer_projection is not None:
@@ -1815,6 +1875,7 @@ def apply_transition(
     _require_accepted: bool = True,
     accepted_evidence: Mapping[str, Any] | None = None,
     successor_source_root: Path | None = None,
+    launch_agents_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Apply only manifest-owned bytes; caller owns the stopped window."""
 
@@ -1830,7 +1891,7 @@ def apply_transition(
           and manifest.get("schema_version") in {
               SCHEMA_VERSION, PRESERVE_SCHEMA_VERSION, EXTERNAL_CAS_SCHEMA_VERSION,
               PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION,
-                   COCKPIT_BRAIN_SCHEMA_VERSION}
+                   COCKPIT_BRAIN_SCHEMA_VERSION, RESEARCH_PUBLICATION_SCHEMA_VERSION}
           and manifest.get("status") == "prepared_inert",
           "transition manifest authority differs")
     acceptance = manifest.get("acceptance", {})
@@ -1851,7 +1912,7 @@ def apply_transition(
     if manifest.get("schema_version") in {
             PRESERVE_SCHEMA_VERSION, EXTERNAL_CAS_SCHEMA_VERSION,
             PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION,
-                   COCKPIT_BRAIN_SCHEMA_VERSION}:
+                   COCKPIT_BRAIN_SCHEMA_VERSION, RESEARCH_PUBLICATION_SCHEMA_VERSION}:
         _need(service_config_path is not None,
               "preserve-existing transition requires the service config path")
         return _apply_preserve_transition(
@@ -1862,6 +1923,7 @@ def apply_transition(
             receipt_path=receipt_path, accepted_evidence=accepted_evidence,
             fault_hook=fault_hook,
             successor_source_root=successor_source_root,
+            launch_agents_dir=launch_agents_dir,
         )
 
     rows = manifest.get("targets")
@@ -2028,6 +2090,7 @@ def apply_transition_to_scratch(
     service_config_path: Path | None = None,
     external_config_path: Path | None = None,
     successor_source_root: Path | None = None,
+    launch_agents_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Apply a pending transition only under an explicit scratch root."""
 
@@ -2070,7 +2133,7 @@ def apply_transition_to_scratch(
             temporary.unlink(missing_ok=True)
     elif manifest.get("schema_version") in {
             PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION,
-                   COCKPIT_BRAIN_SCHEMA_VERSION}:
+                   COCKPIT_BRAIN_SCHEMA_VERSION, RESEARCH_PUBLICATION_SCHEMA_VERSION}:
         _need(external_config_path is not None,
               "schema 0.4/0.5 scratch requires an OpenClaw config path")
         external_config_path = external_config_path.resolve()
@@ -2089,6 +2152,7 @@ def apply_transition_to_scratch(
             receipt_path=receipt_path, service_config_path=service_config_path,
             external_config_path=external_config_path,
             successor_source_root=successor_source_root,
+            launch_agents_dir=launch_agents_dir,
             _require_accepted=False,
         )
     except Exception:

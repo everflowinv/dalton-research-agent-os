@@ -15,6 +15,7 @@ import plistlib
 import shutil
 import stat
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -23,6 +24,7 @@ from scripts.prepare_successor_config_transition import (
     OPENCLAW_FRAME_PATH, OPENCLAW_TARGET_MAX_FRAME_BYTES,
     PRESERVE_SCHEMA_VERSION, PURE_PRESERVE_SCHEMA_VERSION,
     WRITER_APPEND_SCHEMA_VERSION, COCKPIT_BRAIN_SCHEMA_VERSION,
+    RESEARCH_PUBLICATION_SCHEMA_VERSION,
     BRAIN_MODEL_CONFIG, COCKPIT_MODEL_PATH,
     _cockpit_brain_service_after, _json_bytes, _record_hash, _service_after, _set_leaf,
     _validated_service_delta,
@@ -35,7 +37,7 @@ from scripts.prepare_successor_config_transition import (
 PRESERVE_SCHEMA_VERSIONS = {
     PRESERVE_SCHEMA_VERSION, EXTERNAL_CAS_SCHEMA_VERSION,
     PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION,
-    COCKPIT_BRAIN_SCHEMA_VERSION,
+    COCKPIT_BRAIN_SCHEMA_VERSION, RESEARCH_PUBLICATION_SCHEMA_VERSION,
 }
 from scripts.run_release_copied_state_rehearsal import (
     RehearsalBindingError, _artifact, _canonical_sha256,
@@ -631,6 +633,26 @@ def derive_confined_transition(
                 "sha256": _sha(writer_before_path),
             }
 
+        if manifest.get("schema_version") == RESEARCH_PUBLICATION_SCHEMA_VERSION:
+            from scripts.successor_research_publication_transition import validate_transition
+            publication = validate_transition(manifest["research_publication_transition"])
+            confined_files = derived_root / "research-publication-artifacts"
+            confined_files.mkdir(mode=0o700)
+            for index, row in enumerate(publication["files"]):
+                original = packet_root / row["artifact"]
+                _artifact(original, row["sha256"],
+                          f"research publication artifact {row['path']}")
+                confined = confined_files / f"{index:03d}.artifact"
+                _write_exclusive(confined, original.read_bytes())
+                target = derived["research_publication_transition"]["files"][index]
+                target["artifact"] = confined.relative_to(derived_root).as_posix()
+                target["sha256"] = _sha(confined)
+                target["size"] = confined.stat().st_size
+                if row["kind"] == "authority" and row["path"].endswith("-model-config.json"):
+                    value = json.loads(confined.read_text())
+                    final_models[row["path"]] = value
+                    confined_model_hashes[row["path"]] = _sha(confined)
+
     derived["model_inventory"] = {
         "before_count": len(raw_models), "after_count": len(final_models),
         "before_semantic_sha256": canonical_hash(raw_models),
@@ -872,7 +894,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             self.successor_openclaw = None
             if manifest.get("schema_version") in {
                     EXTERNAL_CAS_SCHEMA_VERSION, PURE_PRESERVE_SCHEMA_VERSION,
-                    WRITER_APPEND_SCHEMA_VERSION, COCKPIT_BRAIN_SCHEMA_VERSION}:
+                    WRITER_APPEND_SCHEMA_VERSION, COCKPIT_BRAIN_SCHEMA_VERSION, RESEARCH_PUBLICATION_SCHEMA_VERSION}:
                 self.successor_openclaw = self.temp_root / "openclaw/openclaw.json"
                 self.successor_openclaw.parent.mkdir(mode=0o700)
                 _write_exclusive(
@@ -883,7 +905,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
         def run_bootstrap(self):
             if manifest.get("schema_version") in {
-                    PURE_PRESERVE_SCHEMA_VERSION, COCKPIT_BRAIN_SCHEMA_VERSION}:
+                    PURE_PRESERVE_SCHEMA_VERSION, COCKPIT_BRAIN_SCHEMA_VERSION, RESEARCH_PUBLICATION_SCHEMA_VERSION}:
                 detail, findings, preservation = (
                     verify_scratch_bootstrap_writer_preservation(
                         token_path=self.temp_state / "writer-tokens.json",
@@ -961,7 +983,28 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 service_config_path=self.temp_config,
                 external_config_path=self.successor_openclaw,
                 successor_source_root=source_root,
+                launch_agents_dir=self.launch_agents_dir,
             )
+            self.publication_worker_run_once = None
+            if manifest.get("schema_version") == RESEARCH_PUBLICATION_SCHEMA_VERSION:
+                worker_config = self.temp_state / "research-publication-worker-config.json"
+                env = dict(os.environ)
+                env.update({"HOME": str(self.temp_home), "PYTHONDONTWRITEBYTECODE": "1",
+                            "PYTHONPATH": str(source_root / "src")})
+                completed = subprocess.run(
+                    [sys.executable, "-m", "dalton_core.research_output_preparation",
+                     "run-worker", "--config", str(worker_config)],
+                    cwd=temp_root, env=env, stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    timeout=300, check=False)
+                _need(completed.returncode == 0,
+                      "research publication worker run-once fixture failed")
+                self.publication_worker_run_once = {
+                    "status": "passed", "exit_code": 0,
+                    "stdout_sha256": hashlib.sha256(completed.stdout).hexdigest(),
+                    "stderr_sha256": hashlib.sha256(completed.stderr).hexdigest(),
+                    "provider_calls": 0,
+                }
             self.successor_derivation = {
                 **proof, "proof_path": str(proof_path),
                 "proof_sha256": _sha(proof_path),
@@ -990,6 +1033,26 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         expected_service=expected_service,
         expected_service_mode=(0o600 if manifest.get("schema_version")
                                == COCKPIT_BRAIN_SCHEMA_VERSION else None))
+    if manifest.get("schema_version") == RESEARCH_PUBLICATION_SCHEMA_VERSION:
+        from scripts.successor_research_publication_transition import (
+            artifact_bytes, validate_transition,
+        )
+        publication = validate_transition(manifest["research_publication_transition"])
+        observed = {}
+        for row in publication["files"]:
+            target = ((rehearsal.launch_agents_dir / row["path"])
+                      if row["kind"] == "launch_agent"
+                      else rehearsal.temp_state / row["path"])
+            _need(target.is_file() and not target.is_symlink()
+                  and target.read_bytes() == artifact_bytes(packet_root, row),
+                  f"research publication rehearsal artifact changed: {row['path']}")
+            observed[row["path"]] = _sha(target)
+        final["research_publication_transition"] = {
+            "file_count": len(observed),
+            "file_sha256": observed,
+            "launch_agent_label": publication["launch_agent_label"],
+            "worker_run_once": rehearsal.publication_worker_run_once,
+        }
     if rehearsal.existing_install_authorities is not None:
         final["existing_install_authorities"] = (
             validate_existing_install_authorities(
@@ -1025,7 +1088,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         final["openclaw_config_semantic_sha256"] = canonical_hash(actual_openclaw)
     elif manifest.get("schema_version") in {
             PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION,
-            COCKPIT_BRAIN_SCHEMA_VERSION}:
+            COCKPIT_BRAIN_SCHEMA_VERSION, RESEARCH_PUBLICATION_SCHEMA_VERSION}:
         expected_openclaw = expected_preserved_openclaw_state(
             packet_root=packet_root, manifest=manifest)
         _need(rehearsal.successor_openclaw.is_file()
@@ -1057,7 +1120,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                            rehearsal.writer_token_preservation}
                        if manifest.get("schema_version")
                        in {PURE_PRESERVE_SCHEMA_VERSION,
-                           COCKPIT_BRAIN_SCHEMA_VERSION} else {}),
+                           COCKPIT_BRAIN_SCHEMA_VERSION,
+                           RESEARCH_PUBLICATION_SCHEMA_VERSION} else {}),
                     "confined_transition_derivation":
                         rehearsal.successor_derivation},
         "ops_helpers": {
