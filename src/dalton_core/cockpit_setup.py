@@ -7,8 +7,9 @@ next to the state, none of them a credential:
 - the state directory (lane tickets under ``discoveries/``, ``fetches/`` …);
 - the heartbeat file the service writes every tick;
 - the scheduler database (cockpit model calls are WorkOrders like any other);
-- the extraction model configuration, if installed, so ad-hoc questions and
-  goal drafts route and spend exactly like an extraction window.
+- the research-planner model configuration, when installed, so ad-hoc
+  questions and goal drafts can use the governed brain route; older installs
+  fall back to their extraction configuration until that file exists.
 
 Idempotent: writes ``control.config.cockpit`` only when it differs.
 """
