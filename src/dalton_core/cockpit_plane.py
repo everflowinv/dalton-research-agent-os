@@ -2521,12 +2521,19 @@ class CockpitPlane:
 
         queued = awaiting = unqueued = discovered = 0
         counted = 0
-        pointer = core.execute(
-            "SELECT mission_version_id FROM coverage_mission_pointer "
-            "ORDER BY mission_ref LIMIT 1"
-        ).fetchone()
-        mission_version_ref = None if pointer is None else pointer[0]
-        yields = observed_yield(core)
+        unavailable = {"available": False,
+                       "reason": "研究目标里没有可数的公司"}
+        if not members:
+            return unavailable
+        try:
+            pointer = core.execute(
+                "SELECT mission_version_id FROM coverage_mission_pointer "
+                "ORDER BY mission_ref LIMIT 1"
+            ).fetchone()
+            mission_version_ref = None if pointer is None else pointer[0]
+            yields = observed_yield(core)
+        except (ExtractionBacklogError, sqlite3.Error, ValueError):
+            return unavailable
         for company_ref in sorted(members):
             try:
                 backlog = extraction_backlog(
@@ -2543,8 +2550,7 @@ class CockpitPlane:
                 unqueued += int(tier["acquired_unqueued"])
                 discovered += int(tier["discovered"])
         if counted == 0:
-            return {"available": False,
-                    "reason": "研究目标里没有可数的公司"}
+            return unavailable
         return {
             "available": True, "companies": counted,
             "queued_documents": queued,

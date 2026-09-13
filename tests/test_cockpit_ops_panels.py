@@ -164,6 +164,22 @@ class FourPanelTests(PanelCase):
             self.plane.overview()
         self.assertEqual(read.call_count, 1)
 
+    def test_backlog_summary_preserves_old_core_degradation(self) -> None:
+        connection = self.c.h.h.core.connection
+        connection.execute("DROP TABLE coverage_mission_pointer")
+        connection.commit()
+        result = self.plane._extraction_backlog_total(
+            connection, {"company:test": {}})
+        self.assertEqual(result, {
+            "available": False, "reason": "研究目标里没有可数的公司"})
+
+    def test_empty_mission_skips_shared_yield_scan(self) -> None:
+        connection = self.c.h.h.core.connection
+        with patch("dalton_core.extraction_backlog.observed_yield") as read:
+            result = self.plane._extraction_backlog_total(connection, {})
+        read.assert_not_called()
+        self.assertFalse(result["available"])
+
     def test_the_overview_carries_all_four_panels_each_linking_somewhere(self) -> None:
         ops = self.plane.overview()["ops"]
         self.assertEqual(set(ops), {"lanes", "gaps", "failures", "acceptance"})
