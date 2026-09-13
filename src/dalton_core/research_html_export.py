@@ -11,6 +11,11 @@ from .store import content_hash
 
 _SHA = re.compile(r"^[0-9a-f]{64}$")
 _IMAGE_TYPES = {"image/png": ".png", "image/jpeg": ".jpg", "image/jpg": ".jpeg"}
+_PRODUCT_LABELS = {
+    "initial_screen": "初步筛选", "dossier": "公司档案", "debate_map": "争议地图",
+    "industry_framework": "行业框架", "investment_memo": "投资备忘录",
+    "conviction_call": "投资判断",
+}
 
 
 class ResearchHtmlExportError(RuntimeError):
@@ -200,7 +205,7 @@ def _chart(
         or len({(row[1]["id"], row[1]["period"]) for row in series}) != len(series)
         or len({row[1]["period"] for row in series}) != len(series)
     ):
-        return '<p class="unavailable">Chart unavailable: no comparable distinct-period typed Claim series.</p>'
+        return '<p class="unavailable">暂无可比图表：当前没有口径一致且期间不同的结构化数据序列。</p>'
     values = [row[2] for row in series]
     low, high = min(min(values), 0.0), max(max(values), 0.0)
     span = high - low or 1.0
@@ -211,7 +216,7 @@ def _chart(
         point = 170 + ((value - low) / span * 390)
         x, width = min(axis, point), abs(point - axis)
         rows.append(
-            f'<text x="0" y="{y + 14}" class="sl">{_esc(claim.get("period") or item.get("period") or "unknown")} · {_esc(estimate_kind)}</text>'
+            f'<text x="0" y="{y + 14}" class="sl">{_esc(claim.get("period") or item.get("period") or "未知期间")} · {_esc({"actual": "已披露", "estimate": "预测"}[estimate_kind])}</text>'
             f'<line x1="{axis:.2f}" x2="{axis:.2f}" y1="{y-2}" y2="{y+24}" class="axis"/>'
             f'<rect class="{_esc(estimate_kind)}" x="{x:.2f}" y="{y}" width="{width:.2f}" height="20"/>'
             f'<text x="570" y="{y+15}" class="sv">{_esc(claim["value"])} {_esc(claim.get("currency") or "")} {_esc(claim["unit"])} {_esc(claim.get("scale") or "base")}</text>'
@@ -220,8 +225,8 @@ def _chart(
     return (
         f'<figure><svg role="img" aria-labelledby="{_esc(chart_id)}-title" '
         f'viewBox="0 0 700 {height}"><title id="{_esc(chart_id)}-title">'
-        f'Typed Claim series: {_esc(series[0][3][1])}</title>{"".join(rows)}</svg>'
-        "<figcaption>Reported and estimate values are labelled separately; all values come from hash-verified quantitative Claim versions with the exact product subject and identical metric, unit, scale, and currency.</figcaption></figure>"
+        f'结构化数据序列：{_esc(series[0][3][1])}</title>{"".join(rows)}</svg>'
+        "<figcaption>已披露值与预测值分别标注；所有数值来自哈希已核验、公司归属一致且指标、单位、刻度和币种相同的定量结论版本。</figcaption></figure>"
     )
 
 
@@ -241,9 +246,9 @@ def _source_text(value: Any) -> str:
         ]
         return (
             " · ".join(str(item) for item in fields if isinstance(item, str) and item)
-            or "structured source unavailable"
+            or "结构化来源不可用"
         )
-    return "source unavailable"
+    return "来源不可用"
 
 
 def _gap_text(value: Any) -> str:
@@ -346,12 +351,22 @@ def render_research_html(
     bodies = []
     for pi, product in enumerate(products, 1):
         anchor = f"product-{pi}"
+        product_label = _PRODUCT_LABELS.get(
+            str(product.get("kind")), product.get("label") or product.get("kind"))
         toc.append(
-            f'<li><a href="#{anchor}">{_esc(product.get("label") or product.get("kind"))}</a></li>'
+            f'<li><a href="#{anchor}">{_esc(product_label)}</a></li>'
         )
         status = product.get("status", "unknown")
         binding = product.get("mission_binding", "unknown")
-        head = f'<section id="{anchor}"><h2>{_esc(product.get("label") or product.get("kind"))}</h2><p class="meta">status={_esc(status)} · mission_binding={_esc(binding)} · version={_esc(product.get("version_ref") or "unknown")} · hash={_esc(product.get("content_hash") or "unknown")}</p>'
+        status_label = {"available": "已发布", "missing": "尚未发布", "invalid": "记录无效"}.get(status, status)
+        binding_label = {"current": "当前研究任务", "historical": "历史研究任务",
+                         "unknown": "研究任务绑定未确认"}.get(binding, binding)
+        identity = (f'版本 {_esc(product.get("version_ref") or "未知")} · '
+                    f'原文哈希 {_esc(product.get("content_hash") or "未知")}')
+        localization = product.get("localization") or {}
+        if localization:
+            identity += f' · 中文呈现 {_esc(localization.get("content_hash") or "未知")}'
+        head = f'<section id="{anchor}"><h2>{_esc(product_label)}</h2><p class="meta">{_esc(status_label)} · {_esc(binding_label)}</p><details class="identity"><summary>查看版本与完整哈希</summary><code>{identity}</code></details>'
         completeness = product.get("completeness")
         if completeness:
             partial = completeness.get("status") == "partial"
@@ -363,54 +378,60 @@ def render_research_html(
                 '起草进度不代表资料已更新或研究质量已验收。</p>'
             )
         approval = product.get("approval") or {"status": "unknown"}
-        head += f'<p class="approval">Human approval: {_esc(approval.get("status", "unknown"))} · decision {_esc(approval.get("decision_record_ref") or "none")} · actor {_esc(approval.get("actor_ref") or "unknown")} · at {_esc(approval.get("decided_at") or "unknown")}</p>'
+        approval_label = {"approved": "已通过", "rejected": "未通过",
+                          "pending_human_decision": "等待人工审批",
+                          "historical": "历史版本，当前审批不适用",
+                          "unknown": "状态未确认"}.get(approval.get("status", "unknown"), approval.get("status"))
+        approval_detail = " · ".join(str(x) for x in (approval.get("decision_record_ref"),
+                                    approval.get("actor_ref"), approval.get("decided_at")) if x)
+        head += f'<p class="approval">人工审批：{_esc(approval_label)}{(" · " + _esc(approval_detail)) if approval_detail else ""}</p>'
         if product.get("reason"):
             head += f'<p class="unavailable">{_esc(product["reason"])}</p>'
         if product.get("gaps"):
-            head += f'<p class="gaps">Product gaps: {_esc("; ".join(_gap_text(g) for g in product["gaps"]))}</p>'
+            head += f'<p class="gaps">产物待补资料：{_esc("；".join(_gap_text(g) for g in product["gaps"]))}</p>'
         chunks = []
         for si, section in enumerate(product.get("sections") or [], 1):
             nums = section.get("numbers") or []
             refs = section.get("sources") or []
             table = "".join(
-                f'<tr><td>{_esc(n.get("period") or "unknown")}</td><td>{_esc(n.get("text") or "unknown")}</td><td><code>{_esc(n.get("claim_version_ref") or (n.get("cell") or {}).get("ref") or "unknown")}</code></td></tr>'
+                f'<tr><td>{_esc(n.get("period") or "未知")}</td><td>{_esc(n.get("text") or "暂无可核验内容")}</td><td><code>{_esc(n.get("claim_version_ref") or (n.get("cell") or {}).get("ref") or "未知")}</code></td></tr>'
                 for n in nums
                 if isinstance(n, Mapping)
             )
             chunks.append(
-                f'<article><h3>{_esc(section.get("title") or "Untitled")}</h3><p class="prose">{_esc(section.get("body") or "Unknown / unavailable")}</p>{_chart(nums, claims, f"chart-{pi}-{si}", subject_ref=product.get("subject_ref")) if nums else ""}{("<div class=\"tablewrap\"><table><thead><tr><th>Period</th><th>Value in authority text</th><th>Authority ref</th></tr></thead><tbody>"+table+"</tbody></table></div>") if table else ""}<p class="refs">Sources: {_esc(", ".join(_source_text(ref) for ref in refs) if refs else "unknown / unavailable")}</p><p class="gaps">Gaps: {_esc("; ".join(_gap_text(gap) for gap in (section.get("gaps") or [])) or "none recorded")}</p></article>'
+                f'<article><h3>{_esc(section.get("title") or "未命名章节")}</h3><p class="prose">{_esc(section.get("body") or "暂无可核验内容")}</p>{_chart(nums, claims, f"chart-{pi}-{si}", subject_ref=product.get("subject_ref")) if nums else ""}{("<div class=\"tablewrap\"><table><thead><tr><th>期间</th><th>来源原文中的数值</th><th>证据编号</th></tr></thead><tbody>"+table+"</tbody></table></div>") if table else ""}<details class="refs"><summary>来源（{len(refs)}）</summary><code>{_esc(", ".join(_source_text(ref) for ref in refs) if refs else "暂无来源")}</code></details><p class="gaps">待补资料：{_esc("；".join(_gap_text(gap) for gap in (section.get("gaps") or [])) or "当前未记录待补项")}</p></article>'
             )
         if not chunks:
             chunks = [
-                '<p class="unavailable">Unknown / unavailable: no current readable sections.</p>'
+                '<p class="unavailable">暂无可阅读的当前章节。</p>'
             ]
         bodies.append(head + "".join(chunks) + "</section>")
     figs = "".join(
-        f'<figure><img src="{a["data"]}" alt="{_esc(a["caption"])}"><figcaption>{_esc(a["caption"])} · {_esc(a["refs"])} · user-supplied local figure · sha256 {_esc(a["sha256"])}</figcaption></figure>'
+        f'<figure><img src="{a["data"]}" alt="{_esc(a["caption"])}"><figcaption>{_esc(a["caption"])} · {_esc(a["refs"])} · 用户提供的本地图表 · sha256 {_esc(a["sha256"])}</figcaption></figure>'
         for a in assets
     )
     css = """body{margin:0;background:#f5f5f7;color:#1d1d1f;font:16px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}main{max-width:980px;margin:auto;padding:48px 24px}h1{font-size:42px}h2{border-top:1px solid #ccc;padding-top:32px}article{background:white;border-radius:18px;padding:24px;margin:18px 0;box-shadow:0 2px 18px #0001}.meta,.refs,figcaption{color:#666;font-size:13px;overflow-wrap:anywhere}.approval{font-weight:700}.prose{white-space:pre-wrap}.unavailable,.gaps{background:#fff4ce;padding:10px;border-radius:8px}.tablewrap{overflow:auto}table{border-collapse:collapse;min-width:620px;width:100%}th,td{text-align:left;padding:8px;border-bottom:1px solid #ddd}svg{width:100%;height:auto}rect.actual{fill:#147ce5}rect.estimate{fill:#8e8e93}.sl,.sv{font-size:12px;fill:#333}img{max-width:100%;height:auto}@media(max-width:520px){main{padding:24px 14px}h1{font-size:32px}article{padding:16px}}@media print{body{background:#fff}article{box-shadow:none;border:1px solid #ddd;break-inside:avoid}nav{break-after:page}}"""
     return (
-        '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>'
+        '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>'
         + _esc(company)
-        + " research</title><style>"
+        + " 研究报告</title><style>"
         + css
-        + "</style></head><body><main><header><p>Dalton Research</p><h1>"
+        + "</style></head><body><main><header><p>Dalton 研究报告</p><h1>"
         + _esc(company)
         + "</h1><p>"
-        + _esc(mission.get("title") or "Research report")
-        + '</p><p class="meta">mission '
+        + _esc(mission.get("title") or "研究报告")
+        + '</p><details class="identity"><summary>查看研究任务版本</summary><code>'
         + _esc(mission["id"])
         + " · "
         + _esc(mission["content_hash"])
-        + '</p></header><nav aria-label="Contents"><h2>Contents</h2><ol>'
+        + '</code></details></header><nav aria-label="目录"><h2>目录</h2><ol>'
         + "".join(toc)
         + "</ol></nav>"
         + "".join(bodies)
         + (
-            "<section><h2>Figures</h2>" + figs + "</section>"
+            "<section><h2>图表</h2>" + figs + "</section>"
             if figs
-            else '<section><h2>Figures</h2><p class="unavailable">No locally hashed, source-bound figure assets were supplied.</p></section>'
+            else '<section><h2>图表</h2><p class="unavailable">未提供带本地哈希和来源绑定的图表。</p></section>'
         )
         + "</main></body></html>\n"
     )
@@ -509,6 +530,7 @@ def export_research_html(
                 "content_hash": p.get("content_hash"),
                 "mission_binding": p.get("mission_binding", "unknown"),
                 "approval": (p.get("approval") or {}).get("status", "unknown"),
+                **({"localization": p["localization"]} if p.get("localization") else {}),
                 **({"completeness": p["completeness"]}
                    if p.get("completeness") is not None else {}),
             }

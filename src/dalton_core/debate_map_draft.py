@@ -29,6 +29,8 @@ prove it was independent is not a verification.
 
 from __future__ import annotations
 
+from .final_text_contract import final_text_instructions
+
 import hashlib
 import json
 import sqlite3
@@ -280,6 +282,7 @@ def build_prompt(table: Mapping[str, Any]) -> str:
         for row in table["previous_debates"]
     ) or "  (no previous map)"
     return (
+        "\n".join(final_text_instructions()) + "\n\n" +
         "You keep the map of what is contested about one research subject.\n"
         "Organize consequential, evidenced disagreements about industry structure, "
         "business quality and operating drivers, including emerging questions. Our "

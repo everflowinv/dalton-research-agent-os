@@ -96,11 +96,12 @@ class HtmlRenderTests(unittest.TestCase):
         a = render_research_html(lib, mission=mission, claims=claims)
         b = render_research_html(lib, mission=mission, claims=claims)
         self.assertEqual(a, b)
-        self.assertIn("Contents", a)
-        self.assertIn("pending_human_decision", a)
+        self.assertIn("目录", a)
+        self.assertIn("等待人工审批", a)
         self.assertIn("<svg", a)
         self.assertIn("claim:1", a)
-        self.assertIn("Unknown / unavailable", a)
+        self.assertIn("暂无可阅读的当前章节", a)
+        self.assertIn('lang="zh-CN"', a)
         self.assertNotIn("<script>", a)
         self.assertNotIn("<img src=x", a)
         self.assertIn("&lt;script&gt;", a)
@@ -132,7 +133,7 @@ class HtmlRenderTests(unittest.TestCase):
             },
         }
         page = render_research_html(lib, mission=mission, claims=claims)
-        self.assertIn("Chart unavailable", page)
+        self.assertIn("暂无可比图表", page)
         self.assertNotIn("<svg", page)
 
 
@@ -229,7 +230,7 @@ class RealReadonlyExportTests(ResearchTaskFixture):
             mission=self.mission,
             claims=claims,
         )
-        self.assertIn("Typed Claim series: revenue", page)
+        self.assertIn("结构化数据序列：revenue", page)
 
     def test_wrong_subject_claims_cannot_render_as_company_chart(self):
         fixture = LedgerFixture()
@@ -256,7 +257,7 @@ class RealReadonlyExportTests(ResearchTaskFixture):
         }
         claims = _typed_claims(fixture.store.connection, library)
         page = render_research_html(library, mission=self.mission, claims=claims)
-        self.assertIn("Chart unavailable", page)
+        self.assertIn("暂无可比图表", page)
         self.assertNotIn("<svg", page)
 
     def test_reported_and_estimate_values_share_chart_with_explicit_labels(self):
@@ -274,8 +275,8 @@ class RealReadonlyExportTests(ResearchTaskFixture):
         page = render_research_html(library, mission=mission, claims=claims)
         self.assertIn('<rect class="actual"', page)
         self.assertIn('<rect class="estimate"', page)
-        self.assertIn("FY2025 · actual", page)
-        self.assertIn("FY2026 · estimate", page)
+        self.assertIn("FY2025 · 已披露", page)
+        self.assertIn("FY2026 · 预测", page)
 
 
 class PublishedAuthorityExportTests(unittest.TestCase):

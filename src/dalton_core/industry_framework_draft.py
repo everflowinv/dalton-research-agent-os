@@ -43,6 +43,8 @@ verbatim in a cited row.
 
 from __future__ import annotations
 
+from .final_text_contract import final_text_instructions
+
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -236,6 +238,7 @@ def build_unit_prompt(
     lines = [
         "You are writing one part of an industry framework for a fundamental,",
         "long-biased fund. It is read by a portfolio manager who knows the sector.",
+        *final_text_instructions(),
         "Write in Chinese. You are not advising and not recommending: a framework",
         "says what is true about an industry; what to do about it is decided",
         "elsewhere, by a person.",

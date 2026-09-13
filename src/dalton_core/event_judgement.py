@@ -38,6 +38,8 @@ write, the decision becomes a proposal for a person instead of being dropped.
 
 from __future__ import annotations
 
+from .final_text_contract import final_text_instructions
+
 import json
 import re
 import sqlite3
@@ -62,7 +64,7 @@ from .research_playbook import DECISION_VOCABULARY
 from .store import canonical_json, content_hash
 
 SCHEMA_VERSION = "0.1"
-EVENT_PROMPT_CONTRACT_VERSION = "event-output-constraints:0.3"
+EVENT_PROMPT_CONTRACT_VERSION = "event-output-constraints:0.4"
 _SCHEMA_PATH = Path(__file__).with_name("event_judgement_schema.sql")
 
 # Registered at import: anything that can call ``judge()`` has already run this
@@ -288,6 +290,7 @@ def build_judge_prompt(
         "You are the covering analyst for this company. One thing happened. Decide what,",
         "if anything, should change because of it. Deciding that nothing should change is a",
         "real answer and is often the right one -- but you must say why.",
+        *final_text_instructions(),
         "",
         "Weigh the event by its evidence tier. A company-filed number and a crowd post are",
         "not the same kind of fact; a sales note is what the desk heard, not what happened.",
@@ -623,6 +626,7 @@ def build_reflection_prompt(
         "You are the covering analyst writing down what you got wrong, or what you are",
         "holding through and why. This is not a defence of the thesis and it changes",
         "nothing: a person reads it beside the revision candidate.",
+        *final_text_instructions(),
         "",
         "Compare what we expected with the new evidence, preserving the earlier view",
         "as it was. Explain whether the evidence changes a business driver, an earnings",

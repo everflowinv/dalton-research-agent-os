@@ -44,6 +44,8 @@ being more honest.  A refusal is therefore not a confidence: it is
 
 from __future__ import annotations
 
+from .final_text_contract import final_text_instructions
+
 import re
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -193,6 +195,7 @@ def build_prompt(context: Mapping[str, Any], *, mission: Mapping[str, Any] | Non
     ]
     lines = [
         "你是一套股票研究系统的分析师。只用下面展示给你的材料回答 owner 的问题。",
+        *final_text_instructions(),
         "每一条材料都有一个标签（C=账本结论，D=公司档案，B=还在争的问题，F=我们的模型，",
         "V=估值，P=股价，S=一致预期，K=日程，E=最近事件，G=我们的判断，R=反思，",
         "T=已立论点，N=你上次的反馈）。你引用的每一个标签都必须来自这次展示的材料，",

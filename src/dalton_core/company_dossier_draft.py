@@ -36,6 +36,8 @@ an independent one.
 
 from __future__ import annotations
 
+from .final_text_contract import final_text_instructions
+
 import json
 from collections.abc import Mapping, Sequence
 from typing import Any, Callable
@@ -305,6 +307,7 @@ def build_unit_prompt(
     lines = [
         "You are writing one part of a company file for a fundamental, long-biased fund.",
         "The file is read by a portfolio manager who knows the sector. Write in Chinese.",
+        *(final_text_instructions() if _analytical_contract else ()),
         "You are not advising and not recommending: a file says what is true about a",
         "company; the decision about what to do with it is made elsewhere by a person.",
         "",

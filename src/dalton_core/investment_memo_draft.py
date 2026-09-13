@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .final_text_contract import final_text_instructions
+
 import json
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -12,7 +14,7 @@ from .store import content_hash
 
 DRAFT_PURPOSE = register_purpose("investment_memo")
 VERIFIER_PURPOSE = register_purpose("investment_memo_verifier")
-MEMO_PROMPT_CONTRACT_VERSION = "investment-memo-prompt:0.2"
+MEMO_PROMPT_CONTRACT_VERSION = "investment-memo-prompt:0.3"
 MEMO_VERIFIER_PROMPT_CONTRACT_VERSION = "investment-memo-verifier-prompt:0.2"
 MAX_INPUT_TOKENS = 120_000
 MAX_OUTPUT_TOKENS = 6_000
@@ -55,6 +57,7 @@ def build_group_prompt(*, group: str, section_titles: Sequence[str], questions: 
     }
     return "\n".join([
         "Draft only the requested Investment Memo sections and Playbook key questions.",
+        *final_text_instructions(),
         "Use only the complete frozen evidence rows below. Never use model memory.",
         "Every factual sentence and every number must cite an allowed ref. Evidence-backed",
         "inference is allowed only when its cited rows contain the premises; label the inference",

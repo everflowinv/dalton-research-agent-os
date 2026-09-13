@@ -27,6 +27,8 @@ it was independent is not a verification.
 
 from __future__ import annotations
 
+from .final_text_contract import final_text_instructions
+
 import hashlib
 from typing import Any, Callable, Mapping, Sequence
 
@@ -315,6 +317,7 @@ def build_prompt(table: Mapping[str, Any]) -> str:
         for row in table["risk_reward_standards"]
     ])
     return (
+        "\n".join(final_text_instructions()) + "\n\n" +
         "You write one investment call for a fundamental long-biased fund's own "
         "file. A person decides whether to act on it; you only propose it.\n\n"
         "Understand what the market expects and how the investment can earn its "

@@ -48,6 +48,8 @@ that has to be cleaned up before it can be read is not a review.
 
 from __future__ import annotations
 
+from .final_text_contract import final_text_instructions
+
 import json
 import re
 import sqlite3
@@ -481,6 +483,7 @@ def build_review_prompt(context: Mapping[str, Any]) -> str:
         "fund already holds a view on this company. Nothing has happened that requires a",
         "decision: this is the monthly zero-base review, and the only thing being asked is",
         "whether the accumulated file would be written the same way from a standing start.",
+        *final_text_instructions(),
         "",
         f"Company: {context['company_ref']}",
         f"As of: {context['as_of']}   Trigger: {context['trigger']}   Period: {context['period_label']}",

@@ -31,6 +31,8 @@ route and not about what we asked for -- and it fails closed.
 
 from __future__ import annotations
 
+from .final_text_contract import final_text_instructions
+
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -351,6 +353,7 @@ def build_group_prompt(
         "long-biased fund. The gate is the human checkpoint between a first",
         "screen and full coverage: a portfolio manager reads your answers and",
         "decides whether this company is worth covering deeply. Write in Chinese.",
+        *final_text_instructions(),
         "You are not advising and not recommending: the gate says what is true",
         "about a company; the decision about what to do with it is made elsewhere.",
         "",

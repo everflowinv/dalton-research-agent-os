@@ -20,6 +20,8 @@ and the gate assessment the stage ledger records.
 
 from __future__ import annotations
 
+from .final_text_contract import final_text_instructions
+
 import json
 import re
 from collections.abc import Mapping, Sequence
@@ -433,6 +435,7 @@ def build_section_prompt(
     lines = [
         "You are drafting one section of an equity research Initial Screen for a fund's own file.",
         "Write in Chinese, in full sentences, for a portfolio manager who knows the sector.",
+        *final_text_instructions(),
         "",
         f"Section: {title}",
         f"What this section is for: {guidance}",
