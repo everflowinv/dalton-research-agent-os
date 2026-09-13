@@ -62,6 +62,16 @@ class PreparationTests(unittest.TestCase):
         with self.assertRaises(CockpitModelError):self.run_one()
         self.assertEqual(self.calls,['research_localization'])
 
+    def test_interrupted_brain_resumes_without_repeating_checker(self):
+        self.responses[prep.BRAIN_PURPOSE] = CockpitModelError('this request is already running')
+        with self.assertRaisesRegex(ValueError, 'already running'):
+            self.run_one()
+        self.responses[prep.BRAIN_PURPOSE] = REVISION
+        self.assertEqual(self.run_one()['status'], 'passed')
+        self.assertEqual(self.calls.count(prep.CHECKER_PURPOSE), 1)
+        self.assertEqual(self.calls.count('research_localization'), 1)
+        self.assertEqual(self.calls.count(prep.BRAIN_PURPOSE), 2)
+
     def test_brain_number_change_cannot_reach_verifier_or_publication(self):
         bad=copy.deepcopy(REVISION);bad['sections'][0]['body']='收入为 124 美元。'
         self.responses[prep.BRAIN_PURPOSE]=bad

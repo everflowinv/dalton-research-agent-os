@@ -227,7 +227,12 @@ def run_chunk(task, *, mission, draft_config, verifier_config, checker_config,
                 if evidence.get('draft'):
                     prompt += '\nPREVIOUS OUTPUT: '+evidence['draft']['text']
 
-    if 'language_review' not in evidence:
+    prior_review = evidence.get('language_review') or {}
+    resume_interrupted_call = (
+        prior_review.get('status') == 'pending_brain_revision' and 'brain_call' not in evidence
+        or prior_review.get('status') == 'pending_language_review' and 'checker_call' not in evidence
+    )
+    if 'language_review' not in evidence or resume_interrupted_call:
         review_product = dict(product, sections=evidence['draft_localized']['sections'])
         checker = model(checker_config, 12000)
         brain = model(brain_config, 16000)
