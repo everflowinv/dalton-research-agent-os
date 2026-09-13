@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-FINAL_TEXT_RULES_VERSION = "simplified-chinese-research-prose:0.1"
+FINAL_TEXT_RULES_VERSION = "simplified-chinese-research-prose:0.2"
 
 
 def final_text_instructions() -> tuple[str, ...]:

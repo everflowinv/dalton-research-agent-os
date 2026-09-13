@@ -3,10 +3,12 @@ from __future__ import annotations
 import unittest
 
 from dalton_core.numeric_display import format_display_number
+from dalton_core.final_text_contract import FINAL_TEXT_RULES_VERSION
 
 
 class NumericDisplayTests(unittest.TestCase):
     def test_amounts_use_readable_chinese_units(self):
+        self.assertEqual(FINAL_TEXT_RULES_VERSION, "simplified-chinese-research-prose:0.2")
         self.assertEqual(format_display_number("15623445", kind="amount_usd"), "1562 万美元")
         self.assertEqual(format_display_number("125500000", kind="amount_usd"), "1.3 亿美元")
 

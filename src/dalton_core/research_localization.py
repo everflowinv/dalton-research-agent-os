@@ -93,7 +93,8 @@ def _number_differences(source_values: Sequence[str], target_values: Sequence[st
         numeric_token = token[:-1] if token.endswith("%") else token
         escaped = re.escape(numeric_token)
         kinds: list[str] = []
-        if re.search(rf"(?<![\d.]){escaped}\s*(?:USD|美元)\b", source_joined, re.I):
+        if (re.search(rf"(?<![\d.]){escaped}\s*(?:USD|美元)\b", source_joined, re.I)
+                or re.search(rf"\bUSD\s*{escaped}(?![\d.])", source_joined, re.I)):
             kinds.append("amount_usd")
         if re.search(rf"(?<![\d.]){escaped}\s*%", source_joined):
             kinds.append("percent")
