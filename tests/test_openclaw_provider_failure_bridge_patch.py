@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import patch
 
 from integrations.openclaw_host_patches.patch_provider_failure_bridge import (
-    ORIGINAL, PATCHED, apply, target,
+    ORIGINAL, PREVIOUS, PATCHED, apply, target,
 )
 
 
@@ -29,6 +29,8 @@ class ProviderFailureBridgePatchTests(unittest.TestCase):
         wire = copied.read_text(encoding="utf-8")
         if wire.count(PATCHED) == 1 and not wire.count(ORIGINAL):
             copied.write_text(wire.replace(PATCHED, ORIGINAL, 1), encoding="utf-8")
+        elif wire.count(PREVIOUS) == 1 and not wire.count(ORIGINAL):
+            copied.write_text(wire.replace(PREVIOUS, ORIGINAL, 1), encoding="utf-8")
 
     def tearDown(self):
         self.temp.cleanup()
@@ -96,6 +98,11 @@ for (const [input, expected] of cases) {{
             PATCHED.index("params.providerControls && !providerControlProof"),
             PATCHED.index("const returnedHttpStatus"),
         )
+
+    def test_pre_admission_status_is_closed_and_never_projects_text(self):
+        self.assertIn('/^[45]\\d\\d$/.test(result.errorCode)', PATCHED)
+        self.assertIn('createLlmCompleteError("PROVIDER_ADMISSION_FAILED"', PATCHED)
+        self.assertNotIn("errorMessage", PATCHED)
 
 
 if __name__ == "__main__":

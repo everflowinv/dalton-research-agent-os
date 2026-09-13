@@ -863,6 +863,19 @@ test("known missing control proof gets a fixed safe host error", async () => {
   verifyHash(response);
 });
 
+test("pre-admission HTTP status is classified without provider text", async () => {
+  const broker = new ModelBroker(fakeRuntime(async () => {
+    const error = new Error("Plugin LLM completion failed: provider admission returned HTTP 404 before control proof.");
+    error.code = "PROVIDER_ADMISSION_FAILED";
+    throw error;
+  }), config());
+  const response = await broker.handle(request({ invocationId: "invocation:provider-admission" }));
+  assert.equal(response.ok, false);
+  assert.equal(response.error.code, "PROVIDER_ADMISSION_FAILED");
+  assert.equal(response.error.message, "provider admission returned HTTP 404 before provider-control proof");
+  verifyHash(response);
+});
+
 test("memory journal never turns expired pending uncertainty into a host replay", async () => {
   let now = 1_000;
   let calls = 0;

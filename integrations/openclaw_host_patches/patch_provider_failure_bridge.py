@@ -19,7 +19,29 @@ import tempfile
 SUPPORTED_VERSION = "2026.9.3"
 ORIGINAL = '''\t\tif (params.providerControls && !providerControlProof) throw new Error("Plugin LLM completion failed: provider controls were not enforced by the selected transport.");
 \t\tconst text = result.content.filter((c) => c.type === "text").map((c) => c.text).join("");'''
-PATCHED = '''\t\tif (params.providerControls && !providerControlProof) throw new Error("Plugin LLM completion failed: provider controls were not enforced by the selected transport.");
+PREVIOUS = '''\t\tif (params.providerControls && !providerControlProof) throw new Error("Plugin LLM completion failed: provider controls were not enforced by the selected transport.");
+\t\tconst returnedHttpStatus = result.stopReason === "error" && typeof result.errorCode === "string" && /^(?:429|5\\d\\d)$/.test(result.errorCode) ? Number(result.errorCode) : void 0;
+\t\tif (returnedHttpStatus !== void 0) return finalizePluginLlmCompletion({
+\t\t\tcfg,
+\t\t\thostPluginId: pluginPolicyId,
+\t\t\tsuppressUsage: false,
+\t\t\trawUsage: result.usage,
+\t\t\tlogger,
+\t\t\tresult: {
+\t\t\t\tfailure: { version: "0.1", state: "provider_completed_failure", httpStatus: returnedHttpStatus },
+\t\t\t\tprovider: prepared.selection.provider,
+\t\t\t\tmodel: prepared.selection.modelId,
+\t\t\t\tagentId,
+\t\t\t\texecution: { mode: "direct-provider", owner: { kind: "provider", id: prepared.selection.provider } },
+\t\t\t\taudit
+\t\t\t}
+\t\t});
+\t\tconst text = result.content.filter((c) => c.type === "text").map((c) => c.text).join("");'''
+PATCHED = '''\t\tconst providerAdmissionStatus = result.stopReason === "error" && typeof result.errorCode === "string" && /^[45]\\d\\d$/.test(result.errorCode) ? Number(result.errorCode) : void 0;
+\t\tif (params.providerControls && !providerControlProof) {
+\t\t\tif (providerAdmissionStatus !== void 0) throw createLlmCompleteError("PROVIDER_ADMISSION_FAILED", `Plugin LLM completion failed: provider admission returned HTTP ${providerAdmissionStatus} before control proof.`);
+\t\t\tthrow new Error("Plugin LLM completion failed: provider controls were not enforced by the selected transport.");
+\t\t}
 \t\tconst returnedHttpStatus = result.stopReason === "error" && typeof result.errorCode === "string" && /^(?:429|5\\d\\d)$/.test(result.errorCode) ? Number(result.errorCode) : void 0;
 \t\tif (returnedHttpStatus !== void 0) return finalizePluginLlmCompletion({
 \t\t\tcfg,
@@ -53,14 +75,14 @@ def apply(root: Path, *, check: bool) -> bool:
     path = target(root)
     original_bytes = path.read_bytes()
     source = original_bytes.decode("utf-8")
-    original_count, patched_count = source.count(ORIGINAL), source.count(PATCHED)
+    original_count, previous_count, patched_count = source.count(ORIGINAL), source.count(PREVIOUS), source.count(PATCHED)
     if patched_count == 1:
         if original_count:
             raise ValueError("provider failure bridge contains its original anchor")
         return False
     if patched_count:
         raise ValueError("provider failure bridge is duplicated")
-    if original_count != 1:
+    if original_count + previous_count != 1:
         raise ValueError("OpenClaw provider failure bridge anchor changed")
     if check:
         raise ValueError("provider failure bridge is missing")
@@ -70,7 +92,8 @@ def apply(root: Path, *, check: bool) -> bool:
                                          dir=path.parent, prefix=f".{path.name}.",
                                          delete=False) as handle:
             candidate = Path(handle.name)
-            handle.write(source.replace(ORIGINAL, PATCHED, 1))
+            anchor = PREVIOUS if previous_count else ORIGINAL
+            handle.write(source.replace(anchor, PATCHED, 1))
         checked = subprocess.run(["node", "--check", str(candidate)], text=True,
                                  capture_output=True, check=False)
         if checked.returncode:

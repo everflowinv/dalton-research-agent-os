@@ -494,6 +494,10 @@ export class ModelBroker {
       if (result?.failure !== undefined) return this.#providerFailure(request, requestHash, result);
       return this.#success(request, requestHash, result);
     } catch (error) {
+      const providerAdmission = error?.code === "PROVIDER_ADMISSION_FAILED"
+        && /^Plugin LLM completion failed: provider admission returned HTTP [45]\d\d before control proof\.$/.test(error?.message ?? "")
+        ? error.message.match(/HTTP ([45]\d\d)/)?.[1]
+        : undefined;
       const mappedHostFailure = error instanceof Error
         ? SAFE_HOST_FAILURES.get(error.message)
         : undefined;
@@ -501,10 +505,14 @@ export class ModelBroker {
         || error?.code === "REQUIRED_CONTROLS_UNAVAILABLE"
         ? mappedHostFailure
         : undefined;
-      const code = error instanceof ProtocolError
+      const code = providerAdmission !== undefined
+        ? "PROVIDER_ADMISSION_FAILED"
+        : error instanceof ProtocolError
         ? error.code
         : safeHostFailure?.[0] ?? "HOST_COMPLETION_FAILED";
-      const message = error instanceof ProtocolError
+      const message = providerAdmission !== undefined
+        ? `provider admission returned HTTP ${providerAdmission} before provider-control proof`
+        : error instanceof ProtocolError
         ? error.message
         : safeHostFailure?.[1] ?? "host completion failed";
       return this.#failure(
