@@ -9,6 +9,7 @@ from typing import Any, Mapping, Sequence
 from .cockpit_research_library import research_library
 from .store import content_hash
 from .numeric_display import format_typed_value
+from .research_gap_display import gap_display_text
 
 _SHA = re.compile(r"^[0-9a-f]{64}$")
 _IMAGE_TYPES = {"image/png": ".png", "image/jpeg": ".jpg", "image/jpg": ".jpeg"}
@@ -17,6 +18,49 @@ _PRODUCT_LABELS = {
     "industry_framework": "行业框架", "investment_memo": "投资备忘录",
     "conviction_call": "投资判断",
 }
+
+_APPROVAL_LABELS = {
+    "approved": "已通过",
+    "rejected": "未通过",
+    "pending_human_decision": "等待人工审批",
+    "historical": "历史版本，当前审批不适用",
+    "not_applicable": "无需人工审批",
+    "unknown": "状态未确认",
+}
+_REASON_LABELS = {
+    "not_drafted_this_run": "本轮尚未起草",
+}
+_METRIC_LABELS = {
+    "revenue": "营业收入",
+    "revenues": "营业收入",
+    "revenue_yoy_growth": "营业收入同比增速",
+    "operating_margin": "营业利润率",
+    "gross_margin": "毛利率",
+    "diluted_eps": "稀释每股收益",
+    "free_cash_flow": "自由现金流",
+}
+
+def _metric_label(value: Any) -> str:
+    key = str(value or "").strip().lower()
+    if key in _METRIC_LABELS:
+        return _METRIC_LABELS[key]
+    # Unknown machine keys stay in governed structured data and manifests; the
+    # reader-facing chart title must not expose an internal identifier.
+    if re.fullmatch(r"[a-z][a-z0-9_]*", key):
+        return "其他结构化指标"
+    return str(value or "未命名指标")
+
+def _display_reason(value: Any) -> str:
+    text = str(value or "")
+    return _REASON_LABELS.get(text, text)
+
+
+def _display_metric_terms(value: Any) -> str:
+    text = str(value or "暂无可核验内容")
+    for key in sorted(_METRIC_LABELS, key=len, reverse=True):
+        text = re.sub(rf"(?<![A-Za-z0-9_]){re.escape(key)}(?![A-Za-z0-9_])",
+                      _METRIC_LABELS[key], text, flags=re.IGNORECASE)
+    return text
 
 
 class ResearchHtmlExportError(RuntimeError):
@@ -226,7 +270,7 @@ def _chart(
     return (
         f'<figure><svg role="img" aria-labelledby="{_esc(chart_id)}-title" '
         f'viewBox="0 0 700 {height}"><title id="{_esc(chart_id)}-title">'
-        f'结构化数据序列：{_esc(series[0][3][1])}</title>{"".join(rows)}</svg>'
+        f'结构化数据序列：{_esc(_metric_label(series[0][3][1]))}</title>{"".join(rows)}</svg>'
         "<figcaption>已披露值与预测值分别标注；所有数值来自哈希已核验、公司归属一致且指标、单位、刻度和币种相同的定量结论版本。</figcaption></figure>"
     )
 
@@ -254,14 +298,16 @@ def _source_text(value: Any) -> str:
 
 def _gap_text(value: Any) -> str:
     if isinstance(value, str):
-        return value
-    if isinstance(value, Mapping):
+        text = value
+    elif isinstance(value, Mapping):
         fields = [value.get(key) for key in ("reason", "code", "detail")]
-        return (
+        text = (
             " · ".join(str(item) for item in fields if isinstance(item, str) and item)
-            or "structured gap"
+            or "结构化待补项"
         )
-    return "unknown gap"
+    else:
+        text = "未说明的待补项"
+    return _display_metric_terms(gap_display_text(_display_reason(text)))
 
 
 def _assets(asset_manifest: Mapping[str, Any] | None) -> list[dict[str, str]]:
@@ -359,9 +405,9 @@ def render_research_html(
         )
         status = product.get("status", "unknown")
         binding = product.get("mission_binding", "unknown")
-        status_label = {"available": "已发布", "missing": "尚未发布", "invalid": "记录无效"}.get(status, status)
+        status_label = {"available": "已发布", "missing": "尚未发布", "invalid": "记录无效"}.get(status, "状态未确认")
         binding_label = {"current": "当前研究任务", "historical": "历史研究任务",
-                         "unknown": "研究任务绑定未确认"}.get(binding, binding)
+                         "unknown": "研究任务绑定未确认"}.get(binding, "研究任务绑定未确认")
         identity = (f'版本 {_esc(product.get("version_ref") or "未知")} · '
                     f'原文哈希 {_esc(product.get("content_hash") or "未知")}')
         localization = product.get("localization") or {}
@@ -379,15 +425,13 @@ def render_research_html(
                 '起草进度不代表资料已更新或研究质量已验收。</p>'
             )
         approval = product.get("approval") or {"status": "unknown"}
-        approval_label = {"approved": "已通过", "rejected": "未通过",
-                          "pending_human_decision": "等待人工审批",
-                          "historical": "历史版本，当前审批不适用",
-                          "unknown": "状态未确认"}.get(approval.get("status", "unknown"), approval.get("status"))
+        approval_label = _APPROVAL_LABELS.get(
+            approval.get("status", "unknown"), "状态未确认")
         approval_detail = " · ".join(str(x) for x in (approval.get("decision_record_ref"),
                                     approval.get("actor_ref"), approval.get("decided_at")) if x)
         head += f'<p class="approval">人工审批：{_esc(approval_label)}{(" · " + _esc(approval_detail)) if approval_detail else ""}</p>'
         if product.get("reason"):
-            head += f'<p class="unavailable">{_esc(product["reason"])}</p>'
+            head += f'<p class="unavailable">{_esc(_display_reason(product["reason"]))}</p>'
         if product.get("gaps"):
             head += f'<p class="gaps">产物待补资料：{_esc("；".join(_gap_text(g) for g in product["gaps"]))}</p>'
         chunks = []
@@ -395,12 +439,19 @@ def render_research_html(
             nums = section.get("numbers") or []
             refs = section.get("sources") or []
             table = "".join(
-                f'<tr><td>{_esc(n.get("period") or "未知")}</td><td>{_esc(n.get("text") or "暂无可核验内容")}</td><td><code>{_esc(n.get("claim_version_ref") or (n.get("cell") or {}).get("ref") or "未知")}</code></td></tr>'
+                f'<tr><td>{_esc(n.get("period") or "未知")}</td><td>{_esc(_display_metric_terms(n.get("text")))}</td></tr>'
                 for n in nums
                 if isinstance(n, Mapping)
             )
+            technical_refs = list(refs)
+            for number in nums:
+                if not isinstance(number, Mapping):
+                    continue
+                ref = number.get("claim_version_ref") or (number.get("cell") or {}).get("ref")
+                if ref and ref not in technical_refs:
+                    technical_refs.append(ref)
             chunks.append(
-                f'<article><h3>{_esc(section.get("title") or "未命名章节")}</h3><p class="prose">{_esc(section.get("body") or "暂无可核验内容")}</p>{_chart(nums, claims, f"chart-{pi}-{si}", subject_ref=product.get("subject_ref")) if nums else ""}{("<div class=\"tablewrap\"><table><thead><tr><th>期间</th><th>来源原文中的数值</th><th>证据编号</th></tr></thead><tbody>"+table+"</tbody></table></div>") if table else ""}<details class="refs"><summary>来源（{len(refs)}）</summary><code>{_esc(", ".join(_source_text(ref) for ref in refs) if refs else "暂无来源")}</code></details><p class="gaps">待补资料：{_esc("；".join(_gap_text(gap) for gap in (section.get("gaps") or [])) or "当前未记录待补项")}</p></article>'
+                f'<article><h3>{_esc(section.get("title") or "未命名章节")}</h3><p class="prose">{_esc(_display_metric_terms(section.get("body") or "暂无可核验内容"))}</p>{_chart(nums, claims, f"chart-{pi}-{si}", subject_ref=product.get("subject_ref")) if nums else ""}{("<div class=\"tablewrap\"><table><thead><tr><th>期间</th><th>来源原文中的数值</th></tr></thead><tbody>"+table+"</tbody></table></div>") if table else ""}<details class="refs"><summary>技术详情与来源（{len(technical_refs)}）</summary><code>{_esc(", ".join(_source_text(ref) for ref in technical_refs) if technical_refs else "暂无来源")}</code></details><p class="gaps">待补资料：{_esc("；".join(_gap_text(gap) for gap in (section.get("gaps") or [])) or "当前未记录待补项")}</p></article>'
             )
         if not chunks:
             chunks = [

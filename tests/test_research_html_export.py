@@ -44,7 +44,7 @@ class HtmlRenderTests(unittest.TestCase):
                             "numbers": [
                                 {
                                     "period": "FY25",
-                                    "text": "Revenue $10B",
+                                    "text": "revenue_yoy_growth $10B",
                                     "claim_version_ref": "claim:1",
                                 },
                                 {
@@ -106,6 +106,38 @@ class HtmlRenderTests(unittest.TestCase):
         self.assertNotIn("<img src=x", a)
         self.assertIn("&lt;script&gt;", a)
         self.assertNotIn('src="http', a)
+
+    def test_shell_translates_closed_status_reason_and_metric_labels_and_folds_refs(self):
+        mission, lib = self.fixture()
+        lib["products"][0]["approval"] = {"status": "not_applicable"}
+        lib["products"][1]["reason"] = "not_drafted_this_run"
+        lib["products"][0]["sections"][0]["gaps"] = [
+            "not_drafted_this_run",
+            "缺少可比营业利润率（operating_margin）。",
+        ]
+        claims = {
+            "claim:1": {"id": "claim:1", "subject_ref": "company:acn",
+                        "value": "10", "unit": "percent", "scale": "one",
+                        "currency": None, "metric_or_aspect": "revenue_yoy_growth",
+                        "period": "FY2025", "basis": "reported"},
+            "claim:2": {"id": "claim:2", "subject_ref": "company:acn",
+                        "value": "12", "unit": "percent", "scale": "one",
+                        "currency": None, "metric_or_aspect": "revenue_yoy_growth",
+                        "period": "FY2026", "basis": "reported"},
+        }
+        page = render_research_html(lib, mission=mission, claims=claims)
+        self.assertIn("人工审批：无需人工审批", page)
+        self.assertIn("本轮尚未起草", page)
+        self.assertIn("结构化数据序列：营业收入同比增速", page)
+        self.assertIn("营业收入同比增速 $10B", page)
+        self.assertNotIn("not_applicable", page)
+        self.assertNotIn("not_drafted_this_run", page)
+        self.assertIn("缺少可比营业利润率（营业利润率）", page)
+        self.assertNotIn("operating_margin", page)
+        self.assertNotIn("<th>证据编号</th>", page)
+        self.assertNotIn("<td><code>claim:1</code></td>", page)
+        self.assertIn("技术详情与来源（2）", page)
+        self.assertIn("claim:1, claim:2", page)
 
     def test_incompatible_units_do_not_make_a_chart(self):
         mission, lib = self.fixture()
@@ -230,7 +262,7 @@ class RealReadonlyExportTests(ResearchTaskFixture):
             mission=self.mission,
             claims=claims,
         )
-        self.assertIn("结构化数据序列：revenue", page)
+        self.assertIn("结构化数据序列：营业收入", page)
 
     def test_wrong_subject_claims_cannot_render_as_company_chart(self):
         fixture = LedgerFixture()
