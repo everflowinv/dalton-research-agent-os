@@ -39,6 +39,9 @@ _CHINESE_CALENDAR_QUARTER_RANGE = re.compile(
 _CHINESE_CALENDAR_QUARTER = re.compile(
     r"(?<!\d)(\d{4})\s*\u5e74\s*\u7b2c?\s*([\u4e00\u4e8c\u4e09\u56db1-4])\s*\u5b63\u5ea6"
 )
+_LATIN_CALENDAR_QUARTER = re.compile(
+    r"(?<!\d)(\d{4})\s*\u5e74?\s*Q\s*([1-4])(?!\d)", re.IGNORECASE
+)
 _OPAQUE_ID = re.compile(
     r"\b(?:claim|claim-version|dossier|dossier-version|memo|memo-version|"
     r"debate|debate-map|forecast-model-version|company-model-spec|mission|"
@@ -137,12 +140,14 @@ def _normalize_equivalent_calendar_quarters(
         (match.group(1), names.get(match.group(2), match.group(2)))
         for match in _CHINESE_CALENDAR_QUARTER.finditer(target_text)
     )
-    # If the target retained the explicit range, ordinary token comparison
-    # already proves its boundaries.  Pair only ranges actually replaced by a
-    # quarter name, so a redundant display label cannot mask added/changed
-    # dates elsewhere in the section.
-    target_ranges = range_counts(target_text)
-    paired = (source_counts - target_ranges) & target_counts
+    target_counts.update(match.groups()
+                         for match in _LATIN_CALENDAR_QUARTER.finditer(target_text))
+    # An exact retained range proves the boundaries independently, so its
+    # matching quarter title is a redundant display label.  Normalizing both
+    # spellings also handles a range replaced by the title.  A changed or
+    # incomplete range is not counted here and therefore remains visible to
+    # ordinary numeric-token comparison.
+    paired = source_counts & target_counts
 
     def normalize(text: str) -> str:
         def replace_range(match: re.Match[str]) -> str:
@@ -166,6 +171,7 @@ def _normalize_equivalent_calendar_quarters(
         normalized = _CALENDAR_QUARTER_RANGE.sub(replace_range, text)
         normalized = _CHINESE_CALENDAR_QUARTER_RANGE.sub(replace_chinese_range, normalized)
         normalized = _CHINESE_CALENDAR_QUARTER.sub(replace_name, normalized)
+        normalized = _LATIN_CALENDAR_QUARTER.sub(replace_name, normalized)
         # A source may redundantly state “2026 Q2 (2026-04-01 to
         # 2026-06-30)”.  Once both spellings have proved the same exact
         # identity, retaining that identity once is sufficient, just as for
@@ -200,9 +206,9 @@ def _display_variants(token: str, kind: str) -> list[str]:
     if trimmed != rendered:
         variants.append(trimmed)
     number = Decimal(token.replace(",", ""))
-    # Large 亿 amounts remain faithful at either one or two decimal places.
+    # 亿 amounts remain faithful at either one or two decimal places.
     # This accepts 180.4 and 180.44 for 18,044,066,000, never 180.5.
-    if kind == "amount_usd" and abs(number) >= Decimal("10000000000"):
+    if kind == "amount_usd" and abs(number) >= Decimal("100000000"):
         scaled = number / Decimal("100000000")
         for quantum in (Decimal("0.1"), Decimal("0.01")):
             shown = scaled.quantize(quantum, rounding=ROUND_HALF_UP)
