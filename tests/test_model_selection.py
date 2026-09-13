@@ -1840,8 +1840,15 @@ class CockpitModelPageTests(unittest.TestCase):
         self.assertIn("family", view["choices"][0])
         self.assertIn("provider", view["choices"][0])
         self.assertIn("model_ref", view["choices"][0])
+        self.assertTrue(view["choices"][0]["family_label"])
+        self.assertTrue(all("_" not in label
+                            for label in view["choices"][0]["capability_labels"]))
         self.assertNotEqual(view["choices"][0]["display_name"],
                             view["choices"][0]["model"])
+        page = (Path(__file__).resolve().parents[1]
+                / "src/dalton_core/cockpit_control.html").read_text("utf-8")
+        self.assertNotIn("choice.family_label||choice.family", page)
+        self.assertNotIn("choice.capability_labels||choice.capabilities", page)
         self.assertIsInstance(view["choices"][0]["capabilities"], list)
         catalog = view["catalog"]
         self.assertTrue(catalog["available"])
@@ -1849,6 +1856,14 @@ class CockpitModelPageTests(unittest.TestCase):
                     "dalton_not_in_openclaw"):
             self.assertIsInstance(catalog[key], list)
             self.assertTrue(catalog[f"{key}_note"])
+
+    def test_unclassified_family_and_unknown_capability_do_not_leak(self) -> None:
+        self.assertEqual(CockpitPlane._model_family_label("unclassified:fixture"),
+                         "家族尚未确认")
+        self.assertEqual(
+            CockpitPlane._model_capability_labels(["research", "new_capability"]),
+            ["研究分析", "能力说明待补充"],
+        )
 
     def test_page_reads_each_stage_from_its_actual_consumer_config(self) -> None:
         with ModelRouter(self.router_db) as router:

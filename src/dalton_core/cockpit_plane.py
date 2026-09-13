@@ -4009,6 +4009,22 @@ class CockpitPlane:
         base = model or (family if not family.startswith("unclassified:") else "") or "未命名模型"
         return f"{base} · {provider_label}" if provider_label else base
 
+    @staticmethod
+    def _model_family_label(value: Any) -> str:
+        family = str(value or "").strip()
+        return "家族尚未确认" if not family or family.startswith("unclassified:") else family
+
+    @staticmethod
+    def _model_capability_labels(values: Any) -> list[str]:
+        labels = {
+            "research": "研究分析", "research-hard": "复杂研究分析",
+            "verify": "独立核验", "adjudicate": "判断裁决",
+            "code": "代码分析", "summarize": "摘要整理",
+            "extract": "信息抽取", "format": "格式整理",
+        }
+        return [labels.get(str(value), "能力说明待补充")
+                for value in (values or [])]
+
     def models(self) -> dict[str, Any]:
         """Per calling stage: the tier, the chain it will really use, and a choice.
 
@@ -4196,7 +4212,10 @@ class CockpitPlane:
                     "profile_version_ref": profile.get("profile_version_ref"),
                     "profile_hash": profile.get("content_hash"),
                     "family": profile.get("family"),
+                    "family_label": self._model_family_label(profile.get("family")),
                     "capabilities": list(profile.get("capabilities") or []),
+                    "capability_labels": self._model_capability_labels(
+                        profile.get("capabilities")),
                     "unpriced": bool(profile.get("unpriced")),
                     "note": (
                         "未声明可核验的模型家族：不能承担独立核验"
