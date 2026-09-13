@@ -535,7 +535,7 @@ def build(args, data=None):
         published.append({'source':'ui_text','file':str(target),'batches':len(ui_batches)})
     result={'status':'passed' if not failures else 'incomplete','products':len(products),
             'chunks':len(tasks),'published':published,'failures':failures}
-    write_json(work_dir/'result.json',result)
+    write_json(getattr(args, 'result_output', None) or work_dir/'result.json',result)
     print(json.dumps(result,ensure_ascii=False),flush=True)
     return 0 if not failures else 1
 
@@ -641,6 +641,8 @@ def main():
         run.add_argument('--'+name,type=Path,required=True)
     run.add_argument('--legacy-verifier-config', type=Path,
                      help='exact old verifier config used only to identify a legacy style cache')
+    run.add_argument('--result-output', type=Path,
+                     help='save this batch receipt separately when processing disjoint product sets')
     run.add_argument('--repair-reviewed',action='store_true',
                      help='allow at most two brain-only repairs after a completed language check')
     run.add_argument('--workers',type=int,default=4,choices=range(1,9))
