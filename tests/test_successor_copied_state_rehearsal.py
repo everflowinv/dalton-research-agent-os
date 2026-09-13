@@ -18,6 +18,7 @@ from scripts.run_successor_copied_state_rehearsal import (
     stage_existing_install_authorities, stage_preserved_runtime_configs,
     validate_external_market_digest_preservation,
     validate_existing_install_authorities, validate_successor_snapshots,
+    verify_scratch_bootstrap_writer_append,
 )
 from scripts.prepare_successor_config_transition import (
     apply_transition_to_scratch, canonical_hash,
@@ -120,6 +121,97 @@ class SuccessorCopiedStateRehearsalTests(unittest.TestCase):
             expected_document=self.document, expected_lane=self.lane,
             expected_service=self.service,
         )
+
+    def test_writer_append_runs_real_scratch_bootstrap_and_matches_prediction(self):
+        token = self.state / "writer-tokens.json"
+        before = (b'{"principals":[{"id":"core","operations":["a"],'
+                  b'"token":"secret"}],"schema_version":"0.1"}\n')
+        after = (b'{"principals":[{"id":"core","operations":["a","b"],'
+                 b'"token":"secret"}],"schema_version":"0.1"}\n')
+        token.write_bytes(before)
+
+        def bootstrap():
+            token.write_bytes(after)
+            return "bootstrapped", []
+
+        detail, findings = verify_scratch_bootstrap_writer_append(
+            token_path=token, before=before, predicted_after=after,
+            bootstrap=bootstrap)
+        self.assertEqual("bootstrapped", detail)
+        self.assertEqual([], findings)
+        self.assertEqual(after, token.read_bytes())
+
+    def test_writer_append_refuses_credential_or_noncore_drift(self):
+        token = self.state / "writer-tokens.json"
+        before = b'{"core":{"token":"secret"},"other":{"token":"kept"}}\n'
+        predicted = b'{"core":{"token":"secret"},"other":{"token":"kept"}}\n'
+        token.write_bytes(before)
+
+        def bootstrap():
+            token.write_bytes(
+                b'{"core":{"token":"changed"},"other":{"token":"kept"}}\n')
+            return "bootstrapped", []
+
+        with self.assertRaisesRegex(
+                RehearsalBindingError,
+                "did not produce predicted writer tokens"):
+            verify_scratch_bootstrap_writer_append(
+                token_path=token, before=before, predicted_after=predicted,
+                bootstrap=bootstrap)
+
+    def test_writer_append_derivation_confines_exact_before_and_after_artifacts(self):
+        fixture = PreserveExistingTransitionTests(methodName="runTest")
+        fixture.setUp()
+        try:
+            manifest = fixture.build_writer_append()
+            scratch = fixture.root / "writer-scratch"; scratch.mkdir()
+            scratch_state = scratch / PathModule.STATE_SUBDIR
+            scratch_state.mkdir(parents=True)
+            for name in fixture.models:
+                (scratch_state / name).write_bytes(
+                    (fixture.packet / name).read_bytes())
+            for name, path in fixture.preserved.items():
+                (scratch_state / name).write_bytes(path.read_bytes())
+            authority = (scratch_state /
+                         "connector-governance/yfinance-analyst-estimates-v1.json")
+            authority.parent.mkdir()
+            authority.write_bytes(
+                (fixture.packet / "yfinance-approved.json").read_bytes())
+            scratch_config = scratch / "service.json"
+            scratch_config.write_bytes(
+                (fixture.packet / "service.before.json").read_bytes())
+            scratch_openclaw = scratch / "openclaw/openclaw.json"
+            scratch_openclaw.parent.mkdir()
+            scratch_openclaw.write_bytes(
+                (fixture.packet / "openclaw.preserved.json").read_bytes())
+            rehearsal = SimpleNamespace(
+                temp_root=scratch, temp_state=scratch_state,
+                temp_config=scratch_config, replacements={})
+            before = (fixture.packet / "writer-tokens.before.json").read_bytes()
+            after = b'{"principals":[],"schema_version":"0.1","added":true}\n'
+            with patch(
+                "scripts.run_successor_copied_state_rehearsal."
+                "expected_writer_operation_transition_state",
+                return_value=(before, after,
+                              manifest["writer_operation_transition"]),
+            ):
+                derived_path, proof_path, proof = derive_confined_transition(
+                    PathModule, rehearsal, packet_root=fixture.packet,
+                    manifest=manifest, original_manifest_sha256="f" * 64,
+                    source_root=fixture.root / "successor")
+            derived = json.loads(derived_path.read_text())
+            row = derived["writer_operation_transition"]
+            confined_before = derived_path.parent / row["before"]["file"]
+            evidence = proof["writer_operation_transition"]
+            confined_after = derived_path.parent / evidence["predicted_after"]["file"]
+            self.assertEqual(before, confined_before.read_bytes())
+            self.assertEqual(after, confined_after.read_bytes())
+            self.assertEqual("successor-confined-transition-derivation-0.5",
+                             proof["schema_version"])
+            self.assertEqual(["b"], evidence["added_operations"])
+            self.assertTrue(proof_path.is_file())
+        finally:
+            fixture.doCleanups()
 
     def test_final_snapshot_binds_configs_and_writer_lane_consumption(self):
         result = self.validate()

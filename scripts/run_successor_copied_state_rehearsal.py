@@ -22,17 +22,18 @@ from scripts.prepare_successor_config_transition import (
     DOCUMENT_CONFIG, EXTERNAL_CAS_SCHEMA_VERSION, LANE_CONFIG,
     OPENCLAW_FRAME_PATH, OPENCLAW_TARGET_MAX_FRAME_BYTES,
     PRESERVE_SCHEMA_VERSION, PURE_PRESERVE_SCHEMA_VERSION,
+    WRITER_APPEND_SCHEMA_VERSION,
     _json_bytes, _record_hash, _service_after, _set_leaf,
     _validated_service_delta,
     apply_transition_to_scratch, canonical_hash,
     expected_openclaw_frame_transition_state,
     expected_preserved_openclaw_state, expected_service_transition_state,
-    expected_transition_state,
+    expected_transition_state, expected_writer_operation_transition_state,
 )
 
 PRESERVE_SCHEMA_VERSIONS = {
     PRESERVE_SCHEMA_VERSION, EXTERNAL_CAS_SCHEMA_VERSION,
-    PURE_PRESERVE_SCHEMA_VERSION,
+    PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION,
 }
 from scripts.run_release_copied_state_rehearsal import (
     RehearsalBindingError, _artifact, _canonical_sha256,
@@ -319,6 +320,22 @@ def _write_json(path: Path, value: Mapping[str, Any]) -> None:
                                       indent=2) + "\n").encode("utf-8"))
 
 
+def verify_scratch_bootstrap_writer_append(
+    *, token_path: Path, before: bytes, predicted_after: bytes,
+    bootstrap: Any,
+) -> tuple[str, list[str]]:
+    """Run bootstrap only after its confined token input matches review."""
+
+    _need(token_path.is_file() and not token_path.is_symlink()
+          and token_path.read_bytes() == before,
+          "copied writer token baseline differs from reviewed bytes")
+    detail, findings = bootstrap()
+    _need(token_path.is_file() and not token_path.is_symlink()
+          and token_path.read_bytes() == predicted_after,
+          "scratch bootstrap did not produce predicted writer tokens")
+    return detail, findings
+
+
 def derive_confined_transition(
     module: Any, rehearsal: Any, *, packet_root: Path,
     manifest: Mapping[str, Any], original_manifest_sha256: str,
@@ -541,6 +558,24 @@ def derive_confined_transition(
             derived["external_config_transition"]["after_sha256"] = _sha(
                 confined_before)
 
+        if manifest.get("schema_version") == WRITER_APPEND_SCHEMA_VERSION:
+            _need(source_root is not None,
+                  "writer append rehearsal source is unavailable")
+            writer_before, writer_after, writer_row = (
+                expected_writer_operation_transition_state(
+                    packet_root=packet_root, manifest=manifest,
+                    successor_root=source_root))
+            writer_root = derived_root / "writer-operation-transition"
+            writer_root.mkdir(mode=0o700)
+            writer_before_path = writer_root / "writer-tokens.before.json"
+            writer_after_path = writer_root / "writer-tokens.predicted-after.json"
+            _write_exclusive(writer_before_path, writer_before)
+            _write_exclusive(writer_after_path, writer_after)
+            derived["writer_operation_transition"]["before"] = {
+                "file": writer_before_path.relative_to(derived_root).as_posix(),
+                "sha256": _sha(writer_before_path),
+            }
+
     derived["model_inventory"] = {
         "before_count": len(raw_models), "after_count": len(final_models),
         "before_semantic_sha256": canonical_hash(raw_models),
@@ -556,6 +591,8 @@ def derive_confined_transition(
         "schema_version": (
             "successor-confined-transition-derivation-0.3"
             if manifest.get("schema_version") == EXTERNAL_CAS_SCHEMA_VERSION
+            else "successor-confined-transition-derivation-0.5"
+            if manifest.get("schema_version") == WRITER_APPEND_SCHEMA_VERSION
             else "successor-confined-transition-derivation-0.4"
             if manifest.get("schema_version") == PURE_PRESERVE_SCHEMA_VERSION
             else "successor-confined-transition-derivation-0.2"
@@ -578,6 +615,20 @@ def derive_confined_transition(
              "before_sha256": host_patch["before_sha256"],
              "after_sha256": host_patch["after_sha256"]}
             if host_patch is not None else None)
+    if manifest.get("schema_version") == WRITER_APPEND_SCHEMA_VERSION:
+        proof["writer_operation_transition"] = {
+            "before": {
+                "file": writer_before_path.relative_to(derived_root).as_posix(),
+                "sha256": _sha(writer_before_path),
+            },
+            "predicted_after": {
+                "file": writer_after_path.relative_to(derived_root).as_posix(),
+                "sha256": _sha(writer_after_path),
+            },
+            "added_operations": writer_row["proof"]["added_operations"],
+            "predecessor_commit": writer_row["proof"]["predecessor"]["commit"],
+            "successor_commit": writer_row["proof"]["successor"]["commit"],
+        }
     proof["content_hash"] = canonical_hash(proof)
     proof_path = derived_root / "derivation-proof.json"
     _write_json(proof_path, proof)
@@ -766,6 +817,28 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 detail += "; reviewed OpenClaw bytes staged in scratch"
             return detail, findings
 
+        def run_bootstrap(self):
+            if manifest.get("schema_version") != WRITER_APPEND_SCHEMA_VERSION:
+                return super().run_bootstrap()
+            before, predicted_after, row = (
+                expected_writer_operation_transition_state(
+                    packet_root=packet_root, manifest=manifest,
+                    successor_root=source_root))
+            detail, findings = verify_scratch_bootstrap_writer_append(
+                token_path=self.temp_state / "writer-tokens.json",
+                before=before, predicted_after=predicted_after,
+                bootstrap=super().run_bootstrap)
+            proof = row["proof"]
+            self.writer_operation_transition = {
+                "before_sha256": hashlib.sha256(before).hexdigest(),
+                "after_sha256": hashlib.sha256(predicted_after).hexdigest(),
+                "added_operations": proof["added_operations"],
+                "predecessor_commit": proof["predecessor"]["commit"],
+                "successor_commit": proof["successor"]["commit"],
+            }
+            return (detail + "; predicted writer operation append verified",
+                    findings)
+
         def post_catalog_sync_steps(self):
             steps = [("apply successor configuration in scratch",
                       self._apply_successor)]
@@ -815,6 +888,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 receipt_path=temp_root / "successor-config-transition-receipt.json",
                 service_config_path=self.temp_config,
                 external_config_path=self.successor_openclaw,
+                successor_source_root=source_root,
             )
             self.successor_derivation = {
                 **proof, "proof_path": str(proof_path),
@@ -875,7 +949,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         _need(actual_openclaw == expected_value,
               "confined OpenClaw result changes more than reviewed paths")
         final["openclaw_config_semantic_sha256"] = canonical_hash(actual_openclaw)
-    elif manifest.get("schema_version") == PURE_PRESERVE_SCHEMA_VERSION:
+    elif manifest.get("schema_version") in {
+            PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION}:
         expected_openclaw = expected_preserved_openclaw_state(
             packet_root=packet_root, manifest=manifest)
         _need(rehearsal.successor_openclaw.is_file()
@@ -899,6 +974,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         },
         "results": {**final, "step_count": len(rehearsal.steps),
                     "tick_entries": len(rehearsal.rows), "escaped": 0,
+                    **({"writer_operation_transition":
+                           rehearsal.writer_operation_transition}
+                       if manifest.get("schema_version")
+                       == WRITER_APPEND_SCHEMA_VERSION else {}),
                     "confined_transition_derivation":
                         rehearsal.successor_derivation},
         "ops_helpers": {
