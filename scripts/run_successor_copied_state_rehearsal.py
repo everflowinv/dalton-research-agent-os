@@ -1021,7 +1021,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
               "confined OpenClaw result changes more than reviewed paths")
         final["openclaw_config_semantic_sha256"] = canonical_hash(actual_openclaw)
     elif manifest.get("schema_version") in {
-            PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION}:
+            PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION,
+            COCKPIT_BRAIN_SCHEMA_VERSION}:
         expected_openclaw = expected_preserved_openclaw_state(
             packet_root=packet_root, manifest=manifest)
         _need(rehearsal.successor_openclaw.is_file()
