@@ -468,7 +468,7 @@ RESEARCH_TASK_TERMINAL_LABELS = {
 # describes what a stage does when every explicitly selected model
 # model the owner named has been retired.
 MODEL_SELECTION_MODE_LABELS = {
-    "tier": "跟随档位",
+    "tier": "使用系统推荐配置",
     "explicit": "手动指定模型",
     "tier_after_retirement": "指定模型已退役，暂时使用该环节的默认模型顺序",
     "legacy_pin": "沿用当前策略固定的模型",
@@ -569,8 +569,8 @@ CHECKPOINT_ACTIONS = {
         {"decision": "defer", "label": "暂不处理"},
     ),
     "gate_reopen": (
-        {"decision": "approve", "label": "重出一版"},
-        {"decision": "decline", "label": "不重出"},
+        {"decision": "approve", "label": "批准修订"},
+        {"decision": "decline", "label": "保留当前版本"},
     ),
 }
 # And what it says instead, on a Core whose writer predates the decision ops.
@@ -4475,7 +4475,7 @@ class CockpitPlane:
         purpose = _text(value.get("purpose"), "purpose", maximum=64)
         mode = _text(value.get("mode"), "mode", maximum=32)
         if mode not in SELECTION_MODES:
-            raise CockpitError("请选择“跟随档位”或“手动指定模型”")
+            raise CockpitError("请选择“使用系统推荐配置”或“手动指定模型”")
         chain = value.get("chain") or []
         if not isinstance(chain, list) or any(
             not isinstance(item, str) for item in chain
@@ -4491,7 +4491,7 @@ class CockpitPlane:
         label = PURPOSE_LABELS.get(purpose, purpose)
         self.journal.record_event(
             kind="model_selection", title=f"你给「{label}」选了模型",
-            detail=("跟随档位" if mode == "tier" else " → ".join(chain)),
+            detail=("使用系统推荐配置" if mode == "tier" else " → ".join(chain)),
             login=login, refs={"purpose": purpose, "mode": mode})
         return {**result, "purpose": purpose, "label": label}
 

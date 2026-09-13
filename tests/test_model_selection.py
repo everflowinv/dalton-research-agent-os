@@ -1802,7 +1802,7 @@ class CockpitModelPageTests(unittest.TestCase):
         row = next(
             item for item in view["purposes"] if item["purpose"] == BRAIN_PURPOSE
         )
-        self.assertEqual(row["mode_label"], "跟随档位")
+        self.assertEqual(row["mode_label"], "使用系统推荐配置")
         self.assertEqual(
             [link["model"] for link in row["chain"]], list(tier_chain("brain"))
         )

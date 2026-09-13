@@ -361,10 +361,10 @@ pre.table{background:#f6f8fb;color:#28364b;border-color:var(--line)}table{color:
   <section class="view" id="view-steer">
     <div class="card">
       <h2>调整研究方向</h2>
-      <p class="sub">比如「多关注 IBM 的软件业务」「别再看新闻稿了」「加一个关于人员流失率的问题」。系统会把它翻译成对研究问题的具体改动，你确认后生效。</p>
+      <p class="sub">比如「多关注 IBM 的软件业务」「别再看新闻稿了」「加一个关于人员流失率的问题」。系统会把它整理成对研究问题与目标的具体改动，你确认后生效。</p>
       <div class="compose">
         <textarea id="steer-input" placeholder="写下你的方向…"></textarea>
-        <div class="row"><span class="hint">当前的研究问题见「研究目标」页。</span><button class="primary" id="steer-submit">翻译成具体改动</button></div>
+        <div class="row"><span class="hint">当前的研究问题见「研究目标」页。</span><button class="primary" id="steer-submit">生成调整方案</button></div>
         <div class="status" id="steer-status"></div>
         <div id="steer-draft"></div>
       </div>
@@ -379,8 +379,8 @@ pre.table{background:#f6f8fb;color:#28364b;border-color:var(--line)}table{color:
   <section class="view" id="view-log">
     <div class="card">
       <div class="chips" id="log-filters">
-        <span class="chip on" data-f="all">全部</span><span class="chip" data-f="discoveries">搜索</span><span class="chip" data-f="fetches,acquisitions,sec-lane-runs">获取资料</span>
-        <span class="chip" data-f="extractions,review">阅读</span><span class="chip" data-f="claim">新结论</span><span class="chip" data-f="question,goal,steer,approval">你的操作</span><span class="chip" data-f="problem">问题</span>
+        <span class="chip on" data-f="all">全部动态</span><span class="chip" data-f="discoveries">资料检索</span><span class="chip" data-f="fetches,acquisitions,sec-lane-runs">资料采集</span>
+        <span class="chip" data-f="extractions,review">阅读与提取</span><span class="chip" data-f="claim">新增结论</span><span class="chip" data-f="question,goal,steer,approval">操作记录</span><span class="chip" data-f="problem">运行问题</span>
       </div>
       <div class="status" id="log-status">正在读取…</div>
       <div class="timeline" id="timeline"></div>
@@ -961,7 +961,7 @@ function renderClaims(sheet,r){sheet.replaceChildren(readerClose(),node("h2","�
   filters.append(dedupe);sheet.append(filters);
   /* "There is no index here" and "nothing matched" are different answers. */
   sheet.append(node("div",r.indexed?`共 ${r.total} 条${r.filters.canonical_only?"（同一件事只留一条）":""}`:
-    `共 ${r.total} 条。这个 Core 还没有给结论建索引，所以没有主题和来源层级。`,"meta"));
+    `共 ${r.total} 条。结论索引尚未建立，所以没有主题和来源层级。`,"meta"));
   if(!r.items.length){sheet.append(node("div","这个条件下没有结论","empty"));return}
   const box=node("div");r.items.forEach(x=>{const d=node("div",null,"claimrow");d.append(node("div",x.statement));
     const meta=node("div",null,"meta");meta.append(node("span",x.company));
