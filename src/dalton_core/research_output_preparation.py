@@ -542,7 +542,7 @@ def run_worker(config_path):
                 result={'status':'no_current_mission'}
             else:
                 mission=json.loads(row[0])
-                args=SimpleNamespace(input=None,only=None,workers=int(cfg.get('workers',4)),
+                args=SimpleNamespace(input=None,only=None,repair_reviewed=True,workers=int(cfg.get('workers',4)),
                     chunk_chars=int(cfg.get('chunk_chars',4500)),max_cost_per_call=float(cfg.get('max_cost_per_call',1)),
                     attempts=int(cfg.get('draft_attempts',2)),work_dir=root,
                     output_directory=Path(cfg['output_directory']),scheduler_db=Path(cfg['scheduler_db']),
