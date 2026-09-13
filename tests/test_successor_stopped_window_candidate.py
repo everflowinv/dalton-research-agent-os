@@ -127,6 +127,33 @@ class SuccessorStoppedWindowCandidateTests(unittest.TestCase):
                         "predecessor recovery identity is unresolved"):
                     execute.packet_preflight(packet)
 
+    def test_recovery_rehearsal_requires_exact_writer_preservation(self) -> None:
+        digest = "a" * 64
+        recovery = {"recovery": {"installed_identity": {
+            "writer_tokens": {"live_sha256": digest}}}}
+        transition = {"schema_version": PURE_PRESERVE_SCHEMA_VERSION}
+        preservation = {
+            "before_sha256": digest, "after_sha256": digest,
+            "before_mode": 0o600, "after_mode": 0o600,
+        }
+        execute.validate_recovery_writer_preservation(
+            transition, {"results": {"writer_token_preservation": preservation}},
+            recovery)
+        for changed in (
+                {**preservation, "after_sha256": "b" * 64},
+                {**preservation, "after_mode": 0o644},
+                {**preservation, "extra": True}):
+            with self.subTest(changed=changed), self.assertRaisesRegex(
+                    execute.SuccessorExecuteError, "exact writer preservation"):
+                execute.validate_recovery_writer_preservation(
+                    transition,
+                    {"results": {"writer_token_preservation": changed}}, recovery)
+        with self.assertRaisesRegex(execute.SuccessorExecuteError,
+                                    "exact writer preservation"):
+            execute.validate_recovery_writer_preservation(
+                {"schema_version": execute.WRITER_APPEND_SCHEMA_VERSION},
+                {"results": {"writer_token_preservation": preservation}}, recovery)
+
     def test_unaccepted_or_incomplete_packet_cannot_reach_live_preflight(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             packet = Path(temporary)

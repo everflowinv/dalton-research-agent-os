@@ -214,6 +214,30 @@ def validate_predecessor_recovery(
     return proof, identity
 
 
+def validate_recovery_writer_preservation(
+    transition: Mapping[str, Any], binding: Mapping[str, Any],
+    recovery: Mapping[str, Any],
+) -> None:
+    """Bind a recovery deployment to exact preservation of writer authority."""
+
+    try:
+        live_sha256 = recovery["recovery"]["installed_identity"][
+            "writer_tokens"]["live_sha256"]
+    except (KeyError, TypeError) as exc:
+        raise SuccessorExecuteError(
+            "recovered writer authority is unresolved") from exc
+    preservation = binding.get("results", {}).get("writer_token_preservation")
+    need(transition.get("schema_version") == PURE_PRESERVE_SCHEMA_VERSION
+         and isinstance(live_sha256, str)
+         and HEX64.fullmatch(live_sha256) is not None
+         and preservation == {
+             "before_sha256": live_sha256,
+             "after_sha256": live_sha256,
+             "before_mode": 0o600,
+             "after_mode": 0o600,
+         }, "recovery rehearsal does not prove exact writer preservation")
+
+
 def packet_preflight(packet: Path) -> tuple[dict[str, Any], dict[str, Path]]:
     manifest_path = packet / "release-manifest.candidate.json"
     need(packet.is_dir() and not packet.is_symlink()
@@ -273,8 +297,9 @@ def packet_preflight(packet: Path) -> tuple[dict[str, Any], dict[str, Path]]:
         paths[name] = path
     need(len(set(paths.values())) == len(paths),
          "successor artifact files must be distinct")
+    recovery_identity = None
     if version == RECOVERY_SCHEMA_VERSION:
-        validate_predecessor_recovery(
+        _proof, recovery_identity = validate_predecessor_recovery(
             paths, expected=recovery)
     acceptance = manifest.get("acceptance", {})
     need(acceptance == {
@@ -306,6 +331,9 @@ def packet_preflight(packet: Path) -> tuple[dict[str, Any], dict[str, Path]]:
          and binding.get("transition_manifest_sha256")
          == artifacts["transition_manifest"]["sha256"],
          "copied-state rehearsal does not bind this successor")
+    if version == RECOVERY_SCHEMA_VERSION:
+        validate_recovery_writer_preservation(
+            transition, binding, recovery_identity)
     if transition.get("schema_version") in PRESERVE_SCHEMA_VERSIONS:
         service_before, service_after = expected_service_transition_state(
             packet_root=packet, manifest=transition)
