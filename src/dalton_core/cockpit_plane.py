@@ -381,6 +381,20 @@ def _ops_item_label(item_key: Any,
         return "行业任务"
     return "任务记录"
 
+def _runtime_error_display(reason: Any) -> str:
+    """Classify a runtime error conservatively for the activity page."""
+    text = str(reason or "").casefold()
+    if "budget" in text or "allowance" in text:
+        return "任务受到当前费用或用量限制"
+    if any(word in text for word in ("permission", "forbidden", "not permitted", "unauthorized")):
+        return "当前任务或治理规则尚未授权"
+    if any(word in text for word in ("timeout", "timed out", "busy", "locked")):
+        return "系统繁忙或等待超时，可以稍后重试"
+    if any(word in text for word in ("unavailable", "connection", "network")):
+        return "所需服务或资料暂时不可用"
+    return "本次运行未完成，具体原因见技术详情"
+
+
 OUTCOME_LABELS = {
     "should_have_moved": "当时应调整但未调整（候选）",
     "held": "维持原判断正确",
@@ -3238,7 +3252,7 @@ class CockpitPlane:
                 raw_error = str(lane["last_error"])[:400]
                 events.append({"id": f"error:{key}:{lane.get('last_completed_at')}", "at": lane.get("last_completed_at") or heartbeat.get("last_tick_at"),
                                "kind": "problem", "lane": label, "title": f"{label}遇到问题",
-                               "detail": _terminal_display_reason(raw_error),
+                               "detail": _runtime_error_display(raw_error),
                                "technical": {"original_error": raw_error},
                                "state": "failed", "company": None})
         events = [e for e in events if e.get("at")]

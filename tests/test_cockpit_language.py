@@ -235,7 +235,7 @@ class CockpitLanguageTests(unittest.TestCase):
         self.assertEqual(budget["technical"]["purpose"], "research_localization")
         frontend = HTML.read_text(encoding="utf-8")
         self.assertIn("technicalDetails(e.technical)", frontend)
-        self.assertIn('_terminal_display_reason(raw_error)', Path(__import__("dalton_core.cockpit_plane", fromlist=["x"]).__file__).read_text())
+        self.assertIn('_runtime_error_display(raw_error)', Path(__import__("dalton_core.cockpit_plane", fromlist=["x"]).__file__).read_text())
 
     def test_model_action_journal_uses_readable_copy(self) -> None:
         from dalton_core import cockpit_plane
