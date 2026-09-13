@@ -3407,7 +3407,7 @@ class CockpitPlane:
                         raise ValueError(model_evidence.get("reason") or "formal model evidence is unverified")
                 except (ValueError, KeyError, TypeError, sqlite3.OperationalError) as exc:
                     actions = []
-                    note = f"暂时不能裁决：memo verification contract failed: {exc}"
+                    note = f"暂时无法提交决定：投资备忘录的核验信息不完整。具体原因见技术详情。"
                     model_evidence = {"status": "unverified", "reason": str(exc),
                                       "producer_calls": [], "verifier": None}
                 gate = record.get("gate") or {}
@@ -3419,7 +3419,7 @@ class CockpitPlane:
                 items.append({
                     "kind": "investment_memo", "ref": record["id"],
                     "hash": row["content_hash"], "at": row["created_at"],
-                    "title": "Investment Memo：是否批准并进入持续覆盖",
+                    "title": "投资备忘录：是否批准进入持续覆盖",
                     "who": self._label(members, record["subject_ref"]),
                     "summary": record.get("summary") or "",
                     "details": details, "actions": actions,
@@ -3491,7 +3491,7 @@ class CockpitPlane:
                             row["risk_reward_status"], row["risk_reward_status"]),
                         "可观察信号": [step.get("signal") for step
                                        in record.get("event_pathway") or []],
-                        "怎么裁决": "写者操作 decide_conviction_call（accept / reject / defer，要写理由）",
+                        "所需决定": "请选择接受、不接受或暂缓，并写明理由",
                     },
                     "actions": [],
                     "needs_rationale": False,
@@ -3763,8 +3763,8 @@ class CockpitPlane:
             operation, params = "decide_investment_memo", {
                 "memo_version_ref": ref, "memo_version_hash": digest,
                 "decision": decision, "reason": rationale.strip()}
-            title = ("批准了 Investment Memo" if decision == "approve"
-                     else "拒绝了 Investment Memo") + f"：{ref.split(':', 1)[-1]}"
+            title = ("批准了投资备忘录" if decision == "approve"
+                     else "未批准投资备忘录") + f"：{ref.split(':', 1)[-1]}"
         elif kind == "forecast":
             if decision not in {"keep_forecast", "revise_forecast"}:
                 raise CockpitError("decision must be keep_forecast or revise_forecast")
@@ -3785,8 +3785,8 @@ class CockpitPlane:
             operation, params = "decide_thesis_revision_candidate", {
                 "candidate_ref": ref, "candidate_hash": digest,
                 "verdict": decision, "reason": rationale.strip()}
-            title = {"accept": "接受了论点修订", "reject": "没有接受论点修订",
-                     "defer": "把论点修订放了放"}[decision] + f"：{ref}"
+            title = {"accept": "接受了论点修订", "reject": "未接受论点修订",
+                     "defer": "暂缓决定论点修订"}[decision] + f"：{ref}"
         elif kind == "gate_reopen":
             if decision not in {"approve", "decline"}:
                 raise CockpitError("decision must be approve or decline")
@@ -3795,8 +3795,8 @@ class CockpitPlane:
             operation, params = "decide_gate_reopen", {
                 "proposal_ref": ref, "proposal_hash": digest,
                 "verdict": decision, "reason": rationale.strip()}
-            title = ("同意重出 Initial Screen" if decision == "approve"
-                     else "不重出 Initial Screen") + f"：{ref}"
+            title = ("同意重新出具初步筛查报告" if decision == "approve"
+                     else "不同意重新出具初步筛查报告") + f"：{ref}"
         else:
             raise CockpitError("unknown approval kind")
         try:
