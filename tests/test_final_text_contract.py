@@ -18,6 +18,10 @@ class FinalTextContractTests(unittest.TestCase):
         self.assertIn("clearest evidence-supported judgement", text)
         self.assertIn("Preserve the meaning of genuine gaps", text)
         self.assertIn("Never invent", text)
+        self.assertIn("Claim/Claims→已核实结论", text)
+        self.assertIn("ThesisRevisionCandidate→论点修订建议", text)
+        self.assertIn("Internal system vocabulary is not a proper noun", text)
+        self.assertIn("不改动任何权威", text)
 
     def test_every_human_facing_research_drafter_uses_the_shared_contract(self):
         producers = (
