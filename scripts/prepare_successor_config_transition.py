@@ -41,11 +41,13 @@ PRESERVE_SCHEMA_VERSION = "successor-config-transition-0.2"
 EXTERNAL_CAS_SCHEMA_VERSION = "successor-config-transition-0.3"
 PURE_PRESERVE_SCHEMA_VERSION = "successor-config-transition-0.4"
 WRITER_APPEND_SCHEMA_VERSION = "successor-config-transition-0.5"
+COCKPIT_BRAIN_SCHEMA_VERSION = "successor-config-transition-0.6"
 RECEIPT_SCHEMA_VERSION = "successor-config-transition-receipt-0.1"
 PRESERVE_RECEIPT_SCHEMA_VERSION = "successor-config-transition-receipt-0.2"
 EXTERNAL_CAS_RECEIPT_SCHEMA_VERSION = "successor-config-transition-receipt-0.3"
 PURE_PRESERVE_RECEIPT_SCHEMA_VERSION = "successor-config-transition-receipt-0.4"
 WRITER_APPEND_RECEIPT_SCHEMA_VERSION = "successor-config-transition-receipt-0.5"
+COCKPIT_BRAIN_RECEIPT_SCHEMA_VERSION = "successor-config-transition-receipt-0.6"
 HEX40 = re.compile(r"[0-9a-f]{40}")
 HEX64 = re.compile(r"[0-9a-f]{64}")
 MODEL_ADDITIONS = (
@@ -57,6 +59,9 @@ DOCUMENT_CONFIG = "document-research-config.json"
 LANE_CONFIG = "mission-document-research-lane.json"
 PRESERVED_TARGETS = (*MODEL_ADDITIONS, MODEL_REPLACEMENT, DOCUMENT_CONFIG, LANE_CONFIG)
 PLANNER_BUDGET_PATH = ("bounded_planner", "config", "planner_call_budget")
+COCKPIT_MODEL_PATH = ("control", "config", "cockpit", "model_config_path")
+EXTRACTION_MODEL_CONFIG = "document-extraction-model-config.json"
+BRAIN_MODEL_CONFIG = "research-planner-model-config.json"
 OPENCLAW_FRAME_PATH = (
     "plugins", "entries", "dalton-openclaw-model-broker", "config",
     "maxFrameBytes",
@@ -308,6 +313,22 @@ def _service_after(before: Mapping[str, Any], delta: Mapping[str, Any]) -> dict[
     leaf = PLANNER_BUDGET_PATH[-1]
     _need(leaf not in cursor, "planner service budget path is no longer absent")
     cursor[leaf] = json.loads(json.dumps(delta["after"]))
+    return after
+
+
+def _cockpit_brain_service_after(before: Mapping[str, Any]) -> dict[str, Any]:
+    """Apply the sole service mutation authorized by schema 0.6."""
+    after = json.loads(json.dumps(before))
+    cursor: Any = after
+    for part in COCKPIT_MODEL_PATH[:-1]:
+        _need(isinstance(cursor, dict) and part in cursor,
+              "cockpit model config parent path is unavailable")
+        cursor = cursor[part]
+    leaf = COCKPIT_MODEL_PATH[-1]
+    old = cursor.get(leaf) if isinstance(cursor, dict) else None
+    _need(isinstance(old, str) and Path(old).name == EXTRACTION_MODEL_CONFIG,
+          "cockpit model config is not the reviewed extraction baseline")
+    cursor[leaf] = str(Path(old).with_name(BRAIN_MODEL_CONFIG))
     return after
 
 
@@ -654,6 +675,7 @@ def build_preserve_existing_transition(
     predecessor_source_root: Path | None = None,
     predecessor_source_commit: str | None = None,
     successor_source_root: Path | None = None,
+    cockpit_brain_binding: bool = False,
 ) -> dict[str, Any]:
     """Build a 0.2 service delta through 0.5 writer-append transition.
 
@@ -752,7 +774,7 @@ def build_preserve_existing_transition(
           "writer operation transition inputs are incomplete")
     writer_append = all(value is not None for value in writer_inputs)
     pure_preserve = (
-        service_delta_path is None
+        service_delta_path is None and not cockpit_brain_binding
         and openclaw_config_before_path is not None
         and openclaw_config_after_path is None
         and web_search_plugin_source_path is None
@@ -765,7 +787,7 @@ def build_preserve_existing_transition(
     )
     _need(not writer_append or pure_preserve,
           "writer operation append requires a pure-preserve transition")
-    external_cas = service_delta_path is None and not pure_preserve
+    external_cas = service_delta_path is None and not pure_preserve and not cockpit_brain_binding
     if pure_preserve:
         openclaw_before, openclaw_before_bytes = _read_json(
             openclaw_config_before_path, "OpenClaw config before")
@@ -791,6 +813,41 @@ def build_preserve_existing_transition(
             "live_mutation": False, "manifest_publication": False,
             "service_lifecycle": False, "model_calls": False,
         }
+    elif cockpit_brain_binding:
+        _need(service_delta_path is None and openclaw_config_before_path is not None
+              and openclaw_config_after_path is None
+              and all(value is None for value in (
+                  web_search_plugin_source_path, web_search_plugin_destination_path,
+                  model_broker_plugin_source_path, model_broker_plugin_destination_path,
+                  model_broker_plugin_before_path, model_broker_host_patch,
+                  openclaw_broker_journal_path)),
+              "0.6 permits only the cockpit brain service binding")
+        _need(BRAIN_MODEL_CONFIG in baseline,
+              "reviewed brain model config is absent from the 17-file inventory")
+        openclaw_before, openclaw_before_bytes = _read_json(
+            openclaw_config_before_path, "OpenClaw config before")
+        service_after = _cockpit_brain_service_after(service_before)
+        service_mode = stat.S_IMODE(service_config_before_path.stat().st_mode)
+        _need(service_mode == 0o600, "service config mode is not owner-only")
+        schema_version = COCKPIT_BRAIN_SCHEMA_VERSION
+        service_transition = {
+            "kind": "cockpit_brain_binding", "mutation_count": 1,
+            "json_path": list(COCKPIT_MODEL_PATH),
+            "before_value": str(Path(service_before["control"]["config"]["cockpit"]["model_config_path"])),
+            "after_value": str(Path(service_before["control"]["config"]["cockpit"]["model_config_path"]).with_name(BRAIN_MODEL_CONFIG)),
+            "before": _artifact(service_config_before_path, packet_root),
+            "before_mode": service_mode, "after_mode": service_mode,
+            "after_sha256": sha256_bytes(_json_bytes(service_after)),
+            "target_model_config": {"name": BRAIN_MODEL_CONFIG,
+                                    "sha256": model_file_hashes[BRAIN_MODEL_CONFIG]},
+        }
+        openclaw_transition = {"kind": "preserve_exact", "mutation_count": 0,
+            "before": _artifact(openclaw_config_before_path, packet_root),
+            "after_sha256": sha256_bytes(openclaw_before_bytes)}
+        boundaries = {"configuration_mutations": 0, "service_config_mutations": 1,
+            "external_config_mutations": 0, "live_mutation": False,
+            "manifest_publication": False, "service_lifecycle": False,
+            "model_calls": False}
     elif external_cas:
         _need(openclaw_config_before_path is not None
               and openclaw_config_after_path is not None
@@ -940,7 +997,8 @@ def build_preserve_existing_transition(
         ],
         "boundaries": boundaries,
     }
-    if schema_version in {PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION}:
+    if schema_version in {PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION,
+                          COCKPIT_BRAIN_SCHEMA_VERSION}:
         body["external_config_transition"] = openclaw_transition
     elif openclaw_transition is not None:
         body["external_config_transitions"] = [openclaw_transition]
@@ -1007,7 +1065,7 @@ def expected_transition_state(
     version = manifest.get("schema_version")
     _need(version in {SCHEMA_VERSION, PRESERVE_SCHEMA_VERSION,
                       EXTERNAL_CAS_SCHEMA_VERSION, PURE_PRESERVE_SCHEMA_VERSION,
-                      WRITER_APPEND_SCHEMA_VERSION},
+                      WRITER_APPEND_SCHEMA_VERSION, COCKPIT_BRAIN_SCHEMA_VERSION},
           "transition schema version is unsupported")
     document = None
     lane = None
@@ -1051,10 +1109,37 @@ def expected_service_transition_state(
 
     version = manifest.get("schema_version")
     _need(version in {PRESERVE_SCHEMA_VERSION, EXTERNAL_CAS_SCHEMA_VERSION,
-                      PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION}
+                      PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION,
+                      COCKPIT_BRAIN_SCHEMA_VERSION}
           and manifest.get("transition_kind") == "preserve_existing",
           "service transition requires preserve-existing schema 0.2 through 0.5")
     row = manifest.get("service_transition")
+    if version == COCKPIT_BRAIN_SCHEMA_VERSION:
+        expected = {"kind", "mutation_count", "json_path", "before_value",
+                    "after_value", "before", "before_mode", "after_mode",
+                    "after_sha256", "target_model_config"}
+        _need(isinstance(row, Mapping) and set(row) == expected
+              and row.get("kind") == "cockpit_brain_binding"
+              and row.get("mutation_count") == 1
+              and row.get("json_path") == list(COCKPIT_MODEL_PATH)
+              and row.get("before_mode") == row.get("after_mode") == 0o600
+              and isinstance(row.get("target_model_config"), Mapping)
+              and set(row["target_model_config"]) == {"name", "sha256"}
+              and row["target_model_config"].get("name") == BRAIN_MODEL_CONFIG,
+              "cockpit brain service transition shape differs")
+        _, before_bytes = _resolve_artifact(packet_root, row["before"])
+        try:
+            before = json.loads(before_bytes.decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise ConfigTransitionError("cockpit service baseline is invalid") from exc
+        after = _cockpit_brain_service_after(before)
+        _need(row["before_value"] == before["control"]["config"]["cockpit"]["model_config_path"]
+              and row["after_value"] == after["control"]["config"]["cockpit"]["model_config_path"]
+              and row["target_model_config"]["sha256"]
+                  == manifest.get("model_inventory", {}).get("file_sha256", {}).get(BRAIN_MODEL_CONFIG)
+              and row["after_sha256"] == sha256_bytes(_json_bytes(after)),
+              "cockpit brain service transition hashes differ")
+        return before, after
     if version in {EXTERNAL_CAS_SCHEMA_VERSION, PURE_PRESERVE_SCHEMA_VERSION,
                    WRITER_APPEND_SCHEMA_VERSION}:
         _need(isinstance(row, Mapping)
@@ -1166,7 +1251,8 @@ def expected_preserved_openclaw_state(
     """Return exact OpenClaw bytes bound by a pure-preserve successor."""
 
     _need(manifest.get("schema_version") in {
-              PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION},
+              PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION,
+                   COCKPIT_BRAIN_SCHEMA_VERSION},
           "pure OpenClaw preservation requires schema 0.4 or 0.5")
     row = manifest.get("external_config_transition")
     _need(isinstance(row, Mapping)
@@ -1335,7 +1421,8 @@ def _apply_preserve_transition(
     }
     expected_boundaries = {
         "configuration_mutations": 0,
-        "service_config_mutations": 1 if version == PRESERVE_SCHEMA_VERSION else 0,
+        "service_config_mutations": 1 if version in {PRESERVE_SCHEMA_VERSION,
+                                                       COCKPIT_BRAIN_SCHEMA_VERSION} else 0,
         **({} if version == PRESERVE_SCHEMA_VERSION
            else {"external_config_mutations": (
                1 if version == EXTERNAL_CAS_SCHEMA_VERSION else 0
@@ -1345,13 +1432,15 @@ def _apply_preserve_transition(
     }
     if version == EXTERNAL_CAS_SCHEMA_VERSION:
         expected_fields.add("external_config_transitions")
-    elif version in {PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION}:
+    elif version in {PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION,
+                   COCKPIT_BRAIN_SCHEMA_VERSION}:
         expected_fields.add("external_config_transition")
         if version == WRITER_APPEND_SCHEMA_VERSION:
             expected_fields.add("writer_operation_transition")
             expected_boundaries["writer_token_mutations"] = 1
     _need(version in {PRESERVE_SCHEMA_VERSION, EXTERNAL_CAS_SCHEMA_VERSION,
-                      PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION}
+                      PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION,
+                   COCKPIT_BRAIN_SCHEMA_VERSION}
           and set(manifest) == expected_fields
           and manifest.get("boundaries") == expected_boundaries,
           "preserve-existing transition boundary differs")
@@ -1510,36 +1599,53 @@ def _apply_preserve_transition(
         return receipt
 
     service_row = manifest.get("service_transition")
-    _need(isinstance(service_row, Mapping)
+    if version == COCKPIT_BRAIN_SCHEMA_VERSION:
+        _need(external_config_path is not None and external_config_path.is_file()
+              and not external_config_path.is_symlink()
+              and external_config_path.read_bytes() == expected_preserved_openclaw_state(
+                  packet_root=packet_root, manifest=manifest),
+              "OpenClaw config differs from reviewed preserved bytes")
+        service_before_value, service_after_value = expected_service_transition_state(
+            packet_root=packet_root, manifest=manifest)
+        _, service_before = _resolve_artifact(packet_root, service_row["before"])
+        service_after = _json_bytes(service_after_value)
+        delta = None
+    else:
+        _need(isinstance(service_row, Mapping)
           and set(service_row) == {
               "kind", "mutation_count", "before", "delta", "after_sha256"}
           and service_row.get("kind") == "compare_and_patch"
           and service_row.get("mutation_count") == 1,
-          "service transition shape differs")
-    _, service_before = _resolve_artifact(packet_root, service_row["before"])
-    _, delta_bytes = _resolve_artifact(packet_root, service_row["delta"])
-    try:
-        service_before_value = json.loads(service_before.decode("utf-8"))
-        delta_value = json.loads(delta_bytes.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError) as exc:
-        raise ConfigTransitionError("service transition artifact is invalid JSON") from exc
-    _need(isinstance(service_before_value, dict) and isinstance(delta_value, dict),
-          "service transition artifact is invalid")
-    delta = _validated_service_delta(delta_value)
+              "service transition shape differs")
+        _, service_before = _resolve_artifact(packet_root, service_row["before"])
+        _, delta_bytes = _resolve_artifact(packet_root, service_row["delta"])
+        try:
+            service_before_value = json.loads(service_before.decode("utf-8"))
+            delta_value = json.loads(delta_bytes.decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise ConfigTransitionError("service transition artifact is invalid JSON") from exc
+        _need(isinstance(service_before_value, dict) and isinstance(delta_value, dict),
+              "service transition artifact is invalid")
+        delta = _validated_service_delta(delta_value)
     _need(not service_config_path.is_symlink(),
           "service config cannot be a symlink")
     service_config_path = service_config_path.resolve()
     _need(service_config_path.is_file()
           and service_config_path.read_bytes() == service_before
-          and delta["expected_before_sha256"] == sha256_bytes(service_before)
-          and service_row["after_sha256"] == delta["expected_after_sha256"],
+          and (version == COCKPIT_BRAIN_SCHEMA_VERSION or
+               (delta["expected_before_sha256"] == sha256_bytes(service_before)
+                and service_row["after_sha256"] == delta["expected_after_sha256"])),
           "service config differs from reviewed CAS precondition")
-    service_after = _json_bytes(_service_after(service_before_value, delta))
+    if version != COCKPIT_BRAIN_SCHEMA_VERSION:
+        service_after = _json_bytes(_service_after(service_before_value, delta))
     _need(sha256_bytes(service_after) == service_row["after_sha256"],
           "service transition expected-after bytes differ")
 
     before_stat = service_config_path.stat()
     before_mode = stat.S_IMODE(before_stat.st_mode)
+    if version == COCKPIT_BRAIN_SCHEMA_VERSION:
+        _need(before_mode == service_row["before_mode"],
+              "service config mode differs from reviewed CAS precondition")
     before_identity = (before_stat.st_dev, before_stat.st_ino)
     owned_identity: tuple[int, int] | None = None
 
@@ -1624,7 +1730,9 @@ def _apply_preserve_transition(
         _need(service_config_path.read_bytes() == service_after,
               "installed service config differs from reviewed result")
         receipt = {
-            "schema_version": PRESERVE_RECEIPT_SCHEMA_VERSION,
+            "schema_version": (COCKPIT_BRAIN_RECEIPT_SCHEMA_VERSION
+                               if version == COCKPIT_BRAIN_SCHEMA_VERSION
+                               else PRESERVE_RECEIPT_SCHEMA_VERSION),
             "status": "configured_controller_start_pending",
             "release_ref": manifest["release_ref"],
             "source_commit": manifest["source_commit"],
@@ -1703,7 +1811,8 @@ def apply_transition(
     _need(asserted == canonical_hash({k: v for k, v in manifest.items() if k != "content_hash"})
           and manifest.get("schema_version") in {
               SCHEMA_VERSION, PRESERVE_SCHEMA_VERSION, EXTERNAL_CAS_SCHEMA_VERSION,
-              PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION}
+              PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION,
+                   COCKPIT_BRAIN_SCHEMA_VERSION}
           and manifest.get("status") == "prepared_inert",
           "transition manifest authority differs")
     acceptance = manifest.get("acceptance", {})
@@ -1723,7 +1832,8 @@ def apply_transition(
 
     if manifest.get("schema_version") in {
             PRESERVE_SCHEMA_VERSION, EXTERNAL_CAS_SCHEMA_VERSION,
-            PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION}:
+            PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION,
+                   COCKPIT_BRAIN_SCHEMA_VERSION}:
         _need(service_config_path is not None,
               "preserve-existing transition requires the service config path")
         return _apply_preserve_transition(
@@ -1941,7 +2051,8 @@ def apply_transition_to_scratch(
         finally:
             temporary.unlink(missing_ok=True)
     elif manifest.get("schema_version") in {
-            PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION}:
+            PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION,
+                   COCKPIT_BRAIN_SCHEMA_VERSION}:
         _need(external_config_path is not None,
               "schema 0.4/0.5 scratch requires an OpenClaw config path")
         external_config_path = external_config_path.resolve()

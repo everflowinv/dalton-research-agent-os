@@ -32,7 +32,7 @@ from scripts.successor_ops_binding import OpsBindingError, verify_ops_binding
 from scripts.prepare_successor_config_transition import (
     DOCUMENT_CONFIG, EXTERNAL_CAS_SCHEMA_VERSION, LANE_CONFIG,
     PRESERVE_SCHEMA_VERSION, PURE_PRESERVE_SCHEMA_VERSION,
-    WRITER_APPEND_SCHEMA_VERSION, _json_bytes,
+    WRITER_APPEND_SCHEMA_VERSION, COCKPIT_BRAIN_SCHEMA_VERSION, _json_bytes,
     expected_writer_operation_transition_state,
     apply_transition, expected_service_transition_state,
     expected_openclaw_frame_transition_state, expected_transition_state,
@@ -62,6 +62,7 @@ RECOVERY_MANIFEST_FIELDS = MANIFEST_FIELDS | {"predecessor_recovery"}
 PRESERVE_SCHEMA_VERSIONS = frozenset({
     PRESERVE_SCHEMA_VERSION, EXTERNAL_CAS_SCHEMA_VERSION,
     PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION,
+    COCKPIT_BRAIN_SCHEMA_VERSION,
 })
 
 
@@ -124,7 +125,8 @@ def expected_preserved_service_bytes(
     before, after = expected_service_transition_state(
         packet_root=packet, manifest=transition)
     if transition.get("schema_version") not in {
-            EXTERNAL_CAS_SCHEMA_VERSION, PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION}:
+            EXTERNAL_CAS_SCHEMA_VERSION, PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION,
+            COCKPIT_BRAIN_SCHEMA_VERSION}:
         return _json_bytes(after)
     need(before == after, "schema 0.3 service semantics are not preserved")
     row = transition["service_transition"]["before"]
@@ -331,7 +333,8 @@ def packet_preflight(packet: Path) -> tuple[dict[str, Any], dict[str, Path]]:
          "successor transition is not the frozen inert candidate")
     binding = load_json(paths["copied_state_rehearsal_binding"])
     if transition.get("schema_version") in {
-            EXTERNAL_CAS_SCHEMA_VERSION, PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION}:
+            EXTERNAL_CAS_SCHEMA_VERSION, PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION,
+            COCKPIT_BRAIN_SCHEMA_VERSION}:
         ops_helpers = binding.get("ops_helpers", {})
         execution_binding = ops_helpers.get("execution_binding", {})
         need(execution_binding.get("git_commit") == ops_helpers.get("git_commit"),
@@ -368,7 +371,8 @@ def packet_preflight(packet: Path) -> tuple[dict[str, Any], dict[str, Path]]:
             need(results.get("openclaw_config_semantic_sha256")
                  == canonical_hash(json.loads(external_after)),
                  "copied-state rehearsal does not prove the OpenClaw result")
-        elif transition.get("schema_version") in {PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION}:
+        elif transition.get("schema_version") in {PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION,
+            COCKPIT_BRAIN_SCHEMA_VERSION}:
             expected_openclaw = expected_preserved_openclaw_state(
                 packet_root=packet, manifest=transition)
             need(results.get("openclaw_config_sha256")
@@ -689,7 +693,8 @@ class SuccessorOrchestrator(r11.Orchestrator):
                     row=broker_row["managed_host_patch"])
         else:
             plugin = r11.verify_provider_plugin(artifacts["provider_plugin_snapshot"])
-        if transition.get("schema_version") in {PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION}:
+        if transition.get("schema_version") in {PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION,
+            COCKPIT_BRAIN_SCHEMA_VERSION}:
             need(expected_preserved_openclaw_state(
                      packet_root=self.packet, manifest=transition)
                  == artifacts["openclaw_config_snapshot"].read_bytes(),
@@ -760,7 +765,8 @@ class SuccessorOrchestrator(r11.Orchestrator):
                     expected_preserved_service_bytes(self.packet, transition)
                     if transition.get("schema_version") in {
                         EXTERNAL_CAS_SCHEMA_VERSION,
-                        PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION}
+                        PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION,
+            COCKPIT_BRAIN_SCHEMA_VERSION}
                     else _json_bytes(service_after)
                 )
                 stream.write(service_after_bytes); stream.flush(); os.fsync(stream.fileno())
@@ -791,7 +797,8 @@ class SuccessorOrchestrator(r11.Orchestrator):
             external_config_path=(
                 r11.OPENCLAW if transition.get("schema_version")
                 in {EXTERNAL_CAS_SCHEMA_VERSION,
-                    PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION} else None),
+                    PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION,
+            COCKPIT_BRAIN_SCHEMA_VERSION} else None),
             accepted_evidence=manifest["acceptance"],
             **({"successor_source_root": source}
                if transition.get("schema_version") == WRITER_APPEND_SCHEMA_VERSION else {}),
@@ -864,7 +871,8 @@ class SuccessorOrchestrator(r11.Orchestrator):
             _before, expected_openclaw_bytes, _row = (
                 expected_openclaw_frame_transition_state(
                     packet_root=self.packet, manifest=transition))
-        elif transition.get("schema_version") in {PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION}:
+        elif transition.get("schema_version") in {PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION,
+            COCKPIT_BRAIN_SCHEMA_VERSION}:
             expected_openclaw_bytes = expected_preserved_openclaw_state(
                 packet_root=self.packet, manifest=transition)
         need(r11.SERVICE_CONFIG.read_bytes() == expected_service_bytes
@@ -963,7 +971,8 @@ class SuccessorOrchestrator(r11.Orchestrator):
                 "service_config_mutations": (
                     0 if transition.get("schema_version") in {
                         EXTERNAL_CAS_SCHEMA_VERSION,
-                        PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION} else 1),
+                        PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION,
+            COCKPIT_BRAIN_SCHEMA_VERSION} else 1),
                 "external_config_mutations": (
                     1 if transition.get("schema_version")
                     == EXTERNAL_CAS_SCHEMA_VERSION else 0),
@@ -1017,7 +1026,8 @@ class SuccessorOrchestrator(r11.Orchestrator):
             result = super().rollback()
             return {**result, "preserved_concurrent_config_targets": []}
         if transition.get("schema_version") in {
-                PRESERVE_SCHEMA_VERSION, PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION}:
+                PRESERVE_SCHEMA_VERSION, PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION,
+            COCKPIT_BRAIN_SCHEMA_VERSION}:
             result = super().rollback()
             return {**result, "preserved_concurrent_config_targets": []}
         conflicts = []

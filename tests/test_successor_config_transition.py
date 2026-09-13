@@ -15,7 +15,7 @@ from scripts.prepare_successor_config_transition import (
     ConfigTransitionError, LANE_CONFIG, MODEL_ADDITIONS, MODEL_REPLACEMENT,
     DOCUMENT_CONFIG, OPENCLAW_FRAME_PATH, OPENCLAW_TARGET_MAX_FRAME_BYTES,
     PRESERVED_TARGETS, PURE_PRESERVE_SCHEMA_VERSION, apply_transition,
-    WRITER_APPEND_SCHEMA_VERSION,
+    WRITER_APPEND_SCHEMA_VERSION, COCKPIT_BRAIN_SCHEMA_VERSION,
     build_preserve_existing_transition, build_transition, canonical_hash,
     apply_transition_to_scratch,
     expected_writer_operation_transition_state,
@@ -485,6 +485,64 @@ class PreserveExistingTransitionTests(unittest.TestCase):
             service_config_before_path=self.packet / "service.before.json",
             openclaw_config_before_path=self.packet / "openclaw.preserved.json",
         )
+
+    def build_cockpit_brain(self):
+        self.models["research-planner-model-config.json"] = model("brain")
+        write(self.packet / "research-planner-model-config.json",
+              self.models["research-planner-model-config.json"])
+        write(self.packet / "models.json", self.models)
+        old = "/tmp/state/document-extraction-model-config.json"
+        self.service_before["control"] = {"config": {"cockpit": {
+            "model_config_path": old}}}
+        write(self.packet / "service.before.json", self.service_before)
+        self.build_pure()
+        return build_preserve_existing_transition(
+            packet_root=self.packet, release_ref="cockpit-brain-binding",
+            source_commit="d" * 40,
+            baseline_models_path=self.packet / "models.json",
+            model_config_paths={name: self.packet / name for name in self.models},
+            preserved_config_paths=self.preserved,
+            preserved_state_authority_paths={
+                "connector-governance/yfinance-analyst-estimates-v1.json":
+                    self.packet / "yfinance-approved.json"},
+            service_config_before_path=self.packet / "service.before.json",
+            openclaw_config_before_path=self.packet / "openclaw.preserved.json",
+            cockpit_brain_binding=True,
+        )
+
+    def test_cockpit_brain_binding_is_single_leaf_cas_and_round_trips_scratch(self):
+        manifest = self.build_cockpit_brain()
+        self.assertEqual(COCKPIT_BRAIN_SCHEMA_VERSION, manifest["schema_version"])
+        before, after = expected_service_transition_state(
+            packet_root=self.packet, manifest=manifest)
+        self.assertEqual("document-extraction-model-config.json", Path(
+            before["control"]["config"]["cockpit"]["model_config_path"]).name)
+        self.assertEqual("research-planner-model-config.json", Path(
+            after["control"]["config"]["cockpit"]["model_config_path"]).name)
+        self.install_before()
+        os.chmod(self.service, 0o600)
+        openclaw = self.root / "scratch-brain/openclaw.json"
+        openclaw.parent.mkdir(); openclaw.write_bytes(
+            (self.packet / "openclaw.preserved.json").read_bytes())
+        manifest_path = self.packet / "transition.brain.json"; write(manifest_path, manifest)
+        receipt = apply_transition_to_scratch(
+            packet_root=self.packet, scratch_root=self.root, state_dir=self.state,
+            manifest_path=manifest_path,
+            expected_manifest_sha256=hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+            receipt_path=self.root / "receipt.brain.json",
+            service_config_path=self.service, external_config_path=openclaw)
+        self.assertEqual("successor-config-transition-receipt-0.6",
+                         receipt["schema_version"])
+        self.assertEqual(after, json.loads(self.service.read_text()))
+        self.assertEqual(0o600, self.service.stat().st_mode & 0o777)
+        self.assertEqual((self.packet / "openclaw.preserved.json").read_bytes(),
+                         openclaw.read_bytes())
+
+    def test_cockpit_brain_binding_rejects_any_other_service_leaf(self):
+        manifest = self.build_cockpit_brain()
+        manifest["service_transition"]["json_path"][-1] = "other"
+        with self.assertRaisesRegex(ConfigTransitionError, "shape differs"):
+            expected_service_transition_state(packet_root=self.packet, manifest=manifest)
 
     def build_writer_append(self):
         self.build_pure()
