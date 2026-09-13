@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from scripts import successor_predecessor_recovery as recovery
 from scripts.successor_predecessor_recovery import (
     ARTIFACT_KEYS, PredecessorRecoveryError, build_recovery_proof,
     validate_recovery_proof, verify_installed_predecessor,
@@ -28,7 +29,23 @@ class PredecessorRecoveryTests(unittest.TestCase):
         self.root = Path(tmp.name); self.paths = {name: self.root / name for name in ARTIFACT_KEYS}
         commit = "b" * 40; wheel = b"wheel"
         write(self.paths["accepted_wheel"], wheel)
-        previous = {"release_ref": "R19", "source_commit": "9" * 40}
+        write(self.paths["model_snapshot"], {"a.json": {"model": "模型"}})
+        write(self.paths["service_snapshot"], b'{"service":true}\n')
+        write(self.paths["openclaw_snapshot"], b'{"openclaw":true}\n')
+        self.paths["rollback_state"].mkdir()
+        write(self.paths["rollback_state"] / "owner.json", {"owner": "state"})
+        write(self.paths["rollback_state"] / "writer-tokens.json", b'{"secret":"redacted"}\n')
+        write(self.paths["rollback_initial"], {
+            "protected_state_sha256": recovery._full_protected_state_hash(
+                self.paths["rollback_state"])})
+        previous = {"release_ref": "R19", "source_commit": "9" * 40,
+                    "candidate_manifest_sha256": "d" * 64}
+        write(self.paths["published_previous_runtime_pointer"], {
+            "schema_version": "dalton-runtime-config-pointer-0.2", "status": "deployed_verified",
+            "base_release_commit": previous["source_commit"],
+            "candidate_manifest_sha256": previous["candidate_manifest_sha256"]})
+        previous["current_runtime_config_sha256"] = hashlib.sha256(
+            self.paths["published_previous_runtime_pointer"].read_bytes()).hexdigest()
         write(self.paths["published_previous_pointer"], previous)
         previous_sha = hashlib.sha256(self.paths["published_previous_pointer"].read_bytes()).hexdigest()
         pointer = {"schema_version": "dalton-current-release-0.2", "status": "deployed_verified",
@@ -37,13 +54,20 @@ class PredecessorRecoveryTests(unittest.TestCase):
                    "previous_release": {**previous, "pointer_sha256": previous_sha}}
         write(self.paths["published_pointer"], pointer)
         manifest = {"status": "accepted_for_stopped_window", "release_ref": "R21",
-                    "source": {"commit": commit}, "artifacts": {"wheel": {
-                        "sha256": hashlib.sha256(wheel).hexdigest()}}}
+                    "source": {"commit": commit}, "artifacts": {
+                        "wheel": {"sha256": hashlib.sha256(wheel).hexdigest()},
+                        "model_config_after_snapshot": {"sha256": hashlib.sha256(
+                            self.paths["model_snapshot"].read_bytes()).hexdigest()},
+                        "service_config_snapshot": {"sha256": hashlib.sha256(
+                            self.paths["service_snapshot"].read_bytes()).hexdigest()},
+                        "openclaw_config_snapshot": {"sha256": hashlib.sha256(
+                            self.paths["openclaw_snapshot"].read_bytes()).hexdigest()}}}
         write(self.paths["failed_manifest"], manifest)
         manifest_sha = hashlib.sha256(self.paths["failed_manifest"].read_bytes()).hexdigest()
         deployment = {"schema_version": "successor-stopped-window-execution-0.1",
                       "status": "deployment_failed", "source_commit": commit,
                       "candidate_manifest_sha256": manifest_sha,
+                      "fresh_rollback_snapshot": {"path": str(self.root)},
                       "rollback": {"status": "rollback_failed"}}
         write(self.paths["failed_deployment"], deployment)
         deployment_sha = hashlib.sha256(self.paths["failed_deployment"].read_bytes()).hexdigest()
@@ -74,7 +98,9 @@ class PredecessorRecoveryTests(unittest.TestCase):
                     "protected_state_excluding_writer_tokens_exact": True,
                     "protected_entries_excluding_writer_tokens": 3,
                     "reviewed_plist_sha256": {"writer": "6" * 64},
-                    "writer_tokens": {"snapshot_sha256": "7" * 64, "live_sha256": "8" * 64,
+                    "writer_tokens": {"snapshot_sha256": hashlib.sha256(
+                            (self.paths["rollback_state"] / "writer-tokens.json").read_bytes()).hexdigest(),
+                        "live_sha256": "8" * 64,
                         "principal_inventory_exact": True, "non_core_principals_exact": True,
                         "core_token_equal": True, "core_non_operation_fields_exact": True,
                         "before_operation_count": 2, "after_operation_count": 3,
@@ -94,19 +120,29 @@ class PredecessorRecoveryTests(unittest.TestCase):
                    "deployment_reclassified": False, "database_restore_performed": False,
                    "metadata_overwrite_performed": False}
         write(self.paths["recovery_restart"], restart)
-        write(self.paths["model_snapshot"], {"a.json": {"model": "x"}})
-        write(self.paths["service_snapshot"], b'{"service":true}\n')
-        write(self.paths["openclaw_snapshot"], b'{"openclaw":true}\n')
-        self.paths["rollback_state"].mkdir()
-        write(self.paths["rollback_state"] / "owner.json", {"owner": "state"})
+        published_commit = pointer["source_commit"]
         published = {
-            "published_manifest": {"status": "accepted_for_stopped_window"},
-            "published_deployment": {"status": "installer_finished_runtime_health_pending"},
-            "published_installed": {"status": "installed_bytes_verified_runtime_pending"},
-            "published_health": {"status": "passed"},
-            "published_finalization": {"status": "passed_pending_publication"},
+            "published_manifest": {"schema_version": "successor-stopped-window-candidate-0.1",
+                "status": "accepted_for_stopped_window", "release_ref": "R20",
+                "source": {"commit": published_commit}},
         }
         for name, value in published.items(): write(self.paths[name], value)
+        published_manifest_sha = hashlib.sha256(
+            self.paths["published_manifest"].read_bytes()).hexdigest()
+        write(self.paths["published_deployment"], {
+            "schema_version": "successor-stopped-window-execution-0.1",
+            "status": "installer_finished_runtime_health_pending", "exit_code": 0,
+            "source_commit": published_commit, "candidate_manifest_sha256": published_manifest_sha})
+        write(self.paths["published_installed"], {
+            "schema_version": "successor-installed-verification-0.1",
+            "status": "installed_bytes_verified_runtime_pending", "source_commit": published_commit,
+            "candidate_manifest_sha256": published_manifest_sha})
+        write(self.paths["published_health"], {
+            "schema_version": "successor-health-observation-0.1", "status": "passed",
+            "accepted": True, "source_commit": published_commit})
+        write(self.paths["published_finalization"], {
+            "schema_version": "successor-runtime-verification-candidate-0.1",
+            "status": "passed_pending_publication", "source_commit": published_commit})
         pointer.update({
             "candidate_manifest_sha256": hashlib.sha256(
                 self.paths["published_manifest"].read_bytes()).hexdigest(),
@@ -120,9 +156,23 @@ class PredecessorRecoveryTests(unittest.TestCase):
                 self.paths["published_finalization"].read_bytes()).hexdigest(),
         })
         write(self.paths["published_pointer"], pointer)
+        write(self.paths["published_runtime_pointer"], {
+            "schema_version": "dalton-runtime-config-pointer-0.2", "status": "deployed_verified",
+            "base_release_commit": published_commit,
+            "candidate_manifest_sha256": published_manifest_sha})
+        pointer["current_runtime_config_sha256"] = hashlib.sha256(
+            self.paths["published_runtime_pointer"].read_bytes()).hexdigest()
+        write(self.paths["published_pointer"], pointer)
         write(self.paths["published_publication"], {
-            "status": "published_verified", "current_release_sha256": hashlib.sha256(
-                self.paths["published_pointer"].read_bytes()).hexdigest()})
+            "schema_version": "successor-publication-receipt-0.1", "status": "published_verified",
+            "release_ref": "R20", "source_commit": published_commit,
+            "candidate_manifest_sha256": published_manifest_sha,
+            "current_release_sha256": hashlib.sha256(
+                self.paths["published_pointer"].read_bytes()).hexdigest(),
+            "current_runtime_config_sha256": hashlib.sha256(
+                self.paths["published_runtime_pointer"].read_bytes()).hexdigest(),
+            "prior_runtime_config_sha256": hashlib.sha256(
+                self.paths["published_previous_runtime_pointer"].read_bytes()).hexdigest()})
 
     def test_build_and_validate_closed_redacted_split_identity(self):
         proof = build(self.paths)
@@ -185,7 +235,7 @@ class PredecessorRecoveryTests(unittest.TestCase):
         self.paths["recovery_restart"].write_bytes(restart_original)
         proof = build(self.paths)
         write(self.paths["rollback_state"] / "owner.json", {"owner": "changed"})
-        with self.assertRaisesRegex(PredecessorRecoveryError, "proof differs"):
+        with self.assertRaisesRegex(PredecessorRecoveryError, "authority|proof differs"):
             validate_recovery_proof(proof, artifacts=self.paths)
 
     def test_inventory_is_closed(self):
@@ -193,6 +243,34 @@ class PredecessorRecoveryTests(unittest.TestCase):
         paths = dict(self.paths); paths["extra"] = self.root / "extra"
         with self.assertRaisesRegex(PredecessorRecoveryError, "inventory"):
             validate_recovery_proof(proof, artifacts=paths)
+
+    def test_recomputed_snapshot_and_published_receipt_transplants_fail(self):
+        proof = build(self.paths)
+        write(self.paths["model_snapshot"], {"a.json": {"model": "替换"}})
+        with self.assertRaisesRegex(PredecessorRecoveryError, "failed candidate"):
+            validate_recovery_proof(proof, artifacts=self.paths)
+        write(self.paths["model_snapshot"], {"a.json": {"model": "模型"}})
+        receipt = json.loads(self.paths["published_installed"].read_bytes())
+        receipt["source_commit"] = "e" * 40
+        write(self.paths["published_installed"], receipt)
+        pointer = json.loads(self.paths["published_pointer"].read_bytes())
+        pointer["installed_verification_sha256"] = hashlib.sha256(
+            self.paths["published_installed"].read_bytes()).hexdigest()
+        write(self.paths["published_pointer"], pointer)
+        publication = json.loads(self.paths["published_publication"].read_bytes())
+        publication["current_release_sha256"] = hashlib.sha256(
+            self.paths["published_pointer"].read_bytes()).hexdigest()
+        write(self.paths["published_publication"], publication)
+        with self.assertRaisesRegex(PredecessorRecoveryError, "references"):
+            build(self.paths)
+
+    def test_nonascii_model_semantic_hash_uses_runtime_canonicalization(self):
+        proof = build(self.paths)
+        expected = hashlib.sha256((json.dumps(
+            {"a.json": {"model": "模型"}}, ensure_ascii=False, sort_keys=True,
+            separators=(",", ":")) + "\n").encode()).hexdigest()
+        self.assertEqual(expected, proof["recovery"]["installed_identity"][
+            "model_config_semantic_sha256"])
 
 
 if __name__ == "__main__": unittest.main()

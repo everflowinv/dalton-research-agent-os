@@ -19,6 +19,7 @@ ARTIFACT_KEYS = frozenset({
     "model_snapshot", "service_snapshot", "openclaw_snapshot", "rollback_state",
     "published_manifest", "published_deployment", "published_installed",
     "published_health", "published_finalization", "published_publication",
+    "rollback_initial", "published_runtime_pointer", "published_previous_runtime_pointer",
 })
 WRITER_IDENTITY_KEYS = frozenset({
     "snapshot_sha256", "live_sha256", "principal_inventory_exact",
@@ -46,7 +47,8 @@ def _sha(data: bytes) -> str:
 
 
 def _canonical(value: Mapping[str, Any]) -> str:
-    return _sha((json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode())
+    return _sha((json.dumps(value, ensure_ascii=False, sort_keys=True,
+                            separators=(",", ":")) + "\n").encode())
 
 
 def _hex(value: Any, length: int) -> bool:
@@ -73,12 +75,13 @@ def _read(path: Path, *, json_value: bool = True) -> tuple[Any, bytes]:
     return value, data
 
 
-def protected_state_hash(root: Path) -> str:
+def _protected_rows(root: Path, *, exclude_writer: bool) -> list[list[Any]]:
     _need(root.is_dir() and not root.is_symlink() and root.absolute() == root.resolve(),
           "protected-state snapshot is unavailable or unsafe")
-    managed = {"document-research-config.json", "mission-document-research-lane.json"}
+    managed = {"model-catalog-sync.json"}
     paths = [path for path in root.glob("*.json")
-             if path.name not in managed and path.name != "writer-tokens.json"]
+             if path.name not in managed
+             and (not exclude_writer or path.name != "writer-tokens.json")]
     for name in ("connector-governance", "governance-decisions", "discovery-plans"):
         directory = root / name
         if directory.is_dir():
@@ -91,7 +94,17 @@ def protected_state_hash(root: Path) -> str:
         elif path.is_file(): rows.append([relative, "file", mode, _sha(path.read_bytes())])
         elif path.is_dir(): rows.append([relative, "dir", mode])
         else: raise PredecessorRecoveryError("protected-state snapshot has special entry")
-    return _canonical({"entries": rows})
+    return rows
+
+
+def protected_state_hash(root: Path) -> str:
+    rows = _protected_rows(root, exclude_writer=True)
+    return _sha((json.dumps(rows, sort_keys=True, separators=(",", ":")) + "\n").encode())
+
+
+def _full_protected_state_hash(root: Path) -> str:
+    rows = _protected_rows(root, exclude_writer=False)
+    return _sha((json.dumps(rows, sort_keys=True, separators=(",", ":")) + "\n").encode())
 
 
 def _identity(artifacts: Mapping[str, Path]) -> dict[str, Any]:
@@ -121,6 +134,9 @@ def _identity(artifacts: Mapping[str, Path]) -> dict[str, Any]:
         name: loaded[name] for name in ("published_manifest", "published_deployment",
             "published_installed", "published_health", "published_finalization",
             "published_publication")}
+    current_runtime = loaded["published_runtime_pointer"]
+    previous_runtime = loaded["published_previous_runtime_pointer"]
+    rollback_initial = loaded["rollback_initial"]
 
     _need(pointer.get("schema_version") == "dalton-current-release-0.2"
           and pointer.get("status") == "deployed_verified"
@@ -153,6 +169,56 @@ def _identity(artifacts: Mapping[str, Path]) -> dict[str, Any]:
           and published_receipts["published_publication"].get("current_release_sha256")
               == hashes["published_pointer"],
           "published acceptance chain differs")
+    publication = published_receipts["published_publication"]
+    published_commit = pointer.get("source_commit")
+    published_candidate_hash = hashes["published_manifest"]
+    _need(publication.get("schema_version") == "successor-publication-receipt-0.1"
+          and publication.get("release_ref") == pointer.get("release_ref")
+          and publication.get("source_commit") == published_commit
+          and publication.get("candidate_manifest_sha256") == published_candidate_hash
+          and publication.get("current_runtime_config_sha256")
+              == hashes["published_runtime_pointer"]
+          and publication.get("prior_runtime_config_sha256")
+              == hashes["published_previous_runtime_pointer"]
+          and current_runtime.get("schema_version") == "dalton-runtime-config-pointer-0.2"
+          and current_runtime.get("status") == "deployed_verified"
+          and current_runtime.get("base_release_commit") == published_commit
+          and current_runtime.get("candidate_manifest_sha256") == published_candidate_hash
+          and previous_runtime.get("schema_version") == "dalton-runtime-config-pointer-0.2"
+          and previous_runtime.get("status") == "deployed_verified"
+          and previous_runtime.get("base_release_commit") == previous.get("source_commit")
+          and previous_runtime.get("candidate_manifest_sha256")
+              == previous.get("candidate_manifest_sha256"),
+          "published runtime pointer chain differs")
+    _need(pointer.get("current_runtime_config_sha256")
+              == hashes["published_runtime_pointer"]
+          and previous.get("current_runtime_config_sha256")
+              == hashes["published_previous_runtime_pointer"],
+          "published pointer runtime hashes differ")
+    published_candidate = published_receipts["published_manifest"]
+    published_deployment = published_receipts["published_deployment"]
+    published_installed = published_receipts["published_installed"]
+    published_health = published_receipts["published_health"]
+    published_finalization = published_receipts["published_finalization"]
+    _need(published_candidate.get("schema_version") == "successor-stopped-window-candidate-0.1"
+          and published_candidate.get("release_ref") == pointer.get("release_ref")
+          and published_candidate.get("source", {}).get("commit") == published_commit
+          and published_deployment.get("schema_version")
+              == "successor-stopped-window-execution-0.1"
+          and published_deployment.get("exit_code") == 0
+          and published_deployment.get("source_commit") == published_commit
+          and published_deployment.get("candidate_manifest_sha256") == published_candidate_hash
+          and published_installed.get("schema_version")
+              == "successor-installed-verification-0.1"
+          and published_installed.get("source_commit") == published_commit
+          and published_installed.get("candidate_manifest_sha256") == published_candidate_hash
+          and published_health.get("schema_version") == "successor-health-observation-0.1"
+          and published_health.get("accepted") is True
+          and published_health.get("source_commit") == published_commit
+          and published_finalization.get("schema_version")
+              == "successor-runtime-verification-candidate-0.1"
+          and published_finalization.get("source_commit") == published_commit,
+          "published receipt references differ")
 
     source = manifest.get("source")
     wheel = manifest.get("artifacts", {}).get("wheel") if isinstance(manifest.get("artifacts"), Mapping) else None
@@ -161,12 +227,30 @@ def _identity(artifacts: Mapping[str, Path]) -> dict[str, Any]:
           and isinstance(wheel, Mapping), "failed candidate authority differs")
     commit = source["commit"]
     _need(wheel.get("sha256") == hashes["accepted_wheel"], "accepted wheel bytes differ")
+    candidate_artifacts = manifest.get("artifacts")
+    _need(isinstance(candidate_artifacts, Mapping)
+          and candidate_artifacts.get("model_config_after_snapshot", {}).get("sha256")
+              == hashes["model_snapshot"]
+          and candidate_artifacts.get("service_config_snapshot", {}).get("sha256")
+              == hashes["service_snapshot"]
+          and candidate_artifacts.get("openclaw_config_snapshot", {}).get("sha256")
+              == hashes["openclaw_snapshot"],
+          "recovered configuration snapshots differ from failed candidate")
     _need(deployment.get("schema_version") == "successor-stopped-window-execution-0.1"
           and deployment.get("status") == "deployment_failed"
           and deployment.get("rollback", {}).get("status") == "rollback_failed"
           and deployment.get("source_commit") == commit
           and deployment.get("candidate_manifest_sha256") == hashes["failed_manifest"],
           "failed deployment history differs")
+    snapshot = deployment.get("fresh_rollback_snapshot")
+    _need(isinstance(snapshot, Mapping)
+          and Path(str(snapshot.get("path", ""))).resolve()
+              == Path(artifacts["rollback_state"]).resolve().parent
+          and rollback_initial.get("protected_state_sha256")
+              == _full_protected_state_hash(Path(artifacts["rollback_state"]))
+          and _sha((Path(artifacts["rollback_state"]) / "writer-tokens.json").read_bytes())
+              == prestart.get("writer_tokens", {}).get("snapshot_sha256"),
+          "rollback protected-state authority differs")
     _need(prestart.get("schema_version")
               == "foundation-r21-recovery-prestart-verification-0.1"
           and prestart.get("status") == "verified_failed_deployment_runtime_safe_to_restart"
@@ -305,7 +389,9 @@ def build_recovery_proof(*, published_pointer_path: Path,
                          rollback_state_path: Path, published_manifest_path: Path,
                          published_deployment_path: Path, published_installed_path: Path,
                          published_health_path: Path, published_finalization_path: Path,
-                         published_publication_path: Path) -> dict[str, Any]:
+                         published_publication_path: Path, rollback_initial_path: Path,
+                         published_runtime_pointer_path: Path,
+                         published_previous_runtime_pointer_path: Path) -> dict[str, Any]:
     body = _identity({
         "published_pointer": published_pointer_path,
         "published_previous_pointer": published_previous_pointer_path,
@@ -326,6 +412,9 @@ def build_recovery_proof(*, published_pointer_path: Path,
         "published_health": published_health_path,
         "published_finalization": published_finalization_path,
         "published_publication": published_publication_path,
+        "rollback_initial": rollback_initial_path,
+        "published_runtime_pointer": published_runtime_pointer_path,
+        "published_previous_runtime_pointer": published_previous_runtime_pointer_path,
     })
     return {**body, "content_hash": _canonical(body)}
 
