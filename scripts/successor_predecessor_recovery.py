@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -15,6 +16,9 @@ ARTIFACT_KEYS = frozenset({
     "published_pointer", "published_previous_pointer", "failed_manifest",
     "failed_deployment", "recovery_prestart", "recovery_restart", "accepted_wheel",
     "external_before", "external_after",
+    "model_snapshot", "service_snapshot", "openclaw_snapshot", "rollback_state",
+    "published_manifest", "published_deployment", "published_installed",
+    "published_health", "published_finalization", "published_publication",
 })
 WRITER_IDENTITY_KEYS = frozenset({
     "snapshot_sha256", "live_sha256", "principal_inventory_exact",
@@ -69,13 +73,39 @@ def _read(path: Path, *, json_value: bool = True) -> tuple[Any, bytes]:
     return value, data
 
 
+def protected_state_hash(root: Path) -> str:
+    _need(root.is_dir() and not root.is_symlink() and root.absolute() == root.resolve(),
+          "protected-state snapshot is unavailable or unsafe")
+    managed = {"document-research-config.json", "mission-document-research-lane.json"}
+    paths = [path for path in root.glob("*.json")
+             if path.name not in managed and path.name != "writer-tokens.json"]
+    for name in ("connector-governance", "governance-decisions", "discovery-plans"):
+        directory = root / name
+        if directory.is_dir():
+            paths.extend([directory, *directory.rglob("*")])
+    rows = []
+    for path in sorted(set(paths)):
+        relative = path.relative_to(root).as_posix()
+        mode = path.lstat().st_mode & 0o7777
+        if path.is_symlink(): rows.append([relative, "symlink", mode, os.readlink(path)])
+        elif path.is_file(): rows.append([relative, "file", mode, _sha(path.read_bytes())])
+        elif path.is_dir(): rows.append([relative, "dir", mode])
+        else: raise PredecessorRecoveryError("protected-state snapshot has special entry")
+    return _canonical({"entries": rows})
+
+
 def _identity(artifacts: Mapping[str, Path]) -> dict[str, Any]:
     _need(isinstance(artifacts, Mapping) and set(artifacts) == ARTIFACT_KEYS,
           "recovery artifact inventory differs")
     loaded: dict[str, Any] = {}
     hashes: dict[str, str] = {}
     for name in sorted(ARTIFACT_KEYS):
-        value, data = _read(Path(artifacts[name]), json_value=name != "accepted_wheel")
+        if name == "rollback_state":
+            loaded[name] = None
+            hashes[name] = protected_state_hash(Path(artifacts[name]))
+            continue
+        value, data = _read(Path(artifacts[name]), json_value=name not in {
+            "accepted_wheel", "service_snapshot", "openclaw_snapshot"})
         loaded[name] = value
         hashes[name] = _sha(data)
 
@@ -87,9 +117,14 @@ def _identity(artifacts: Mapping[str, Path]) -> dict[str, Any]:
     restart = loaded["recovery_restart"]
     external_before = loaded["external_before"]
     external_after = loaded["external_after"]
+    published_receipts = {
+        name: loaded[name] for name in ("published_manifest", "published_deployment",
+            "published_installed", "published_health", "published_finalization",
+            "published_publication")}
 
     _need(pointer.get("schema_version") == "dalton-current-release-0.2"
           and pointer.get("status") == "deployed_verified"
+          and _hex(pointer.get("current_runtime_config_sha256"), 64)
           and isinstance(pointer.get("previous_release"), Mapping),
           "published release pointer differs")
     link = pointer["previous_release"]
@@ -97,6 +132,27 @@ def _identity(artifacts: Mapping[str, Path]) -> dict[str, Any]:
           and link.get("release_ref") == previous.get("release_ref")
           and link.get("source_commit") == previous.get("source_commit"),
           "published release chain differs")
+    published_hash_fields = {
+        "published_manifest": "candidate_manifest_sha256",
+        "published_deployment": "deployment_receipt_sha256",
+        "published_installed": "installed_verification_sha256",
+        "published_health": "health_summary_sha256",
+        "published_finalization": "finalization_sha256",
+    }
+    _need(all(pointer.get(field) == hashes[name]
+              for name, field in published_hash_fields.items())
+          and published_receipts["published_deployment"].get("status")
+              == "installer_finished_runtime_health_pending"
+          and published_receipts["published_installed"].get("status")
+              == "installed_bytes_verified_runtime_pending"
+          and published_receipts["published_health"].get("status") == "passed"
+          and published_receipts["published_finalization"].get("status")
+              == "passed_pending_publication"
+          and published_receipts["published_publication"].get("status")
+              == "published_verified"
+          and published_receipts["published_publication"].get("current_release_sha256")
+              == hashes["published_pointer"],
+          "published acceptance chain differs")
 
     source = manifest.get("source")
     wheel = manifest.get("artifacts", {}).get("wheel") if isinstance(manifest.get("artifacts"), Mapping) else None
@@ -105,12 +161,15 @@ def _identity(artifacts: Mapping[str, Path]) -> dict[str, Any]:
           and isinstance(wheel, Mapping), "failed candidate authority differs")
     commit = source["commit"]
     _need(wheel.get("sha256") == hashes["accepted_wheel"], "accepted wheel bytes differ")
-    _need(deployment.get("status") == "deployment_failed"
+    _need(deployment.get("schema_version") == "successor-stopped-window-execution-0.1"
+          and deployment.get("status") == "deployment_failed"
           and deployment.get("rollback", {}).get("status") == "rollback_failed"
           and deployment.get("source_commit") == commit
           and deployment.get("candidate_manifest_sha256") == hashes["failed_manifest"],
           "failed deployment history differs")
-    _need(prestart.get("status") == "verified_failed_deployment_runtime_safe_to_restart"
+    _need(prestart.get("schema_version")
+              == "foundation-r21-recovery-prestart-verification-0.1"
+          and prestart.get("status") == "verified_failed_deployment_runtime_safe_to_restart"
           and prestart.get("source_commit") == commit
           and prestart.get("failed_deployment_sha256") == hashes["failed_deployment"]
           and prestart.get("accepted_manifest_sha256") == hashes["failed_manifest"]
@@ -121,13 +180,20 @@ def _identity(artifacts: Mapping[str, Path]) -> dict[str, Any]:
           and prestart.get("openclaw_config_exact") is True
           and prestart.get("protected_state_excluding_writer_tokens_exact") is True,
           "recovered installed identity differs")
+    _need(prestart.get("boundaries") == {
+        "database_restore_performed": False, "metadata_overwrite_performed": False,
+        "service_calls": False, "provider_calls": False, "live_mutation": False,
+    }, "recovery prestart boundaries differ")
     _need(_content_hash_valid(prestart), "recovery prestart content hash differs")
-    _need(restart.get("status") == "verified_installed_runtime_restarted_healthy"
+    _need(restart.get("schema_version") == "foundation-r21-service-recovery-0.1"
+          and restart.get("status") == "verified_installed_runtime_restarted_healthy"
           and restart.get("source_commit") == commit
           and restart.get("failed_deployment_sha256") == hashes["failed_deployment"]
           and restart.get("prestart_proof_sha256") == hashes["recovery_prestart"]
           and restart.get("published_owner_release") == pointer.get("release_ref")
-          and restart.get("deployment_reclassified") is False,
+          and restart.get("deployment_reclassified") is False
+          and restart.get("database_restore_performed") is False
+          and restart.get("metadata_overwrite_performed") is False,
           "recovery restart history differs")
 
     _need(hashes["external_before"] == hashes["external_after"]
@@ -138,6 +204,10 @@ def _identity(artifacts: Mapping[str, Path]) -> dict[str, Any]:
           and external_after.get("external_origin_release") == "foundation-r18b"
           and external_after.get("external_origin_acceptance")
               == "runtime_installed_health_failed_unpublished"
+          and external_after.get("live_mutation") is False
+          and external_after.get("external_mutations_authorized") == 0
+          and external_after.get("model_calls") == 0
+          and external_after.get("network_calls") == 0
           and prestart.get("external_dependency_receipt_sha256") == hashes["external_after"],
           "R18b external dependency authority differs")
     _need(_content_hash_valid(external_after), "external dependency content hash differs")
@@ -149,7 +219,7 @@ def _identity(artifacts: Mapping[str, Path]) -> dict[str, Any]:
           and all(writer.get(key) is True for key in {
               "principal_inventory_exact", "non_core_principals_exact", "core_token_equal",
               "core_non_operation_fields_exact", "after_equals_source_core_operations"})
-          and isinstance(writer.get("before_operation_count"), int)
+          and type(writer.get("before_operation_count")) is int
           and writer.get("after_operation_count") == writer.get("before_operation_count") + 1
           and isinstance(writer.get("only_added_operation"), str)
           and bool(writer.get("only_added_operation")),
@@ -162,19 +232,26 @@ def _identity(artifacts: Mapping[str, Path]) -> dict[str, Any]:
         "runtime_matches_accepted_wheel": True,
         "model_config_count": prestart.get("model_config_count"),
         "model_configs_exact": True,
+        "model_config_semantic_sha256": _canonical(loaded["model_snapshot"]),
         "service_config_exact": True,
+        "service_config_sha256": hashes["service_snapshot"],
         "openclaw_config_exact": True,
+        "openclaw_config_sha256": hashes["openclaw_snapshot"],
         "reviewed_plist_sha256": prestart.get("reviewed_plist_sha256"),
         "protected_entries_excluding_writer_tokens": prestart.get(
             "protected_entries_excluding_writer_tokens"),
         "protected_state_excluding_writer_tokens_exact": True,
+        "protected_state_excluding_writer_tokens_sha256": hashes["rollback_state"],
         "writer_tokens": dict(writer),
     }
-    _need(isinstance(installed["runtime_file_count"], int)
+    _need(type(installed["runtime_file_count"]) is int
           and installed["runtime_file_count"] > 0
-          and isinstance(installed["model_config_count"], int)
+          and type(installed["model_config_count"]) is int
           and installed["model_config_count"] > 0
           and isinstance(installed["reviewed_plist_sha256"], Mapping)
+          and bool(installed["reviewed_plist_sha256"])
+          and all(isinstance(key, str) and key and _hex(value, 64)
+                  for key, value in installed["reviewed_plist_sha256"].items())
           and isinstance(installed["writer_tokens"], Mapping),
           "recovered installed evidence is incomplete")
     external_fields = {key: external_after.get(key) for key in sorted(EXTERNAL_AUTHORITY_KEYS)}
@@ -190,7 +267,10 @@ def _identity(artifacts: Mapping[str, Path]) -> dict[str, Any]:
             "release_ref": pointer.get("release_ref"),
             "source_commit": pointer.get("source_commit"),
             "pointer_sha256": hashes["published_pointer"],
+            "runtime_pointer_sha256": pointer.get("current_runtime_config_sha256"),
             "previous_pointer_sha256": hashes["published_previous_pointer"],
+            "acceptance_artifact_sha256": {
+                name: hashes[name] for name in sorted(published_receipts)},
         },
         "failed_install": {
             "release_ref": manifest.get("release_ref"), "source_commit": commit,
@@ -220,7 +300,12 @@ def build_recovery_proof(*, published_pointer_path: Path,
                          failed_manifest_path: Path, failed_deployment_path: Path,
                          recovery_prestart_path: Path, recovery_restart_path: Path,
                          accepted_wheel_path: Path, external_before_path: Path,
-                         external_after_path: Path) -> dict[str, Any]:
+                         external_after_path: Path, model_snapshot_path: Path,
+                         service_snapshot_path: Path, openclaw_snapshot_path: Path,
+                         rollback_state_path: Path, published_manifest_path: Path,
+                         published_deployment_path: Path, published_installed_path: Path,
+                         published_health_path: Path, published_finalization_path: Path,
+                         published_publication_path: Path) -> dict[str, Any]:
     body = _identity({
         "published_pointer": published_pointer_path,
         "published_previous_pointer": published_previous_pointer_path,
@@ -231,6 +316,16 @@ def build_recovery_proof(*, published_pointer_path: Path,
         "accepted_wheel": accepted_wheel_path,
         "external_before": external_before_path,
         "external_after": external_after_path,
+        "model_snapshot": model_snapshot_path,
+        "service_snapshot": service_snapshot_path,
+        "openclaw_snapshot": openclaw_snapshot_path,
+        "rollback_state": rollback_state_path,
+        "published_manifest": published_manifest_path,
+        "published_deployment": published_deployment_path,
+        "published_installed": published_installed_path,
+        "published_health": published_health_path,
+        "published_finalization": published_finalization_path,
+        "published_publication": published_publication_path,
     })
     return {**body, "content_hash": _canonical(body)}
 
