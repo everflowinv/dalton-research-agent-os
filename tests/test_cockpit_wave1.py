@@ -746,8 +746,8 @@ class PageVocabularyTests(unittest.TestCase):
 
     def test_the_three_ways_of_being_quiet_have_their_own_words(self) -> None:
         page = self.PAGE.read_text(encoding="utf-8")
-        for status, words in (("ungranted", "缺授权"), ("unconfigured", "还没装上"),
-                              ("unapproved", "等你批准"), ("unstarted", "还没跑过")):
+        for status, words in (("ungranted", "缺授权"), ("unconfigured", "尚未配置"),
+                              ("unapproved", "等待批准"), ("unstarted", "尚未运行")):
             self.assertIn(f"{status}:", page)
             self.assertIn(words, page)
 

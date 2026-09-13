@@ -132,6 +132,22 @@ class CockpitLanguageTests(unittest.TestCase):
         self.assertIn('versionLabel(version)', text)
         self.assertIn('technicalDetails({rubric:q.rubric})', text)
 
+    def test_model_and_status_copy_uses_reviewed_business_terms(self) -> None:
+        from dalton_core.cockpit_plane import (
+            CHECKPOINT_ACTIONS,
+            MODEL_SELECTION_MODE_LABELS,
+            MODEL_TIER_LABELS,
+        )
+
+        text = HTML.read_text(encoding="utf-8")
+        self.assertEqual("手动指定模型", MODEL_SELECTION_MODE_LABELS["explicit"])
+        self.assertEqual("高阶推理与规划", MODEL_TIER_LABELS["brain"])
+        self.assertEqual("暂不处理", CHECKPOINT_ACTIONS["thesis_revision_candidate"][2]["label"])
+        for stale in ("还没装上", "等你批准", "还没跑过", "网关上有什么", "写进 broker"):
+            self.assertNotIn(stale, text)
+        for expected in ("尚未配置", "等待批准", "尚未运行", "模型网关目录"):
+            self.assertIn(expected, text)
+
     def test_dynamic_planner_fields_are_mapped_before_composition(self) -> None:
         text = HTML.read_text(encoding="utf-8")
         self.assertIn('${displayText(q.subject)}：${displayText(q.question)}', text)

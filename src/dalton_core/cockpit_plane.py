@@ -462,20 +462,21 @@ RESEARCH_TASK_TERMINAL_LABELS = {
     "human_deprioritized": "人已降级",
 }
 # The two model tiers a purpose can sit in, and what each is for.
-# P14-M2: "跟随档位" or "自己点名"; the third is what a stage does when every
+# P14-M2: follow the configured tier or explicitly select models; the third
+# describes what a stage does when every explicitly selected model
 # model the owner named has been retired.
 MODEL_SELECTION_MODE_LABELS = {
     "tier": "跟随档位",
-    "explicit": "自己点名",
-    "tier_after_retirement": "你选的都退役了，暂时按档位走",
+    "explicit": "手动指定模型",
+    "tier_after_retirement": "指定模型已退役，暂时使用该环节的默认模型顺序",
     "legacy_pin": "沿用当前策略固定的模型",
     "policy_filters": "由当前策略筛选模型",
     "tier_preview": "默认档位预览（尚未绑定策略）",
 }
 MODEL_TIER_LABELS = {
-    "brain": "要动脑的（写判断、做规划）",
-    "cheap": "量大而便宜的（逐窗口阅读、打标签）",
-    "verifier": "独立复核的（必须与写的那个不是同一家）",
+    "brain": "高阶推理与规划",
+    "cheap": "批量阅读与整理",
+    "verifier": "独立复核",
 }
 # ADR-0007 / P14d: the two human checkpoints that arrive with the revision
 # loop. Rendered whenever their rows exist; the decision path is not assumed,
@@ -534,7 +535,7 @@ CHECKPOINT_ACTIONS = {
     "thesis_revision_candidate": (
         {"decision": "accept", "label": "接受，出新版本"},
         {"decision": "reject", "label": "不接受"},
-        {"decision": "defer", "label": "先放着，再看看"},
+        {"decision": "defer", "label": "暂不处理"},
     ),
     "gate_reopen": (
         {"decision": "approve", "label": "重出一版"},
@@ -2317,8 +2318,8 @@ class CockpitPlane:
             "caps_note": ("这四个上限是默认分法，研究目标里没有自己的分法"
                           if status["caps_defaulted"] else "上限来自研究目标自己的分法"),
             "borrow_open": status["borrow_open"],
-            "borrow_note": ("过了半天，闲着的池可以把额度借给覆盖池"
-                            if status["borrow_open"] else "今天还早，暂时不允许互借"),
+            "borrow_note": ("半日后可将未使用的预算配额调拨至覆盖研究预算池"
+                            if status["borrow_open"] else "当前尚未开放预算池间调拨"),
             "unpooled_usd": round(status["unpooled_micros"] / 1_000_000, 4),
             "exhausted_lane_count": status["exhausted_lane_count"],
             "exhausted_lanes": [
@@ -2480,8 +2481,8 @@ class CockpitPlane:
             "other": other, "total": len(lanes),
             "waiting_on_you": counts["ungranted"] + counts["unapproved"],
             "headline": stuck,
-            "note": (f"{counts['running']} 条在跑，{counts['idle']} 条闲着，"
-                     f"{stuck} 条动不了"),
+            "note": (f"{counts['running']} 项执行中，{counts['idle']} 项待命，"
+                     f"{stuck} 项受阻"),
             "link": "lanes",
         }
 
@@ -2622,11 +2623,11 @@ class CockpitPlane:
         ]
         if top:
             note = "，".join(
-                f"{row['dependency_label']} 挂着 {row['item_count']} 件" for row in top)
+                f"{row['dependency_label']}：{row['item_count']} 项等待处理" for row in top)
         elif backlog["terminal_count"]:
-            note = f"没有挂起的；{backlog['terminal_count']} 件读到了但用不了"
+            note = f"没有等待依赖的任务；{backlog['terminal_count']} 项已终止"
         else:
-            note = "没有等依赖的工作"
+            note = "没有等待依赖的任务"
         return {
             "available": True,
             "headline": backlog["parked_items"] + backlog["terminal_count"],
@@ -3986,7 +3987,7 @@ class CockpitPlane:
                 "superseded_chain": row["superseded_chain"],
                 "superseded_note": (
                     None if not row["superseded_chain"] else
-                    "你选的模型都已退役，这个环节暂时按档位的默认链走："
+                    "指定模型均已退役，当前暂用该环节的默认模型顺序："
                     + "、".join(row["superseded_chain"])
                 ),
                 "last_served": None if served is None else {
@@ -3996,7 +3997,7 @@ class CockpitPlane:
                     "cost_usd": served["estimated_cost_usd"],
                 },
                 "last_served_note": (
-                    "还没有用过这个环节" if served is None else
+                    "该环节尚无调用记录" if served is None else
                     (f"上一次是链上第 {served['chain_position']} 个模型服务的"
                      + (f"，估算 {served['estimated_cost_usd']} 美元"
                         if served["estimated_cost_usd"] else ""))
@@ -4054,19 +4055,19 @@ class CockpitPlane:
 
         if not configured or not discovery:
             return {"available": False,
-                    "reason": "这台机器没有配网关配置文件的位置，所以看不到网关有什么"}
+                    "reason": "尚未配置模型网关文件位置，暂时无法读取模型目录"}
         return {
             "available": True,
             "in_sync": bool(discovery.get("in_sync")),
             "in_openclaw_not_allowed": list(discovery["in_openclaw_not_allowed"]),
             "in_openclaw_not_allowed_note":
-                "网关上有、但还没放行给 Dalton；点「放行」写进 broker 的白名单",
+                "模型网关已提供，但 Dalton 尚未获准使用；可通过「放行」提交授权操作",
             "allowed_not_in_dalton": list(discovery["allowed_not_in_dalton"]),
             "allowed_not_in_dalton_note":
-                "已放行、但这台机器还没登记档案；同步流水线下一个整点会自动登记",
+                "Dalton 已获授权，但本机尚未登记模型档案；同步任务会按计划自动登记",
             "dalton_not_in_openclaw": list(discovery["dalton_not_in_openclaw"]),
             "dalton_not_in_openclaw_note":
-                "这台机器还留着档案、网关上已经没有了；同步流水线会把它退役（不删除）",
+                "本机仍有模型档案，但模型网关已不再提供；同步任务会将档案标记为退役并保留记录",
             "allowed_without_broker_profile":
                 list(discovery.get("allowed_without_broker_profile") or []),
         }
@@ -4079,7 +4080,7 @@ class CockpitPlane:
         path = (config or {}).get("model_router_db") if isinstance(config, dict) else None
         if not path or not Path(str(path)).is_file():
             return {"available": False,
-                    "reason": "这台机器上还没有模型路由库，所以没有可读的路由"}
+                    "reason": "本机尚未配置模型路由库，暂时无法读取路由"}
         from .model_fallback_chain import FallbackChainError, routing_overview
         from .model_router import ModelRouter
 
@@ -4333,14 +4334,14 @@ class CockpitPlane:
         purpose = _text(value.get("purpose"), "purpose", maximum=64)
         mode = _text(value.get("mode"), "mode", maximum=32)
         if mode not in SELECTION_MODES:
-            raise CockpitError("要么跟随档位，要么自己点名，没有第三种")
+            raise CockpitError("请选择“跟随档位”或“手动指定模型”")
         chain = value.get("chain") or []
         if not isinstance(chain, list) or any(
             not isinstance(item, str) for item in chain
         ):
-            raise CockpitError("点名的模型必须是一串模型 id")
+            raise CockpitError("手动指定的模型必须是模型标识列表")
         if mode == "explicit" and not chain:
-            raise CockpitError("自己点名就要至少点一个模型，第一选择排在最前")
+            raise CockpitError("手动指定模型时至少需要一个模型，并按调用顺序排列")
         params: dict[str, Any] = {"purpose": purpose, "mode": mode}
         if mode == "explicit":
             params["chain"] = [_text(item, "chain[]", maximum=256) for item in chain]

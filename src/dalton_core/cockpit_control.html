@@ -442,7 +442,7 @@ const ENUM_LABELS={
   current:"当前版本",historical:"历史版本",running:"运行中",starting:"正在启动",
   degraded:"部分功能暂不可用",stopped:"已停止",failed:"未完成",held:"等待中",
   idle:"待命",ready:"就绪",paused:"已暂停",ungranted:"缺授权",
-  unconfigured:"还没装上",unapproved:"等你批准",unstarted:"还没跑过",busy:"运行中",
+  unconfigured:"尚未配置",unapproved:"等待批准",unstarted:"尚未运行",busy:"运行中",
   launched:"运行中",budget_exhausted:"预算已用完"
 };
 function enumLabel(value,fallback="状态暂不可读"){return ENUM_LABELS[value]||fallback}
@@ -815,7 +815,7 @@ async function openModels(){const sheet=prepareReader("研究详情");
   try{renderModels(sheet,await getJson("/v1/cockpit/models"))}
   catch(e){sheet.replaceChildren(readerClose());showProblem(sheet,e,"读取模型配置")}}
 function renderModels(sheet,r){sheet.replaceChildren(readerClose(),node("h2","每个环节用哪个模型"),
-  node("div","每个环节会说明当前使用的是模型顺序还是候选集。可热加载的环节在下一次调用生效；标为需重启的环节按行内提示生效。想回到原来的，把原来的再选一次。","meta"));
+  node("div","每个环节会说明当前使用的是模型顺序还是候选集。可热加载的环节在下一次调用生效；标为需重启的环节按行内提示生效。如需恢复原配置，请重新选择原方案。","meta"));
   if(!r.available){sheet.append(node("div",r.reason,"empty"));return}
   (r.notices||[]).filter(n=>!n.acknowledged).forEach(n=>{
     const d=node("div",null,"gap");d.append(node("b","模型变动"),node("div",n.message,"raw"));
@@ -836,7 +836,7 @@ function renderModels(sheet,r){sheet.replaceChildren(readerClose(),node("h2","�
     const mode=document.createElement("select");
     r.modes.forEach(m=>{const o=document.createElement("option");o.value=m.value;o.textContent=m.label;
       if(m.value===(pp.mode==="explicit"?"explicit":"tier"))o.selected=true;mode.append(o)});
-    const picked=document.createElement("input");picked.type="text";picked.setAttribute("aria-label","模型 ID，按顺序用逗号分隔");picked.placeholder="按顺序填写模型 ID，用逗号分隔";
+    const picked=document.createElement("input");picked.type="text";picked.setAttribute("aria-label","按调用顺序填写模型标识，多个标识以逗号分隔");picked.placeholder="按调用顺序填写模型标识，多个标识以逗号分隔";
     picked.value=pp.mode==="explicit"?pp.chain.map(l=>l.model).join(", "):"";
     picked.style.minWidth="260px";
     picked.disabled=mode.value!=="explicit";
@@ -883,7 +883,7 @@ function renderModels(sheet,r){sheet.replaceChildren(readerClose(),node("h2","�
       try{const out=await postJson("/v1/cockpit/model_metadata",{profile_id:choice.model,profile_version_ref:choice.profile_version_ref,profile_hash:choice.profile_hash,family:family.trim(),capabilities});toast(out.application_status==="applied"?"元数据已发布并生效":out.application_status==="route_changed"?"模型路由已变化，旧声明未应用；请重新确认当前模型":"元数据已发布，等待目录同步");openModels()}
       catch(e){declare.disabled=false;toast(readableError(e,"保存模型说明").message)}};line.append(declare);avail.append(line)});
   sheet.append(avail);
-  const cat=r.catalog,box=node("section");box.append(node("h3","网关上有什么"));
+  const cat=r.catalog,box=node("section");box.append(node("h3","模型网关目录"));
   if(!cat.available){box.append(node("div",cat.reason,"empty"));sheet.append(box);return}
   box.append(node("div",cat.in_sync?"本地模型配置与网关一致。":"本地模型配置与网关存在差异，明细如下。","meta"));
   const col=(title,names,note,allow)=>{const d=node("div",null,"lane");d.append(node("span",null,"st"+(names.length?" wait":" on")));
@@ -896,9 +896,9 @@ function renderModels(sheet,r){sheet.replaceChildren(readerClose(),node("h2","�
         catch(e){b.disabled=false;toast(readableError(e,"授权模型").message)}};line.append(b)}
       c.append(line)});
     d.append(c);box.append(d)};
-  col("网关有、还没放行给 Dalton",cat.in_openclaw_not_allowed,cat.in_openclaw_not_allowed_note,true);
-  col("已放行、这台机器还没登记",cat.allowed_not_in_dalton,cat.allowed_not_in_dalton_note,false);
-  col("这台机器还留着、网关已经没有",cat.dalton_not_in_openclaw,cat.dalton_not_in_openclaw_note,false);
+  col("模型网关已提供、Dalton 尚未获授权",cat.in_openclaw_not_allowed,cat.in_openclaw_not_allowed_note,true);
+  col("Dalton 已获授权、本机尚未登记",cat.allowed_not_in_dalton,cat.allowed_not_in_dalton_note,false);
+  col("本机仍有登记、模型网关已下线",cat.dalton_not_in_openclaw,cat.dalton_not_in_openclaw_note,false);
   sheet.append(box)}
 /* Q2: 每周回头看. Prose and table both derived from counted things; no model
    wrote either, which is why they are shown verbatim. */
