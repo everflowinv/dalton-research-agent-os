@@ -119,6 +119,17 @@ def _artifact(path: Path, packet_root: Path) -> dict[str, Any]:
             "sha256": sha256_bytes(path.read_bytes())}
 
 
+def _direct_absolute_path(path: Path, label: str) -> Path:
+    """Reject aliases so a manifest names the checkout it actually validates."""
+
+    _need(path.is_absolute(), f"{label} must be absolute")
+    current = Path(path.anchor)
+    for part in path.parts[1:]:
+        current /= part
+        _need(not current.is_symlink(), f"{label} contains a symlink")
+    return path.resolve()
+
+
 def incomplete_template() -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
@@ -941,6 +952,14 @@ def build_preserve_existing_transition(
         assert predecessor_source_root is not None
         assert predecessor_source_commit is not None
         assert successor_source_root is not None
+        writer_token_before_path = _direct_absolute_path(
+            writer_token_before_path, "writer token before path")
+        _need(writer_token_before_path.is_relative_to(packet_root),
+              "writer token before path escapes packet")
+        predecessor_source_root = _direct_absolute_path(
+            predecessor_source_root, "predecessor source root")
+        successor_source_root = _direct_absolute_path(
+            successor_source_root, "successor source root")
         proof = build_writer_transition(
             before_path=writer_token_before_path,
             predecessor_root=predecessor_source_root,
@@ -950,7 +969,7 @@ def build_preserve_existing_transition(
         )
         body["writer_operation_transition"] = {
             "before": _artifact(writer_token_before_path, packet_root),
-            "predecessor_source_root": str(predecessor_source_root.resolve()),
+            "predecessor_source_root": str(predecessor_source_root),
             "proof": proof,
         }
     body["content_hash"] = canonical_hash(body)
@@ -1175,14 +1194,30 @@ def expected_writer_operation_transition_state(
           and set(row) == {"before", "predecessor_source_root", "proof"}
           and isinstance(row.get("proof"), Mapping),
           "writer operation transition shape differs")
+    before_artifact = row["before"]
+    _need(isinstance(before_artifact, Mapping)
+          and set(before_artifact) == {"file", "sha256"},
+          "writer token before artifact shape differs")
+    before_rel = Path(str(before_artifact.get("file", "")))
+    _need(not before_rel.is_absolute() and ".." not in before_rel.parts,
+          "writer token before artifact escapes packet")
+    _direct_absolute_path(
+        packet_root.resolve() / before_rel, "writer token before artifact")
     before_path, before_bytes = _resolve_artifact(packet_root, row["before"])
     _need(before_path.read_bytes() == before_bytes,
           "writer token before artifact differs")
     proof = dict(row["proof"])
-    predecessor = Path(str(row.get("predecessor_source_root", ""))).resolve()
+    predecessor = _direct_absolute_path(
+        Path(str(row.get("predecessor_source_root", ""))),
+        "writer predecessor source root",
+    )
     if predecessor_source_root is not None:
-        _need(predecessor_source_root.resolve() == predecessor,
+        supplied_predecessor = _direct_absolute_path(
+            predecessor_source_root, "supplied writer predecessor source root")
+        _need(supplied_predecessor == predecessor,
               "writer predecessor source root differs")
+    successor_root = _direct_absolute_path(
+        successor_root, "writer successor source root")
     _need(proof.get("successor", {}).get("commit") == manifest.get("source_commit"),
           "writer successor source identity differs")
     from scripts.successor_writer_token_transition import validate_transition

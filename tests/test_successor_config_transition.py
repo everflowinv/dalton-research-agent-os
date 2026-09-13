@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -79,7 +80,7 @@ class SuccessorConfigTransitionTests(unittest.TestCase):
     def setUp(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        self.root = Path(temporary.name).resolve()
         self.packet = self.root / "packet"; self.packet.mkdir()
         self.state = self.root / "state"; self.state.mkdir()
         self.initial = model("initial")
@@ -299,7 +300,7 @@ class PreserveExistingTransitionTests(unittest.TestCase):
     def setUp(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        self.root = Path(temporary.name).resolve()
         self.packet = self.root / "packet"; self.packet.mkdir()
         self.state = self.root / "state"; self.state.mkdir()
         self.service = self.root / "config/service.json"
@@ -521,6 +522,85 @@ class PreserveExistingTransitionTests(unittest.TestCase):
                 successor_source_root=self.root / "successor",
             )
 
+    def git_writer_source(self, name, operations):
+        root = self.root / name
+        package = root / "src/dalton_core"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text("", encoding="utf-8")
+        (package / "writer_server.py").write_text(
+            f"CORE_OPERATIONS = set({operations!r})\n"
+            "def install_lane_operations():\n    return None\n",
+            encoding="utf-8",
+        )
+        subprocess.run(["git", "init", "-q", str(root)], check=True)
+        subprocess.run(["git", "-C", str(root), "config", "user.email",
+                        "test@example.invalid"], check=True)
+        subprocess.run(["git", "-C", str(root), "config", "user.name", "Test"],
+                       check=True)
+        subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(root), "commit", "-qm", name], check=True)
+        commit = subprocess.check_output(
+            ["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
+        return root, commit
+
+    def test_real_frozen_sources_predict_actual_bootstrap_writer_bytes(self):
+        from dalton_core.writer_server import Principal, replace_token_config
+
+        self.build_pure()
+        predecessor, predecessor_commit = self.git_writer_source(
+            "writer-predecessor", ["a", "b"])
+        successor, successor_commit = self.git_writer_source(
+            "writer-successor", ["a", "b", "settle"])
+        writer_before = self.packet / "writer-tokens.real-before.json"
+        before_value = {"schema_version": "0.1", "principals": [{
+            "principal_id": "core", "token": "core-secret",
+            "operations": ["a", "b"], "allowed_invocation_refs": [],
+            "work_order_refs": [], "unrestricted": True, "actor_ref": None,
+        }, {
+            "principal_id": "owner", "token": "owner-secret",
+            "operations": ["approve"], "allowed_invocation_refs": ["invocation:x"],
+            "work_order_refs": ["work:x"], "unrestricted": False,
+            "actor_ref": "owner:x",
+        }]}
+        writer_before.write_text(json.dumps(
+            before_value, sort_keys=True, separators=(",", ":")) + "\n")
+        manifest = build_preserve_existing_transition(
+            packet_root=self.packet, release_ref="code-successor-writer-real",
+            source_commit=successor_commit,
+            baseline_models_path=self.packet / "models.json",
+            model_config_paths={name: self.packet / name for name in self.models},
+            preserved_config_paths=self.preserved,
+            preserved_state_authority_paths={
+                "connector-governance/yfinance-analyst-estimates-v1.json":
+                    self.packet / "yfinance-approved.json"},
+            service_config_before_path=self.packet / "service.before.json",
+            openclaw_config_before_path=self.packet / "openclaw.preserved.json",
+            writer_token_before_path=writer_before,
+            predecessor_source_root=predecessor,
+            predecessor_source_commit=predecessor_commit,
+            successor_source_root=successor,
+        )
+        before, predicted, _ = expected_writer_operation_transition_state(
+            packet_root=self.packet, manifest=manifest, successor_root=successor)
+        target = self.root / "bootstrap-state/writer-tokens.json"
+        principals = [Principal(
+            principal_id=row["principal_id"], token=row["token"],
+            operations=frozenset(
+                ["a", "b", "settle"] if row["principal_id"] == "core"
+                else row["operations"]),
+            allowed_invocation_refs=frozenset(row["allowed_invocation_refs"]),
+            work_order_refs=frozenset(row["work_order_refs"]),
+            unrestricted=row["unrestricted"], actor_ref=row["actor_ref"],
+        ) for row in before_value["principals"]]
+        replace_token_config(target, principals)
+        self.assertEqual(predicted, target.read_bytes())
+        actual = json.loads(target.read_bytes())
+        self.assertEqual(before_value["principals"][1], actual["principals"][1])
+        self.assertEqual(
+            ["core-secret", "owner-secret"],
+            [row["token"] for row in actual["principals"]],
+        )
+
     def test_writer_append_manifest_and_validator_bind_exact_projected_bytes(self):
         manifest = self.build_writer_append()
         self.assertEqual(WRITER_APPEND_SCHEMA_VERSION, manifest["schema_version"])
@@ -540,6 +620,33 @@ class PreserveExistingTransitionTests(unittest.TestCase):
         self.assertEqual(after, projected)
         self.assertEqual(row, validated_row)
         self.assertEqual(before, validate.call_args.kwargs["before_bytes"])
+
+    def test_writer_validator_rejects_symlinked_source_and_packet_ancestor(self):
+        manifest = self.build_writer_append()
+        real_predecessor = self.root / "real-predecessor"
+        real_predecessor.mkdir()
+        predecessor_alias = self.root / "predecessor-alias"
+        predecessor_alias.symlink_to(real_predecessor, target_is_directory=True)
+        manifest["writer_operation_transition"]["predecessor_source_root"] = str(
+            predecessor_alias)
+        with self.assertRaisesRegex(ConfigTransitionError, "symlink"):
+            expected_writer_operation_transition_state(
+                packet_root=self.packet, manifest=manifest,
+                successor_root=self.root / "successor")
+
+        manifest = self.build_writer_append()
+        actual = self.packet / "writer-real"
+        actual.mkdir()
+        (actual / "before.json").write_bytes(
+            (self.packet / "writer-tokens.before.json").read_bytes())
+        alias = self.packet / "writer-alias"
+        alias.symlink_to(actual, target_is_directory=True)
+        artifact = manifest["writer_operation_transition"]["before"]
+        artifact["file"] = "writer-alias/before.json"
+        with self.assertRaisesRegex(ConfigTransitionError, "symlink"):
+            expected_writer_operation_transition_state(
+                packet_root=self.packet, manifest=manifest,
+                successor_root=self.root / "successor")
 
     def test_apply_records_bootstrap_projection_without_writing_writer_artifact(self):
         manifest = self.build_writer_append()
