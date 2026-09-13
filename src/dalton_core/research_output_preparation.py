@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from dalton_core.cockpit_model import CockpitModel, CockpitModelError, independent_model_call, unwrap_json_object
+from dalton_core.cockpit_model import CockpitModel, CockpitModelError, CockpitModelRouteUnavailable, independent_model_call, unwrap_json_object
 from dalton_core.company_dossier_draft import independence, router_family_resolver
 from dalton_core.cockpit_research_library import research_library
 from dalton_core.model_fallback_chain import register_purpose_tier
@@ -259,8 +259,17 @@ def run_chunk(task, *, mission, draft_config, verifier_config, checker_config,
         def revise(brain_prompt):
             if 'brain_call' not in evidence:
                 brain_id = hashlib.sha256((identity+brain_prompt).encode()).hexdigest()
-                evidence['brain_call'] = brain.call(purpose=BRAIN_PURPOSE,
-                    request_id='zh-revise-'+brain_id,prompt=brain_prompt,mission=mission)
+                try:
+                    evidence['brain_call'] = brain.call(purpose=BRAIN_PURPOSE,
+                        request_id='zh-revise-'+brain_id,prompt=brain_prompt,mission=mission)
+                except CockpitModelRouteUnavailable:
+                    # Only a proved routing rejection can create this smaller
+                    # reservation. Busy, interrupted, or dispatched calls keep
+                    # their original identity and are never bypassed.
+                    bounded_brain = model(brain_config, 12000)
+                    evidence['brain_call'] = bounded_brain.call(purpose=BRAIN_PURPOSE,
+                        request_id='zh-revise-'+brain_id+'-output-12000',
+                        prompt=brain_prompt,mission=mission)
                 write_json(stage_path,evidence)
             return parse_stage_output(evidence['brain_call']['text'], stage='brain')
         review = run_language_review(review_product,checker=check,brain=revise,

@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from dalton_core import research_output_preparation as prep
-from dalton_core.cockpit_model import CockpitModelError
+from dalton_core.cockpit_model import CockpitModelError, CockpitModelRouteUnavailable
 
 SOURCE={'kind':'initial_screen','version_ref':'screen:1','status':'available',
         'sections':[{'title':'Revenue','body':'Revenue was 123 USD.','gaps':[]}]}
@@ -58,6 +58,19 @@ class PreparationTests(unittest.TestCase):
         self.assertIn('Revenue was 123 USD.', prompt)
         self.assertIn(prep.source_content_hash(source), prompt)
         self.assertIn('preserve the currency', prompt)
+
+    def test_initial_brain_can_reduce_output_only_after_a_proved_route_rejection(self):
+        self.responses[prep.BRAIN_PURPOSE] = [CockpitModelRouteUnavailable('no route'), REVISION]
+        result = self.run_one()
+        self.assertEqual(result['localized']['sections'][0]['body'], '收入为 123 美元。')
+        self.assertEqual(self.calls.count(prep.CHECKER_PURPOSE), 1)
+        self.assertTrue(any(request.endswith('-output-12000') for request in self.request_ids))
+
+    def test_initial_brain_never_bypasses_an_outstanding_call_with_a_smaller_budget(self):
+        self.responses[prep.BRAIN_PURPOSE] = CockpitModelError('this request is already running')
+        with self.assertRaisesRegex(ValueError, 'already running'): self.run_one()
+        self.assertEqual(self.calls.count(prep.BRAIN_PURPOSE), 1)
+        self.assertFalse(any(request.endswith('-output-12000') for request in self.request_ids))
 
     def test_checker_then_brain_then_semantic_verifier_replays_without_new_calls(self):
         result=self.run_one()
