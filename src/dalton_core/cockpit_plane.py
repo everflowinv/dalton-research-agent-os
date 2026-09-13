@@ -1512,7 +1512,8 @@ class CockpitPlane:
                     "reasons": [], "failed": [], "not_checked": not_checked,
                     "note": "这个产出没有经济不变量失败，但下列检查因证据不足而未执行",
                 }
-        return out
+        from .cockpit_model_display import present_invariants
+        return present_invariants(out)
 
     def _forecast(self, core: Any) -> dict[str, dict[str, Any]]:
         """P13-M2: how much of each company's model actually stands up."""
@@ -1559,8 +1560,9 @@ class CockpitPlane:
                 f"{readiness.get('drivers_with_assumptions', 0)}/"
                 f"{readiness.get('drivers', 0)} 条驱动因素有假设")
         if missing:
-            return head + "；算不出来的行：" + "、".join(missing[:3])
-        return head + "；这条链上的每一行都算出来了"
+            return head + f"；仍有 {len(missing)} 项结果缺少计算条件"
+        partial = len(readiness.get("results_partial") or [])
+        return head + (f"；另有 {partial} 项仅完成部分计算" if partial else "；各项结果已完成计算")
 
     def _quality(self, core: Any) -> dict[str, dict[str, Any]]:
         """Q1: the newest score of every artefact that has one, by target."""
@@ -3975,6 +3977,7 @@ class CockpitPlane:
 
         ref = _text(company_ref, "company_ref", maximum=512)
         from .company_model_report import render_forecast_model
+        from .cockpit_model_display import readiness_labels
         from .model_forecast_driver import model_readiness
 
         with self._core() as core:
@@ -4011,6 +4014,8 @@ class CockpitPlane:
         def display_model_text(value: str) -> str:
             if value in model_text:
                 return model_text[value]
+            if any("\u4e00" <= char <= "\u9fff" for char in value):
+                return value
             return ("正文正在检查文字表达，完成后会显示。"
                     if review_required else value)
         return {
@@ -4021,10 +4026,12 @@ class CockpitPlane:
             "change_reason_label": CHANGE_REASON_LABELS.get(
                 record.get("change_reason"), record.get("change_reason")),
             "decision": record.get("decision"),
-            "readiness": readiness, "note": self._forecast_note(readiness),
+            "readiness": readiness_labels(record, readiness, display_model_text),
+            "note": self._forecast_note(readiness),
             "table": render_forecast_model(
                 record, entity_name=label,
-                display_text=display_model_text),
+                display_text=display_model_text, include_technical=False),
+            "technical_table": render_forecast_model(record, entity_name=label),
             "history": history,
             "invariants": refused,
         }

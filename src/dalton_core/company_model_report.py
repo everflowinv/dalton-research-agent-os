@@ -197,8 +197,10 @@ def _visual_ljust(value: str, width: int) -> str:
 
 
 def _row(label: str, history: Sequence[str], forecast: Sequence[str]) -> str:
-    label = label[:DRIVER_LABEL_WIDTH]
-    return (
+    prefix = ""
+    if _visual_width(label) > DRIVER_LABEL_WIDTH:
+        prefix, label = label + "\n", ""
+    return prefix + (
         _visual_ljust(label, DRIVER_LABEL_WIDTH)
         + "".join(item.rjust(CELL_WIDTH) for item in history)
         + " |"
@@ -211,6 +213,7 @@ def render_forecast_model(
     history_columns: int = HISTORY_COLUMNS,
     annual_projection: Mapping[str, Any] | None = None,
     display_text: Callable[[str], str] | None = None,
+    include_technical: bool = True,
 ) -> str:
     """Print one ForecastModelVersion so a person can argue with it.
 
@@ -227,7 +230,8 @@ def render_forecast_model(
     """
 
     supplied_show = display_text or (lambda value: value)
-    show = lambda value: _model_text(value, supplied_show)
+    from .cockpit_model_display import field_label
+    show = lambda value: field_label(value, lambda raw: _model_text(raw, supplied_show))
     history = [str(item) for item in (record.get("history_periods") or [])]
     history = history[-max(0, int(history_columns)):] if history_columns else []
     realised = [str(item["end"]) for item in (record.get("realised_periods") or [])]
@@ -256,8 +260,12 @@ def render_forecast_model(
             role={"revenue":"收入驱动","cost":"成本驱动","margin":"利润率驱动"}.get(str(driver["role"]),show(str(driver["role"])))
             label = f"{label} [{role}]"
         if not cells:
-            out.append(f"  {str(driver.get('ref'))[:DRIVER_LABEL_WIDTH - 2]:40} "
-                       f"{show(str(driver.get('note') or driver.get('status')))}")
+            shown_label = str(driver.get('ref')) if include_technical else label.strip()
+            shown_note = show(str(driver.get('note') or driver.get('status')))
+            if not include_technical and _visual_width(shown_label) > DRIVER_LABEL_WIDTH - 2:
+                out.append(f"  {shown_label}\n{'':42}{shown_note}")
+            else:
+                out.append(f"  {shown_label[:DRIVER_LABEL_WIDTH - 2]:40} {shown_note}")
             continue
         out.append(_row(
             label,
@@ -316,7 +324,7 @@ def render_forecast_model(
         if result.get("status") != "computed":
             out.append(f"        状态：{show(str(result.get('status') or '未记录'))}；"
                        f"原因：{show(str(result.get('reason') or '未记录原因'))}")
-        else:
+        elif include_technical:
             out.append(f"        {result.get('formula')}")
     if annual_projection is not None:
         from .company_model_annual_projection import validate_projection_record
@@ -371,19 +379,20 @@ def render_forecast_model(
         out.append("")
         out.append("  当前计算链未覆盖的披露科目：")
         for concept in outside:
-            out.append(f"      {concept}")
+            name = next((str(item.get("label") or concept) for item in drivers if str(item.get("concept")) == concept), concept)
+            out.append(f"      {concept if include_technical else show(name)}")
     out.append("")
     out.append("阅读说明")
     out.append("-" * DRIVER_LABEL_WIDTH)
-    out.append("  每项假设均由披露历史外推，并列出所用依据；")
-    out.append("  它们是可质疑、可复核的估算，不代表投资观点。")
+    out.append("  预测依据列在对应假设下方，可据此检查和调整。")
     out.append("  “--”表示没有完成计算，下方会说明缺少什么。")
     out.append("  已披露季度显示实际值，并保留当时预测供对照。")
     out.append("")
-    out.append("技术信息")
-    out.append(f"  模型记录 {record.get('id')}")
-    out.append(f"  模型规格 {record.get('spec_ref')} · 公式 {record.get('formula_ref')}")
-    out.append(f"  生成规则 {record.get('generator_ref')}")
+    if include_technical:
+        out.append("技术信息")
+        out.append(f"  模型记录 {record.get('id')}")
+        out.append(f"  模型规格 {record.get('spec_ref')} · 公式 {record.get('formula_ref')}")
+        out.append(f"  生成规则 {record.get('generator_ref')}")
     out.append("")
     return "\n".join(out)
 

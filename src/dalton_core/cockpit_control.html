@@ -669,11 +669,12 @@ function valuationBlock(v){const w=node("div");w.append(node("div",`估值 · ${
        fundamentals never moved is the price's own percentile. */
     const basis=m.percentile!=null?m.percentile_basis_label:m.percentile_reason;if(basis)li.append(node("span",basis,"basis"));ul.append(li)});
   w.append(ul);if(v.basis&&v.basis.shares_note)w.append(node("div",v.basis.shares_note,"hint"));return w}
-function invariantRefusal(x){if(!x)return null;const missing=x.status==="unavailable",unchecked=x.not_checked||[];
+function invariantRefusal(x){if(!x)return null;const missing=x.status==="unavailable",unchecked=x.display_not_checked||[];
   if(!missing&&!unchecked.length)return null;const d=node("div",null,"gap");
   d.append(node("b",missing?`${x.output_kind_label||"这项数字"}未发布`:`${x.output_kind_label||"这项数字"}有未检查项`));
-  if(missing)(x.reasons||[]).forEach(reason=>d.append(node("div",reason)));
+  if(missing)(x.display_reasons||["模型检查未通过，详见技术详情。"]).forEach(reason=>d.append(node("div",reason)));
   else unchecked.forEach(item=>d.append(node("div",`${item.label||item.invariant}：${(item.findings||[]).join("；")||"证据不足，未执行"}`)));
+  const tech=technicalDetails(x.technical_details||x);if(tech)d.append(tech);
   return d}
 function modelBlock(c){const m=c.model,r=m.readiness||{},d=node("div",null,"mdl");
   d.append(node("b",`公司模型 · ${versionLabel(m.version)}`),node("div",m.note||""));
@@ -1003,10 +1004,11 @@ function renderModel(sheet,m){sheet.replaceChildren(readerClose(),node("h2",`${m
   Object.values(m.invariants||{}).forEach(x=>{const refusal=invariantRefusal(x);if(refusal)sheet.append(refusal)});
   const r=m.readiness||{};
   if(r.drivers_without_history&&r.drivers_without_history.length)
-    sheet.append(node("div",`没有历史可依的驱动因素：${r.drivers_without_history.join("、")}`,"gap"));
+    sheet.append(node("div",`没有历史可依的驱动因素：${(r.drivers_without_history_labels||[]).join("、")}`,"gap"));
   if(r.results_unavailable&&r.results_unavailable.length)
-    sheet.append(node("div",`当前版本暂无结果的项目：${r.results_unavailable.map(displayText).join("、")}`,"gap"));
+    sheet.append(node("div",`当前版本暂无结果的项目：${(r.results_unavailable_labels||[]).join("、")}`,"gap"));
   sheet.append(node("pre",m.table,"table"));
+  const technical=technicalDetails(m.technical_table,"模型计算与记录详情");if(technical)sheet.append(technical);
   if(m.history&&m.history.length>1){sheet.append(node("h3","这个模型的版本链"));const h=node("div",null,"hist");
     m.history.forEach(x=>h.append(node("div",`${versionLabel(x.version)} · ${fmtDate(x.created_at)}${x.change_reason_label?" · "+displayText(x.change_reason_label):""}`)));
     sheet.append(h)}}
