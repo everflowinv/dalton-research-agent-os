@@ -35,6 +35,20 @@ from .company_model_inputs import ESTIMATED, FILED, SHARED, build_model_inputs
 
 LABEL_WIDTH = 46
 CELL_WIDTH = 12
+_CHINESE_MODEL_LABELS = {
+    "Revenue": "营业收入",
+    "Revenues": "营业收入",
+    "Gross Profit": "毛利润",
+    "Operating Income": "营业利润",
+    "Net Income": "净利润",
+}
+
+
+def _model_text(value: str, fallback: Callable[[str], str]) -> str:
+    """Translate only exact model field labels; prose and quotes stay intact."""
+
+    mapped = _CHINESE_MODEL_LABELS.get(value.strip())
+    return mapped if mapped is not None else fallback(value)
 
 
 def _millions(value: Any) -> str:
@@ -210,7 +224,8 @@ def render_forecast_model(
     wrong this system usually is.
     """
 
-    show = display_text or (lambda value: value)
+    supplied_show = display_text or (lambda value: value)
+    show = lambda value: _model_text(value, supplied_show)
     history = [str(item) for item in (record.get("history_periods") or [])]
     history = history[-max(0, int(history_columns)):] if history_columns else []
     realised = [str(item["end"]) for item in (record.get("realised_periods") or [])]
@@ -428,7 +443,8 @@ def render_sensitivity(
       opposite of what a missing line means.
     """
 
-    show = display_text or (lambda value: value)
+    supplied_show = display_text or (lambda value: value)
+    show = lambda value: _model_text(value, supplied_show)
     scenario_label = lambda value: {"trough":"历史低点","mean":"历史均值","ours":"本模型","peak":"历史高点","latest":"最新值"}.get(str(value),show(str(value)))
     out: list[str] = []
     title = entity_name or record.get("company_ref") or "company"

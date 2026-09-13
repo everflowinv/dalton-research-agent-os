@@ -829,6 +829,16 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(_visual_width(header.split("|", 1)[0]),
                          _visual_width(translated_row.split("|", 1)[0]))
 
+    def test_generic_business_labels_are_chinese_in_model_view_only(self):
+        record = model()
+        record["drivers"][0]["label"] = "Revenues"
+        record["drivers"][0]["note"] = "Quoted source says Revenues increased."
+        text = render_forecast_model(
+            record, display_text=lambda value: f"translated:{value}")
+        self.assertIn("  营业收入", text)
+        self.assertIn("translated:Quoted source says Revenues increased.", text)
+        self.assertNotIn("translated:Revenues", text)
+
     def test_browser_forecast_report_preserves_per_share_and_unknown_units(self):
         record = model()
         end = record["history_periods"][-1]
