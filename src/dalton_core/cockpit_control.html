@@ -739,8 +739,10 @@ function judgementBlock(j){const d=node("div",null,"mdl");d.append(node("b",`研
   (j.latest||[]).forEach(x=>{const li=node("li");
     li.append(node("span",`${x.decision_label} → ${x.action_label}`,"figv"));
     if(x.because)li.append(node("span",` ${finalResearchText(x.because)}`));
-    const tail=[];if(x.effect)tail.push(`落地：${finalResearchText(x.effect)}`);tail.push(x.verifier_label);
-    li.append(node("span",` ${tail.join(" · ")}`,"figp"));ul.append(li)});
+    const effectLabels={queued:"等待处理",recorded:"已记录",published:"已发布",fresh:"已生成新版本",duplicate:"此前已处理",proposed:"已提出建议",candidate:"已生成修订建议",refused:"未执行",unavailable:"暂无法执行",admitted:"已安排研究",skipped:"本次未执行"};
+    const effectReasons={no_bindable_template:"尚无适用的研究模板",out_of_mandate_scope:"超出当前研究任务的范围"};
+    const tail=[];if(x.effect)tail.push(`处理状态：${effectLabels[x.effect]||"状态待确认"}`);if(effectReasons[x.effect_detail])tail.push(effectReasons[x.effect_detail]);tail.push(x.verifier_label);
+    li.append(node("span",` ${tail.join(" · ")}`,"figp"));const technical=technicalDetails({judgement_ref:x.ref,event_ref:x.event_ref,effect:x.effect,effect_detail:x.effect_detail});if(technical)li.append(technical);ul.append(li)});
   d.append(ul);return d}
 function reflectionBlock(rows){const d=node("div",null,"mdl");d.append(node("b","反思"));
   rows.forEach(r=>{const w=node("div");w.append(node("div",r.trigger_label,"hint"));
