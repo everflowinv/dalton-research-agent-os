@@ -1039,9 +1039,11 @@ class SuccessorOrchestrator(r11.Orchestrator):
             })
         if transition.get("schema_version") == RESEARCH_PUBLICATION_SCHEMA_VERSION:
             from scripts.successor_research_publication_transition import (
-                artifact_bytes, validate_transition,
+                WORKER_CONFIG, artifact_bytes, validate_transition,
+                validate_waiting_checkpoint, validate_worker_config_bytes,
             )
             publication = validate_transition(transition["research_publication_transition"])
+            worker_config = None
             for row in publication["files"]:
                 target = ((r11.LAUNCH_AGENTS / row["path"])
                           if row["kind"] == "launch_agent"
@@ -1050,6 +1052,16 @@ class SuccessorOrchestrator(r11.Orchestrator):
                      and stat.S_IMODE(target.stat().st_mode) == row["mode"]
                      and target.read_bytes() == artifact_bytes(self.packet, row),
                      f"installed research publication file differs: {row['path']}")
+                if row["path"] == WORKER_CONFIG:
+                    worker_config = validate_worker_config_bytes(
+                        target.read_bytes(),
+                        expected_source_commit=manifest["source"]["commit"])
+            need(worker_config is not None,
+                 "research publication worker config is absent")
+            checkpoint = Path(worker_config["work_dir"]) / "worker-last-run.json"
+            need(checkpoint.is_file() and not checkpoint.is_symlink(),
+                 "research publication waiting checkpoint is absent")
+            validate_waiting_checkpoint(load_json(checkpoint))
             result["research_publication_transition"] = {
                 "launch_agent_label": publication["launch_agent_label"],
                 "file_sha256": {row["path"]: row["sha256"]

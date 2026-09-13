@@ -8,10 +8,12 @@ that the same manifest proves this release installed.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import plistlib
 import re
 import stat
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -35,6 +37,69 @@ _SEED_PATTERNS = (
     re.compile(rf"research-localization/language-reviews/{_HEX}\.(?:json|md)"),
     re.compile(rf"research-localization/ui-records/{_HEX}\.json"),
 )
+WORKER_CONFIG = "research-publication-worker-config.json"
+_OWNER_ROOT = Path("/Users/everflow/Projects/dalton-owner-activation-20260910")
+
+
+def validate_worker_config_bytes(data: bytes, *,
+                                 expected_source_commit: str | None = None) -> dict[str, Any]:
+    try:
+        value = json.loads(data)
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise ResearchPublicationTransitionError(
+            "research publication worker config is invalid") from exc
+    expected = {"schema_version", "core_db", "scheduler_db", "model_config",
+                "verifier_config", "checker_config", "brain_config", "work_dir",
+                "output_directory", "workers", "chunk_chars", "max_cost_per_call",
+                "draft_attempts", "publication_gate"}
+    _need(isinstance(value, dict) and set(value) == expected
+          and value.get("schema_version") == "research-publication-worker-config:0.1"
+          and value.get("workers") in {4, 8} and value.get("chunk_chars") == 4500
+          and value.get("max_cost_per_call") == 1.0
+          and value.get("draft_attempts") == 2,
+          "research publication worker config shape differs")
+    for key in ("core_db", "scheduler_db", "model_config", "verifier_config",
+                "checker_config", "brain_config", "work_dir", "output_directory"):
+        _need(isinstance(value[key], str) and Path(value[key]).is_absolute(),
+              f"research publication worker {key} is not absolute")
+    _need(Path(value["work_dir"]).name == "research-publication-work"
+          and Path(value["output_directory"]).name == "research-localization",
+          "research publication worker output paths differ")
+    gate = value["publication_gate"]
+    _need(isinstance(gate, dict) and set(gate) == {
+        "release_pointer", "runtime_pointer", "expected_release_ref",
+        "expected_source_commit"}
+        and gate["release_pointer"] == str(_OWNER_ROOT / "current-release.json")
+        and gate["runtime_pointer"] == str(_OWNER_ROOT / "current-runtime-config.json")
+        and gate["expected_release_ref"] == "foundation-r25"
+        and isinstance(gate["expected_source_commit"], str)
+        and re.fullmatch(r"[0-9a-f]{40}", gate["expected_source_commit"])
+        and (expected_source_commit is None
+             or gate["expected_source_commit"] == expected_source_commit),
+        "research publication gate authority differs")
+    return value
+
+
+def validate_waiting_checkpoint(value: Mapping[str, Any]) -> dict[str, Any]:
+    _need(isinstance(value, Mapping) and set(value) == {
+        "schema_version", "status", "model_calls", "observed_release_sha256",
+        "observed_runtime_sha256", "checked_at"}
+        and value.get("schema_version") == "research-publication-worker-checkpoint:0.1"
+        and value.get("status") == "waiting_for_release_publication"
+        and value.get("model_calls") == 0,
+        "research publication waiting checkpoint shape differs")
+    for key in ("observed_release_sha256", "observed_runtime_sha256"):
+        _need(value.get(key) is None or (isinstance(value[key], str)
+              and re.fullmatch(_HEX, value[key])),
+              "research publication checkpoint pointer hash differs")
+    try:
+        timestamp = datetime.fromisoformat(str(value.get("checked_at", "")))
+    except ValueError as exc:
+        raise ResearchPublicationTransitionError(
+            "research publication checkpoint time is invalid") from exc
+    _need(timestamp.tzinfo is not None and timestamp.utcoffset().total_seconds() == 0,
+          "research publication checkpoint time is not UTC")
+    return dict(value)
 
 
 class ResearchPublicationTransitionError(RuntimeError):
@@ -166,6 +231,7 @@ def artifact_bytes(packet_root: Path, row: Mapping[str, Any]) -> bytes:
         argv = plist.get("ProgramArguments")
         _need(plist.get("Label") == LAUNCH_AGENT_LABEL
               and plist.get("StartInterval") == 300
+              and plist.get("RunAtLoad") is True
               and isinstance(argv, list) and len(argv) == 6
               and isinstance(argv[0], str) and Path(argv[0]).is_absolute()
               and argv[1:5] == ["-m", "dalton_core.research_output_preparation",
@@ -173,6 +239,8 @@ def artifact_bytes(packet_root: Path, row: Mapping[str, Any]) -> bytes:
               and isinstance(argv[5], str) and Path(argv[5]).is_absolute()
               and Path(argv[5]).name == "research-publication-worker-config.json",
               "research publication LaunchAgent contract differs")
+    elif row["kind"] == "authority" and row["path"] == WORKER_CONFIG:
+        validate_worker_config_bytes(data)
     return data
 
 

@@ -499,12 +499,24 @@ class PreserveExistingTransitionTests(unittest.TestCase):
         for name in PUBLICATION_FILES:
             path = assets / name
             value = model(name) if name.endswith("-model-config.json") else {"schema_version": "0.1"}
+            if name == "research-publication-worker-config.json":
+                value = {"schema_version": "research-publication-worker-config:0.1",
+                    "core_db": "/state/core.sqlite", "scheduler_db": "/state/scheduler.sqlite",
+                    "model_config": "/state/a.json", "verifier_config": "/state/b.json",
+                    "checker_config": "/state/c.json", "brain_config": "/state/d.json",
+                    "work_dir": "/state/research-publication-work",
+                    "output_directory": "/state/research-localization", "workers": 4,
+                    "chunk_chars": 4500, "max_cost_per_call": 1.0, "draft_attempts": 2,
+                    "publication_gate": {"release_pointer": "/Users/everflow/Projects/dalton-owner-activation-20260910/current-release.json",
+                    "runtime_pointer": "/Users/everflow/Projects/dalton-owner-activation-20260910/current-runtime-config.json",
+                    "expected_release_ref": "foundation-r25", "expected_source_commit": "e" * 40}}
             write(path, value); authorities[name] = path
         seed = assets / "research-localization/index.json"
         seed.parent.mkdir(); write(seed, {"schema_version": "0.1", "records": []})
         plist = assets / "com.dalton.research-publication-worker.plist"
         plist.write_bytes(plistlib.dumps({
             "Label": "com.dalton.research-publication-worker", "StartInterval": 300,
+            "RunAtLoad": True,
             "ProgramArguments": ["/runtime/python", "-m",
                 "dalton_core.research_output_preparation", "run-worker", "--config",
                 "/state/research-publication-worker-config.json"]}))

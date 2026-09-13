@@ -1124,9 +1124,16 @@ def expected_transition_state(
         elif row.get("name") == LANE_CONFIG:
             lane = value
     if version == RESEARCH_PUBLICATION_SCHEMA_VERSION:
-        from scripts.successor_research_publication_transition import validate_transition
+        from scripts.successor_research_publication_transition import (
+            WORKER_CONFIG, artifact_bytes, validate_transition,
+            validate_worker_config_bytes,
+        )
         publication = validate_transition(manifest.get("research_publication_transition"))
         for row in publication["files"]:
+            if row["path"] == WORKER_CONFIG:
+                validate_worker_config_bytes(
+                    artifact_bytes(packet_root, row),
+                    expected_source_commit=manifest.get("source_commit"))
             if row["kind"] == "authority" and row["path"].endswith("-model-config.json"):
                 _, data = _resolve_artifact(packet_root, {"file": row["artifact"], "sha256": row["sha256"]})
                 models[row["path"]] = json.loads(data)
