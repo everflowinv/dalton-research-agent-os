@@ -282,7 +282,7 @@ class JudgementOnTheCardTests(Int2Case):
         self.judgement(self.price_move())
         latest = self.card()["judgements"]["latest"][0]
         self.assertEqual(latest["decision_label"], "论点被削弱了")
-        self.assertEqual(latest["action_label"], "写一段短报告")
+        self.assertEqual(latest["action_label"], "记录研究说明")
         self.assertEqual(latest["because"], "定价压力比我们以为的更快出现")
 
     def test_the_page_shows_what_the_effect_actually_was(self) -> None:
@@ -305,8 +305,8 @@ class JudgementOnTheCardTests(Int2Case):
         # nothing.
         self.judgement(self.price_move(), decision="NO_CHANGE", action="no_change")
         latest = self.card()["judgements"]["latest"][0]
-        self.assertEqual(latest["decision_label"], "不用改主意")
-        self.assertEqual(latest["action_label"], "什么都不做")
+        self.assertEqual(latest["decision_label"], "维持现有判断")
+        self.assertEqual(latest["action_label"], "维持现状")
 
 
 class ReflectionOnTheCardTests(Int2Case):
@@ -510,7 +510,7 @@ class ApprovalsTests(Int2Case):
             core.commit()
         item = next(i for i in self.plane.approvals()["items"]
                     if i["kind"] == "gate_reopen")
-        self.assertEqual(item["title"], "深度研究关卡出现新证据，待决定是否重新评估")
+        self.assertEqual(item["title"], "已有研究报告需要重新评估")
         # No diff on this hand-written row, so the summary falls back to what
         # the row does say rather than failing to render.
         self.assertEqual(item["summary"], "现在有了四个季度的纪要")
@@ -579,7 +579,7 @@ class SourcePanelTests(Int2Case):
         undeclared = [row for row in rows.values()
                       if row["status"] == "undeclared"]
         self.assertTrue(undeclared)
-        self.assertEqual(undeclared[0]["status_label"], "研究目标里没提过它")
+        self.assertEqual(undeclared[0]["status_label"], "研究目标尚未声明该来源")
 
     def test_without_a_policy_the_frequency_column_says_so(self) -> None:
         # In a source checkout the packaged policy is always reachable, so the
@@ -805,7 +805,7 @@ class ResearchTaskTests(Int2Case):
         self.assertEqual(row["task_ref"], loop["loop_ref"])
         self.assertEqual(row["question"], "折扣有多深？")
         self.assertEqual(row["budget_label"], "0/2 轮")
-        self.assertEqual(row["state_label"], "已排队，还没开跑")
+        self.assertEqual(row["state_label"], "已排队，等待执行")
         self.assertEqual(row["gap"], "已排队，尚未开跑")
         self.assertIsNone(row["conclusion"])
 

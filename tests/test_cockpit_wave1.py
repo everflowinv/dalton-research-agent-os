@@ -317,7 +317,7 @@ class ForecastCardTests(Wave1Case):
         self.assertIn("驱动因素有假设", model["note"])
         # Counted, never scored: no percentage anywhere on this block.
         self.assertNotIn("%", model["note"])
-        self.assertIn("模型估的", model["assumptions_by_kind"])
+        self.assertIn("模型估算", model["assumptions_by_kind"])
 
     def test_the_model_view_prints_the_lane_s_own_table(self) -> None:
         published = self.publish_model()
@@ -395,7 +395,7 @@ class QualityAndJournalTests(Wave1Case):
             "target_kind": "initial_screen", "verdict": "needs_more_evidence",
             "company_ref": ACN, "note": "再找两条一手证据。"})
         self.assertEqual(first["status"], "fresh")
-        self.assertEqual(first["verdict_label"], "证据不够")
+        self.assertEqual(first["verdict_label"], "仍需补充证据")
         self.assertEqual(seen[0]["operation"], "record_analyst_journal_entry")
         # The principal is the owner's Tailscale-derived one, and the
         # idempotency key is content-addressed rather than spelling out an
@@ -415,7 +415,7 @@ class QualityAndJournalTests(Wave1Case):
         self.assertEqual((card["feedback"]["total"], card["feedback"]["outstanding"]), (1, 1))
         document = self.plane.document(deliverable["id"])
         self.assertEqual([e["verdict_label"] for e in document["feedback"]["entries"]],
-                         ["证据不够"])
+                         ["仍需补充证据"])
         self.assertTrue(any(e["kind"] == "feedback" for e in self.plane.log()["events"]))
 
     def test_a_verdict_outside_the_five_never_leaves_the_cockpit(self) -> None:
@@ -680,7 +680,7 @@ class ClaimIndexViewTests(Wave1Case):
         by_aspect = self.plane.claims(index_aspect="demand_drivers")
         self.assertEqual([item["statement"] for item in by_aspect["items"]],
                          [other["normalized_statement"]])
-        self.assertEqual(by_aspect["items"][0]["aspect_label"], "需求从哪来")
+        self.assertEqual(by_aspect["items"][0]["aspect_label"], "需求驱动因素")
 
         by_source = self.plane.claims(importance="management_statement")
         self.assertEqual(len(by_source["items"]), 1)
@@ -753,9 +753,9 @@ class PageVocabularyTests(unittest.TestCase):
 
     def test_the_five_feedback_buttons_are_the_five_verdicts(self) -> None:
         page = self.PAGE.read_text(encoding="utf-8")
-        for verdict, label in (("read", "读过"), ("useful", "有用"),
-                               ("needs_more_evidence", "证据不够"),
-                               ("disagree", "不同意"), ("revise", "要重写")):
+        for verdict, label in (("read", "已审阅"), ("useful", "可用于研究判断"),
+                               ("needs_more_evidence", "仍需补充证据"),
+                               ("disagree", "不认同当前结论"), ("revise", "需要修订")):
             self.assertIn(f"{verdict}:\"{label}\"", page)
         self.assertIn("/v1/cockpit/feedback", page)
 

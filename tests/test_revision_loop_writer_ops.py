@@ -294,6 +294,8 @@ class CockpitApprovalTests(unittest.TestCase):
         self.assertEqual(row["hash"], "a" * 64)
         self.assertEqual(row["details"]["大脑的判断"],
                          JUDGEMENT_DECISION_LABELS["THESIS_WEAKENED"])
+        self.assertEqual(row["detail_labels"]["提议改成"], "建议修订为")
+        self.assertEqual(row["detail_labels"]["提议的把握"], "建议置信度")
         self.assertEqual(row["reflection"]["what_happened"], "They fell.")
         self.assertEqual([a["decision"] for a in row["actions"]],
                          ["accept", "reject", "defer"])
@@ -304,11 +306,12 @@ class CockpitApprovalTests(unittest.TestCase):
         self.seed_reopen()
         items = self.c.plane.approvals()["items"]
         row = next(item for item in items if item["kind"] == "gate_reopen")
-        self.assertEqual(row["title"], "深度研究关卡出现新证据，待决定是否重新评估")
+        self.assertEqual(row["title"], "已有研究报告需要重新评估")
         self.assertIn("缺（0）", row["summary"])
         self.assertIn("有（2926）", row["summary"])
         self.assertEqual(row["details"]["修订原因"],
                          CHANGE_REASON_LABELS["evidence_thicker"])
+        self.assertEqual(row["detail_labels"]["修订原因"], "修订原因")
         self.assertEqual([a["decision"] for a in row["actions"]],
                          ["approve", "decline"])
 

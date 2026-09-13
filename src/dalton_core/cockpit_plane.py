@@ -118,19 +118,19 @@ STAGE_LABELS = {
 # "this Core has no price history" and "this company has no price history" are
 # different answers, and only the second one is worth a note on a card.
 VERDICT_LABELS = {
-    "read": "读过", "useful": "有用", "needs_more_evidence": "证据不够",
-    "disagree": "不同意", "revise": "要重写",
+    "read": "已审阅", "useful": "可用于研究判断", "needs_more_evidence": "仍需补充证据",
+    "disagree": "不认同当前结论", "revise": "需要修订",
 }
 # The verdicts that say the last attempt was not enough.
 OUTSTANDING_VERDICTS = frozenset({"needs_more_evidence", "disagree", "revise"})
 IMPORTANCE_LABELS = {
-    "filing": "公司报表原文", "management_statement": "管理层原话",
+    "filing": "公司报表原文", "management_statement": "管理层直接表述",
     "sell_side": "卖方观点", "news": "新闻报道", "other": "其他",
 }
 ASPECT_LABELS = {
-    "business_model": "怎么赚钱", "segments_and_mix": "业务构成",
-    "demand_drivers": "需求从哪来", "supply_and_cost": "成本与供给",
-    "competitive_position": "竞争位置",
+    "business_model": "商业模式与盈利来源", "segments_and_mix": "业务构成",
+    "demand_drivers": "需求驱动因素", "supply_and_cost": "成本与供给",
+    "competitive_position": "竞争地位",
     "management_and_capital_allocation": "管理层与资本配置",
     "guidance_style": "指引风格", "kpi_dictionary": "关键指标口径",
     "catalyst_calendar": "日程与催化", "history_of_price_drivers": "股价的历史驱动",
@@ -146,7 +146,7 @@ CALL_STANDARD_LABELS = {
     "met": "达到手册的风险回报标准",
     "not_met": "未达到手册规定的风险回报标准",
     "unavailable": "缺少可供对照的数字",
-    "not_applicable": "手册对这类 call 没有回报标准",
+    "not_applicable": "手册未规定这类投资判断的回报标准",
 }
 # P11c asked for this one specifically: a percentile computed while the
 # fundamentals never moved is the price's percentile wearing a multiple's
@@ -156,25 +156,27 @@ PERCENTILE_BASIS_LABELS = {
     "price_and_filed_fundamentals": "股价与已报基本面一起算出来的",
 }
 CHANGE_REASON_LABELS = {
-    "filing_actual": "财报数字取代了当初的估计",
-    "driver_event": "有事件改变了驱动因素",
-    "assumption_review": "复核了假设",
+    "filing_actual": "财报实际值替代原估计",
+    "driver_event": "新事件改变了关键驱动因素",
+    "assumption_review": "关键假设已经复核",
     "evidence_thicker": "支撑论据已补充更新",
     "human_revision": "人工审阅后修订",
     "imported_prior": "从历史资料导入",
 }
-ASSUMPTION_KIND_LABELS = {"estimate": "模型估的", "human": "人写的", "actual": "已报实际"}
+ASSUMPTION_KIND_LABELS = {
+    "estimate": "模型估算", "human": "人工设定", "actual": "已披露实际值",
+}
 QUALITY_CHECK_LABELS = {
-    "numbers_without_refs": "每个数字都有出处",
-    "residual_citation_artefacts": "引用标记清理干净",
-    "duplicate_parallel_citations": "同一件事没有被并列引用多次",
-    "required_sections_present": "该写的章节都写了",
-    "claim_refs_resolve": "引用的结论都找得到",
-    "cites_only_shown_claims": "只引用了给它看过的结论",
-    "confidence_stated": "说明了把握有多大",
-    "every_section_cites": "每一节都有依据",
-    "new_version_cites_new_refs": "新版本用上了新证据",
-    "restatement_drift": "改写没有偏离原意",
+    "numbers_without_refs": "数字均有可核验出处",
+    "residual_citation_artefacts": "没有残留引用标记",
+    "duplicate_parallel_citations": "没有重复引用同一事项",
+    "required_sections_present": "必需章节完整",
+    "claim_refs_resolve": "引用的研究结论均可定位",
+    "cites_only_shown_claims": "仅引用输入中已有的研究结论",
+    "confidence_stated": "已说明结论置信度",
+    "every_section_cites": "各章节均有依据",
+    "new_version_cites_new_refs": "新版本引用了新增证据",
+    "restatement_drift": "改写保持原意",
 }
 # What each status means, in the owner's language. The driver's own ``reason``
 # is English and written for whoever reads a tick summary -- "this mission does
@@ -332,13 +334,13 @@ def _terminal_display_reason(reason: Any, failure_class: Any = None) -> str:
     return "当前产出未通过内容或证据校验"
 
 OUTCOME_LABELS = {
-    "should_have_moved": "当时该动没动（候选）",
-    "held": "按兵不动是对的",
-    "moved_right": "动对了",
-    "moved_wrong": "动反了",
-    "not_confirmed": "方向没被证实",
-    "pending": "还评不出来",
-    "unavailable": "评不了，有理由",
+    "should_have_moved": "当时应调整但未调整（候选）",
+    "held": "维持原判断正确",
+    "moved_right": "调整方向正确",
+    "moved_wrong": "调整方向错误",
+    "not_confirmed": "判断方向尚未得到证实",
+    "pending": "尚待评估",
+    "unavailable": "暂不具备评估条件",
 }
 
 
@@ -385,7 +387,7 @@ EVENT_KIND_LABELS = {
     "news": "新闻", "filing": "公司报表", "transcript": "电话会纪要",
     "rating_change": "评级变化", "calendar": "日程",
     "reconciliation": "预测与实际对账", "claim": "新结论",
-    "sales_note": "卖方 sales note", "crowd_post": "散户与市场议论",
+    "sales_note": "卖方销售简报", "crowd_post": "散户与市场讨论",
     "expert_excerpt": "专家访谈摘录",
     "insider_transaction": "董事与高管的买卖",
     "insider_trading_plan": "董事与高管的交易计划变更",
@@ -395,22 +397,22 @@ EVENT_KIND_LABELS = {
 }
 # Ordered best first, the same order the Playbook reads them in.
 EVIDENCE_TIER_LABELS = {
-    "primary_filing": "公司报表原文", "management_direct": "管理层原话",
+    "primary_filing": "公司报表原文", "management_direct": "管理层直接表述",
     "expert_network": "专家访谈", "sell_side": "卖方观点",
-    "vendor_note": "vendor 归一化", "internal_wiki": "我们自己的档案",
-    "market_price": "市场价格", "derived": "我们算出来的",
-    "news_media": "新闻报道", "crowd": "网上的议论",
+    "vendor_note": "第三方资料整理", "internal_wiki": "内部研究档案",
+    "market_price": "市场价格", "derived": "系统计算结果",
+    "news_media": "新闻报道", "crowd": "公开市场讨论",
 }
 # The five words the judgement layer may say, and the six things it may do.
 JUDGEMENT_DECISION_LABELS = {
-    "NO_CHANGE": "不用改主意", "THESIS_STRENGTHENED": "论点更站得住了",
+    "NO_CHANGE": "维持现有判断", "THESIS_STRENGTHENED": "论点得到加强",
     "THESIS_WEAKENED": "论点被削弱了", "THESIS_BROKEN": "论点被打破了",
-    "NEW_THESIS": "这是一个新论点",
+    "NEW_THESIS": "形成新的投资论点",
 }
 JUDGEMENT_ACTION_LABELS = {
-    "no_change": "什么都不做", "note": "写一段短报告",
-    "research": "派一次专项研究", "revise_forecast": "改预测",
-    "revise_thesis": "提一个论点修订候选", "revise_dossier": "改公司档案",
+    "no_change": "维持现状", "note": "记录研究说明",
+    "research": "启动专项研究", "revise_forecast": "修订预测",
+    "revise_thesis": "提出论点修订候选", "revise_dossier": "修订公司档案",
 }
 # What the independent reader said about that decision. ``none`` is not a
 # verdict: it is the absence of one, and the two must not look alike.
@@ -422,28 +424,28 @@ VERIFIER_VERDICT_LABELS = {
 CONTENT_KIND_LABELS = {
     "sell_side_report": "卖方研报", "sell_side_comment": "卖方短评",
     "transcript": "电话会纪要", "management_minutes": "管理层会议纪要",
-    "expert_excerpt": "专家访谈摘录", "sales_note": "卖方 sales note",
+    "expert_excerpt": "专家访谈摘录", "sales_note": "卖方销售简报",
     "crowd_post": "散户帖子", "employee_review": "员工评价",
     "news": "新闻", "filing": "公司报表", "financial_statement": "三张报表",
     "price": "股价", "consensus": "市场一致预期", "calendar": "日程",
     "web_page": "公开网页",
 }
 CONNECTION_STATUS_LABELS = {
-    "connected": "已接上", "not_connected": "还没接上",
-    "probe_only": "只允许试读", "undeclared": "研究目标里没提过它",
+    "connected": "已连接", "not_connected": "尚未连接",
+    "probe_only": "仅允许试读", "undeclared": "研究目标尚未声明该来源",
     "unknown": "状态不明",
 }
 COMPLETENESS_LABELS = {
-    "enumerated": "能取全", "bounded": "能取到有限的一批", "sampled": "只能取到样本",
+    "enumerated": "可完整获取", "bounded": "可获取限定范围", "sampled": "仅能获取样本",
 }
 # The tracking policy's source keys, named for the owner. A key with no name
 # here shows its key, which is ugly and visible -- the same rule the lane
 # panel follows.
 TRACKING_SOURCE_LABELS = {
     "yfinance": "股价", "sec": "SEC 报表与 8-K", "alphaengine": "卖方研报与纪要",
-    "x-xreach": "X（推特）", "sales-notes": "卖方 sales note",
+    "x-xreach": "X（推特）", "sales-notes": "卖方销售简报",
     "gemini-web-search": "公开网页搜索", "guidepoint": "专家访谈",
-    "company-wiki": "我们自己的公司维基", "employee-reviews": "员工评价",
+    "company-wiki": "内部公司知识库", "employee-reviews": "员工评价",
     "catalyst-calendar": "催化剂日历",
 }
 CATALYST_EVENT_LABELS = {
@@ -452,14 +454,14 @@ CATALYST_EVENT_LABELS = {
 }
 # P14e: what a special-purpose research task ended up as.
 RESEARCH_TASK_STATE_LABELS = {
-    "admitted": "已排队，还没开跑", "running": "正在做", "terminal": "已结束",
+    "admitted": "已排队，等待执行", "running": "正在执行", "terminal": "已结束",
 }
 RESEARCH_TASK_TERMINAL_LABELS = {
     "evidence_observed_for_review": "有发现，待复核",
     "coverage_complete_unobservable_candidate": "查遍了，没有可观察到的证据",
-    "budget_exhausted": "预算用完，还没答完",
-    "human_replan_required": "等人重新规划",
-    "human_deprioritized": "人已降级",
+    "budget_exhausted": "预算已用完，研究尚未完成",
+    "human_replan_required": "等待人工重新规划",
+    "human_deprioritized": "人工降低了优先级",
 }
 # The two model tiers a purpose can sit in, and what each is for.
 # P14-M2: follow the configured tier or explicitly select models; the third
@@ -505,10 +507,10 @@ def _gate_answer_line(item: Mapping[str, Any]) -> str:
     if item["status"] == "answered":
         refs = len(item["sources"])
         return (f"{head} —— {answer_body(item)}"
-                f"（把握 {item['confidence']}，{refs} 条引用）")
+                f"（置信度 {item['confidence']}，{refs} 条引用）")
     unknown = item["unknown"]
-    return (f"{head} —— 未答：{unknown['missing']}。"
-            f"能定它的证据：{unknown['evidence_that_would_answer']}")
+    return (f"{head} —— 未回答：{unknown['missing']}。"
+            f"所需证据：{unknown['evidence_that_would_answer']}")
 
 
 def _gate_decidability(core: sqlite3.Connection, record: Mapping[str, Any]) -> dict[str, Any]:
@@ -525,7 +527,36 @@ def _gate_decidability(core: sqlite3.Connection, record: Mapping[str, Any]) -> d
 
 CHECKPOINT_TITLES = {
     "thesis_revision_candidate": "新证据可能影响现有投资论点，待人工决策",
-    "gate_reopen": "深度研究关卡出现新证据，待决定是否重新评估",
+    "gate_reopen": "已有研究报告需要重新评估",
+}
+APPROVAL_DETAIL_LABELS = {
+    "thesis": {"信心": "置信度", "提议者": "提议人"},
+    "capability": {"已有评估": "是否已有评估"},
+    "planner": {"轮次": "研究轮次"},
+    "forecast": {"偏离": "实际值与预测的偏离"},
+    "deep_insight_gate": {"行业分类": "行业分类"},
+    "investment_memo": {"独立核验": "独立核验结果"},
+    "claim": {"发现的问题": "需要处理的问题", "依据": "判断依据"},
+    "conviction_call": {
+        "我们的看法": "当前投资判断", "市场的看法": "市场一致预期",
+        "时间跨度": "投资期限", "信心": "置信度",
+        "风险回报是否达标": "风险回报标准", "怎么裁决": "所需决定",
+    },
+    "thesis_revision_candidate": {
+        "大脑的判断": "系统研判", "提议改成": "建议修订为",
+        "提议的把握": "建议置信度", "修订原因": "修订原因",
+        "此前通过时间": "此前通过时间",
+    },
+    "gate_reopen": {
+        "大脑的判断": "系统研判", "提议改成": "建议修订为",
+        "提议的把握": "建议置信度", "修订原因": "修订原因",
+        "此前通过时间": "此前通过时间",
+    },
+    "forecast_proposal": {
+        "哪一期": "预测期间", "想改成": "建议值",
+        "为什么没直接改": "需要人工决定的原因",
+    },
+    "model_fallback": {"环节": "受影响的研究环节", "档位": "模型档位"},
 }
 # What each one's buttons say, when this Core can actually decide it. The
 # words are the authorities' own verdict vocabularies -- ``accept / reject /
@@ -726,7 +757,27 @@ def _gate_reopen_view(record: Mapping[str, Any], summary: str) -> tuple[str, dic
             record.get("change_reason"), record.get("change_reason")),
         "发生退步的项目": list(record.get("regressed") or ()),
     }
-    return ("；".join(flipped) or summary or "原先缺失的证据现已补齐。"), details
+    erratum = record.get("erratum") or {}
+    substitutions = erratum.get("substitutions") if isinstance(erratum, Mapping) else None
+    corrections = [
+        f"{change.get('before')} → {change.get('after')}"
+        for change in substitutions or ()
+        if isinstance(change, Mapping) and change.get("before") and change.get("after")
+    ]
+    if (record.get("change_reason") == "human_revision"
+            and record.get("policy_ref") == "owner-directed-factual-erratum:0.1"
+            and corrections):
+        display_summary = "根据已核验来源纠正事实：" + "；".join(corrections)
+        details["修订原因"] = "根据已核验来源纠正事实"
+    elif flipped:
+        display_summary = "；".join(flipped)
+    elif summary:
+        display_summary = summary
+    elif record.get("change_reason") == "human_revision":
+        display_summary = "人工修订记录未提供具体纠错摘要。"
+    else:
+        display_summary = "原先缺失的证据现已补齐。"
+    return display_summary, details
 
 
 def _iso(value: datetime) -> str:
@@ -2661,7 +2712,7 @@ class CockpitPlane:
         deterministic = int(scores.get("deterministic_only") or 0)
         entries = int(feedback.get("entries") or 0) if feedback.get("available") else 0
         if published == 0:
-            note = "上周没有产出被打过分"
+            note = "上周没有研究产出完成质量评估"
         else:
             note = (f"上周完成 {published} 份质量评估，覆盖 "
                     f"{scores.get('distinct_targets')} 份产出")
@@ -3081,7 +3132,7 @@ class CockpitPlane:
                 items.append({
                     "kind": "deep_insight_gate", "ref": row["version_id"],
                     "hash": row["content_hash"], "at": row["created_at"],
-                    "title": "深度认知门十二问：是否让这家公司进入完整覆盖",
+                    "title": "深度认知评审十二问：是否让这家公司进入完整覆盖",
                     "who": self._label(members, row["company_ref"]),
                     "summary": (f"第 {row['version_number']} 版；十二问答了 "
                                 f"{len(answered)} 问，其余写明缺什么、下一步取什么。"),
@@ -3096,6 +3147,11 @@ class CockpitPlane:
                            for item in record["answers"]},
                         "档案版本": record["bindings"]["dossier_version_ref"],
                         "争议图版本": record["bindings"]["debate_map_version_ref"],
+                    },
+                    "detail_labels": {
+                        "行业分类": "行业分类",
+                        **{item["question_ref"]: f"研究问题 {number}"
+                           for number, item in enumerate(record["answers"], 1)},
                     },
                     "actions": list(GATE_ACTIONS) if verdict["decidable"] else [],
                     "needs_rationale": verdict["decidable"],
@@ -3266,6 +3322,14 @@ class CockpitPlane:
         # owner did not choose, and the only thing that would ever surface that
         # is a notice that stays until somebody reads it.
         items.extend(self._model_fallback_items())
+        for item in items:
+            labels = APPROVAL_DETAIL_LABELS.get(item["kind"], {})
+            if labels:
+                item["detail_labels"] = {
+                    **item.get("detail_labels", {}),
+                    **{key: label for key, label in labels.items()
+                       if key in (item.get("details") or {})},
+                }
         items.sort(key=lambda i: i["at"])
         return {"schema_version": SCHEMA_VERSION, "as_of": _iso(self.clock()), "items": items, "count": len(items)}
 
@@ -3495,8 +3559,8 @@ class CockpitPlane:
             operation, params = "decide_deep_insight_gate", {
                 "gate_version_ref": ref, "gate_version_hash": digest,
                 "decision": decision, "reason": rationale.strip()}
-            title = {"approve": "通过了深度认知门", "return_for_more_work": "把深度认知门退回补充",
-                     "reject": "否决了深度认知门"}[decision] + f"：{ref.split(':', 1)[-1]}"
+            title = {"approve": "通过了深度认知评审", "return_for_more_work": "将深度认知评审退回补充",
+                     "reject": "未通过深度认知评审"}[decision] + f"：{ref.split(':', 1)[-1]}"
         elif kind == "investment_memo":
             if decision not in {"approve", "reject"}:
                 raise CockpitError("decision must be approve or reject")

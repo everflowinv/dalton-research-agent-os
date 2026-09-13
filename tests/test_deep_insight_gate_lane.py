@@ -1000,7 +1000,7 @@ class CockpitTests(unittest.TestCase):
 
     def test_the_undecided_gate_is_listed_with_a_plain_title(self):
         item = self.gate_item(self.plane())
-        self.assertEqual(item["title"], "深度认知门十二问：是否让这家公司进入完整覆盖")
+        self.assertEqual(item["title"], "深度认知评审十二问：是否让这家公司进入完整覆盖")
         self.assertEqual(item["ref"], self.draft["id"])
         self.assertEqual(item["hash"], self.draft["content_hash"])
         self.assertEqual([action["decision"] for action in item["actions"]],
@@ -1019,10 +1019,10 @@ class CockpitTests(unittest.TestCase):
             self.assertIn(ref, item["details"])
         answered = [row for row in self.draft["answers"]
                     if row["status"] == "answered"]
-        self.assertIn("把握", item["details"][answered[0]["question_ref"]])
+        self.assertIn("置信度", item["details"][answered[0]["question_ref"]])
         unknown = next(row for row in self.draft["answers"]
                        if row["status"] == "unknown")
-        self.assertIn("能定它的证据", item["details"][unknown["question_ref"]])
+        self.assertIn("所需证据", item["details"][unknown["question_ref"]])
 
     def test_a_rolled_mission_version_leaves_the_item_with_no_buttons(self):
         from dalton_core.deep_insight_gate import UNDECIDABLE_REASONS

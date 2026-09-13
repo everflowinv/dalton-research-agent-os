@@ -109,6 +109,22 @@ class CockpitLanguageTests(unittest.TestCase):
                          "提取财务数字", "支撑论据已补充更新", "人工审阅后修订"):
             self.assertIn(expected, visible_metadata)
 
+    def test_approval_business_details_are_visible_and_raw_technical_values_remain_expandable(self) -> None:
+        text = HTML.read_text(encoding="utf-8")
+        self.assertIn('if(label&&typeof v!=="object")', text)
+        self.assertIn('if(looksTechnical(String(v)))technical[k]=v', text)
+        self.assertIn('technicalDetails({kind:it.kind,ref:it.ref,hash:it.hash,details:technical})', text)
+
+    def test_owner_erratum_uses_its_exact_correction_as_the_visible_summary(self) -> None:
+        from dalton_core.cockpit_plane import _gate_reopen_view
+        summary, details = _gate_reopen_view({
+            "change_reason": "human_revision",
+            "policy_ref": "owner-directed-factual-erratum:0.1",
+            "erratum": {"substitutions": [{"before": "2025Q2", "after": "2026Q2"}]},
+        }, "")
+        self.assertEqual(summary, "根据已核验来源纠正事实：2025Q2 → 2026Q2")
+        self.assertEqual(details["修订原因"], "根据已核验来源纠正事实")
+
     def test_goal_and_steer_prompts_share_the_final_text_contract(self) -> None:
         from dalton_core.cockpit_plane import CockpitPlane
         from dalton_core.final_text_contract import final_text_instructions
