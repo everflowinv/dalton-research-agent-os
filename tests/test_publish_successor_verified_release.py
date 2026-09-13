@@ -15,6 +15,86 @@ def write(path: Path, value: object) -> None:
 
 
 class SuccessorPublisherTests(unittest.TestCase):
+    def recovery_fixture(self):
+        fixture = self.fixture()
+        packet, owner, _, manifest, _, accepted, args = fixture
+        recovery = {
+            "schema_version": "successor-predecessor-recovery-0.1",
+            "status": "failed_install_recovered_unpublished",
+            "published_release": {
+                "pointer_sha256": args["expected_current_release_sha256"],
+                "runtime_pointer_sha256": args["expected_current_runtime_config_sha256"],
+            },
+            "failed_install": {"source_commit": "c" * 40, "status": "deployment_failed"},
+        }
+        manifest["predecessor_recovery"] = recovery
+        write(packet / "release-manifest.candidate.json", manifest)
+        args["expected_manifest_sha256"] = publish.sha(packet / "release-manifest.candidate.json")
+        deployed = json.loads(args["deployment_path"].read_text())
+        deployed["candidate_manifest_sha256"] = args["expected_manifest_sha256"]
+        write(args["deployment_path"], deployed)
+        args["expected_deployment_sha256"] = publish.sha(args["deployment_path"])
+        write(args["installed_path"], {"predecessor_recovery": recovery})
+        args["expected_installed_sha256"] = publish.sha(args["installed_path"])
+        accepted.update(candidate_manifest_sha256=args["expected_manifest_sha256"],
+                        deployment_receipt_sha256=args["expected_deployment_sha256"],
+                        installed_verification_sha256=args["expected_installed_sha256"])
+        accepted["runtime_verification"]["predecessor_recovery"] = recovery
+        write(args["finalization_path"], accepted)
+        args["expected_finalization_sha256"] = publish.sha(args["finalization_path"])
+        return fixture
+
+    def test_recovery_chain_survives_finalization_and_publication(self):
+        fixture = self.recovery_fixture()
+        packet, owner, _, manifest, _, _, args = fixture
+        with self.verified_context(fixture):
+            receipt = publish.publish(**args)
+        expected = manifest["predecessor_recovery"]
+        self.assertEqual(receipt["predecessor_recovery"], expected)
+        self.assertEqual(json.loads((owner / "current-runtime-config.json").read_text())[
+            "predecessor_recovery"], expected)
+        self.assertEqual(json.loads((owner / "current-release.json").read_text())[
+            "runtime_verification"]["predecessor_recovery"], expected)
+
+    def test_rebound_installed_receipt_cannot_substitute_recovered_predecessor(self):
+        fixture = self.recovery_fixture()
+        packet, owner, _, _, _, accepted, args = fixture
+        before = (owner / "current-release.json").read_bytes()
+        write(args["installed_path"], {"predecessor_recovery": {"unrelated": "history"}})
+        args["expected_installed_sha256"] = publish.sha(args["installed_path"])
+        accepted["installed_verification_sha256"] = args["expected_installed_sha256"]
+        write(args["finalization_path"], accepted)
+        args["expected_finalization_sha256"] = publish.sha(args["finalization_path"])
+        with self.verified_context(fixture):
+            with self.assertRaisesRegex(publish.finalizer.SuccessorFinalizeError,
+                                        "predecessor recovery differs"):
+                publish.publish(**args)
+        self.assertEqual((owner / "current-release.json").read_bytes(), before)
+        self.assertFalse((packet / "previous-current-release.json").exists())
+        self.assertFalse(args["receipt_path"].exists())
+
+    def test_valid_pointer_pair_cannot_replace_accepted_published_predecessor(self):
+        fixture = self.recovery_fixture()
+        packet, owner, _, _, _, _, args = fixture
+        # Even a correctly self-bound new pair is outside the accepted history.
+        write(owner / "current-release.json", {
+            "status": "deployed_verified", "source_commit": "d" * 40,
+            "release_ref": "unrelated"})
+        args["expected_current_release_sha256"] = publish.sha(owner / "current-release.json")
+        write(owner / "current-runtime-config.json", {
+            "schema_version": "dalton-runtime-config-pointer-0.1",
+            "base_release_commit": "d" * 40,
+            "base_release_pointer_sha256": args["expected_current_release_sha256"]})
+        args["expected_current_runtime_config_sha256"] = publish.sha(owner / "current-runtime-config.json")
+        before = (owner / "current-release.json").read_bytes()
+        with self.verified_context(fixture):
+            with self.assertRaisesRegex(publish.SuccessorPublicationError,
+                                        "predecessor pointers differ"):
+                publish.publish(**args)
+        self.assertEqual((owner / "current-release.json").read_bytes(), before)
+        self.assertFalse((packet / "previous-current-release.json").exists())
+        self.assertFalse(args["receipt_path"].exists())
+
     @contextmanager
     def verified_context(self, fixture):
         packet, _, state, manifest, artifacts, accepted, _ = fixture

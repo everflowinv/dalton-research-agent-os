@@ -132,6 +132,7 @@ def publish(
     finalization_bytes = packet_file(packet, finalization_path, expected_finalization_sha256,
                                      "successor finalization")
     deployment = load_json_bytes(deployment_bytes, "deployment receipt")
+    installed = load_json_bytes(installed_bytes, "installed verification")
     accepted = load_json_bytes(finalization_bytes, "successor finalization")
     commit = manifest["source"]["commit"]
     need(
@@ -145,6 +146,15 @@ def publish(
         and accepted.get("manifest_publication") is False,
         "successor finalization does not bind the publication inputs",
     )
+    finalizer.verify_predecessor_recovery(
+        manifest, installed, accepted.get("runtime_verification", {}))
+    if "predecessor_recovery" in manifest:
+        published_predecessor = manifest["predecessor_recovery"].get("published_release", {})
+        need(published_predecessor.get("pointer_sha256")
+                 == expected_current_release_sha256
+             and published_predecessor.get("runtime_pointer_sha256")
+                 == expected_current_runtime_config_sha256,
+             "publication predecessor pointers differ from accepted recovery")
     rollback = deployment.get("fresh_rollback_snapshot", {})
     rollback_path = Path(rollback.get("path", "")).resolve()
     need(
@@ -246,6 +256,8 @@ def publish(
             "document_research_config_sha256": sha(document_path),
             "mission_document_lane_config_sha256": sha(lane_path),
         }
+        if "predecessor_recovery" in manifest:
+            runtime_record["predecessor_recovery"] = manifest["predecessor_recovery"]
         runtime_after = json_bytes(runtime_record)
         runtime_after_sha = sha_bytes(runtime_after)
         release_record = {
@@ -298,6 +310,8 @@ def publish(
             "finalization_sha256": expected_finalization_sha256,
             "research_governance_signed": False,
         }
+        if "predecessor_recovery" in manifest:
+            receipt["predecessor_recovery"] = manifest["predecessor_recovery"]
         receipt_bytes = json_bytes(receipt)
 
         current_release_bytes = regular_bytes(current_release, "current release pointer")

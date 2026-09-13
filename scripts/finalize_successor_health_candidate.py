@@ -36,6 +36,23 @@ def exclusive_json(path: Path, value: Mapping[str, Any]) -> None:
         stream.flush(); os.fsync(stream.fileno())
 
 
+def verify_predecessor_recovery(
+    manifest: Mapping[str, Any], installed: Mapping[str, Any],
+    exact: Mapping[str, Any],
+) -> None:
+    """Carry the accepted historical identity across both live verifications."""
+    if "predecessor_recovery" in manifest:
+        expected = manifest["predecessor_recovery"]
+        need(isinstance(expected, Mapping) and bool(expected)
+             and installed.get("predecessor_recovery") == expected
+             and exact.get("predecessor_recovery") == expected,
+             "post-observation predecessor recovery differs from acceptance")
+    else:
+        need("predecessor_recovery" not in installed
+             and "predecessor_recovery" not in exact,
+             "unaccepted predecessor recovery appeared after deployment")
+
+
 def verify_health(
     summary_path: Path, summary: Mapping[str, Any], deployment: Mapping[str, Any],
     policy: Mapping[str, int],
@@ -160,6 +177,7 @@ def finalize(
          and canonical_hash(exact["authority"])
              == canonical_hash(installed["authority"]),
          "post-observation authority differs from installed verification")
+    verify_predecessor_recovery(manifest, installed, exact)
     if "writer_operation_transition" in exact:
         need(exact["writer_operation_transition"] == installed.get("writer_operation_transition")
              and exact.get("writer_token_mutations")
