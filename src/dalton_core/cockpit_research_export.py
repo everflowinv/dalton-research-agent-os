@@ -4,17 +4,23 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import re
 import tempfile
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 
 def export_download(core_db: str | Path, company_ref: str, format: str,
-                    *, mission_ref: str) -> dict[str, Any]:
+                    *, mission_ref: str, company_label: str | None = None) -> dict[str, Any]:
     if format not in {"html", "xlsx"}:
         raise ValueError("unsupported research export format")
     suffix = hashlib.sha256(company_ref.encode()).hexdigest()[:12]
-    filename = f"Dalton-research-{suffix}.{format}"
+    label = re.sub(r'[\\/:*?"<>|\x00-\x1f\x7f]', "_", company_label or "").strip(" ._")[:80]
+    label = label or f"公司_{suffix}"
+    kind = "研究报告" if format == "html" else "财务模型"
+    date = datetime.now().astimezone().date().isoformat()
+    filename = f"Dalton_{label}_{kind}_{date}.{format}"
     with tempfile.TemporaryDirectory(prefix="dalton-cockpit-export-") as name:
         target = Path(name) / filename
         if format == "html":

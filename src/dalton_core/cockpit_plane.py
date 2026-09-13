@@ -3668,11 +3668,15 @@ class CockpitPlane:
             raise CockpitError("请选择 HTML 报告或 Excel 模型")
         with self._core() as core:
             mission = self._mission(core)
-            if ref not in {member["company_ref"] for member in mission["universe"]}:
+            member = next((member for member in mission["universe"]
+                           if member["company_ref"] == ref), None)
+            if member is None:
                 raise CockpitError("公司不在当前研究任务范围内")
         try:
             return export_download(self.config.core_db, ref, format,
-                                   mission_ref=mission["mission_ref"])
+                                   mission_ref=mission["mission_ref"],
+                                   company_label="_".join(str(member[key])
+                                       for key in ("ticker", "name") if member.get(key)))
         except (ValueError, RuntimeError, OSError, sqlite3.Error) as exc:
             raise CockpitError(f"无法导出：{exc}") from exc
 
