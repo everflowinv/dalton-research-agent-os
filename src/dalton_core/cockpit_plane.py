@@ -3131,6 +3131,39 @@ class CockpitPlane:
             "detail": detail, "state": state, "company": who if company_ref else None,
         }
 
+    def _journal_event_view(self, row: Mapping[str, Any]) -> dict[str, Any]:
+        """Project legacy journal rows without changing their stored evidence."""
+        title, detail = str(row["title"]), row["detail"]
+        try:
+            refs = json.loads(row["refs_json"] or "{}")
+        except (TypeError, ValueError):
+            refs = {}
+        technical = None
+        if row["kind"] == "approval" and isinstance(refs, Mapping):
+            decision = refs.get("decision")
+            titles = {
+                "admit": "接受了研究论点", "approve": "批准了研究决定",
+                "reject": "未批准研究决定", "retired": "停止使用了一条结论",
+                "kept": "保留了一条被标记的结论",
+                "return_for_more_work": "退回研究内容以补充资料",
+                "keep_forecast": "维持了预测", "revise_forecast": "决定修订预测",
+                "accept": "接受了论点修订", "defer": "暂缓决定论点修订",
+                "decline": "不同意重新评估研究报告",
+                "publish": "发布了研究目标", "discard": "放弃了研究草稿",
+            }
+            if decision in titles:
+                technical = {"original_title": title, "refs": refs}
+                title = titles[decision]
+        elif row["kind"] == "model_budget" and isinstance(refs, Mapping):
+            from .model_selection import PURPOSE_LABELS
+            purpose = refs.get("purpose")
+            if isinstance(purpose, str):
+                title = f"已调整「{PURPOSE_LABELS.get(purpose, '研究模型')}」的调用预算"
+                technical = {"original_title": row["title"], "purpose": purpose,
+                             "revision": refs.get("revision"), "original_detail": detail}
+                detail = "新预算已保存"
+        return {"title": title, "detail": detail, "technical": technical}
+
     def log(self, *, since: str | None = None, limit: int = 150) -> dict[str, Any]:
         limit = max(1, min(int(limit), 500))
         with self._core() as core:
@@ -3194,14 +3227,19 @@ class CockpitPlane:
                 "company": None,
             })
         for row in self.journal.rows("SELECT * FROM cockpit_events ORDER BY event_id DESC LIMIT ?", (limit,)):
+            shown = self._journal_event_view(row)
             events.append({"id": f"cockpit:{row['event_id']}", "at": row["at"], "kind": row["kind"], "lane": "你",
-                           "title": row["title"], "detail": row["detail"], "state": "done", "company": None})
+                           "title": shown["title"], "detail": shown["detail"],
+                           "technical": shown["technical"], "state": "done", "company": None})
         heartbeat = _load_json(self.config.heartbeat_path) or {}
         for key, label in (("bounded_planner", "研究调度"), ("outbox", "消息投递"), ("weekly_brief", "每周简报"), ("backup", "备份")):
             lane = heartbeat.get(key) or {}
             if lane.get("last_error"):
+                raw_error = str(lane["last_error"])[:400]
                 events.append({"id": f"error:{key}:{lane.get('last_completed_at')}", "at": lane.get("last_completed_at") or heartbeat.get("last_tick_at"),
-                               "kind": "problem", "lane": label, "title": f"{label}遇到问题", "detail": str(lane["last_error"])[:400],
+                               "kind": "problem", "lane": label, "title": f"{label}遇到问题",
+                               "detail": _terminal_display_reason(raw_error),
+                               "technical": {"original_error": raw_error},
                                "state": "failed", "company": None})
         events = [e for e in events if e.get("at")]
         if since:

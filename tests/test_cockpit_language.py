@@ -216,6 +216,27 @@ class CockpitLanguageTests(unittest.TestCase):
                       "把论点修订放了放", "重出 Initial Screen"):
             self.assertNotIn(stale, frontend + backend)
 
+    def test_legacy_log_rows_hide_refs_and_machine_errors(self) -> None:
+        from dalton_core.cockpit_plane import CockpitPlane
+        plane = object.__new__(CockpitPlane)
+        approval = plane._journal_event_view({
+            "kind": "approval", "title": "批准了投资备忘录：memo-version:raw",
+            "detail": "同意", "refs_json": '{"decision":"approve","ref":"memo-version:raw"}',
+        })
+        self.assertEqual(approval["title"], "批准了研究决定")
+        self.assertNotIn("raw", approval["title"] + approval["detail"])
+        self.assertEqual(approval["technical"]["refs"]["ref"], "memo-version:raw")
+        budget = plane._journal_event_view({
+            "kind": "model_budget", "title": "已调整「research_localization」的调用预算",
+            "detail": '{"max_cost_usd":1}',
+            "refs_json": '{"purpose":"research_localization","revision":"raw-revision"}',
+        })
+        self.assertNotIn("research_localization", budget["title"] + budget["detail"])
+        self.assertEqual(budget["technical"]["purpose"], "research_localization")
+        frontend = HTML.read_text(encoding="utf-8")
+        self.assertIn("technicalDetails(e.technical)", frontend)
+        self.assertIn('_terminal_display_reason(raw_error)', Path(__import__("dalton_core.cockpit_plane", fromlist=["x"]).__file__).read_text())
+
     def test_model_action_journal_uses_readable_copy(self) -> None:
         from dalton_core import cockpit_plane
 
