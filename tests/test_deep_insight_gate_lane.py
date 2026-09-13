@@ -411,6 +411,34 @@ class Harness:
 
 
 class GrantTests(unittest.TestCase):
+    def test_source_fingerprint_reads_empty_and_present_valuation_authority(self):
+        from dalton_core.valuation_snapshot import ValuationSnapshotAuthority
+        from tests.test_valuation_snapshot import history, roles
+
+        harness = Harness()
+        self.addCleanup(harness.close)
+        empty = deep_insight_company_source_fingerprint(
+            harness.store.connection, ACN)
+        authority = ValuationSnapshotAuthority(harness.store)
+        authority.publish_snapshot(
+            company_ref=ACN,
+            price={"version_ref": "market-price-series-version:" + "a" * 32,
+                   "version_hash": "b" * 64, "bar_date": "2026-09-08",
+                   "close": "100", "currency": "USD",
+                   "invocation_ref": "connector-invocation:yfinance:" + "c" * 32,
+                   "artifact_hash": "d" * 64},
+            shares={"version_ref": "market-price-series-version:" + "a" * 32,
+                    "version_hash": "b" * 64, "as_of": "2026-09-08",
+                    "shares_outstanding": "1000000",
+                    "invocation_ref": "connector-invocation:yfinance:" + "c" * 32,
+                    "artifact_hash": "d" * 64},
+            fundamental_windows=[{"as_of": "2026-08-31", "roles": roles()}],
+            price_history=history(),
+        )
+        present = deep_insight_company_source_fingerprint(
+            harness.store.connection, ACN)
+        self.assertNotEqual(empty, present)
+
     def test_a_mission_that_has_not_granted_deliverable_spends_nothing(self):
         harness = Harness(may_write=["claim", "stage_record", "observation",
                                      "research_question", "dossier"])

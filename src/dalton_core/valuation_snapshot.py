@@ -290,6 +290,21 @@ def _decode(row: sqlite3.Row | None, name: str) -> dict[str, Any]:
     return wire
 
 
+def latest_snapshot(
+    connection: sqlite3.Connection, company_ref: str,
+) -> dict[str, Any] | None:
+    """Read the latest snapshot without installing schema or opening a writer."""
+
+    row = connection.execute(
+        "SELECT * FROM valuation_snapshot_versions WHERE snapshot_ref=? "
+        "ORDER BY version_number DESC LIMIT 1",
+        (snapshot_ref_for(company_ref),),
+    ).fetchone()
+    if row is None:
+        return None
+    return _decode(row, f"latest ValuationSnapshotVersion for {company_ref}")
+
+
 # -- inputs ----------------------------------------------------------------
 
 
@@ -702,14 +717,7 @@ class ValuationSnapshotAuthority:
         return _decode(row, f"ValuationSnapshotVersion {version_ref}")
 
     def latest_version(self, company_ref: str) -> dict[str, Any] | None:
-        row = self.connection.execute(
-            "SELECT * FROM valuation_snapshot_versions WHERE snapshot_ref=? "
-            "ORDER BY version_number DESC LIMIT 1",
-            (snapshot_ref_for(company_ref),),
-        ).fetchone()
-        if row is None:
-            return None
-        return _decode(row, f"latest ValuationSnapshotVersion for {company_ref}")
+        return latest_snapshot(self.connection, company_ref)
 
     def publish_snapshot(
         self,

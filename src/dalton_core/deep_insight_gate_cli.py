@@ -136,7 +136,7 @@ def screened_companies(missions: Any, mission: Mapping[str, Any]) -> list[str]:
     ]
 
 
-def valuation_rows(store: DaltonStore, company_ref: str) -> list[dict[str, Any]]:
+def valuation_rows(store: Any, company_ref: str) -> list[dict[str, Any]]:
     """The computed multiples and where each sits in its own history.
 
     Citable because the snapshot is an append-only authority with a frozen
@@ -146,9 +146,9 @@ def valuation_rows(store: DaltonStore, company_ref: str) -> list[dict[str, Any]]
 
     if not table_exists(store.connection, "valuation_snapshot_versions"):
         return []
-    from .valuation_snapshot import ValuationSnapshotAuthority
+    from .valuation_snapshot import latest_snapshot
 
-    snapshot = ValuationSnapshotAuthority(store).latest_version(company_ref)
+    snapshot = latest_snapshot(store.connection, company_ref)
     if snapshot is None:
         return []
     rows: list[dict[str, Any]] = []
