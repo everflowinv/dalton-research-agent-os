@@ -21,7 +21,7 @@ VERDICT={'verdict':'pass','faithful':True,'no_new_facts':True,'meaning_preserved
 class PreparationTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
-        self.calls=[];self.excluded=[]
+        self.calls=[];self.request_ids=[];self.excluded=[]
         self.args=dict(mission={},draft_config={'name':'draft'},verifier_config={'name':'verify'},
           checker_config={'name':'checker'},brain_config={'name':'brain'},scheduler_db=Path('unused'),
           work_dir=Path(self.temp.name),max_cost=.2,attempts=3)
@@ -32,6 +32,7 @@ class PreparationTests(unittest.TestCase):
             def __init__(self,*a,**kw):pass
             def call(self,*,purpose,**kw):
                 owner.calls.append(purpose)
+                owner.request_ids.append(kw.get('request_id'))
                 response=owner.responses[purpose]
                 if isinstance(response,Exception):raise response
                 return {'text':json.dumps(response),'route_decision_ref':purpose,'cost_micros':1}
@@ -74,3 +75,51 @@ class PreparationTests(unittest.TestCase):
         self.assertNotEqual(old,prep.pipeline_identity(SOURCE,[{'policy':'b'}]))
         with patch.object(prep,'FINAL_TEXT_RULES_VERSION','future'):
             self.assertNotEqual(old,prep.pipeline_identity(SOURCE,[{'policy':'a'}]))
+
+    def test_changing_only_verifier_reuses_paid_style_and_reverifies(self):
+        self.run_one()
+        self.args['verifier_config']={'name':'verify-v2'}
+        result=self.run_one()
+        self.assertEqual(self.calls,[
+            'research_localization',prep.CHECKER_PURPOSE,prep.BRAIN_PURPOSE,
+            'research_localization_verifier','research_localization_verifier'])
+        verifier_ids=[request_id for purpose,request_id in zip(self.calls,self.request_ids)
+                      if purpose=='research_localization_verifier']
+        self.assertEqual(len(set(verifier_ids)),2)
+        self.assertEqual(result['semantic_identity'],prep.semantic_stage_identity(
+            result['pipeline_identity'],self.args['verifier_config']))
+
+    def test_style_config_or_source_change_does_not_reuse_style(self):
+        self.run_one()
+        self.args['checker_config']={'name':'checker-v2'}
+        self.run_one()
+        changed=copy.deepcopy(SOURCE);changed['version_ref']='screen:2'
+        prep.run_chunk((0,0,changed),**self.args)
+        self.assertEqual(self.calls.count(prep.CHECKER_PURPOSE),3)
+        self.assertEqual(self.calls.count(prep.BRAIN_PURPOSE),3)
+        self.assertEqual(self.calls.count('research_localization'),3)
+
+    def test_explicit_legacy_config_migrates_only_completed_style(self):
+        old_verifier={'name':'verify-old'}
+        old_identity=prep.pipeline_identity(SOURCE,[self.args['draft_config'],old_verifier,
+            self.args['checker_config'],self.args['brain_config']])
+        legacy_dir=Path(self.temp.name)/'stages';legacy_dir.mkdir()
+        legacy={'source_hash':prep.source_content_hash(SOURCE),'pipeline_identity':old_identity,
+            'rules_version':prep.FINAL_TEXT_RULES_VERSION,'pipeline_version':prep.PIPELINE_VERSION,
+            'draft':{'route_decision_ref':'research_localization','cost_micros':1},
+            'draft_localized':CHINESE,
+            'checker_call':{'text':json.dumps(STYLE),'route_decision_ref':prep.CHECKER_PURPOSE,
+                            'cost_micros':1},
+            'brain_call':{'text':json.dumps(REVISION),'route_decision_ref':prep.BRAIN_PURPOSE,
+                          'cost_micros':1},
+            'language_review':prep.run_language_review(
+                dict(SOURCE,sections=CHINESE['sections']),checker=lambda _:STYLE,
+                brain=lambda _:REVISION,checker_identity={
+                    'provider':prep.CHECKER_PROVIDER,'model':prep.CHECKER_MODEL}),
+            'verifier_call':{'text':'must not migrate','route_decision_ref':'old-verifier'}}
+        (legacy_dir/(old_identity+'.json')).write_text(json.dumps(legacy))
+        self.args['legacy_verifier_config']=old_verifier
+        result=self.run_one()
+        self.assertEqual(self.calls,['research_localization_verifier'])
+        self.assertNotEqual(result['verifier_call']['route_decision_ref'],'old-verifier')
+        self.assertEqual(result['migrated_legacy_pipeline_identity'],old_identity)

@@ -29,6 +29,7 @@ from dalton_core.research_language_review import (run_language_review, CHECKER_P
 from dalton_core.model_router import ModelRouter
 
 PIPELINE_VERSION = "localization-with-one-language-review:0.1"
+SEMANTIC_CONTRACT_VERSION = "localization-semantic-verification:0.1"
 
 
 
@@ -97,6 +98,66 @@ def pipeline_identity(product, configs):
         "configs": configs}, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
+def style_stage_identity(product, *, draft_config, checker_config, brain_config):
+    """Bind the paid one-check/one-revision stage without its later verifier."""
+    return pipeline_identity(product, [draft_config, checker_config, brain_config])
+
+
+def semantic_stage_identity(style_identity, verifier_config):
+    return hashlib.sha256(json.dumps({"style_identity": style_identity,
+        "contract": SEMANTIC_CONTRACT_VERSION, "verifier_config": verifier_config},
+        sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+_STYLE_EVIDENCE_KEYS = ('draft', 'draft_localized', 'checker_call', 'brain_call',
+                        'language_review')
+
+
+def _migrate_legacy_style(*, product, work_dir, draft_config, checker_config,
+                          brain_config, legacy_verifier_config, style_identity):
+    """Import only a cryptographically identified legacy style stage.
+
+    The legacy semantic call is deliberately excluded: a new verifier policy
+    always gets its own call and independence proof.
+    """
+    if legacy_verifier_config is None:
+        return None
+    legacy_identity = pipeline_identity(product, [draft_config, legacy_verifier_config,
+                                                   checker_config, brain_config])
+    legacy_path = work_dir / 'stages' / (legacy_identity + '.json')
+    if not legacy_path.exists():
+        return None
+    legacy = read_json(legacy_path)
+    if (legacy.get('pipeline_identity') != legacy_identity or
+            legacy.get('source_hash') != source_content_hash(product) or
+            legacy.get('rules_version') != FINAL_TEXT_RULES_VERSION or
+            legacy.get('pipeline_version') != PIPELINE_VERSION):
+        raise ValueError('legacy style stage identity could not be confirmed')
+    if not all(key in legacy for key in _STYLE_EVIDENCE_KEYS):
+        raise ValueError('legacy style stage is incomplete')
+    validate_localized_text(product, legacy['draft_localized'])
+    review = legacy['language_review']
+    if review.get('status') != 'ready_for_publication':
+        raise ValueError('legacy style review is not complete')
+    localized = {'sections': review['brain_revision']['sections']}
+    validate_localized_text(product, localized)
+    actual = selected_identity(checker_config, legacy['checker_call'])
+    if actual != {'provider': CHECKER_PROVIDER, 'model': CHECKER_MODEL}:
+        raise ValueError('legacy language checker identity could not be confirmed')
+    review_product = dict(product, sections=legacy['draft_localized']['sections'])
+    replayed_review = run_language_review(review_product,
+        checker=lambda _: unwrap_json_object(legacy['checker_call']['text']),
+        brain=lambda _: unwrap_json_object(legacy['brain_call']['text']),
+        checker_identity={'provider': CHECKER_PROVIDER, 'model': CHECKER_MODEL})
+    if replayed_review != review:
+        raise ValueError('legacy language review does not replay exactly')
+    migrated = {'source_hash': source_content_hash(product),
+        'pipeline_identity': style_identity, 'rules_version': FINAL_TEXT_RULES_VERSION,
+        'pipeline_version': PIPELINE_VERSION, 'migrated_legacy_pipeline_identity': legacy_identity}
+    migrated.update({key: copy.deepcopy(legacy[key]) for key in _STYLE_EVIDENCE_KEYS})
+    return migrated
+
+
 def selected_identity(config, call):
     with ModelRouter(config["model_router_db"]) as router:
         decision = router.get_decision(call["route_decision_ref"])
@@ -105,18 +166,29 @@ def selected_identity(config, call):
 
 
 def run_chunk(task, *, mission, draft_config, verifier_config, checker_config,
-              brain_config, scheduler_db, work_dir, max_cost, attempts):
+              brain_config, scheduler_db, work_dir, max_cost, attempts,
+              legacy_verifier_config=None):
     product_index, start, product = task
-    identity = pipeline_identity(product, [draft_config, verifier_config, checker_config, brain_config])
-    target = work_dir / 'chunks' / (identity + '.json')
+    identity = style_stage_identity(product, draft_config=draft_config,
+        checker_config=checker_config, brain_config=brain_config)
+    semantic_identity = semantic_stage_identity(identity, verifier_config)
+    target = work_dir / 'chunks' / (semantic_identity + '.json')
     stage_path = work_dir / 'stages' / (identity + '.json')
+    semantic_path = work_dir / 'semantic-stages' / (semantic_identity + '.json')
     resolve = router_family_resolver(draft_config)
-    evidence = read_json(stage_path) if stage_path.exists() else {
+    evidence = read_json(stage_path) if stage_path.exists() else _migrate_legacy_style(
+        product=product, work_dir=work_dir, draft_config=draft_config,
+        checker_config=checker_config, brain_config=brain_config,
+        legacy_verifier_config=legacy_verifier_config, style_identity=identity)
+    if evidence is not None and not stage_path.exists():
+        write_json(stage_path, evidence)
+    evidence = evidence or {
         'source_hash': source_content_hash(product), 'pipeline_identity': identity,
         'rules_version': FINAL_TEXT_RULES_VERSION, 'pipeline_version': PIPELINE_VERSION}
     if target.exists():
         saved = read_json(target)
-        if saved['pipeline_identity'] != identity:
+        if (saved['pipeline_identity'] != identity or
+                saved.get('semantic_identity') != semantic_identity):
             raise ValueError('saved chunk pipeline changed')
         validate_localized_text(product, saved['localized'])
         proof = independence(draft_routes=saved['producer_routes'],
@@ -203,21 +275,30 @@ def run_chunk(task, *, mission, draft_config, verifier_config, checker_config,
     # from the independent semantic verifier, in addition to the initial drafter.
     routes = [evidence['draft']['route_decision_ref'],evidence['brain_call']['route_decision_ref']]
     check_prompt = build_verifier_prompt(product,localized)
-    if 'verifier_call' not in evidence:
-        check_id = hashlib.sha256(('semantic-provider-contract:0.1'+identity+check_prompt).encode()).hexdigest()
+    semantic_evidence = read_json(semantic_path) if semantic_path.exists() else {
+        'source_hash': source_content_hash(product), 'pipeline_identity': identity,
+        'semantic_identity': semantic_identity,
+        'semantic_contract_version': SEMANTIC_CONTRACT_VERSION}
+    if (semantic_evidence.get('pipeline_identity') != identity or
+            semantic_evidence.get('semantic_identity') != semantic_identity):
+        raise ValueError('semantic stage identity changed')
+    if 'verifier_call' not in semantic_evidence:
+        check_id = hashlib.sha256((SEMANTIC_CONTRACT_VERSION+semantic_identity+check_prompt).encode()).hexdigest()
         verifier = model(verifier_config,5000)
-        evidence['verifier_call'] = independent_model_call(verifier,
+        semantic_evidence['verifier_call'] = independent_model_call(verifier,
             producer_route_decision_refs=routes, purpose='research_localization_verifier',
             request_id='zh-verify-'+check_id,prompt=check_prompt,mission=mission)
-        write_json(stage_path,evidence)
-    checked = evidence['verifier_call']
+        write_json(semantic_path,semantic_evidence)
+    checked = semantic_evidence['verifier_call']
     verdict = unwrap_json_object(checked['text'])
     proof = independence(draft_routes=routes,verifier_route=checked['route_decision_ref'],resolve=resolve)
     if not proof['independent']:
         raise ValueError('semantic verifier model is not independent of both authors')
     build_localization(product,localized,verdict)
-    saved={**evidence,'localized':localized,'producer_routes':routes,'verifier':verdict,
-           'independence':proof,'status':'passed'}
+    saved={**evidence,'semantic_identity':semantic_identity,
+           'semantic_contract_version':SEMANTIC_CONTRACT_VERSION,
+           'verifier_call':checked,'localized':localized,'producer_routes':routes,
+           'verifier':verdict,'independence':proof,'status':'passed'}
     write_json(target,saved)
     print(json.dumps({'product':product_index,'section_start':start,'status':'passed',
         'cost_micros':sum(saved[k]['cost_micros'] for k in
@@ -237,12 +318,15 @@ def build(args, data=None):
     work_dir = args.work_dir.resolve()
     work_dir.mkdir(parents=True, exist_ok=True)
     tasks = [(i,start,part) for i,p in enumerate(products) for start,part in chunks(p,args.chunk_chars)]
+    legacy_verifier_config = (read_json(args.legacy_verifier_config)
+        if getattr(args, 'legacy_verifier_config', None) else None)
     found, failures = {}, []
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
         futures = {pool.submit(run_chunk,t,mission=data['mission'],draft_config=read_json(args.model_config),
             verifier_config=read_json(args.verifier_config),checker_config=read_json(args.checker_config),
             brain_config=read_json(args.brain_config),scheduler_db=args.scheduler_db,
-            work_dir=work_dir,max_cost=args.max_cost_per_call,attempts=args.attempts):t for t in tasks}
+            work_dir=work_dir,max_cost=args.max_cost_per_call,attempts=args.attempts,
+            legacy_verifier_config=legacy_verifier_config):t for t in tasks}
         for future in concurrent.futures.as_completed(futures):
             task = futures[future]
             try:
@@ -380,6 +464,8 @@ def main():
     run=sub.add_parser('build')
     for name in ['input','model-config','verifier-config','checker-config','brain-config','scheduler-db','work-dir','output-directory']:
         run.add_argument('--'+name,type=Path,required=True)
+    run.add_argument('--legacy-verifier-config', type=Path,
+                     help='exact old verifier config used only to identify a legacy style cache')
     run.add_argument('--workers',type=int,default=4,choices=range(1,9))
     run.add_argument('--chunk-chars',type=int,default=4500)
     run.add_argument('--max-cost-per-call',type=float,default=1.0)
