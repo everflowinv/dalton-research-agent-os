@@ -92,8 +92,7 @@ class SchedulerTests(unittest.TestCase):
 
     def interruption_proof(self, durable=False):
         proof = {"schema_version": "dalton-model-interruption-proof:0.1",
-                 "broker_journal_sha256": "1" * 64,
-                 "process_command_sha256": "2" * 64}
+                 "process_identity_sha256": "2" * 64}
         if durable:
             proof |= {"route_decision_ref": "route:1", "profile_version_ref": "profile:1",
                       "invocation_ref": "invocation:result-1",
@@ -110,13 +109,20 @@ class SchedulerTests(unittest.TestCase):
     def test_operator_reconciles_exact_durable_model_completion(self):
         lease = self.enqueue_claim()
         envelope = ResultEnvelope.from_dict(result("result-1")).to_dict()
+        reservation_hash="9"*64
+        self.scheduler.reserve_interrupted_model_recovery("work-1",1,"worker:a",
+            lease_revision_ref=lease["lease"]["id"],lease_hash=lease["lease"]["content_hash"],
+            work_order_hash=lease["work_order_hash"],reservation_hash=reservation_hash)
+        with self.assertRaisesRegex(LeaseRejected, "reserved for interrupted-model"):
+            self.scheduler.complete("work-1",1,"worker:a",lease["lease_token"],
+                envelope,idempotency_key="ordinary-complete")
         recovered = self.scheduler.reconcile_interrupted_model_attempt(
             "work-1", 1, "worker:a", lease_revision_ref=lease["lease"]["id"],
             lease_hash=lease["lease"]["content_hash"],
             work_order_hash=lease["work_order_hash"], process_pid=25400,
             process_start="2026-09-13T13:26:00-04:00",
             process_is_alive=lambda pid: False, disposition="durable_completion",
-            recovery_proof=self.interruption_proof(True),
+            reservation_hash=reservation_hash, recovery_proof=self.interruption_proof(True),
             idempotency_key="recover:model:work-1:1", result_envelope=envelope,
             result_envelope_hash=content_hash(envelope))
         self.assertEqual(recovered["work_state"], "succeeded")
@@ -128,7 +134,7 @@ class SchedulerTests(unittest.TestCase):
             work_order_hash=lease["work_order_hash"], process_pid=25400,
             process_start="2026-09-13T13:26:00-04:00",
             process_is_alive=lambda pid: False, disposition="durable_completion",
-            recovery_proof=self.interruption_proof(True),
+            reservation_hash=reservation_hash, recovery_proof=self.interruption_proof(True),
             idempotency_key="recover:model:work-1:1", result_envelope=envelope,
             result_envelope_hash=content_hash(envelope))
         self.assertEqual(duplicate["status"], "duplicate")

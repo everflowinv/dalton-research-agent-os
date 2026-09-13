@@ -574,10 +574,33 @@ class Scheduler:
         current_leased = self._current_leased_events(cur)
         expired: list[dict[str, Any]] = []
         for event in current_leased:
+            if str(event["reason"]).startswith("operator_model_recovery_reserved:"):
+                continue
             lease = self._latest_lease_for_event(cur, event)
             if _parse_time(lease["expires_at"]) <= now_dt:
                 expired.append(self._expire_one(cur, event, lease, now))
         return expired
+
+    def reserve_interrupted_model_recovery(self, work_order_id: str,
+        attempt_number: int, owner_ref: str, *, lease_revision_ref: str,
+        lease_hash: str, work_order_hash: str, reservation_hash: str) -> dict[str, Any]:
+        """Append an exact recovery marker before another authority is settled."""
+        reservation_hash=_sha256(reservation_hash,"reservation_hash")
+        exact=self.validate_interrupted_model_attempt(work_order_id,attempt_number,owner_ref,
+            lease_revision_ref=lease_revision_ref,lease_hash=lease_hash,
+            work_order_hash=work_order_hash)
+        reason="operator_model_recovery_reserved:"+reservation_hash
+        now=_timestamp(self._now())
+        with self._transaction() as cur:
+            current=self._latest_event(cur,work_order_id)
+            if (current["state"]!="leased" or current["lease_revision_id"]!=lease_revision_ref):
+                raise SchedulerConflict("interrupted model recovery reservation lost CAS")
+            if current["reason"]==reason:
+                return {"status":"duplicate",**exact,"reservation_hash":reservation_hash}
+            event=self._append_event(cur,work_order_id=work_order_id,
+                attempt_number=attempt_number,state="leased",now=now,
+                lease_revision_id=lease_revision_ref,reason=reason)
+            return {"status":"fresh",**exact,"reservation_hash":reservation_hash,"event":event}
 
     def sweep_expired(self) -> list[dict[str, Any]]:
         """Expire all overdue leases and create bounded retries atomically."""
@@ -608,6 +631,7 @@ class Scheduler:
         process_pid: int, process_start: str,
         process_is_alive: Callable[[int], bool], disposition: str,
         recovery_proof: Mapping[str, Any], idempotency_key: str,
+        reservation_hash: str | None = None,
         result_envelope: ResultEnvelope | Mapping[str, Any] | None = None,
         result_envelope_hash: str | None = None,
     ) -> dict[str, Any]:
@@ -635,7 +659,11 @@ class Scheduler:
         if disposition not in {"durable_completion", "undispatched"}:
             raise SchedulerValidationError("model recovery disposition is invalid")
         proof = dict(recovery_proof) if isinstance(recovery_proof, Mapping) else {}
-        common = {"schema_version", "broker_journal_sha256", "process_command_sha256"}
+        if disposition == "durable_completion":
+            reservation_hash = _sha256(reservation_hash, "reservation_hash")
+        elif reservation_hash is not None:
+            raise SchedulerValidationError("undispatched recovery has no reservation")
+        common = {"schema_version", "process_identity_sha256"}
         durable = common | {"route_decision_ref", "profile_version_ref", "invocation_ref",
                             "broker_record_sha256", "budget_admission_id",
                             "budget_settlement_id", "budget_settlement_sha256"}
@@ -669,6 +697,7 @@ class Scheduler:
                    "lease_hash": lease_hash, "work_order_hash": work_order_hash,
                    "process_pid": process_pid, "process_start": process_start,
                    "disposition": disposition, "recovery_proof": proof,
+                   "reservation_hash": reservation_hash,
                    "result_envelope_hash": calculated_hash}
         request_hash = content_hash(request)
         now = _timestamp(self._now())
@@ -692,6 +721,9 @@ class Scheduler:
                     or int(lease["attempt_number"]) != attempt_number
                     or lease["owner_ref"] != owner_ref):
                 raise SchedulerConflict("interrupted model lease CAS authority drifted")
+            if (disposition == "durable_completion" and current["reason"] !=
+                    "operator_model_recovery_reserved:" + reservation_hash):
+                raise SchedulerConflict("model recovery reservation authority drifted")
             next_event = None
             if disposition == "undispatched":
                 event = self._append_event(cur, work_order_id=work_order_id,
@@ -736,6 +768,47 @@ class Scheduler:
             cur.execute("INSERT INTO scheduler_completion_idempotency (idempotency_key,request_hash,result_json,created_at) VALUES(?,?,?,?)",
                         (idempotency_key, request_hash, canonical_json(response), now))
             return response
+
+    def validate_interrupted_model_attempt(
+        self, work_order_id: str, attempt_number: int, owner_ref: str, *,
+        lease_revision_ref: str, lease_hash: str, work_order_hash: str,
+    ) -> dict[str, Any]:
+        """Read and verify the exact current lease before external settlement."""
+        work_order_id = _nonempty(work_order_id, "work_order_id")
+        attempt_number = _positive_int(attempt_number, "attempt_number")
+        owner_ref = _nonempty(owner_ref, "owner_ref")
+        lease_revision_ref = _nonempty(lease_revision_ref, "lease_revision_ref")
+        lease_hash = _sha256(lease_hash, "lease_hash")
+        work_order_hash = _sha256(work_order_hash, "work_order_hash")
+        cur = self.connection.cursor()
+        try:
+            work = cur.execute("SELECT work_order_hash FROM scheduler_work_orders WHERE work_order_id=?", (work_order_id,)).fetchone()
+            current = self._latest_event(cur, work_order_id)
+            lease = cur.execute("SELECT * FROM scheduler_leases WHERE lease_revision_id=?", (lease_revision_ref,)).fetchone()
+            if (work is None or work["work_order_hash"] != work_order_hash
+                    or current is None or current["state"] != "leased"
+                    or int(current["attempt_number"]) != attempt_number
+                    or current["lease_revision_id"] != lease_revision_ref
+                    or lease is None or lease["content_hash"] != lease_hash
+                    or lease["work_order_id"] != work_order_id
+                    or int(lease["attempt_number"]) != attempt_number
+                    or lease["owner_ref"] != owner_ref):
+                raise SchedulerConflict("interrupted model lease CAS authority drifted")
+            return {"work_order_ref": work_order_id, "attempt_number": attempt_number,
+                    "lease_revision_ref": lease_revision_ref, "lease_hash": lease_hash,
+                    "work_order_hash": work_order_hash, "owner_ref": owner_ref}
+        finally: cur.close()
+
+    def interrupted_model_recovery_receipt(self, idempotency_key: str) -> dict[str, Any] | None:
+        """Read a prior exact operator recovery result for crash-safe CLI replay."""
+        row=self.connection.execute(
+            "SELECT request_hash,result_json FROM scheduler_completion_idempotency WHERE idempotency_key=?",
+            (_nonempty(idempotency_key,"idempotency_key"),)).fetchone()
+        if row is None:return None
+        result=json.loads(row["result_json"])
+        if result.get("request_hash")!=row["request_hash"]:
+            raise SchedulerConflict("interrupted model recovery receipt drifted")
+        return result
 
     def claim(
         self,
@@ -869,6 +942,8 @@ class Scheduler:
             raise WorkNotFound(work_order_id)
         if event["attempt_number"] != attempt_number or event["state"] != "leased":
             raise LeaseRejected("attempt is not the current leased attempt")
+        if str(event["reason"]).startswith("operator_model_recovery_reserved:"):
+            raise LeaseRejected("attempt is reserved for interrupted-model recovery")
         lease = self._latest_lease_for_event(cur, event)
         supplied = _token_hash(lease_token)
         if lease["owner_ref"] != owner_ref or not hmac.compare_digest(
