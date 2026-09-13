@@ -151,6 +151,8 @@ def finalize(
     with os.fdopen(log_fd, "w", encoding="utf-8") as log:
         worker = SuccessorOrchestrator(packet, log)
         worker.rollback_root = rollback
+        worker.artifacts = dict(artifacts)
+        worker.successor_source = source
         worker.initially_loaded = list(initial["loaded"])
         exact = worker.verify_successor(manifest, artifacts)
     need(exact["model_config_count"] == installed["model_config_count"]
@@ -158,6 +160,11 @@ def finalize(
          and canonical_hash(exact["authority"])
              == canonical_hash(installed["authority"]),
          "post-observation authority differs from installed verification")
+    if "writer_operation_transition" in exact:
+        need(exact["writer_operation_transition"] == installed.get("writer_operation_transition")
+             and exact.get("writer_token_mutations")
+                 == installed.get("writer_token_mutations") == 1,
+             "post-observation writer transition differs from installed verification")
     need(manifest_path.read_bytes() == manifest_bytes,
          "accepted successor manifest changed during finalization")
     result = {

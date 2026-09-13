@@ -281,7 +281,12 @@ class SuccessorStoppedWindowCandidateTests(unittest.TestCase):
             exact = {"model_config_count": 17, "runtime_files": 9,
                      "authority": {"mission": "exact"},
                      "writer_lane_enabled": True, "thesis_impact_enabled": False,
-                     "backup_keep_latest": 3}
+                     "backup_keep_latest": 3,
+                     "writer_token_mutations": 1,
+                     "writer_operation_transition": {
+                         "before_sha256": "d" * 64, "after_sha256": "e" * 64,
+                         "predecessor_commit": "a" * 40, "successor_commit": "b" * 40,
+                         "added_operations": ["settle_company_model_spec"]}}
             write_json(installed_path, {
                 "schema_version": "successor-installed-verification-0.1",
                 "status": "installed_bytes_verified_runtime_pending",
@@ -331,19 +336,51 @@ class SuccessorStoppedWindowCandidateTests(unittest.TestCase):
                 "postdeployment_controller": True, "observed_long_enough": True,
                 "accepted": True, "samples": samples,
             })
-            class FakeWorker:
-                def __init__(self, *_args): pass
-                def verify_successor(self, _manifest, _artifacts): return exact
-            with patch.object(final, "packet_preflight", return_value=(manifest, {})), \
+            transition_path = packet / "transition.json"
+            transition = {"schema_version": execute.WRITER_APPEND_SCHEMA_VERSION}
+            write_json(transition_path, transition)
+            artifacts = {"transition_manifest": transition_path}
+            class FakeWorker(execute.SuccessorOrchestrator):
+                def verify_successor(self, _manifest, _artifacts):
+                    # Exercise the actual fresh-worker proof entry point;
+                    # finalization must bind both artifacts and frozen source.
+                    self._writer_projection()
+                    return exact
+            with patch.object(final, "packet_preflight", return_value=(manifest, artifacts)), \
                  patch.object(final, "SuccessorOrchestrator", FakeWorker), \
+                 patch.object(execute, "expected_writer_operation_transition_state",
+                              return_value=(b"before", b"after", {})) as projection, \
                  patch.object(final.subprocess, "check_output",
                               side_effect=["b" * 40 + "\n", ""]):
                 result = final.finalize(
                     packet, deployment_path, summary_path, installed_path,
                     packet / "runtime-verification.json", packet / "post.log")
+            projection.assert_called_once_with(
+                packet_root=packet, manifest=transition, successor_root=source)
             self.assertEqual("passed_pending_publication", result["status"])
             self.assertFalse(result["manifest_publication"])
             self.assertFalse((packet / "current-release.json").exists())
+            # A re-bound installed receipt cannot substitute different writer
+            # proof for the freshly reverified source and rollback identity.
+            mismatched = json.loads(installed_path.read_text())
+            mismatched["writer_operation_transition"]["after_sha256"] = "f" * 64
+            write_json(installed_path, mismatched)
+            deployment = json.loads(deployment_path.read_text())
+            deployment["installed_verification_sha256"] = execute.sha(installed_path)
+            write_json(deployment_path, deployment)
+            summary = json.loads(summary_path.read_text())
+            summary["deployment_receipt_sha256"] = execute.sha(deployment_path)
+            write_json(summary_path, summary)
+            with patch.object(final, "packet_preflight", return_value=(manifest, artifacts)), \
+                 patch.object(final, "SuccessorOrchestrator", FakeWorker), \
+                 patch.object(execute, "expected_writer_operation_transition_state",
+                              return_value=(b"before", b"after", {})), \
+                 patch.object(final.subprocess, "check_output",
+                              side_effect=["b" * 40 + "\n", ""]):
+                with self.assertRaisesRegex(final.SuccessorFinalizeError, "writer transition differs"):
+                    final.finalize(packet, deployment_path, summary_path, installed_path,
+                                   packet / "refused-verification.json", packet / "refused-post.log")
+            self.assertFalse((packet / "refused-verification.json").exists())
 
 
 if __name__ == "__main__":
