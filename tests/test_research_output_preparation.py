@@ -87,6 +87,26 @@ class PreparationTests(unittest.TestCase):
         with self.assertRaises(CockpitModelError):self.run_one()
         self.assertEqual(self.calls,['research_localization'])
 
+    def test_three_invalid_drafts_get_one_cached_brain_repair_before_review(self):
+        bad={'sections':[{'index':0,'title':'收入','body':'收入为 124 USD。','gaps':[]}]}
+        self.responses['research_localization']=[bad,bad,bad]
+        self.responses[prep.BRAIN_PURPOSE]=[CHINESE,REVISION]
+        result=self.run_one()
+        self.assertEqual(self.calls.count('research_localization'),3)
+        self.assertEqual(self.calls.count(prep.BRAIN_PURPOSE),2)
+        self.assertEqual(self.calls.count(prep.CHECKER_PURPOSE),1)
+        self.assertTrue(any(x.startswith('zh-draft-brain-repair-') for x in self.request_ids))
+        self.assertEqual(len(result['draft_failures']),3)
+        self.assertEqual(result['draft']['route_decision_ref'],prep.BRAIN_PURPOSE)
+        self.assertEqual(self.excluded,[ [prep.BRAIN_PURPOSE,prep.BRAIN_PURPOSE] ])
+        calls=len(self.calls);self.assertEqual(self.run_one(),result);self.assertEqual(len(self.calls),calls)
+
+    def test_final_transport_failure_never_uses_brain_draft_repair(self):
+        bad={'sections':[{'index':0,'title':'收入','body':'收入为 124 USD。','gaps':[]}]}
+        self.responses['research_localization']=[bad,bad,CockpitModelError('broker busy')]
+        with self.assertRaisesRegex(CockpitModelError,'broker busy'):self.run_one()
+        self.assertEqual(self.calls.count(prep.BRAIN_PURPOSE),0)
+
     def test_interrupted_brain_resumes_without_repeating_checker(self):
         self.responses[prep.BRAIN_PURPOSE] = CockpitModelError('this request is already running')
         with self.assertRaisesRegex(ValueError, 'already running'):

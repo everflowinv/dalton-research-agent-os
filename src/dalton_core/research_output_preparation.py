@@ -134,6 +134,18 @@ def _repair_prompt(*, product, draft_localized, review, failure, attempt):
         '上次修订：'+json.dumps(review.get('brain_revision'),ensure_ascii=False,sort_keys=True,separators=(',',':')),
     ))
 
+def _draft_brain_repair_prompt(product, last_draft, feedback):
+    display={key:copy.deepcopy(product[key]) for key in
+             ('kind','version_ref','status','title','sections') if key in product}
+    return '\n'.join((
+        '你是研究成品的中文初稿修复器。便宜初稿模型已完成三次，但确定性内容校验仍未通过。',
+        '只修复给出的校验错误，忠实保留原文的事实、数字、单位、来源、审批状态、缺口和章节结构。',
+        '只输出 JSON：{"sections":[{"index":0,"title":"...","body":"...","gaps":[]}]}。',
+        '原始展示内容：'+json.dumps(display,ensure_ascii=False,sort_keys=True,separators=(',',':')),
+        '最后一次初稿：'+json.dumps(last_draft,ensure_ascii=False,sort_keys=True,separators=(',',':')),
+        '准确校验反馈：'+str(feedback),
+    ))
+
 
 _STYLE_EVIDENCE_KEYS = ('draft', 'draft_localized', 'checker_call', 'brain_call',
                         'language_review')
@@ -215,6 +227,7 @@ def run_chunk(task, *, mission, draft_config, verifier_config, checker_config,
     draft = model(draft_config, 10000)
     prompt = build_prompt(product)
     if 'draft_localized' not in evidence:
+        final_validation_error = None
         for attempt in range(attempts):
             token = hashlib.sha256((identity+prompt).encode()).hexdigest()
             try:
@@ -227,15 +240,40 @@ def run_chunk(task, *, mission, draft_config, verifier_config, checker_config,
                 write_json(stage_path, evidence)
                 break
             except Exception as exc:
+                if not isinstance(exc,CockpitModelError):
+                    final_validation_error=exc
+                    evidence.setdefault('draft_failures',[]).append({
+                        'attempt':attempt,'error':str(exc),'draft_call':copy.deepcopy(evidence.get('draft'))})
                 evidence.update(status='draft_failed', error=str(exc), attempt=attempt)
                 write_json(work_dir/'attempts'/(identity+'-'+str(attempt)+'.json'),evidence)
                 # Transport, routing and budget errors have their own governed adapter
                 # retry. Redrafting cannot repair them and would spend unnecessarily.
-                if isinstance(exc, CockpitModelError) or attempt+1 == attempts:
+                if isinstance(exc, CockpitModelError):
                     raise
+                if attempt+1 == attempts:
+                    break
                 prompt = build_prompt(product)+'\nREPAIR FEEDBACK: '+str(exc)
                 if evidence.get('draft'):
                     prompt += '\nPREVIOUS OUTPUT: '+evidence['draft']['text']
+        if 'draft_localized' not in evidence:
+            if final_validation_error is None or not evidence.get('draft'):
+                raise ValueError('draft validation failed without repairable evidence')
+            if attempts != 3:
+                raise final_validation_error
+            try:last_draft=parse_stage_output(evidence['draft']['text'],stage='draft')
+            except ValueError:last_draft={'unparsed_output':evidence['draft']['text']}
+            repair_prompt=_draft_brain_repair_prompt(product,last_draft,final_validation_error)
+            repair_id=hashlib.sha256((identity+repair_prompt).encode()).hexdigest()
+            repair=model(brain_config,12000).call(purpose=BRAIN_PURPOSE,
+                request_id='zh-draft-brain-repair-'+repair_id,prompt=repair_prompt,mission=mission)
+            evidence['draft_repair_call']=copy.deepcopy(repair)
+            evidence['draft']=copy.deepcopy(repair)
+            write_json(stage_path,evidence)
+            localized=parse_stage_output(repair['text'],stage='draft')
+            validate_localized_text(product,localized)
+            evidence['draft_localized']=localized
+            evidence.pop('status',None);evidence.pop('error',None);evidence.pop('attempt',None)
+            write_json(stage_path,evidence)
 
     prior_review = evidence.get('language_review') or {}
     resume_interrupted_call = (
