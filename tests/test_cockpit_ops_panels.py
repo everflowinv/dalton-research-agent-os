@@ -326,7 +326,7 @@ class PageTests(unittest.TestCase):
         self.assertIn('$("open-reflection").onclick=openReflection;', self.page)
 
     def test_the_row_speaks_the_owner_s_language(self) -> None:
-        for word in ("任务流水线状态", "待补齐资料缺口", "异常阻断与终止任务",
+        for word in ("任务运行情况", "待补齐资料缺口", "受阻与停止记录",
                      "上周交付物验收", "运维待办"):
             with self.subTest(word=word):
                 self.assertIn(word, self.page)
