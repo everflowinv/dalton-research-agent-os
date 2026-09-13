@@ -42,7 +42,25 @@ def install(config_path: str | Path) -> dict[str, Any]:
     state_dir = core_db.parent
     control = service["control"]["config"]
     review = control.get("research_review") or {}
-    model_config = review.get("document_extraction_model_config_path")
+    extraction_model_config = review.get("document_extraction_model_config_path")
+    planner_model_config = state_dir / "research-planner-model-config.json"
+    existing = control.get("cockpit")
+    existing_model_config = (
+        existing.get("model_config_path") if isinstance(existing, dict) else None
+    )
+    # Preserve a separately selected cockpit model configuration.  Older
+    # installs copied the extraction path into this field; upgrade that legacy
+    # default to the planner's brain-capable configuration when it is present.
+    if (
+        isinstance(existing_model_config, str)
+        and existing_model_config
+        and existing_model_config != extraction_model_config
+    ):
+        model_config = existing_model_config
+    elif planner_model_config.is_file() and not planner_model_config.is_symlink():
+        model_config = str(planner_model_config)
+    else:
+        model_config = extraction_model_config
     wire = {
         "core_db": str(core_db),
         "state_dir": str(state_dir),
@@ -51,7 +69,6 @@ def install(config_path: str | Path) -> dict[str, Any]:
         "journal_path": str(state_dir / JOURNAL_DIR / JOURNAL_FILE),
         "model_config_path": None if model_config is None else str(Path(model_config).resolve()),
     }
-    existing = control.get("cockpit")
     if isinstance(existing, dict) and existing.get("mission_ref"):
         wire["mission_ref"] = existing["mission_ref"]
     if isinstance(existing, dict) and "openclaw_config_path" in existing:

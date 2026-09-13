@@ -551,6 +551,7 @@ MAX_CLAIMS_IN_VIEW = 300
 
 JOB_TTL_SECONDS = 6 * 3600
 MAX_JOBS = 200
+COCKPIT_DEFAULT_MAX_COST_USD = 2.0
 # P15a moved the answer's own bounds into ``ask_context`` (the byte budget and
 # the claim-row cap live with the priority order that spends them).  These two
 # stay as the names other readers import.
@@ -4322,7 +4323,16 @@ class CockpitPlane:
         config = _load_json(self.config.model_config_path)
         if not isinstance(config, dict):
             raise CockpitError("模型配置无法读取")
-        factory = self._model_factory or (lambda c: CockpitModel(c, scheduler_db=self.config.scheduler_db))
+        # Interactive brain-tier work can carry the full governed research
+        # context, so the plane owns a larger fallback than CockpitModel's
+        # general-purpose default. Explicit config budgets still take priority.
+        factory = self._model_factory or (
+            lambda c: CockpitModel(
+                c,
+                scheduler_db=self.config.scheduler_db,
+                max_cost_usd=COCKPIT_DEFAULT_MAX_COST_USD,
+            )
+        )
         self._model = factory(config)
         return self._model
 

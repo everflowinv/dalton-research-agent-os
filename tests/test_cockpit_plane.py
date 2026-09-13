@@ -435,6 +435,109 @@ class CockpitPlaneTests(unittest.TestCase):
         self.assertFalse(second["service_config_changed"])
         self.assertEqual(json.loads(config.read_text())["control"]["config"]["cockpit"], first["cockpit"])
 
+    def test_setup_prefers_the_installed_research_planner_model_config(self) -> None:
+        root = (self.c.root / "svc-planner").resolve(); root.mkdir()
+        extraction = root / "extract.json"
+        planner = root / "research-planner-model-config.json"
+        extraction.write_text("{}", encoding="utf-8")
+        planner.write_text("{}", encoding="utf-8")
+        config = root / "service.json"
+        config.write_text(json.dumps({
+            "core_db": str(root / "core.sqlite"),
+            "heartbeat_path": str(root / "run" / "heartbeat.json"),
+            "scheduler_db": str(root / "scheduler.sqlite"),
+            "control": {"config": {"research_review": {
+                "document_extraction_model_config_path": str(extraction),
+            }}},
+        }), encoding="utf-8")
+
+        result = install_cockpit(config)
+
+        self.assertEqual(result["cockpit"]["model_config_path"], str(planner))
+
+    def test_setup_upgrades_the_legacy_extraction_model_binding(self) -> None:
+        root = (self.c.root / "svc-legacy-model").resolve(); root.mkdir()
+        extraction = root / "extract.json"
+        planner = root / "research-planner-model-config.json"
+        extraction.write_text("{}", encoding="utf-8")
+        planner.write_text("{}", encoding="utf-8")
+        existing = {
+            "core_db": str(root / "core.sqlite"), "state_dir": str(root),
+            "heartbeat_path": str(root / "run" / "heartbeat.json"),
+            "scheduler_db": str(root / "scheduler.sqlite"),
+            "journal_path": str(root / "cockpit" / "journal.sqlite"),
+            "model_config_path": str(extraction),
+        }
+        config = root / "service.json"
+        config.write_text(json.dumps({
+            "core_db": existing["core_db"],
+            "heartbeat_path": existing["heartbeat_path"],
+            "scheduler_db": existing["scheduler_db"],
+            "control": {"config": {
+                "research_review": {
+                    "document_extraction_model_config_path": str(extraction),
+                },
+                "cockpit": existing,
+            }},
+        }), encoding="utf-8")
+
+        result = install_cockpit(config)
+
+        self.assertEqual(result["cockpit"]["model_config_path"], str(planner))
+        self.assertTrue(result["service_config_changed"])
+
+    def test_setup_preserves_a_separately_selected_cockpit_model_config(self) -> None:
+        root = (self.c.root / "svc-explicit-model").resolve(); root.mkdir()
+        extraction = root / "extract.json"
+        planner = root / "research-planner-model-config.json"
+        explicit = root / "cockpit-model.json"
+        for path in (extraction, planner, explicit):
+            path.write_text("{}", encoding="utf-8")
+        config = root / "service.json"
+        existing = {
+            "core_db": str(root / "core.sqlite"), "state_dir": str(root),
+            "heartbeat_path": str(root / "run" / "heartbeat.json"),
+            "scheduler_db": str(root / "scheduler.sqlite"),
+            "journal_path": str(root / "cockpit" / "journal.sqlite"),
+            "model_config_path": str(explicit),
+        }
+        config.write_text(json.dumps({
+            "core_db": existing["core_db"],
+            "heartbeat_path": existing["heartbeat_path"],
+            "scheduler_db": existing["scheduler_db"],
+            "control": {"config": {
+                "research_review": {
+                    "document_extraction_model_config_path": str(extraction),
+                },
+                "cockpit": existing,
+            }},
+        }), encoding="utf-8")
+
+        result = install_cockpit(config)
+
+        self.assertEqual(result["cockpit"]["model_config_path"], str(explicit))
+        self.assertFalse(result["service_config_changed"])
+
+    def test_cockpit_model_has_a_scoped_cost_ceiling_and_keeps_an_explicit_one(self) -> None:
+        from dataclasses import replace
+
+        self.c.plane._model = None
+        self.c.plane._model_factory = None
+        self.c.plane.config = replace(
+            self.c.plane.config, model_config_path=self.c.model_config_path)
+        model = self.c.plane._model_instance()
+        self.assertEqual(model.budget_for("ask")["max_cost_usd"], 2.0)
+
+        explicit = {**self.c.model_config, "purpose_call_budgets": {
+            "ask": {"max_cost_usd": 0.75},
+        }}
+        path = self.c.root / "explicit-cockpit-model.json"
+        path.write_text(json.dumps(explicit), encoding="utf-8")
+        self.c.plane._model = None
+        self.c.plane.config = replace(self.c.plane.config, model_config_path=path)
+        model = self.c.plane._model_instance()
+        self.assertEqual(model.budget_for("ask")["max_cost_usd"], 0.75)
+
     def test_setup_preserves_valid_existing_gateway_path_and_exact_bytes(self) -> None:
         root = (self.c.root / "svc-preserved").resolve(); root.mkdir()
         broker = root / "openclaw.json"
