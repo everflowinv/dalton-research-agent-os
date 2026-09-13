@@ -104,6 +104,14 @@ class CockpitLanguageTests(unittest.TestCase):
             for rule in final_text_instructions():
                 self.assertIn(rule, prompt)
 
+    def test_pending_language_review_never_renders_product_sections(self) -> None:
+        text = HTML.read_text(encoding="utf-8")
+        guard = 'if(p.publication_status==="pending_language_review")'
+        self.assertIn(guard, text)
+        guarded = text[text.index(guard):text.index('d.append(node("h3",title)', text.index(guard)) + 300]
+        self.assertIn("display_reason", guarded)
+        self.assertIn("return d", guarded)
+
 
 if __name__ == "__main__":
     unittest.main()

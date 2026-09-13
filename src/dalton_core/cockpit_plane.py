@@ -4570,6 +4570,7 @@ class CockpitPlane:
         answer = ask_answer.parse_answer(unwrap_json_object(call["text"]) or {}, context=context)
         cost_micros = call["cost_micros"]
         replayed = call["replayed"]
+        answer_route_decision_ref = call["route_decision_ref"]
 
         plan = ask_refresh.plan_refresh(
             answer, context, mission=mission,
@@ -4608,14 +4609,15 @@ class CockpitPlane:
                 context = again
                 cost_micros += second["cost_micros"]
                 replayed = replayed and second["replayed"]
+                answer_route_decision_ref = second["route_decision_ref"]
 
         language_review = {"status": "not_configured"}
         reviewed_display_answer = None
         reviewed_display_gaps = None
         language_root = self.config.core_db.parent
         language_policy = language_root / "research-language-policy.json"
-        checker_config = language_root / "language-checker-model-config.json"
-        brain_config = language_root / "language-brain-model-config.json"
+        checker_config = language_root / "research-language-check-model-config.json"
+        brain_config = language_root / "research-language-revision-model-config.json"
         verifier_config = language_root / "research-localization-verifier-model-config.json"
         required = False
         if language_policy.exists():
@@ -4634,7 +4636,7 @@ class CockpitPlane:
                 language_review = run_language_review(
                     product, mission=mission, request_id=request_id,
                     checker_config=checker_config, brain_config=brain_config, verifier_config=verifier_config,
-                    scheduler_db=self.config.scheduler_db, producer_route_decision_ref=call["route_decision_ref"],
+                    scheduler_db=self.config.scheduler_db, producer_route_decision_ref=answer_route_decision_ref,
                     artifact_dir=language_root / "research-language-reviews" / "ask")
             except Exception as exc:
                 raise CockpitError("回答已生成，但发布前语言审查未完成，请稍后重试") from exc
@@ -4643,6 +4645,9 @@ class CockpitPlane:
             section = language_review["brain_revision"]["sections"][0]
             reviewed_display_answer = section["body"]
             reviewed_display_gaps = section["gaps"]
+            cost_micros += int(language_review.get("review_cost_micros") or 0)
+            replayed = replayed and (language_review.get("artifact_replayed") is True
+                                     or language_review.get("replayed") is True)
         elif required:
             raise CockpitError("回答已生成，但发布前语言审查尚未配置，尚未发布")
 

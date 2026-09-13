@@ -537,6 +537,11 @@ async function loadResearchProducts(companyRef,box){
     box.replaceChildren(...products.map(p=>{
       const d=node("article",null,"detail-box");
       const title=p.label||contentLabel(p.kind,PRODUCT_LABELS,"研究产物");
+      if(p.publication_status==="pending_language_review"){
+        d.append(node("h3",title),node("div",p.display_reason||"正文正在进行语言检查，完成后会在这里显示。","gap"));
+        if(p.version_ref){const tech=technicalDetails(p.version_ref);if(tech)d.append(tech)}
+        return d;
+      }
       d.append(node("h3",title),node("div",p.status==="available"?[p.version_label||`第 ${p.version||"?"} 版`,fmtDate(p.created_at)].filter(Boolean).join(" · "):`${enumLabel(p.status,"尚未发布")} · ${p.display_reason||(p.gaps||[]).map(x=>looksTechnical(x)?"资料尚不完整":x).join("；")||"暂无可核验记录"}`,p.status==="available"?"hint":"gap"));
       if(p.version_ref){const tech=technicalDetails(p.version_ref);if(tech)d.append(tech)}
       appendProductState(d,p);
