@@ -32,6 +32,10 @@ _CALENDAR_QUARTER_RANGE = re.compile(
     r"(?<!\d)(\d{4})-(\d{2})-(\d{2})\s*(?:\.\.|\u81f3|to)\s*\1-(\d{2})-(\d{2})(?!\d)",
     re.IGNORECASE,
 )
+_CHINESE_CALENDAR_QUARTER_RANGE = re.compile(
+    r"(?<!\d)(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日\s*"
+    r"(?:至|到)\s*(?:(\d{4})\s*年\s*)?(\d{1,2})\s*月\s*(\d{1,2})\s*日"
+)
 _CHINESE_CALENDAR_QUARTER = re.compile(
     r"(?<!\d)(\d{4})\s*\u5e74\s*\u7b2c?\s*([\u4e00\u4e8c\u4e09\u56db1-4])\s*\u5b63\u5ea6"
 )
@@ -108,14 +112,27 @@ def _normalize_equivalent_calendar_quarters(
     }
     names = {"一": "1", "二": "2", "三": "3", "四": "4"}
 
-    def range_key(match: re.Match[str]) -> tuple[str, str] | None:
+    def iso_range_key(match: re.Match[str]) -> tuple[str, str] | None:
         quarter = boundaries.get(match.groups()[1:])
         return (match.group(1), quarter) if quarter else None
 
+    def chinese_range_key(match: re.Match[str]) -> tuple[str, str] | None:
+        year, start_month, start_day, end_year, end_month, end_day = match.groups()
+        if end_year is not None and end_year != year:
+            return None
+        quarter = boundaries.get((start_month.zfill(2), start_day.zfill(2),
+                                  end_month.zfill(2), end_day.zfill(2)))
+        return (year, quarter) if quarter else None
+
+    def range_counts(text: str) -> Counter[tuple[str, str]]:
+        keys = [iso_range_key(match) for match in _CALENDAR_QUARTER_RANGE.finditer(text)]
+        keys.extend(chinese_range_key(match)
+                    for match in _CHINESE_CALENDAR_QUARTER_RANGE.finditer(text))
+        return Counter(key for key in keys if key is not None)
+
     source_text = "\n".join(source_values)
     target_text = "\n".join(target_values)
-    source_counts = Counter(key for match in _CALENDAR_QUARTER_RANGE.finditer(source_text)
-                            if (key := range_key(match)) is not None)
+    source_counts = range_counts(source_text)
     target_counts = Counter(
         (match.group(1), names.get(match.group(2), match.group(2)))
         for match in _CHINESE_CALENDAR_QUARTER.finditer(target_text)
@@ -124,13 +141,18 @@ def _normalize_equivalent_calendar_quarters(
     # already proves its boundaries.  Pair only ranges actually replaced by a
     # quarter name, so a redundant display label cannot mask added/changed
     # dates elsewhere in the section.
-    target_ranges = Counter(key for match in _CALENDAR_QUARTER_RANGE.finditer(target_text)
-                            if (key := range_key(match)) is not None)
+    target_ranges = range_counts(target_text)
     paired = (source_counts - target_ranges) & target_counts
 
     def normalize(text: str) -> str:
         def replace_range(match: re.Match[str]) -> str:
-            key = range_key(match)
+            key = iso_range_key(match)
+            if key is not None and paired[key]:
+                return f" CALQ{key[0]}X{key[1]} "
+            return match.group(0)
+
+        def replace_chinese_range(match: re.Match[str]) -> str:
+            key = chinese_range_key(match)
             if key is not None and paired[key]:
                 return f" CALQ{key[0]}X{key[1]} "
             return match.group(0)
@@ -142,6 +164,7 @@ def _normalize_equivalent_calendar_quarters(
             return match.group(0)
 
         normalized = _CALENDAR_QUARTER_RANGE.sub(replace_range, text)
+        normalized = _CHINESE_CALENDAR_QUARTER_RANGE.sub(replace_chinese_range, normalized)
         normalized = _CHINESE_CALENDAR_QUARTER.sub(replace_name, normalized)
         # A source may redundantly state “2026 Q2 (2026-04-01 to
         # 2026-06-30)”.  Once both spellings have proved the same exact
