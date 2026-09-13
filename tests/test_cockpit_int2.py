@@ -562,6 +562,12 @@ class SourcePanelTests(Int2Case):
             "Current rating period": "当前评级期",
             "FY29 medium-term guidance": "FY29 中期指引",
             "Q2 2026 / ongoing": "Q2 2026 / 持续中",
+            "current as of the call": "截至电话会时",
+            "current second half pipeline": "当前下半年商机储备",
+            "report dated 03 August 2026": "报告日期为 2026年8月3日",
+            "Fiscal years 2025, 2024 and 2023": "财年 2025, 2024 及 2023",
+            "52-week period up to October 30, 2025": "截至 2025年10月30日 的 52 周期间",
+            "unrecognized proprietary period": "unrecognized proprietary period",
         }
         for raw, expected in cases.items():
             with self.subTest(raw=raw):

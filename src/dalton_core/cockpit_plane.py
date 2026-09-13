@@ -512,43 +512,157 @@ CONFIDENCE_LABELS = {"high": "高", "medium": "中等", "low": "低"}
 
 
 def _claim_period_label(value: Any) -> str | None:
-    """Translate known period metadata while preserving dates and raw authority."""
+    """Render period metadata; the original value remains in technical details."""
     if not isinstance(value, str) or not value.strip():
         return None
     text = value.strip()
-    replacements = (
-        (r"Not specified", "期间未注明"), (r"current commentary", "当前评论"),
-        (r"recent opportunities", "近期机会"), (r"currentratingperiod", "当前评级期"),
-        (r"Current rating period", "当前评级期"), (r"Current rating", "当前评级"),
-        (r"Current pipeline period", "当前商机期"),
-        (r"Current company description", "当前公司描述"), (r"Current coverage", "当前覆盖期"),
-        (r"Current trend", "当前趋势"), (r"Current and forward-looking", "当前及前瞻期"),
-        (r"Current and future", "当前及未来"), (r"Current and near term", "当前及近期"),
-        (r"current and medium-to-long term", "当前至中长期"),
-        (r"current and medium term", "当前及中期"), (r"current to medium-term", "当前至中期"),
-        (r"medium-to-long-term", "中长期"), (r"medium to long term", "中长期"),
-        (r"FY(\d+) medium-term guidance", r"FY\1 中期指引"),
-        (r"over the medium term", "中期内"), (r"medium-term", "中期"),
-        (r"medium term", "中期"), (r"last couple of years and ongoing", "过去几年至今"),
-        (r"ongoing", "持续中"), (r"Current/Forecast to", "当前／预测至"),
-        (r"Current/Forecast", "当前／预测"),
-        (r"Current fiscal year second half", "当前财年下半年"),
-        (r"Current fiscal year", "当前财年"),
-        (r"Current quarter vs\. last year", "当前季度同比"), (r"Current quarter", "当前季度"),
-        (r"Current period", "当前期间"), (r"Current year", "当前年度"),
-        (r"Current as of", "截至"), (r"as of", "截至"), (r"Current into", "当前至"),
-        (r"Current", "当前"), (r"fiscal year", "财年"), (r"guidance", "指引"),
-        (r"report date", "报告日"),
-    )
-    for pattern, replacement in replacements:
-        text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
-    months = {name: index for index, name in enumerate((
-        "January", "February", "March", "April", "May", "June", "July",
-        "August", "September", "October", "November", "December"), 1)}
-    text = re.sub(
-        r"\b(" + "|".join(months) + r")\s+(\d{1,2}),\s+(\d{4})\b",
-        lambda match: (f"{match.group(3)}年{months[match.group(1).capitalize()]}月"
-                       f"{int(match.group(2))}日"), text, flags=re.IGNORECASE)
+    # Longer phrases precede their component words. Word boundaries prevent
+    # "report date" from corrupting "report dated", or "year" from eating "years".
+    phrases = {
+        "current guidance period, with reference to the Q4 call and prior one to two quarters":
+            "当前指引期，参考第四季度电话会及此前一至两个季度",
+        "current quarter versus prior year and prior quarter": "当前季度，与上年同期及上一季度比较",
+        "current quarter with outlook over the next quarter or two": "当前季度，并展望未来一至两个季度",
+        "current and historical EMEA comparison": "当前与历史欧洲、中东及非洲业务对比",
+        "most recent fiscal year": "最近财年",
+        "annual report year ended": "年度报告，年度截至",
+        "fiscal year covered by the Form 10-K": "Form 10-K 覆盖的财年",
+        "fiscal year covered by filing": "申报文件覆盖的财年",
+        "forward-looking statement (current release)": "本次发布的前瞻性表述",
+        "company description (current)": "当前公司概况",
+        "post Kyndryl spin-off": "分拆 Kyndryl 之后",
+        "current second half pipeline": "当前下半年商机储备",
+        "current CEO transition": "当前首席执行官交接期",
+        "current guidance period": "当前指引期",
+        "current outlook period": "当前展望期",
+        "current filing period": "当前申报期",
+        "current company description": "当前公司概况",
+        "current pipeline period": "当前商机期",
+        "current rating period": "当前评级期",
+        "currentratingperiod": "当前评级期",
+        "current rating": "当前评级",
+        "current coverage": "当前覆盖期",
+        "current and medium-to-long term": "当前至中长期",
+        "current and medium term": "当前及中期",
+        "current to medium-term": "当前至中期",
+        "current and forward-looking": "当前及前瞻期",
+        "current and forward": "当前及未来",
+        "current and near term": "当前及近期",
+        "current and near-term": "当前及近期",
+        "current and future": "当前及未来",
+        "current/future": "当前及未来",
+        "current quarter vs. last year": "当前季度同比",
+        "current fiscal year second half": "当前财年下半年",
+        "current year second half": "当前年度下半年",
+        "current year second quarter": "当前年度第二季度",
+        "current year and next year": "当前年度及下一年度",
+        "first half of current fiscal year": "当前财年上半年",
+        "first half of current year": "当前年度上半年",
+        "first quarter of current fiscal year": "当前财年第一季度",
+        "second half of current fiscal year and beyond": "当前财年下半年及以后",
+        "second half of current fiscal year": "当前财年下半年",
+        "second half of current year": "当前年度下半年",
+        "second half current year": "当前年度下半年",
+        "first half (fiscal year unspecified)": "上半年（财年未注明）",
+        "remainder of current fiscal year": "当前财年剩余时间",
+        "until early next fiscal year": "至下一财年初",
+        "last couple of years and ongoing": "过去几年至今",
+        "last 1-2 years and current": "过去 1–2 年至今",
+        "last 6 months as of the call": "截至电话会时的过去 6 个月",
+        "last months and weeks as of the call": "截至电话会时的最近几个月及几周",
+        "late last year through current": "上年末至今",
+        "past decade and current": "过去十年至今",
+        "past year and current": "过去一年至今",
+        "historical and current": "历史及当前",
+        "period not specified": "期间未注明",
+        "not specified": "期间未注明",
+        "current commentary": "当前评论",
+        "recent opportunities": "近期机会",
+        "current engagement": "当前合作期间",
+        "current era": "当前时期",
+        "current filing": "当前申报文件",
+        "current outlook": "当前展望",
+        "current view": "当前判断",
+        "current trend": "当前趋势",
+        "current period starting July": "自 7 月开始的当前期间",
+        "multi-year strategy": "多年战略",
+        "trailing twelve months": "过去十二个月",
+        "medium-to-long-term": "中长期",
+        "medium to long term": "中长期",
+        "over the medium term": "中期内",
+        "medium-term guidance": "中期指引",
+        "medium-term": "中期",
+        "medium term": "中期",
+        "long-term": "长期",
+        "long term": "长期",
+        "forward-looking": "前瞻期",
+        "multiyear": "多年期间",
+        "current/forecast to": "当前／预测至",
+        "current/forecast": "当前／预测",
+        "current fiscal year": "当前财年",
+        "current quarter": "当前季度",
+        "current period": "当前期间",
+        "current year": "当前年度",
+        "current as of the call": "截至电话会时",
+        "current as of": "截至",
+        "current into": "当前至",
+        "as of the call": "截至电话会时",
+        "as of": "截至",
+        "next fiscal year": "下一财年",
+        "fiscal years": "财年",
+        "fiscal year": "财年",
+        "fiscal": "财年",
+        "FY guidance period": "财年指引期",
+        "years ended": "各年度截至",
+        "year ended": "年度截至",
+        "report dated": "报告日期为",
+        "report date": "报告日",
+        "risk factors": "风险因素",
+        "given at": "发布于",
+        "reported": "披露于",
+        "full-year": "全年",
+        "first quarter": "第一季度",
+        "second quarter": "第二季度",
+        "third quarter": "第三季度",
+        "fourth quarter": "第四季度",
+        "52-week period up to": "截至下列日期的 52 周期间：",
+        "Belarus restrictions through end of": "白俄罗斯相关限制持续至下列年份年底：",
+        "current": "当前",
+        "ongoing": "持续中",
+        "guidance": "指引",
+        "outlook": "展望",
+        "actual": "实际业绩",
+        "goals": "目标",
+        "analysis": "分析时点",
+        "report": "报告",
+        "versus": "对比",
+        "vs": "对比",
+        "and": "及",
+    }
+    for phrase, replacement in phrases.items():
+        text = re.sub(r"(?<![A-Za-z])" + re.escape(phrase) + r"(?![A-Za-z])",
+                      lambda _: replacement, text, flags=re.IGNORECASE)
+    text = re.sub(r"\bpost-(\d{4})\b", r"\1 年后", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bearly (\d{4})\b", r"\1 年初", text, flags=re.IGNORECASE)
+    names = ("January", "February", "March", "April", "May", "June", "July",
+             "August", "September", "October", "November", "December")
+    months = {form.lower(): i for i, name in enumerate(names, 1)
+              for form in (name, name[:3])}
+    month = "(?:" + "|".join(sorted(months, key=len, reverse=True)) + r")\.?"
+    def month_number(raw: str) -> int:
+        return months[raw.rstrip(".").lower()]
+    text = re.sub(r"\b(" + month + r")\s+(\d{1,2}),\s+(\d{4})\b",
+        lambda m: f"{m[3]}年{month_number(m[1])}月{int(m[2])}日", text, flags=re.IGNORECASE)
+    text = re.sub(r"\b(\d{1,2})\s+(" + month + r")\s+(\d{4})\b",
+        lambda m: f"{m[3]}年{month_number(m[2])}月{int(m[1])}日", text, flags=re.IGNORECASE)
+    text = re.sub(r"\b(" + month + r")\s+(\d{4})\b",
+        lambda m: f"{m[2]}年{month_number(m[1])}月", text, flags=re.IGNORECASE)
+    text = re.sub(r"截至下列日期的 52 周期间： (\d{4}年\d{1,2}月\d{1,2}日)",
+                  r"截至 \1 的 52 周期间", text)
+    text = re.sub(r"白俄罗斯相关限制持续至下列年份年底： (\d{4})",
+                  r"白俄罗斯相关限制持续至 \1 年底", text)
+    text = re.sub(r"(?<!各)年度截至 (\d{4}年\d{1,2}月\d{1,2}日)",
+                  r"截至 \1 的年度", text)
     return text
 
 
