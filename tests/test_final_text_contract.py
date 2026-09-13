@@ -5,8 +5,8 @@ import unittest
 
 from dalton_core import (
     ask_answer, company_dossier_draft, conviction_call_draft, debate_map_draft,
-    deep_insight_gate_draft, event_judgement, industry_framework_draft,
-    initial_screen, investment_memo_draft, thesis_impact_control, zero_base_review,
+    deep_insight_gate_draft, earnings_calibration, event_judgement, industry_framework_draft,
+    initial_screen, investment_memo_draft, research_planner, thesis_impact_control, zero_base_review,
 )
 from dalton_core.final_text_contract import final_text_instructions
 
@@ -28,10 +28,12 @@ class FinalTextContractTests(unittest.TestCase):
             investment_memo_draft.build_group_prompt,
             conviction_call_draft.build_prompt,
             deep_insight_gate_draft.build_group_prompt,
+            earnings_calibration.build_calibration_prompt,
             event_judgement.build_judge_prompt,
             event_judgement.build_reflection_prompt,
             zero_base_review.build_review_prompt,
             ask_answer.build_prompt,
+            research_planner.build_prompt,
             thesis_impact_control.ResearchPlanThesisImpactCoordinator._assessment_work_order,
         )
         missing = [item.__qualname__ for item in producers

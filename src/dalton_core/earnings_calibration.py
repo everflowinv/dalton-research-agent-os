@@ -38,6 +38,8 @@ The human decides once.
 
 from __future__ import annotations
 
+from .final_text_contract import final_text_instructions
+
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from typing import Any, Callable
@@ -396,6 +398,7 @@ def build_calibration_prompt(context: Mapping[str, Any]) -> str:
     lines: list[str] = [
         "你在写一份业绩校准（earnings calibration）：这一季实际出来之后，"
         "对着我们之前的预测和公司自己的指引说清楚差在哪、为什么，以及这对 thesis 意味着什么。",
+        *final_text_instructions(),
         "只输出 JSON，不要 markdown 代码块。",
         "",
         "规则：",

@@ -50,6 +50,8 @@ planner decides what to do next and what is worth going deeper on.
 
 from __future__ import annotations
 
+from .final_text_contract import final_text_instructions
+
 import hashlib
 import json
 from typing import Any, Mapping, Sequence
@@ -500,6 +502,7 @@ def project_state_for_prompt(
 
 def build_prompt(state: Mapping[str, Any]) -> str:
     return (
+        "\n".join(final_text_instructions()) + "\n\n" +
         "You decide what a research system works on next.\n\n"
         "RESEARCH_STATE below is the whole picture: the standing goal, the industry "
         "itself -- which has its own checklist, because facts about the market belong "
