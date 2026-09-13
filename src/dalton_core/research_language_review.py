@@ -85,25 +85,41 @@ def validate_checker_output(value: Mapping[str, Any], *, sections: list[Mapping[
         raise ResearchLanguageReviewError("language checker suggestions must be a list")
     suggestions = []
     for item in value["suggestions"]:
-        if not isinstance(item, Mapping) or set(item) != {
-                "section_index", "quote", "assessment", "suggestion"}:
+        required = {"section_index", "quote", "assessment", "suggestion"}
+        if not isinstance(item, Mapping) or set(item) not in (required, required | {"title"}):
             raise ResearchLanguageReviewError("language checker suggestion has an invalid shape")
         index = item["section_index"]
         if isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < len(sections):
             raise ResearchLanguageReviewError("language checker section index is invalid")
+        if 'title' in item and item['title'] != sections[index].get('title'):
+            raise ResearchLanguageReviewError("language checker redundant title differs from source")
+        if any(not isinstance(item[key], str) for key in ('quote', 'assessment', 'suggestion')):
+            raise ResearchLanguageReviewError("language checker suggestion text must be a string")
         fields = {key: str(item[key]).strip() for key in ("quote", "assessment", "suggestion")}
         if any(not text for text in fields.values()):
             raise ResearchLanguageReviewError("language checker suggestion text is missing")
-        source = sections[index]
-        source_text = "\n".join((str(source.get("title") or ""),
-                                  str(source.get("body") or ""),
-                                  *(str(x) for x in source.get("gaps") or [])))
+        def source_text(source: Mapping[str, Any]) -> str:
+            return "\n".join((str(source.get("title") or ""),
+                              str(source.get("body") or ""),
+                              *(str(x) for x in source.get("gaps") or [])))
         def visible_quote(text: str) -> str:
             text = re.sub(r'\\u(?:200[bcd]|feff)', '', text, flags=re.IGNORECASE)
             return text.translate({ord(char): None for char in '\u200b\u200c\u200d\ufeff'})
         visible = visible_quote(fields['quote'])
-        if (not visible.strip() or (fields["quote"] not in source_text
-                and visible not in visible_quote(source_text))):
+        # A terminal ellipsis denotes an excerpt, never a wildcard inside it.
+        excerpt = re.sub(r'(?:\u2026+|\.{3,})$', '', visible).rstrip()
+        def matches(source: Mapping[str, Any]) -> bool:
+            text = visible_quote(source_text(source))
+            return bool(excerpt.strip()) and (visible in text or excerpt in text)
+        if not matches(sections[index]):
+            # A checker may cite the right sentence with the wrong chapter
+            # number. Re-anchor only an exact, uniquely located excerpt.
+            locations = [i for i, source in enumerate(sections) if matches(source)]
+            if len(locations) == 1:
+                index = locations[0]
+            else:
+                raise ResearchLanguageReviewError("language checker quote is not in its source section")
+        if not visible.strip():
             raise ResearchLanguageReviewError("language checker quote is not in its source section")
         suggestions.append({"section_index": index, **fields})
     return {"overall": value["overall"].strip(), "suggestions": suggestions}

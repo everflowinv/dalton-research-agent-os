@@ -24,6 +24,33 @@ def review():
 
 
 class ResearchLanguageReviewTests(unittest.TestCase):
+    def test_checker_recovers_unique_quote_location_and_terminal_excerpt(self):
+        sections = [{'title': '公司', 'body': '公司概况。', 'gaps': []},
+                    {'title': '风险', 'body': 'AI 需求仍处于早期，收入转化需要时间。', 'gaps': []}]
+        value = {'overall': '用词可以更自然。', 'suggestions': [{
+            'section_index': 0, 'quote': 'AI 需求仍处于早期……',
+            'assessment': '可更简洁。', 'suggestion': 'AI 需求刚刚起步。'}]}
+        fixed = validate_checker_output(value, sections=sections)
+        self.assertEqual(fixed['suggestions'][0]['section_index'], 1)
+        self.assertEqual(fixed['suggestions'][0]['quote'], value['suggestions'][0]['quote'])
+        self.assertEqual(value['suggestions'][0]['section_index'], 0)
+        for quote in ['AI 需求……转化需要时间。', '……', 'AI 需求已经成熟……']:
+            value['suggestions'][0]['quote'] = quote
+            with self.assertRaises(ValueError):
+                validate_checker_output(value, sections=sections)
+
+    def test_checker_redundant_title_must_match_and_ambiguous_quote_is_rejected(self):
+        sections = [{'title': '结论', 'body': '需求企稳。', 'gaps': []}]
+        value = {'overall': '可简化。', 'suggestions': [{
+            'section_index': 0, 'title': '结论', 'quote': '需求企稳。',
+            'assessment': '可更直接。', 'suggestion': '需求趋稳。'}]}
+        self.assertNotIn('title', validate_checker_output(value, sections=sections)['suggestions'][0])
+        value['suggestions'][0]['title'] = '不存在的标题'
+        with self.assertRaises(ValueError): validate_checker_output(value, sections=sections)
+        del value['suggestions'][0]['title']
+        with self.assertRaises(ValueError):
+            validate_checker_output(value, sections=[{'title': '空', 'body': '', 'gaps': []}, *sections, *sections])
+
     def test_quote_matches_escaped_zero_width_character_without_losing_visible_content(self):
         source=[{'title':'状态','body':r"m\u200banagement 分类无效。",'gaps':[]}]
         value={'overall':'分类名有不可见字符。','suggestions':[
