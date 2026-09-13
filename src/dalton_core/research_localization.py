@@ -23,7 +23,7 @@ _OPAQUE_ID = re.compile(
     r"\b(?:claim|claim-version|dossier|dossier-version|memo|memo-version|"
     r"debate|debate-map|forecast-model-version|company-model-spec|mission|"
     r"mission-version|thesis|thesis-version|event|document|document-version)"
-    r":[A-Za-z0-9:._-]+|\b[0-9a-f]{64}\b",
+    r":[A-Za-z0-9:._-]+|\b[0-9a-f]{64}\b|\bT[0-9]+\b|\bcausal_chain:[0-9]+\b",
     re.IGNORECASE,
 )
 _HAN = re.compile(r"[\u3400-\u9fff]")
@@ -135,7 +135,8 @@ def build_prompt(product: Mapping[str, Any]) -> str:
         "presentation pass, not new research.",
         *final_text_instructions(),
         "Keep exactly one output section for each input section, in the same order and with the "
-        "same index. You may merge repetitive defensive sentences inside a section and repair "
+        "same index. Keep the same gaps array length; do not manufacture new gaps. "
+        "You may merge repetitive defensive sentences inside a section and repair "
         "awkward wording, but retain every uncertainty that could change the judgement.",
         "Preserve every authoritative value. You may format an explicit USD amount into 万美元 or "
         "亿美元 with normal display rounding, a percentage to one decimal place, and an explicitly "
@@ -163,15 +164,18 @@ def build_verifier_prompt(product: Mapping[str, Any], localized: Mapping[str, An
     return "\n".join((
         "You are an independent verifier of a Chinese presentation attachment for an existing "
         "research product.",
-        "Check faithful meaning, fluent Simplified Chinese, exact section order, preservation of "
-        "all decision-relevant uncertainties and all financial number tokens, and absence of new "
+        "Check faithful meaning, exact section order, preservation of "
+        "all decision-relevant uncertainties and financial values (allow faithful USD 万/亿 unit "
+        "conversion and display rounding, percentages to one decimal, EPS/ARPU to two decimals), "
+        "and absence of new "
         "facts, sources, approvals or actions. Proper nouns and verbatim quotations may remain in "
         "their source language.",
         "Return raw JSON only: "
         '{"verdict":"pass|reject","faithful":true,"no_new_facts":true,'
         '"meaning_preserved":true,"findings":["具体问题"]}',
         "Source refs, numbers, status, version and approval remain bound by the source product "
-        "outside this presentation attachment and must not be changed or translated.",
+        "outside this presentation attachment. Display unit conversion does not change the original "
+        "numeric data. This verifier checks semantic fidelity, not sentence-level language style.",
         "SOURCE: " + json.dumps(source, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
         "LOCALIZED: " + json.dumps(localized, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
     ))

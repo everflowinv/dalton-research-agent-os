@@ -133,3 +133,12 @@ class ResearchLocalizationTests(unittest.TestCase):
             "body": "Revenue was USD 1,234.50, up 5.2%.",
             "gaps": ["Missing FY2027 margin"],
         }]})
+
+ def test_internal_section_ids_and_thesis_labels_are_not_financial_numbers(self):
+    source = product()
+    source['sections'][0].update(title='causal_chain:0', body='T1 supports revenue of 123 USD.', gaps=[])
+    translated={'sections':[{'index':0,'title':'收入增长的传导','body':'T1 支持 123 USD 收入的判断，需继续跟踪 T1。','gaps':[]}]}
+    self.assertEqual(validate_localized_text(source,translated)[0]['index'],0)
+    translated['sections'][0]['body']='T1 支持 124 USD 收入的判断。'
+    with self.assertRaises(ResearchLocalizationError):
+        validate_localized_text(source,translated)

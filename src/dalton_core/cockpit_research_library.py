@@ -55,7 +55,7 @@ def _sections(kind: str, record: Mapping[str, Any]) -> list[dict[str, Any]]:
 
 
 def research_library(connection: sqlite3.Connection, mission: Mapping[str, Any],
-                     company_ref: str) -> dict[str, Any]:
+                     company_ref: str, *, localize: bool = True) -> dict[str, Any]:
     if company_ref not in {m["company_ref"] for m in mission["universe"]}:
         raise ValueError("company is outside the current research mission")
     products = []
@@ -115,8 +115,12 @@ def research_library(connection: sqlite3.Connection, mission: Mapping[str, Any],
                 CompanyDossierError, DebateMapError, IndustryFrameworkError,
                 CoverageMissionError) as exc:
             item.update(status="invalid", reason=str(exc), sections=[], gaps=[])
-    return {"company_ref": company_ref, "industry_ref": mission["industry_ref"],
-            "mission_version_ref": mission["id"], "products": products}
+    result = {"company_ref": company_ref, "industry_ref": mission["industry_ref"],
+              "mission_version_ref": mission["id"], "products": products}
+    if localize:
+        from .research_localization_store import localize_library
+        return localize_library(connection, result)
+    return result
 
 
 def _memo_approval(connection: sqlite3.Connection, mission: Mapping[str, Any],
