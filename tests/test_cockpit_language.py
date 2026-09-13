@@ -112,6 +112,25 @@ class CockpitLanguageTests(unittest.TestCase):
         self.assertIn("display_reason", guarded)
         self.assertIn("return d", guarded)
 
+    def test_reported_stale_cockpit_phrases_are_removed(self) -> None:
+        text = HTML.read_text(encoding="utf-8")
+        for stale in (
+            "质量评分 · ${q.rubric}", "条结果行", "格换成了实际数",
+            "估计被取代但保留着", "这一版为什么存在", "每一池花了多少",
+            "当时的判断，后来怎样", "给你的几句建议", "流水线在跑",
+            "还没填上的来源缺口", "挂起 / 不再重试的工作",
+            'rawNode("div",x.statement)',
+        ):
+            self.assertNotIn(stale, text)
+        self.assertIn('versionLabel(version)', text)
+        self.assertIn('technicalDetails({rubric:q.rubric})', text)
+
+    def test_dynamic_planner_fields_are_mapped_before_composition(self) -> None:
+        text = HTML.read_text(encoding="utf-8")
+        self.assertIn('${displayText(q.subject)}：${displayText(q.question)}', text)
+        self.assertIn('需要核实：${displayText(q.wants)}', text)
+        self.assertIn('${displayText(d.subject)} · ${displayText(d.item)}', text)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Dalton 研究台</title>
+<title>Dalton 投研工作台</title>
 <style>
 :root{
   --bg0:#070b16;--bg1:#0d1326;--bg2:#121a33;--panel:rgba(255,255,255,.045);--panel2:rgba(255,255,255,.07);
@@ -266,11 +266,11 @@ pre.table{background:#f6f8fb;color:#28364b;border-color:var(--line)}table{color:
 <div class="app">
 <nav>
   <div class="brand"><div class="logo">D</div><div><b>Dalton 投研工作台</b><small id="workspace-name">研究系统</small></div></div>
-  <button type="button" class="nav-item active" data-view="goal"><span class="ic"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/><path d="m15 9 6-6M17 3h4v4"/></svg></span>研究目标</button>
-  <button type="button" class="nav-item" data-view="steer"><span class="ic"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m15 9-2 4-4 2 2-4 4-2Z"/></svg></span>调整方向</button>
-  <button type="button" class="nav-item" data-view="log"><span class="ic"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12a7 7 0 0 1 7-7m-7 7a7 7 0 0 0 7 7m-1-7a1 1 0 1 0 2 0 1 1 0 0 0-2 0Zm4-5a7 7 0 0 1 0 10"/></svg></span>研究日志<span class="badge" id="log-badge"></span></button>
-  <button type="button" class="nav-item" data-view="ask"><span class="ic"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 18 3 21v-6a8 8 0 1 1 4 4Z"/><path d="M8 10h8M8 14h5"/></svg></span>随时提问</button>
-  <button type="button" class="nav-item" data-view="approve"><span class="ic"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 1-3-6"/><path d="m9 11 3 3 8-9"/></svg></span>待你审批<span class="badge" id="approve-badge"></span></button>
+  <button type="button" class="nav-item active" data-view="goal"><span class="ic"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/><path d="m15 9 6-6M17 3h4v4"/></svg></span>研究目标与计划</button>
+  <button type="button" class="nav-item" data-view="steer"><span class="ic"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m15 9-2 4-4 2 2-4 4-2Z"/></svg></span>策略指引</button>
+  <button type="button" class="nav-item" data-view="log"><span class="ic"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12a7 7 0 0 1 7-7m-7 7a7 7 0 0 0 7 7m-1-7a1 1 0 1 0 2 0 1 1 0 0 0-2 0Zm4-5a7 7 0 0 1 0 10"/></svg></span>投研执行日志<span class="badge" id="log-badge"></span></button>
+  <button type="button" class="nav-item" data-view="ask"><span class="ic"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 18 3 21v-6a8 8 0 1 1 4 4Z"/><path d="M8 10h8M8 14h5"/></svg></span>投研问答</button>
+  <button type="button" class="nav-item" data-view="approve"><span class="ic"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 1-3-6"/><path d="m9 11 3 3 8-9"/></svg></span>待办审批<span class="badge" id="approve-badge"></span></button>
   <div class="nav-foot">系统负责搜集、阅读和整理；你负责目标、方向和关键决策。</div>
 </nav>
 <main>
@@ -314,7 +314,7 @@ pre.table{background:#f6f8fb;color:#28364b;border-color:var(--line)}table{color:
          个页面。放在一行里，每格点开到它自己那页。 -->
     <div class="card">
       <h2>研究总览</h2>
-      <p class="sub" id="ops-sub">一眼看全运行状态、资料缺口、等待中的任务和上周产物。点击卡片查看明细。</p>
+      <p class="sub" id="ops-sub">汇总运行状态、资料缺口、等待中的任务和上周产物。点击卡片查看明细。</p>
       <div class="grid c4" id="ops-panels"></div>
     </div>
 
@@ -464,7 +464,7 @@ function readableError(value,context="操作"){
 }
 function showProblem(container,value,context){const p=readableError(value,context);container.replaceChildren(node("div",p.message,"gap"));if(p.nextStep)container.append(node("div",p.nextStep,"hint"));const tech=technicalDetails(p.technical);if(tech)container.append(tech)}
 let csrf="";
-const titles={goal:["研究目标","当前生效的研究任务"],steer:["调整方向","告诉系统要增加、减少或改写什么"],log:["研究日志","查看正在进行和已经完成的工作"],ask:["研究问答","回答只使用已核实的结论"],approve:["待决事项","需要你确认的研究决定"]};
+const titles={goal:["研究目标与计划","当前生效的研究任务"],steer:["策略指引与方向调整","告诉系统要增加、减少或改写什么"],log:["投研执行日志","查看正在进行和已经完成的工作"],ask:["投研问答","回答只使用已核实的结论"],approve:["待办审批","需要你确认的研究决定"]};
 async function getJson(path){const r=await fetch(path,{headers:{Accept:"application/json"},cache:"no-store"});const v=await r.json().catch(()=>({}));if(!r.ok){const e=new Error(v.message||`HTTP ${r.status}`);Object.assign(e,v,{technical_detail:v.technical_detail||v.message||`HTTP ${r.status}`});throw e}if(v.csrf_token)csrf=v.csrf_token;return v}
 async function postJson(path,value){const r=await fetch(path,{method:"POST",headers:{"Content-Type":"application/json","X-Dalton-CSRF":csrf},body:JSON.stringify(value)});const v=await r.json().catch(()=>({}));if(!r.ok){const e=new Error(v.message||`HTTP ${r.status}`);Object.assign(e,v,{display_message:r.status===403?"登录状态已变化，请刷新页面":v.display_message,technical_detail:v.technical_detail||v.message||`HTTP ${r.status}`});throw e}return v}
 const rid=()=>crypto.randomUUID?crypto.randomUUID():Math.random().toString(16).slice(2)+Date.now();
@@ -487,7 +487,8 @@ const RESEARCH_STAGES=[
   ["investment_memo","投资备忘录"],["active_coverage","持续覆盖"]
 ];
 let lastReaderFocus=null;
-function sourceLabel(source){if(typeof source==="string")return looksTechnical(source)?"已绑定来源":source;return source.display_label||source.label||source.text||"已绑定来源"}
+function sourceLabel(source){if(typeof source==="string")return looksTechnical(source)?"已绑定来源":displayText(source);return displayText(source.display_label||source.label||source.text||"已绑定来源")}
+function versionLabel(version){return version==null||version==="?"?"版本未标明":`版本 ${version}`}
 const PRODUCT_LABELS={company_dossier:"公司档案",debate_map:"核心争议",industry_framework:"行业框架",initial_screen:"初步筛选",investment_memo:"投资备忘录"};
 const SECTION_LABELS={business_model:"商业模式",segments_and_mix:"业务结构",demand_drivers:"需求驱动",supply_and_cost:"供给与成本",competitive_position:"竞争地位",management_and_capital_allocation:"管理层与资本配置",guidance_style:"指引与兑现",kpi_dictionary:"关键指标口径",catalyst_calendar:"催化剂日历",history_of_price_drivers:"历史股价驱动",industry_classification:"行业分类",variant_view:"差异化观点",industry_characteristics:"行业特征",long_term_drivers:"长期驱动",short_term_drivers:"短期驱动",cross_company_comparison:"公司比较",gaps:"资料缺口"};
 function contentLabel(value,map,fallback){return map[value]||fallback}
@@ -590,27 +591,27 @@ function renderOverview(o){
     $("plan-directives").replaceChildren(...plan.directives.map(d=>{
       const li=node("li",null,d.action==="stop"?"dir stop":"dir do");
       li.append(node("span",d.action_label,"tag "+(d.action==="stop"?"spoken":"filed")),
-                node("span",` ${d.subject} · ${d.item}`,"figv"),
+                node("span",` ${displayText(d.subject)} · ${displayText(d.item)}`,"figv"),
                 node("div",d.reason,"hint"));
       return li}));
     $("plan-inquiries-block").hidden=!plan.inquiries.length;
     $("plan-inquiries").replaceChildren(...plan.inquiries.map(q=>{
       const li=node("li");
-      li.append(node("div",`${q.subject}：${q.question}`),
-                node("div",`需要核实：${q.wants}`,"hint"));
+      li.append(node("div",`${displayText(q.subject)}：${displayText(q.question)}`),
+                node("div",`需要核实：${displayText(q.wants)}`,"hint"));
       return li}));
     $("plan-when").textContent=`建议生成于 ${fmtDate(plan.decided_at)}`+
       (plan.stopped?` · ${plan.stopped} 项建议暂停`:"");
   }
-  $("goal-sources").replaceChildren(...g.sources.map(s=>node("span",`${s.connected?"● ":"○ "}${s.label}`,`tag ${s.connected?"on":"off"}`)));
+  $("goal-sources").replaceChildren(...g.sources.map(s=>node("span",`${s.connected?"● ":"○ "}${displayText(s.label)}`,`tag ${s.connected?"on":"off"}`)));
   $("goal-history").replaceChildren(...g.history.map(h=>{const d=node("div",null,"h");d.append(node("b",`第 ${h.version} 版 · ${fmtDate(h.created_at)}`),node("div",h.title),node("div",`${h.research_questions.length} 个问题 · ${h.universe.join("、")}`));return d}));
   renderOpsPanels(o.ops);
   const t=o.totals,b=o.budgets;
   $("totals").replaceChildren(stat(t.found,"找到的资料","网页、研报、电话会"),stat(t.read,"已读完的资料",`还有 ${t.waiting} 份排队`),stat(t.claims,"入库的结论",t.claims_today?`今天新增 ${t.claims_today} 条`:"今天还没有新增"),
     stat(b.model_calls?`${b.model_calls.used}/${b.model_calls.cap}`:"—","今天的模型调用",b.model_calls?`已花 $${b.model_calls.cost_usd}，上限 $${b.model_calls.cost_cap_usd}`:"未接入"));
   $("totals-sub").textContent=`截至 ${fmtDate(o.as_of)}`+(b.web?` · 网页搜索今日 ${b.web.spent}/${b.web.cap}`:"")+(b.alphaengine?` · 研报获取 24 小时 ${b.alphaengine.spent}/${b.alphaengine.cap}`:"");
-  $("lanes").replaceChildren(...o.activity.lanes.map(l=>{const d=node("div",null,"lane");const cls=laneClassOf(l.status);d.append(node("span",null,`st ${cls}`));const c=node("div");c.append(node("b",l.label),node("small",`${laneStatus(l.status)} · ${l.note}`));if(l.detail)c.append(node("small",l.detail,"raw"));d.append(c);return d}));
-  const run=$("running");run.replaceChildren(...o.activity.running.map(r=>{const d=node("div",null,"r");d.append(node("span",null,"spin"),node("span",r.title+(r.detail?` — ${r.detail}`:"")));return d}));
+  $("lanes").replaceChildren(...o.activity.lanes.map(l=>{const d=node("div",null,"lane");const cls=laneClassOf(l.status);d.append(node("span",null,`st ${cls}`));const c=node("div");c.append(node("b",l.label),node("small",`${laneStatus(l.status)} · ${displayText(l.note)}`));if(l.detail)c.append(node("small",l.detail,"raw"));d.append(c);return d}));
+  const run=$("running");run.replaceChildren(...o.activity.running.map(r=>{const d=node("div",null,"r");d.append(node("span",null,"spin"),node("span",displayText(r.title)+(r.detail?` — ${displayText(r.detail)}`:"")));return d}));
   if(!o.activity.running.length)run.append(node("div","此刻没有正在运行的任务；调度器每 5 分钟检查一次。","hint"));
   /* C2: four pools. A pool that is spent refuses every request for the rest
      of the day, so "which one ran out" is the only useful form of the
@@ -664,29 +665,30 @@ function invariantRefusal(x){if(!x)return null;const missing=x.status==="unavail
   else unchecked.forEach(item=>d.append(node("div",`${item.label||item.invariant}：${(item.findings||[]).join("；")||"证据不足，未执行"}`)));
   return d}
 function modelBlock(c){const m=c.model,r=m.readiness||{},d=node("div",null,"mdl");
-  d.append(node("b",`公司模型 · 第 ${m.version} 版`),node("div",m.note||""));
-  const parts=[];if(r.results_computed&&r.results_computed.length)parts.push(`算出 ${r.results_computed.length} 条结果行`);
-  if(r.realised_quarters)parts.push(`${r.realised_quarters} 个季度已兑现`);
-  if(r.actual_cells)parts.push(`${r.actual_cells} 格换成了实际数`);
-  if(r.superseded_estimates)parts.push(`${r.superseded_estimates} 格估计被取代但保留着`);
+  d.append(node("b",`公司模型 · ${versionLabel(m.version)}`),node("div",m.note||""));
+  const parts=[];if(r.results_computed&&r.results_computed.length)parts.push(`已计算 ${r.results_computed.length} 项模型结果`);
+  if(r.realised_quarters)parts.push(`已纳入 ${r.realised_quarters} 个季度的实际业绩`);
+  if(r.actual_cells)parts.push(`${r.actual_cells} 个预测值已更新为实际值`);
+  if(r.superseded_estimates)parts.push(`保留 ${r.superseded_estimates} 个已被实际值替代的历史预测`);
   if(parts.length)d.append(node("div",parts.join(" · "),"hint"));
-  if(m.change_reason_label)d.append(node("div",`这一版为什么存在：${m.change_reason_label}`,"hint"));
+  if(m.change_reason_label)d.append(node("div",`本次更新原因：${displayText(m.change_reason_label)}`,"hint"));
   const stopped=(c.invariants||{}).forecast_model_version;if(stopped)d.append(invariantRefusal(stopped));
   const sensitivity=(c.invariants||{}).sensitivity_projection;if(sensitivity)d.append(invariantRefusal(sensitivity));
-  const b=node("button","看模型表","ghost");b.style.cssText="padding:4px 10px;font-size:12px;margin-top:8px";b.onclick=()=>openModel(c.company_ref);d.append(b);return d}
+  const b=node("button","查看模型详情","ghost");b.style.cssText="padding:4px 10px;font-size:12px;margin-top:8px";b.onclick=()=>openModel(c.company_ref);d.append(b);return d}
 function qualityBlock(q){if(!q)return null;const low=(q.below_passing&&q.below_passing.length)||q.checks_passed===false;
-  const d=node("div",null,`qs${low?" low":""}`);d.append(node("b",`质量评分 · ${q.rubric}`));
+  const d=node("div",null,`qs${low?" low":""}`);d.append(node("b","质量评分"));
   const bits=[];if(q.mean!=null)bits.push(`平均 ${q.mean} / 4`);if(q.minimum!=null)bits.push(`最低 ${q.minimum}`);
   bits.push(q.checks_passed===false?"有机器检查没通过":"机器检查全通过");if(q.verified)bits.push("另有一位独立复核确认过");
   d.append(node("div",bits.join(" · ")));
   const bad=(q.checks||[]).filter(x=>x.status==="fail");
-  if(bad.length){const ul=node("ul");bad.forEach(x=>ul.append(node("li",`${x.label}：${x.count} 处`)));d.append(ul)}
+  if(bad.length){const ul=node("ul");bad.forEach(x=>ul.append(node("li",`${displayText(x.label)}：${x.count} 处`)));d.append(ul)}
   if(q.below_passing&&q.below_passing.length){const ul=node("ul");q.below_passing.forEach(x=>ul.append(node("li",x)));d.append(ul)}
+  if(q.rubric){const tech=technicalDetails({rubric:q.rubric});if(tech)d.append(tech)}
   return d}
 const FB_LABELS={read:"读过",useful:"有用",needs_more_evidence:"证据不够",disagree:"不同意",revise:"要重写"};
 const FB_ORDER=["read","useful","needs_more_evidence","disagree","revise"];
 function feedbackBar(binding){const wrap=node("div");const bar=node("div",null,"fb");const st=node("span","","status");
-  const note=document.createElement("input");note.placeholder="想补一句吗？（可以留空）";note.style.cssText="margin-top:8px;font-size:12.5px;padding:8px 12px";
+  const note=document.createElement("input");note.placeholder="补充意见（选填）";note.style.cssText="margin-top:8px;font-size:12.5px;padding:8px 12px";
   const given=new Set((binding.entries||[]).map(e=>e.verdict));
   FB_ORDER.forEach(v=>{const b=node("button",FB_LABELS[v]);if(given.has(v))b.classList.add("on");
     b.onclick=async()=>{bar.querySelectorAll("button").forEach(x=>x.disabled=true);st.className="status";st.textContent="正在记下…";
@@ -879,7 +881,7 @@ function renderModels(sheet,r){sheet.replaceChildren(readerClose(),node("h2","�
   sheet.append(avail);
   const cat=r.catalog,box=node("section");box.append(node("h3","网关上有什么"));
   if(!cat.available){box.append(node("div",cat.reason,"empty"));sheet.append(box);return}
-  box.append(node("div",cat.in_sync?"这台机器的模型目录和网关一致。":"这台机器的模型目录和网关不一致，下面三列说明差在哪。","meta"));
+  box.append(node("div",cat.in_sync?"本地模型配置与网关一致。":"本地模型配置与网关存在差异，明细如下。","meta"));
   const col=(title,names,note,allow)=>{const d=node("div",null,"lane");d.append(node("span",null,"st"+(names.length?" wait":" on")));
     const c=node("div");c.append(node("b",`${title}（${names.length}）`));c.append(node("small",note));
     if(!names.length)c.append(node("small","没有","raw"));
@@ -901,26 +903,25 @@ async function openReflection(){const sheet=prepareReader("研究详情");
   sheet.replaceChildren(node("div","正在读取…","empty"));
   try{renderReflection(sheet,await getJson("/v1/cockpit/reflection"))}
   catch(e){sheet.replaceChildren(readerClose());showProblem(sheet,e,"读取每周复盘")}};
-function renderReflection(sheet,r){sheet.replaceChildren(readerClose(),node("h2","每周回头看"));
+function renderReflection(sheet,r){sheet.replaceChildren(readerClose(),node("h2","每周投研运行复盘"));
   if(!r.available){sheet.append(node("div",r.reason,"empty"));return}
   sheet.append(node("div",`${r.iso_week} · ${fmtDate(r.written_at)} · 第 ${r.version} 版${r.historical?" · 历史记录":""}${r.content_as_of?" · 内容截至 "+fmtDate(r.content_as_of):""}`,"meta"));
-  const s=node("section");s.append(node("h3",r.title));
-  (r.prose||"").split("\n").filter(Boolean).forEach(line=>s.append(node("p",line)));
+  const s=node("section");s.append(node("h3",r.title));renderText(s,r.prose||"");
   sheet.append(s);
-  if((r.table||[]).length){const t=node("section");t.append(node("h3","每一池花了多少"));
+  if((r.table||[]).length){const t=node("section");t.append(node("h3","各预算池支出"));
     const ul=node("ul",null,"latest");
     r.table.forEach(row=>ul.append(node("li",`${row.pool}${row.lane?`（${row.lane}）`:""}：$${row.cost_usd} · ${row.calls} 次 · 占本周 ${row.share_of_spend}`)));
     t.append(ul);sheet.append(t)}
-  if(r.judgement_outcomes){const o=r.judgement_outcomes,t=node("section");t.append(node("h3","当时的判断，后来怎样"));
+  if(r.judgement_outcomes){const o=r.judgement_outcomes,t=node("section");t.append(node("h3","历史判断跟踪结果"));
     if(!o.available)t.append(node("div",o.reason||"还没有可验证的判断","gap"));
     else{(o.rows||[]).forEach(x=>t.append(node("p",`${x.label}：累计 ${x.to_date} · 本周 ${x.this_week}`)));if(o.note)t.append(node("div",o.note,"hint"))}sheet.append(t)}
   if((r.backlog_candidates||[]).length){const b=node("section");b.append(node("h3","下周可以研究的问题（候选）"));
     r.backlog_candidates.forEach(c=>{const d=node("div");d.append(node("b",c.question),node("div",c.because,"hint"));b.append(d)});
     sheet.append(b)}
-  if((r.policy_suggestions||[]).length){const ps=node("section");ps.append(node("h3","给你的几句建议"));
+  if((r.policy_suggestions||[]).length){const ps=node("section");ps.append(node("h3","后续研究建议"));
     const ul=node("ul",null,"latest");r.policy_suggestions.forEach(x=>ul.append(node("li",x)));ps.append(ul);sheet.append(ps)}
   if(r.authority_note)sheet.append(node("div",r.authority_note,"hint"))}
-function cardActions(c){const a=node("div",null,"fb");const b=node("button","看这家的结论","ghost");
+function cardActions(c){const a=node("div",null,"fb");const b=node("button","查看公司研究结论","ghost");
   b.style.cssText="padding:4px 10px;font-size:12px";b.onclick=()=>openClaims(c.company_ref);a.append(b);return a}
 let claimFilters={company:"",aspect:"",importance:"",canonical:"1"},claimCursor=null,claimPages=[];
 function openClaims(company){claimFilters={company:company||"",aspect:"",importance:"",canonical:"1"};claimCursor=null;claimPages=[];prepareReader("已核实的结论");loadClaims()}
@@ -967,25 +968,25 @@ async function openModel(company){const sheet=prepareReader("研究详情");
   try{renderModel(sheet,await getJson(`/v1/cockpit/model?company=${encodeURIComponent(company)}`))}
   catch(e){sheet.replaceChildren(readerClose());showProblem(sheet,e,"读取公司模型")}}
 function renderModel(sheet,m){sheet.replaceChildren(readerClose(),node("h2",`${m.company} · 公司模型`),
-  node("div",`第 ${m.version} 版 · ${fmtDate(m.created_at)}${m.change_reason_label?" · "+m.change_reason_label:""}`,"meta"));
+  node("div",`${versionLabel(m.version)} · ${fmtDate(m.created_at)}${m.change_reason_label?" · "+displayText(m.change_reason_label):""}`,"meta"));
   sheet.append(node("div",m.note||"","hint"));
   Object.values(m.invariants||{}).forEach(x=>{const refusal=invariantRefusal(x);if(refusal)sheet.append(refusal)});
   const r=m.readiness||{};
   if(r.drivers_without_history&&r.drivers_without_history.length)
     sheet.append(node("div",`没有历史可依的驱动因素：${r.drivers_without_history.join("、")}`,"gap"));
   if(r.results_unavailable&&r.results_unavailable.length)
-    sheet.append(node("div",`这一版暂无结果的项目：${r.results_unavailable.join("、")}`,"gap"));
+    sheet.append(node("div",`当前版本暂无结果的项目：${r.results_unavailable.map(displayText).join("、")}`,"gap"));
   sheet.append(node("pre",m.table,"table"));
   if(m.history&&m.history.length>1){sheet.append(node("h3","这个模型的版本链"));const h=node("div",null,"hist");
-    m.history.forEach(x=>h.append(node("div",`第 ${x.version} 版 · ${fmtDate(x.created_at)}${x.change_reason_label?" · "+x.change_reason_label:""}`)));
+    m.history.forEach(x=>h.append(node("div",`${versionLabel(x.version)} · ${fmtDate(x.created_at)}${x.change_reason_label?" · "+displayText(x.change_reason_label):""}`)));
     sheet.append(h)}}
 function laneClassOf(s){if(["launched","busy","running"].includes(s))return"on";
   /* Waiting on the owner is not idling, and the dot says so. */
   if(["ungranted","unapproved","unconfigured","unstarted"].includes(s))return"wait";
   if(s==="held")return"hold";if(["failed","rejected","unavailable"].includes(s))return"err";return""}
-function docCard(doc){const d=node("div",null,"doc");d.append(node("b",`初步筛选 · 第 ${doc.version} 版`),node("div",doc.summary,"sm"));const meta=node("div",`${doc.sections_written}/${doc.sections_total} 节已写 · 引用 ${doc.claims_cited} 条结论${doc.gaps?` · ${doc.gaps} 处缺口`:""} · ${fmtDate(doc.created_at)}`,"hint");const btn=node("button","阅读全文","ghost");btn.style.padding="5px 12px";btn.style.fontSize="12px";btn.style.marginTop="8px";btn.onclick=()=>openDoc(doc.version_ref);d.append(meta,btn);const q=qualityBlock(doc.quality);if(q)d.append(q);if(doc.feedback&&doc.feedback.enabled!==false)d.append(feedbackBar(doc.feedback));return d}
+function docCard(doc){const d=node("div",null,"doc");d.append(node("b",`初步筛选 · ${versionLabel(doc.version)}`),node("div",doc.summary,"sm"));const meta=node("div",`${doc.sections_written}/${doc.sections_total} 节已写 · 引用 ${doc.claims_cited} 条结论${doc.gaps?` · ${doc.gaps} 处缺口`:""} · ${fmtDate(doc.created_at)}`,"hint");const btn=node("button","阅读完整报告","ghost");btn.style.padding="5px 12px";btn.style.fontSize="12px";btn.style.marginTop="8px";btn.onclick=()=>openDoc(doc.version_ref);d.append(meta,btn);const q=qualityBlock(doc.quality);if(q)d.append(q);if(doc.feedback&&doc.feedback.enabled!==false)d.append(feedbackBar(doc.feedback));return d}
 async function openDoc(ref){const r=$("reader"),sheet=prepareReader("研究文档");sheet.replaceChildren(node("div","正在打开…","empty"));try{const doc=await getJson(`/v1/cockpit/deliverable?ref=${encodeURIComponent(ref)}`);renderDoc(sheet,doc)}catch(e){showProblem(sheet,e,"打开研究文档")}}
-function renderDoc(sheet,doc){sheet.replaceChildren();const close=node("button","关闭","ghost");close.className="ghost close";close.onclick=closeReader;sheet.append(close,node("h2",`${doc.company} · 初步筛选`),node("div",`第 ${doc.version} 版 · ${fmtDate(doc.created_at)} · 由系统按研究手册起草`,"meta"));const last=(doc.stage_history||[]).filter(s=>s.status!=="entered").slice(-1)[0];if(last){const g=node("div",null,`gatebox ${last.status==="gate_passed"?"pass":"fail"}`);g.append(node("b",last.status==="gate_passed"?"出口门：通过":"出口门：未通过"),node("div",last.rationale||""));sheet.append(g)}
+function renderDoc(sheet,doc){sheet.replaceChildren();const close=node("button","关闭","ghost");close.className="ghost close";close.onclick=closeReader;sheet.append(close,node("h2",`${doc.company} · 初步筛选`),node("div",`${versionLabel(doc.version)} · ${fmtDate(doc.created_at)} · 由系统按研究手册起草`,"meta"));const last=(doc.stage_history||[]).filter(s=>s.status!=="entered").slice(-1)[0];if(last){const g=node("div",null,`gatebox ${last.status==="gate_passed"?"pass":"fail"}`);g.append(node("b",last.status==="gate_passed"?"出口门：通过":"出口门：未通过"),node("div",last.rationale||""));sheet.append(g)}
 doc.sections.forEach(s=>{const sec=node("section");sec.append(node("h3",s.title));if(s.body)renderText(sec,s.body);(s.gaps||[]).forEach(g=>sec.append(node("div",g,"gap")));if(s.cited&&s.cited.length){const c=node("div",null,"cited");c.append(node("div",`依据的 ${s.cited.length} 条结论：`));s.cited.slice(0,12).forEach(x=>c.append(node("div",x.statement)));sec.append(c)}sheet.append(sec)});const q=qualityBlock(doc.quality);if(q)sheet.append(q);if(doc.feedback&&doc.feedback.enabled!==false)sheet.append(node("h3","读完之后"),feedbackBar(doc.feedback))}
 const CHECK={complete:["✓","ok"],partial:["◐","part"],missing:["○","no"],not_planned:["⊘","na"],source_unavailable:["⊘","na"]};
 function checklist(items){const ul=node("ul",null,"checks");items.forEach(it=>{const[icon,cls]=CHECK[it.status]||["·","na"];const li=node("li",null,cls);li.append(node("span",icon,"ic"),node("span",it.label),node("span",it.item_ref==="quarterly_financials"?`${it.have}/${it.required} 季`:`已取 ${it.have}/${it.required} · 全文已读 ${it.read??0}${it.legacy_extracted?` · 历史已提取 ${it.legacy_extracted}（全文待核验）`:""}`,"cnt"));if(it.status!=="complete")li.append(node("span",it.note,"nt"));ul.append(li)});return ul}
@@ -997,12 +998,12 @@ function panel(n,l,s,go,onclick,alarm){const d=stat(n,l,s);d.className="stat lin
 function renderOpsPanels(ops){const box=$("ops-panels");if(!ops){box.replaceChildren();return}
   const L=ops.lanes,G=ops.gaps,F=ops.failures,A=ops.acceptance;
   box.replaceChildren(
-    panel(`${L.counts.running}/${L.total}`,"流水线在跑",L.note,"往下看每条流水线 ↓",
+    panel(`${L.counts.running}/${L.total}`,"任务流水线状态",L.note,"查看各项任务 ↓",
       ()=>$("lanes").scrollIntoView({behavior:"smooth",block:"center"}),L.waiting_on_you>0),
-    panel(G.headline,"还没填上的来源缺口",G.note,"看每个来源能取什么 →",openSources,false),
-    panel(F.headline,"挂起 / 不再重试的工作",F.note,"看运维待办 →",openOps,F.parked_items>0),
-    panel(A.available?A.published:"—","上周产物验收",A.note||"",
-      `${A.week||"上周"} · 每周回头看 →`,openReflection,false));}
+    panel(G.headline,"待补齐资料缺口",G.note,"查看数据源能力 →",openSources,false),
+    panel(F.headline,"异常阻断与终止任务",F.note,"查看系统待办 →",openOps,F.parked_items>0),
+    panel(A.available?A.published:"—","上周交付物验收",A.note||"",
+      `${A.week||"上周"} · 查看每周复盘 →`,openReflection,false));}
 /* P17d 运维待办: 哪些工作在等哪个依赖、从什么时候开始等。只读，纯粹是
    append-only 失败台账的折叠结果。 */
 function openOps(){const sheet=prepareReader("研究详情");
@@ -1046,7 +1047,7 @@ function draftActions(box,r,kind){const a=node("div",null,"actions"),ok=node("bu
 
 // ---------- steer
 $("steer-submit").onclick=async()=>{const text=$("steer-input").value.trim();if(!text){$("steer-status").textContent="请先写下调整方向";return}const b=$("steer-submit"),s=$("steer-status");b.disabled=true;s.className="status";s.textContent="正在整理具体改动…";$("steer-draft").replaceChildren();try{const job=await postJson("/v1/cockpit/steer",{text,request_id:rid()});const r=await waitJob(job.job_id);s.className="status ok";s.textContent="已整理完成，请确认。";renderSteerDraft(r)}catch(e){s.className="status err";s.textContent=readableError(e,"整理方向调整").message}finally{b.disabled=false}};
-function renderSteerDraft(r){const d=r.draft,box=node("div",null,"draft");if(d.understood_as)box.append(node("p",`我理解为：${d.understood_as}`,"summary"));if(d.summary)box.append(node("div",d.summary));const any=d.add_questions.length||d.remove_questions.length||d.changes.objective;if(d.add_questions.length){const ul=node("ul");d.add_questions.forEach(q=>ul.append(node("li",q,"add")));box.append(node("h4","新增的问题"),ul)}if(d.remove_questions.length){const ul=node("ul");d.remove_questions.forEach(q=>ul.append(node("li",q,"rm")));box.append(node("h4","去掉的问题"),ul)}if(d.changes.objective)box.append(node("h4","改写后的目标"),node("div",d.objective));if(d.not_possible.length){const ul=node("ul");d.not_possible.forEach(q=>ul.append(node("li",q)));box.append(node("h4","这次做不到的"),ul)}if(!any)box.append(node("div","这句话不需要改动研究问题；如果你想改变的是数据来源或公司名单，请告诉我，我会记下来作为下一步开发。","hint"));else{box.append(node("div","确认后发布为新一版研究目标；系统从下一轮开始按新问题阅读和提炼。","hint"));draftActions(box,r,"steer")}$("steer-draft").replaceChildren(box)}
+function renderSteerDraft(r){const d=r.draft,box=node("div",null,"draft");if(d.understood_as)box.append(node("p",`我理解为：${d.understood_as}`,"summary"));if(d.summary)box.append(node("div",d.summary));const any=d.add_questions.length||d.remove_questions.length||d.changes.objective;if(d.add_questions.length){const ul=node("ul");d.add_questions.forEach(q=>ul.append(node("li",q,"add")));box.append(node("h4","新增的问题"),ul)}if(d.remove_questions.length){const ul=node("ul");d.remove_questions.forEach(q=>ul.append(node("li",q,"rm")));box.append(node("h4","去掉的问题"),ul)}if(d.changes.objective)box.append(node("h4","改写后的目标"),node("div",d.objective));if(d.not_possible.length){const ul=node("ul");d.not_possible.forEach(q=>ul.append(node("li",q)));box.append(node("h4","本次无法执行的调整"),ul)}if(!any)box.append(node("div","这句话不需要改动研究问题；如果你想改变的是数据来源或公司名单，请告诉我，我会记下来作为下一步开发。","hint"));else{box.append(node("div","确认后发布为新一版研究目标；系统从下一轮开始按新问题阅读和提炼。","hint"));draftActions(box,r,"steer")}$("steer-draft").replaceChildren(box)}
 async function loadSteerHistory(){try{const h=await getJson("/v1/cockpit/history?kind=steer");const box=$("steer-history");const items=h.drafts||[];if(!items.length){box.replaceChildren(node("div","尚无方向调整记录","empty"));return}box.replaceChildren(...items.map(x=>{const d=node("div",null,"h");d.append(node("b",`${fmtDate(x.created_at)} · ${{open:"待确认",published:"已生效",discarded:"已放弃"}[x.status]||"状态暂不可读"}`),node("div",`你的要求：${x.input_text}`),node("div",x.draft.understood_as||x.draft.summary||""));return d}))}catch(e){showProblem($("steer-history"),e,"读取方向调整记录")}}
 
 // ---------- log
@@ -1059,7 +1060,7 @@ async function loadLog(full){try{const r=await getJson(`/v1/cockpit/log?limit=20
 // ---------- ask
 let askSubmitting=false,askHistorySequence=0,askHistoryTimer=null;
 $("ask-submit").onclick=async()=>{const q=$("ask-input").value.trim();if(!q){$("ask-status").textContent="请先写下问题";return}const b=$("ask-submit"),s=$("ask-status");askSubmitting=true;b.disabled=true;s.className="status";s.textContent="";const chat=$("chat");if(chat.querySelector(".empty"))chat.replaceChildren();const qa=node("div",null,"qa");qa.append(node("div",q,"q"));const a=node("div",null,"a");const th=node("div",null,"thinking");th.append(document.createTextNode("正在查阅已核实的结论，通常约需一分钟 "),node("i"),node("i"),node("i"));a.append(th);qa.append(a);chat.prepend(qa);$("ask-input").value="";try{const job=await postJson("/v1/cockpit/ask",{question:q,request_id:rid()});const r=await waitJob(job.job_id);renderAnswer(a,r)}catch(e){const p=readableError(e,"回答问题");a.replaceChildren(node("p",p.message));if(p.nextStep)a.append(node("p",p.nextStep,"hint"));const tech=technicalDetails(p.technical);if(tech)a.append(tech);a.style.borderColor="rgba(255,107,138,.4)"}finally{askSubmitting=false;b.disabled=false}};
-function renderAnswer(a,r){a.replaceChildren();renderText(a,r.display_answer||r.answer);const shownGaps=r.display_gaps||r.gaps;if(shownGaps&&shownGaps.length)a.append(node("div","当前证据缺口："+shownGaps.map(displayText).join("；"),"gaps"));const foot=node("div",null,"foot");const confidence={high:"高置信度",medium:"中等置信度",low:"低置信度"}[r.confidence]||"";foot.append(node("span",`引用 ${r.citations.length} 条已核实结论（共查阅 ${r.claims_considered} 条${r.duplicates_dropped?`，合并 ${r.duplicates_dropped} 条重复内容`:""}）`),node("span",confidence),node("span",r.replayed?"沿用上次结果":`本次模型费用 US$${r.cost_usd}`));if(r.citations.length){const btn=node("button","查看引用","ghost");btn.style.padding="4px 10px";btn.style.fontSize="12px";const c=node("div",null,"cites");r.citations.forEach(x=>{const d=node("div",null,"cite");d.append(rawNode("div",x.statement),node("small",`${x.company} · ${x.period||"期间未注明"} · 入库于 ${fmtDate(x.at)}`));c.append(d)});btn.onclick=()=>{c.classList.toggle("show");btn.textContent=c.classList.contains("show")?"收起引用":"查看引用"};foot.append(btn);a.append(foot,c)}else a.append(foot);if(r.feedback&&r.feedback.enabled!==false)a.append(feedbackBar(r.feedback))}
+function renderAnswer(a,r){a.replaceChildren();renderText(a,r.display_answer||r.answer);const shownGaps=r.display_gaps||r.gaps;if(shownGaps&&shownGaps.length)a.append(node("div","当前证据缺口："+shownGaps.map(displayText).join("；"),"gaps"));const foot=node("div",null,"foot");const confidence={high:"高置信度",medium:"中等置信度",low:"低置信度"}[r.confidence]||"";foot.append(node("span",`引用 ${r.citations.length} 条已核实结论（共查阅 ${r.claims_considered} 条${r.duplicates_dropped?`，合并 ${r.duplicates_dropped} 条重复内容`:""}）`),node("span",confidence),node("span",r.replayed?"沿用上次结果":`本次模型费用 US$${r.cost_usd}`));if(r.citations.length){const btn=node("button","查看引用","ghost");btn.style.padding="4px 10px";btn.style.fontSize="12px";const c=node("div",null,"cites");r.citations.forEach(x=>{const d=node("div",null,"cite"),shown=displayText(x.statement);d.append(node("div",shown),node("small",`${x.company} · ${x.period||"期间未注明"} · 入库于 ${fmtDate(x.at)}`));if(shown!==x.statement){const tech=technicalDetails({original_statement:x.statement});if(tech)d.append(tech)}c.append(d)});btn.onclick=()=>{c.classList.toggle("show");btn.textContent=c.classList.contains("show")?"收起引用":"查看引用"};foot.append(btn);a.append(foot,c)}else a.append(foot);if(r.feedback&&r.feedback.enabled!==false)a.append(feedbackBar(r.feedback))}
 function renderText(el,text){let ul=null;(displayText(text)||"").split(/\r?\n/).forEach(line=>{const t=line.trim();if(!t){ul=null;return}if(/^[-•*]\s+/.test(t)){if(!ul){ul=node("ul");el.append(ul)}ul.append(node("li",t.replace(/^[-•*]\s+/,"")))}else{ul=null;el.append(node("p",t.replace(/^#+\s*/,"")))}})}
 async function loadAskHistory(){clearTimeout(askHistoryTimer);if(askSubmitting)return;const sequence=++askHistorySequence;try{const h=await getJson("/v1/cockpit/history?kind=ask");if(askSubmitting||sequence!==askHistorySequence)return;const chat=$("chat");if(!h.items.length)return;chat.replaceChildren(...h.items.map(x=>{const qa=node("div",null,"qa");qa.append(node("div",x.request.question,"q"));const a=node("div",null,"a");if(x.status==="done"&&x.result)renderAnswer(a,x.result);else if(x.status==="failed"){const p=readableError(x,"回答问题");a.append(node("p",p.message));const tech=technicalDetails(x.error);if(tech)a.append(tech)}else a.append(node("p","正在处理，请稍候…"));qa.append(a);return qa}));if(h.items.some(x=>x.status==="running")&&current==="ask"&&!document.hidden)askHistoryTimer=setTimeout(loadAskHistory,1800)}catch(e){if(sequence===askHistorySequence)$("ask-status").textContent=readableError(e,"读取问答记录").message}}
 

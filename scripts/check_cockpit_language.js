@@ -12,7 +12,8 @@ const checks = {
   opaqueClaimCursor: html.includes('q.set("cursor",claimCursor)') && html.includes("r.next_cursor"),
   boundedClaimPage: html.includes('q.set("limit","50")'),
   technicalDetailsCollapsed: html.includes('node("details",null,"technical")'),
-  rawCitationPreserved: html.includes('rawNode("div",x.statement)'),
+  normalizedCitationLocalized: html.includes('shown=displayText(x.statement)') &&
+    html.includes('technicalDetails({original_statement:x.statement})'),
   unknownEnumsClosed: html.includes('enumLabel(s,"状态暂不可读")'),
   askWaitExplained: html.includes("通常约需一分钟"),
   approvalDedupeRequiresKey: html.includes("sameActions&&item.dedupe_key"),
