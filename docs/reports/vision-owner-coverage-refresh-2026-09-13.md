@@ -2,7 +2,7 @@
 
 本表替代旧报告中的“当前缺失”判断，历史报告保留其日期含义。核对范围包括 v0.1、v0.5/v0.6、v0.9、v1.1 vision，09-09 analyst onboarding 蓝图、并行计划及 owner 裁决，09-10 owner expectations/steps，09-11 foundation priorities 与两份 prompt-contract review，以及本次 owner 关于持续开发、Sol 并行、Guidepoint、OpenClaw Wiki、桌面历史资料和及时清理备份的指令。没有发现比这些更近的独立 Dalton 指令文件；这不代表能访问全部历史对话。
 
-代码基线：R22b 冻结 `5dbe5212`；其后已合入模板导入 `3b33679c`、双工作区验收 `4e75be56`、Wiki 路径修复 `3715fe1f`。这些后续提交不属于 R22b wheel。三个 GPT-5.6 Sol 并行开发/审计，主代理复核原始要求与实现，开发未因本次复盘暂停。
+最新 owner 优先级已收敛为先交付正式可运行 demo。当前已发布基础版本 R23 `3e4e8682`，页面、模型表及五公司导出通过；实际 Ask 路由缺陷仍在修复，尚未计正式交互 demo 完成。最新执行状态见 [PROJECT_STATUS](../PROJECT_STATUS.md)。后续集成包含模板导入、合成双工作区工具和 Wiki 路径修复，但这些扩展不在本次 demo wheel。下列高级范围暂停推进，未从剩余清单中删除。
 
 ## 仍有明确开发工作
 
@@ -11,7 +11,7 @@
 | Conviction v2 | 当前 authority 仍为 0.1。需版本化 policy/schema、producer/verifier、proposal/lane 全链；允许市场同向但回报有吸引力，分开表示证据置信度、情景概率与回报；后续人工发布策略。不能把 prompt identity 0.2 当 v2 已实现。 | `owner-research-prompt-contract-audit-2026-09-11.md` 最后一节；`conviction_call.py`、`conviction_call_draft.py` |
 | 持有期回报及市场预期 | 缺冻结的持有期回报/归因 authority 与买方预期来源 authority。现有 valuation 和调用者提供的 XLSX scenario 不等于这些对象；来源分类不能靠模型猜。 | `foundation-research-prompt-contract-review-2026-09-11.md` Memo 行；`fund_xlsx_export.py` |
 | 结构化情景与观察记录 | Dossier 当前情景/触发条件主要仍为有引用的文字。需独立结构化、可持久跟踪的条件/观察；通用 tracking 或模型 scenario 不能替代该对象。 | 上述 review 的 Dossier 行；owner prompt audit 的 Conviction v2 要求 |
-| 参考基金模板闭环 | 安全离线样式候选 importer 已合入并通过 9 项相关测试；仅接受可明确映射的受支持样式，并非任意 workbook 自动转换。候选版本注册、审核/选择与 exporter 接线正在开发。 | `fund_xlsx_template_import.py`、`fund_xlsx_template.py` |
+| 参考基金模板闭环 | 安全离线样式候选 importer 已合入并通过 9 项相关测试；仅接受可明确映射的受支持样式，并非任意 workbook 自动转换。registry/select 在独立候选 `8e66ee01` 完成并通过 31 项检查，尚待合入、部署和产品验收。 | `fund_xlsx_template_import.py`、`fund_xlsx_template.py` |
 | 最终交付与真实多工作区验收 | 页面和 workspace 核心已有实现。仍需确定最终交付/设备视觉验收范围，以及真实两行业 workspace 的配置、安装升级、回滚隔离与共享容量验收。新本地 harness 已补 synthetic acceptance，不能记作真实 host 产品验收。 | `run_two_workspace_acceptance.py`、`workspace.py`、`workspace_process.py`；owner 要求保留现有 Cockpit 风格 |
 
 高级投资能力仍排在基础运行及真实研究产物闭环之后。已有范围内继续开发，不把缺少策略签名误写成代码已经完成。
@@ -38,11 +38,11 @@ Sales notes、IR、yfinance 和 Ask 的现有治理/策略状态分别核验；�
 
 ## 发布与清理检查点
 
-R22b `5dbe5212` 已通过完整 7,938 tests（0 failures/errors，1 skip）、608 个 wheel/source 文件及 3 JS 检查、14 步复制状态演练（42 tick entries，0 escapes，17 份配置、173 个 writer 操作保留）。正式 packet preflight 已通过，manifest SHA `16c1709edbebc01a4f3969ebed1e2709656b7abf19ac030e7ee43f1f54f77577`。发布流程继续进行；此检查点尚不声称部署/持续健康/发布完成。正式 pointer 仍为 R20，实际运行前驱为恢复后的未发布 R21。
+R23 已完成 7,945 项完整测试（0 failures/errors，1 skip）、608 文件 wheel/source 核验、14 步复制状态演练、45/45 持续健康及正式发布。真实 HTTPS 首屏 3.587 秒，五公司模型/产物页面与 HTML/XLSX 导出通过；Ask 一次实际调用被路由拒绝，正以 R24 必需修复处理。页面可用不等于高级研究质量和人工验收已经完成。
 
-复制 runner 名称与真实 suite receipt 不一致曾导致 packet preflight 拒绝；已保留失败 manifest，修正 packet basename 后重新通过，未改测试证据或重写失败历史。
+失败历史保留：R22b 的部署工具漏接返回值导致安装失败并健康回滚；R23 首次演练在复制前被磁盘余量检查拒绝；旧 QA proxy 引起线上请求积压，移除后页面恢复。所有失败日志与修复后验收单独保存。
 
-已清理完成的 R13c 与失败 R22a 演练数据库副本约 2.66 GB，保留报告、日志、hash binding。后续继续清理完成演练的临时数据库；保留当前回滚、R21 恢复证明与发布链依赖，避免清理破坏可恢复性。
+本轮持续清理已完成演练和开发的临时 SQLite 副本，并关闭确认过期的 QA proxy/session；保留发布证据、当前回滚及 R18b 外部依赖、R21 恢复链所需文件。备份保留状态与清理 receipt 随发布 packet 登记。
 
 ## 明确冻结或排除
 
