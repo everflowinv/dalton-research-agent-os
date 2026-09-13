@@ -177,7 +177,34 @@ def run_language_review(
     return result
 
 
+def publish_language_attachment(
+    product: Mapping[str, Any], *,
+    checker: Callable[[str], Mapping[str, Any]],
+    brain: Callable[[str], Mapping[str, Any]],
+    checker_identity: Mapping[str, str],
+    save_review: Callable[[Mapping[str, Any]], Any],
+    publish_attachment: Callable[[Mapping[str, Any], Mapping[str, Any]], Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Run the gate, retain its result, and publish only a passing attachment.
+
+    ``save_review`` is called for every terminal attempt, including pending
+    failures. ``publish_attachment`` is called only once for a ready result and
+    receives the unchanged source product plus the bound review result.
+    """
+
+    result = run_language_review(
+        product, checker=checker, brain=brain, checker_identity=checker_identity)
+    save_review(result)
+    if result["status"] != "ready_for_publication":
+        return result
+    published = publish_attachment(product, result)
+    if not isinstance(published, Mapping):
+        raise ResearchLanguageReviewError("language attachment publisher returned no receipt")
+    return {**result, "attachment": dict(published)}
+
+
 __all__ = ["BRAIN_PURPOSE", "CHECKER_MODEL", "CHECKER_PROVIDER", "CHECKER_PURPOSE",
            "ResearchLanguageReviewError",
            "SCHEMA_VERSION", "build_brain_prompt", "build_checker_prompt",
-           "render_suggestions_markdown", "run_language_review", "validate_checker_output"]
+           "publish_language_attachment", "render_suggestions_markdown", "run_language_review",
+           "validate_checker_output"]

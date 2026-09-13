@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import unittest
 
-from dalton_core.research_language_review import build_brain_prompt, run_language_review
+from dalton_core.research_language_review import (
+    build_brain_prompt, publish_language_attachment, run_language_review,
+)
 
 IDENTITY = {"provider": "antigravity-cli-gateway",
             "model": "antigravity-cli-gateway/gemini-3.8-flash"}
@@ -22,6 +24,34 @@ def review():
 
 
 class ResearchLanguageReviewTests(unittest.TestCase):
+    def test_publication_adapter_saves_review_before_publishing_attachment(self):
+        order = []
+        result = publish_language_attachment(
+            product(), checker=lambda prompt: review(),
+            brain=lambda prompt: {
+                "decisions": [{"suggestion_index": 0, "decision": "reject",
+                               "reason": "保留精确原值。"}],
+                "sections": [{"index": 0, "title": "结论",
+                              "body": "收入为 15623445 USD，利润率为 5.24%。", "gaps": []}],
+            }, checker_identity=IDENTITY,
+            save_review=lambda row: order.append(("save", row["status"])),
+            publish_attachment=lambda source, row: (
+                order.append(("publish", row["source_hash"])) or {"status": "published"}),
+        )
+        self.assertEqual([item[0] for item in order], ["save", "publish"])
+        self.assertEqual(result["attachment"], {"status": "published"})
+
+    def test_publication_adapter_saves_failure_and_never_publishes(self):
+        order = []
+        result = publish_language_attachment(
+            product(), checker=lambda prompt: {"bad": True}, brain=lambda prompt: {},
+            checker_identity=IDENTITY,
+            save_review=lambda row: order.append(("save", row["status"])),
+            publish_attachment=lambda source, row: order.append(("publish", "bad")),
+        )
+        self.assertEqual(order, [("save", "pending_language_review")])
+        self.assertEqual(result["status"], "pending_language_review")
+
     def test_brain_prompt_omits_large_authority_and_source_payloads(self):
         source = product(); source["sources"] = [{"raw": "secret-large-authority"}]
         prompt = build_brain_prompt(source, review())
