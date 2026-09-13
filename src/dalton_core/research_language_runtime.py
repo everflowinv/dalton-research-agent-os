@@ -7,9 +7,10 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from .cockpit_model import CockpitModel, unwrap_json_object
+from .cockpit_model import CockpitModel, independent_model_call, unwrap_json_object
 from .model_router import ModelRouter
-from .model_fallback_chain import TIER_BRAIN, TIER_CHEAP, register_purpose_tier
+from .model_fallback_chain import TIER_BRAIN, TIER_CHEAP, TIER_VERIFIER, register_purpose_tier
+from .research_localization import build_verifier_prompt
 from .research_language_review import (
     BRAIN_PURPOSE, CHECKER_MODEL, CHECKER_PURPOSE, ResearchLanguageReviewError,
     run_language_review,
@@ -18,6 +19,7 @@ from .store import canonical_json, content_hash
 
 register_purpose_tier(CHECKER_PURPOSE, TIER_CHEAP)
 register_purpose_tier(BRAIN_PURPOSE, TIER_BRAIN)
+FIDELITY_PURPOSE=register_purpose_tier("research_localization_verifier",TIER_VERIFIER)
 
 
 def _hash_bytes(data: bytes) -> str:
@@ -53,21 +55,25 @@ def _write_once(path: Path, data: bytes) -> None:
 
 
 def run(product: Mapping[str, Any], *, mission: Mapping[str, Any], request_id: str,
-        checker_config: Path, brain_config: Path, scheduler_db: Path,
-        artifact_dir: Path | None=None,
+        checker_config: Path, brain_config: Path, verifier_config: Path, scheduler_db: Path,
+        producer_route_decision_ref: str, artifact_dir: Path | None=None,
         model_factory: Callable[[Mapping[str, Any]], Any] | None=None) -> dict[str, Any]:
     """Run exactly one checker and one brain call, persisting a closed receipt."""
-    checker_raw=_load(checker_config); brain_raw=_load(brain_config)
+    checker_raw=_load(checker_config); brain_raw=_load(brain_config); verifier_raw=_load(verifier_config)
     proof_key=sha256((request_id+":"+sha256((canonical_json(product)+"\n").encode()).hexdigest()).encode()).hexdigest()[:24]
     proof_base=None if artifact_dir is None else artifact_dir/proof_key
     if proof_base is not None and proof_base.with_suffix(".json").exists():
         payload=proof_base.with_suffix(".json").read_bytes(); prior=json.loads(payload)
-        if prior.get("status")!="ready_for_publication": raise ResearchLanguageReviewError("既有语言审查记录未完成")
+        if (prior.get("status")!="ready_for_publication" or not isinstance(prior.get("fidelity_verification"),dict)
+                or prior["fidelity_verification"].get("verdict")!="pass"
+                or prior.get("content_hash")!=content_hash({k:v for k,v in prior.items() if k!="content_hash"})):
+            raise ResearchLanguageReviewError("既有语言审查记录不完整或身份不匹配")
         return {**prior,"artifact_ref":proof_base.name,"artifact_sha256":_hash_bytes(payload)}
     def default_factory(cfg: Mapping[str,Any]):
         checker=cfg is checker_raw
+        output=12_000 if checker else 16_000
         return CockpitModel(cfg,scheduler_db=scheduler_db,max_input_tokens=120_000,
-                            max_output_tokens=12_000 if checker else 16_000,
+                            max_output_tokens=output,
                             timeout_seconds=600,max_cost_usd=1.0)
     make=model_factory or default_factory
     calls: dict[str,dict[str,Any]]={}
@@ -93,7 +99,16 @@ def run(product: Mapping[str, Any], *, mission: Mapping[str, Any], request_id: s
         checker_identity=_route_identity(checker_raw,calls["checker"])
         if checker_identity["provider"]!="antigravity-cli-gateway" or checker_identity["model"]!="gemini-3.8-flash":
             raise ResearchLanguageReviewError("语言检查模型身份不符合发布要求")
-        result["runtime_identity"]={"checker":checker_identity,"brain":_route_identity(brain_raw,calls["brain"])}
+        brain_identity=_route_identity(brain_raw,calls["brain"])
+        verifier_model=make(verifier_raw)
+        verifier_call=independent_model_call(verifier_model,producer_route_decision_refs=[producer_route_decision_ref,calls["brain"]["route_decision_ref"]],purpose=FIDELITY_PURPOSE,request_id=f"{request_id}:fidelity",prompt=build_verifier_prompt(product,{"sections":result["brain_revision"]["sections"]}),mission=mission)
+        calls["fidelity"]=dict(verifier_call)
+        verdict=unwrap_json_object(verifier_call["text"])
+        expected={"verdict","faithful","no_new_facts","meaning_preserved","findings"}
+        if not isinstance(verdict,Mapping) or set(verdict)!=expected or verdict.get("verdict")!="pass" or any(verdict.get(k) is not True for k in ("faithful","no_new_facts","meaning_preserved")) or not isinstance(verdict.get("findings"),list):
+            raise ResearchLanguageReviewError("独立事实保真核验未通过")
+        result["fidelity_verification"]={**dict(verdict),"route":_route_identity(verifier_raw,verifier_call)}
+        result["runtime_identity"]={"checker":checker_identity,"brain":brain_identity,"fidelity":result["fidelity_verification"]["route"]}
         result["call_evidence"]={k:{x:v.get(x) for x in ("work_order_ref","result_envelope_ref","invocation_ref","cost_micros","replayed")} for k,v in calls.items()}
         result["content_hash"]=content_hash({k:v for k,v in result.items() if k!="content_hash"})
     if artifact_dir is not None:

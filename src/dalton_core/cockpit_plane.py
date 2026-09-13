@@ -4615,6 +4615,7 @@ class CockpitPlane:
         language_policy = language_root / "research-language-policy.json"
         checker_config = language_root / "language-checker-model-config.json"
         brain_config = language_root / "language-brain-model-config.json"
+        verifier_config = language_root / "research-localization-verifier-model-config.json"
         required = False
         if language_policy.exists():
             try:
@@ -4622,7 +4623,7 @@ class CockpitPlane:
                 required = isinstance(policy, Mapping) and policy.get("required") is True
             except (OSError, json.JSONDecodeError):
                 raise CockpitError("发布前语言审查配置无法读取，请修复配置后重试")
-        configured = checker_config.exists() and brain_config.exists()
+        configured = checker_config.exists() and brain_config.exists() and verifier_config.exists()
         if configured:
             from .research_language_runtime import run as run_language_review
             product = {"kind": "ask_answer", "version_ref": f"cockpit-ask:{request_id}",
@@ -4631,8 +4632,8 @@ class CockpitPlane:
             try:
                 language_review = run_language_review(
                     product, mission=mission, request_id=request_id,
-                    checker_config=checker_config, brain_config=brain_config,
-                    scheduler_db=self.config.scheduler_db,
+                    checker_config=checker_config, brain_config=brain_config, verifier_config=verifier_config,
+                    scheduler_db=self.config.scheduler_db, producer_route_decision_ref=call["route_decision_ref"],
                     artifact_dir=language_root / "research-language-reviews" / "ask")
             except Exception as exc:
                 raise CockpitError("回答已生成，但发布前语言审查未完成，请稍后重试") from exc
