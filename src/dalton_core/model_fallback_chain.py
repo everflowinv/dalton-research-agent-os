@@ -161,6 +161,13 @@ _PURPOSE_TIERS: dict[str, str] = {
     # Reading a rating and a target price off page one of a broker note is
     # "apply a stated standard to a lot of items" -- cheap.
     "street_estimate": TIER_CHEAP,
+    # Publication setup validates preserved purpose overrides before the
+    # scheduled worker imports its dynamic builder.  These four therefore
+    # belong to the static routing authority as well as build-time guards.
+    "research_localization": TIER_CHEAP,
+    "research_language_check": TIER_CHEAP,
+    "research_language_revision": TIER_BRAIN,
+    "research_localization_verifier": TIER_VERIFIER,
 }
 
 # A link may be skipped for these and only these, and each one means "the

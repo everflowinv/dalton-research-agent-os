@@ -31,6 +31,8 @@ from dalton_core.model_fallback_chain import (
 )
 from dalton_core.model_router import ModelRouter
 from dalton_core.openclaw_catalog_reconcile import sync_openclaw_model_catalog
+from dalton_core.document_extraction_setup import ensure_extraction_policy
+from dalton_core.model_selection import publish_selection
 from dalton_core.research_planner_setup import credential_slots_for, ensure_planner_policy
 from tests.test_openclaw_catalog_reconcile import _config
 
@@ -143,6 +145,20 @@ class TierMapTests(unittest.TestCase):
         self.assertEqual(tier_for("claim_index"), "cheap")
         self.assertEqual(tier_for("quality"), "cheap")
 
+    def test_production_setup_can_validate_publication_purposes_before_builder_import(self) -> None:
+        # Copied-state deployment replays setup in a fresh process.  It reads
+        # preserved routing overrides before research_output_preparation.build
+        # has had an opportunity to register these dynamically.
+        self.assertEqual({purpose: tier_for(purpose) for purpose in (
+            "research_localization", "research_language_check",
+            "research_language_revision", "research_localization_verifier",
+        )}, {
+            "research_localization": "cheap",
+            "research_language_check": "cheap",
+            "research_language_revision": "brain",
+            "research_localization_verifier": "verifier",
+        })
+
     def test_the_classifier_names_every_failure_it_is_shown(self) -> None:
         from dalton_core.openclaw_model_adapter import (
             BrokerBudgetExceeded,
@@ -251,6 +267,26 @@ class ChainExecutionTests(unittest.TestCase):
             producer_decision_ref=producer_decision_ref,
             producer_decision_refs=producer_decision_refs,
         )
+
+    def test_production_setup_replays_policy_with_publication_overrides(self) -> None:
+        # Start at the legacy one-profile setup, add the owner's four
+        # publication choices, then run the same tier migration used by the
+        # production installer.  The migration must carry every override.
+        legacy = ensure_extraction_policy(
+            self.router, profile_ids=[tier_chain("cheap")[0]], now=NOW)
+        policy_ref = legacy["policy_version_ref"]
+        for purpose in ("research_localization", "research_language_check",
+                        "research_language_revision", "research_localization_verifier"):
+            selected = publish_selection(
+                self.router, policy_version_ref=policy_ref, purpose=purpose,
+                mode="tier", actor_ref="human:owner", now=NOW)
+            policy_ref = selected["policy_version_ref"]
+        replayed = ensure_extraction_policy(self.router, tier="cheap", now=NOW)
+        policy = self.router.get_policy(replayed["policy_version_ref"])
+        self.assertEqual(set(policy["purpose_overrides"]), {
+            "research_localization", "research_language_check",
+            "research_language_revision", "research_localization_verifier",
+        })
 
     def test_the_first_link_serves_and_the_chain_records_which_one(self) -> None:
         broker = FakeBroker({})
