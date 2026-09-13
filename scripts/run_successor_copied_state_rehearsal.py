@@ -668,6 +668,13 @@ def derive_confined_transition(
                     config["publication_gate"]["release_pointer"] = str(release_pointer)
                     config["publication_gate"]["runtime_pointer"] = str(runtime_pointer)
                     confined_bytes = _json_bytes(config)
+                elif row["kind"] == "authority" and row["path"].endswith(
+                        "-model-config.json"):
+                    config = json.loads(confined_bytes)
+                    config = module.rewrite_paths(config, rehearsal.replacements)
+                    _need(not module.foreign_paths(config, rehearsal.temp_root),
+                          f"confined publication model config retains live paths: {row['path']}")
+                    confined_bytes = _json_bytes(config)
                 _write_exclusive(confined, confined_bytes)
                 target = derived["research_publication_transition"]["files"][index]
                 target["artifact"] = confined.relative_to(derived_root).as_posix()

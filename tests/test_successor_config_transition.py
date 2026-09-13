@@ -28,6 +28,7 @@ from scripts.successor_research_publication_transition import (
     FIXED_FILES as PUBLICATION_FILES, build_transition as build_publication,
 )
 from scripts.run_successor_copied_state_rehearsal import derive_confined_transition
+from scripts.rehearse_deploy import foreign_paths, rewrite_paths
 from scripts.execute_successor_stopped_window_candidate import expected_preserved_service_bytes
 
 
@@ -499,6 +500,13 @@ class PreserveExistingTransitionTests(unittest.TestCase):
         for name in PUBLICATION_FILES:
             path = assets / name
             value = model(name) if name.endswith("-model-config.json") else {"schema_version": "0.1"}
+            if name.endswith("-model-config.json"):
+                value.update({
+                    "broker_auth_key": "/Users/example/.openclaw/dalton-model-broker.sock.key",
+                    "broker_socket": "/Users/example/.openclaw/dalton-model-broker.sock",
+                    "budget_db": "/Users/example/Library/Application Support/Dalton/state/dalton-core/thesis-impact-budget.sqlite",
+                    "model_router_db": "/Users/example/Library/Application Support/Dalton/state/dalton-core/model-router.sqlite",
+                })
             if name == "research-publication-worker-config.json":
                 value = {"schema_version": "research-publication-worker-config:0.1",
                     "core_db": "/state/core.sqlite", "scheduler_db": "/state/scheduler.sqlite",
@@ -545,20 +553,35 @@ class PreserveExistingTransitionTests(unittest.TestCase):
         (scratch / "openclaw/openclaw.json").write_bytes(
             (self.packet / "openclaw.preserved.json").read_bytes())
 
+        copied_state = scratch / "state"
+        copied_state.mkdir()
+        for path in self.state.rglob("*"):
+            if not path.is_file():
+                continue
+            target = copied_state / path.relative_to(self.state)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(path.read_bytes())
+        copied_service = scratch / "service.json"
+        copied_service.write_bytes(self.service.read_bytes())
+
         class Module:
             @staticmethod
             def model_config_inventory(state):
                 return {path.name: json.loads(path.read_text())
                         for path in sorted(state.glob("*-model-config.json"))}
 
-            @staticmethod
-            def rewrite_paths(value, replacements):
-                return value
+            rewrite_paths = staticmethod(rewrite_paths)
+            foreign_paths = staticmethod(foreign_paths)
 
         derived_path, _proof_path, _proof = derive_confined_transition(
             Module, SimpleNamespace(
-                temp_root=scratch, temp_state=self.state,
-                temp_config=self.service, replacements={},
+                temp_root=scratch, temp_state=copied_state,
+                temp_config=copied_service,
+                replacements={
+                    "/state": str(copied_state),
+                    "/Users/example/.openclaw": str(scratch / "broker"),
+                    "/Users/example/Library/Application Support/Dalton": str(scratch),
+                },
             ), packet_root=self.packet, manifest=manifest,
             original_manifest_sha256="f" * 64)
         derived = json.loads(derived_path.read_text())
@@ -566,6 +589,10 @@ class PreserveExistingTransitionTests(unittest.TestCase):
                          set(derived["model_inventory"]["file_sha256"]))
         self.assertEqual(len(self.models) + 4,
                          derived["model_inventory"]["after_count"])
+        for row in derived["research_publication_transition"]["files"]:
+            if row["path"].endswith("-model-config.json"):
+                value = json.loads((derived_path.parent / row["artifact"]).read_text())
+                self.assertEqual([], foreign_paths(value, scratch))
         openclaw = self.root / "scratch-publication/openclaw.json"
         openclaw.parent.mkdir(); openclaw.write_bytes(
             (self.packet / "openclaw.preserved.json").read_bytes())
