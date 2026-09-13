@@ -140,7 +140,7 @@ class CockpitLanguageTests(unittest.TestCase):
 
     def test_final_research_prose_waits_for_exact_reviewed_text(self) -> None:
         text = HTML.read_text(encoding="utf-8")
-        self.assertIn('FINAL_RESEARCH_REQUIRED&&shown===value', text)
+        self.assertIn('FINAL_RESEARCH_REQUIRED&&!Object.prototype.hasOwnProperty.call(UI_TEXT,value)', text)
         self.assertIn('正文正在检查文字表达，完成后会显示。', text)
         for field in (
             'finalResearchText(x.because)',

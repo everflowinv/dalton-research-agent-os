@@ -5,10 +5,19 @@ const fs = require("fs");
 const path = require("path");
 const root = path.resolve(__dirname, "..");
 const html = fs.readFileSync(path.join(root, "src/dalton_core/cockpit_control.html"), "utf8");
+const vm = require('vm');
+const gateCode = ['displayText', 'finalResearchText'].map(name =>
+  html.split('\n').find(line => line.startsWith(`const ${name}=`))).join('\n');
+const gateContext = { UI_TEXT: { '表达已经清楚': '表达已经清楚', 'old': '已修改' }, FINAL_RESEARCH_REQUIRED: true };
+vm.createContext(gateContext);
+vm.runInContext(gateCode + '\nthis.showFinal=finalResearchText;', gateContext);
 
 const checks = {
   removedOldReviewLink: !html.includes('href="/legacy"') && !html.includes("旧版审阅"),
   exactLocalizationHook: html.includes("Object.prototype.hasOwnProperty.call(UI_TEXT,value)"),
+  unchangedApprovedTextVisible: gateContext.showFinal('表达已经清楚') === '表达已经清楚',
+  changedApprovedTextVisible: gateContext.showFinal('old') === '已修改',
+  absentReviewWaits: gateContext.showFinal('未经审查') === '正文正在检查文字表达，完成后会显示。',
   opaqueClaimCursor: html.includes('q.set("cursor",claimCursor)') && html.includes("r.next_cursor"),
   boundedClaimPage: html.includes('q.set("limit","50")'),
   technicalDetailsCollapsed: html.includes('node("details",null,"technical")'),

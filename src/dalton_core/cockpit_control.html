@@ -421,7 +421,7 @@ let UI_TEXT={};
 let FINAL_RESEARCH_REQUIRED=false;
 const displayText=value=>typeof value==="string"&&Object.prototype.hasOwnProperty.call(UI_TEXT,value)?UI_TEXT[value]:value;
 const FINAL_RESEARCH_KINDS=new Set(["thesis","thesis_revision_candidate","deep_insight_gate","conviction_call"]);
-const finalResearchText=value=>{if(typeof value!=="string"||!value)return value;const shown=displayText(value);return FINAL_RESEARCH_REQUIRED&&shown===value?"正文正在检查文字表达，完成后会显示。":shown};
+const finalResearchText=value=>{if(typeof value!=="string"||!value)return value;return FINAL_RESEARCH_REQUIRED&&!Object.prototype.hasOwnProperty.call(UI_TEXT,value)?"正文正在检查文字表达，完成后会显示。":displayText(value)};
 const rawNode=(tag,text,cls)=>{const n=document.createElement(tag);if(text!=null)n.textContent=text;if(cls)n.className=cls;return n};
 const node=(tag,text,cls)=>rawNode(tag,text==null?text:displayText(text),cls);
 function formatDisplayMetric(value,{unit=null,currency=null,scale=null,metric_ref=""}={}){
