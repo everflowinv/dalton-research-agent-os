@@ -5,6 +5,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from dalton_core.research_publication_worker import poll_once, run_periodic
 
@@ -49,6 +50,28 @@ class ResearchPublicationWorkerTests(unittest.TestCase):
                           library_reader=changed_reader)
         self.assertEqual(third["completed"], 1)
         self.assertEqual(len(calls), 4)
+
+    def test_default_reader_explicitly_ignores_existing_localization_attachment(self):
+        calls = []
+        source_product = reader(None, MISSION, "company:a")["products"][0]
+        def current_library(connection, mission, company, *, localize):
+            self.assertFalse(localize)
+            product = dict(source_product)
+            if localize:
+                product["localization"] = {"content_hash": "localized"}
+            return {"products": [product]}
+        with mock.patch(
+                "dalton_core.research_publication_worker.research_library",
+                side_effect=current_library):
+            first = poll_once(object(), {**MISSION, "universe": [{"company_ref": "company:a"}]},
+                              state_dir=self.state,
+                              prepare=lambda product: (calls.append(product) or {"status": "completed"}))
+            second = poll_once(object(), {**MISSION, "universe": [{"company_ref": "company:a"}]},
+                               state_dir=self.state,
+                               prepare=lambda product: (calls.append(product) or {"status": "completed"}))
+        self.assertEqual((first["completed"], second["unchanged"]), (1, 1))
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn("localization", calls[0])
 
     def test_failure_is_pending_and_does_not_block_other_products(self):
         calls = []

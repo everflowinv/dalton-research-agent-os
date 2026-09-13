@@ -74,7 +74,7 @@ def poll_once(
     *,
     state_dir: Path,
     prepare: Callable[[Mapping[str, Any]], Mapping[str, Any]],
-    library_reader: Callable[[Any, Mapping[str, Any], str], Mapping[str, Any]] = research_library,
+    library_reader: Callable[[Any, Mapping[str, Any], str], Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Discover current products and prepare each unseen hash independently.
 
@@ -88,7 +88,11 @@ def poll_once(
         company_ref = member.get("company_ref") if isinstance(member, Mapping) else None
         if not isinstance(company_ref, str) or not company_ref:
             continue
-        library = library_reader(connection, mission, company_ref)
+        library = (
+            research_library(connection, mission, company_ref, localize=False)
+            if library_reader is None
+            else library_reader(connection, mission, company_ref)
+        )
         for product in library.get("products") or []:
             if not isinstance(product, Mapping) or product.get("status") != "available":
                 continue
@@ -137,7 +141,7 @@ def run_periodic(
     connection: Any, mission: Mapping[str, Any], *, state_dir: Path,
     prepare: Callable[[Mapping[str, Any]], Mapping[str, Any]],
     stop_event: Any, interval_seconds: float, max_loops: int | None = None,
-    library_reader: Callable[[Any, Mapping[str, Any], str], Mapping[str, Any]] = research_library,
+    library_reader: Callable[[Any, Mapping[str, Any], str], Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     if interval_seconds <= 0 or max_loops is not None and max_loops < 1:
         raise ValueError("periodic worker bounds are invalid")
