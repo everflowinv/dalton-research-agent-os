@@ -605,6 +605,19 @@ class SourcePanelTests(Int2Case):
         self.assertTrue(quoted)
         self.assertTrue(all(q["daily_limit"] for row in quoted for q in row["quotas"]))
 
+    def test_source_and_quota_machine_ids_have_separate_display_labels(self) -> None:
+        rows = self.plane.sources()["sources"]
+        self.assertTrue(all(row["label"] != row["slug"] for row in rows))
+        quotas = [quota for row in rows for quota in row["quotas"]]
+        self.assertTrue(quotas)
+        self.assertTrue(all(quota["operation"] for quota in quotas))
+        self.assertTrue(all(quota["operation_label"] for quota in quotas))
+        self.assertTrue(all("_" not in quota["operation_label"] for quota in quotas))
+        ownership = next(row for row in rows if row["slug"] == "sec-ownership")
+        financials = next(row for row in rows if row["slug"] == "sec-financials")
+        self.assertNotEqual(ownership["label"], financials["label"])
+        self.assertIn("股东与高管持股申报", ownership["content"])
+
 
 class RoutingPanelTests(Int2Case):
     def test_without_a_router_database_the_panel_says_why(self) -> None:

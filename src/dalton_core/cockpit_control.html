@@ -791,7 +791,7 @@ function renderSources(sheet,r){sheet.replaceChildren(readerClose(),node("h2","�
     c.append(node("small",`能取：${s.content.join("、")||"—"}`));
     if(s.connector)c.append(node("small",`连接：${connector.status_label||enumLabel(connector.status)} · 研究权限：${mission.status_label||enumLabel(mission.status)}`));
     else c.append(node("small",`层级：${s.tier_label} · 状态：${s.status_label||enumLabel(s.status)}${s.completeness_label?" · "+s.completeness_label:""}`));
-    const q=(s.quotas||[]).map(x=>`${x.operation} ${x.daily_limit}/天`).join(" · ");
+    const q=(s.quotas||[]).map(x=>`${x.operation_label||x.operation} ${x.daily_limit}/天`).join(" · ");
     c.append(node("small",`配额：${q||"没有登记额度"} · 频率：${s.cadence_label||"没有基线"}`,"raw"));
     if(s.generic_note)c.append(node("small",s.generic_note,"raw"));
     if(s.installed_note)c.append(node("small",s.installed_note,"raw"));

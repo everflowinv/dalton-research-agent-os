@@ -62,6 +62,18 @@ SOURCE_LABELS = {
     "source:sec-edgar": "SEC 财报数据", "source:alphaengine": "卖方研报与电话会",
     "source:company-ir": "公司投资者关系", "source:guidepoint": "专家访谈", "source:web-search": "公开网页搜索",
 }
+SOURCE_SLUG_LABELS = {
+    "alphaengine": "卖方研报与电话会", "catalyst-calendar": "催化剂日历",
+    "cn-hk-findata": "沪深港财务与交易数据", "cninfo": "巨潮资讯",
+    "company-wiki": "内部公司知识库", "employee-reviews": "员工评价",
+    "gemini-web-search": "Gemini 公开网页搜索", "guidepoint": "Guidepoint 专家访谈",
+    "hkex-filings": "香港交易所公告", "reddit-last30days": "Reddit 近 30 天讨论",
+    "roic-transcript": "ROIC 电话会纪要", "sales-notes": "卖方销售简报",
+    "sec": "SEC 财报与公告", "sec-financials": "SEC 三张财务报表",
+    "sec-ownership": "SEC 股东与高管持股申报", "web-fetch": "公开网页读取",
+    "x-x-search": "X 站内搜索", "x-xreach": "X 动态与新闻",
+    "xueqiu": "雪球", "yfinance": "Yahoo Finance 市场数据",
+}
 
 
 def _stage_readiness_labels(entry: Mapping[str, Any]) -> dict[str, Any]:
@@ -428,7 +440,23 @@ CONTENT_KIND_LABELS = {
     "crowd_post": "散户帖子", "employee_review": "员工评价",
     "news": "新闻", "filing": "公司报表", "financial_statement": "三张报表",
     "price": "股价", "consensus": "市场一致预期", "calendar": "日程",
-    "web_page": "公开网页",
+    "web_page": "公开网页", "ownership_filing": "股东与高管持股申报",
+    "insider_trading_plan": "高管预设交易计划", "buyback_disclosure": "股份回购披露",
+}
+SOURCE_OPERATION_LABELS = {
+    "get_document": "读取文档", "search_library": "搜索资料库",
+    "ah_premium": "A／H 股溢价", "buybacks": "股份回购",
+    "financial_statements": "财务报表", "margin_balance": "融资融券余额",
+    "northbound_flow": "北向资金流", "shareholders": "股东资料",
+    "list_documents": "列出文档", "blind_reviews": "Blind 员工评价",
+    "announcements_index": "公告索引", "disclosure_of_interests": "权益披露",
+    "monthly_returns": "月报表", "next_day_disclosure_returns": "翌日披露报表",
+    "get_note": "读取销售简报", "list_notes": "列出销售简报",
+    "list_filings": "列出公司申报", "beneficial_ownership": "实益所有权申报",
+    "form13f_holdings": "13F 机构持仓", "form144_notices": "Form 144 拟出售通知",
+    "form4_transactions": "Form 4 高管交易", "analyst_estimates": "分析师一致预期",
+    "calendar": "公司日程", "daily_prices": "每日股价",
+    "search_web": "搜索公开网页", "fetch_get": "读取公开网页",
 }
 CONNECTION_STATUS_LABELS = {
     "connected": "已连接", "not_connected": "尚未连接",
@@ -3923,7 +3951,8 @@ class CockpitPlane:
             completeness = entry["completeness_ceiling"]
             rows.append({
                 "slug": entry["slug"], "source_ref": entry["source_ref"],
-                "label": SOURCE_LABELS.get(entry["source_ref"], entry["slug"]),
+                "label": SOURCE_SLUG_LABELS.get(
+                    entry["slug"], SOURCE_LABELS.get(entry["source_ref"], entry["slug"])),
                 # 能取什么
                 "content": [CONTENT_KIND_LABELS.get(kind, kind)
                             for kind in entry["content_kinds"]],
@@ -3951,6 +3980,8 @@ class CockpitPlane:
                 # projection can be hashed; a dict is what a page renders.
                 "quotas": [
                     {"operation": row.get("operation"),
+                     "operation_label": SOURCE_OPERATION_LABELS.get(
+                         row.get("operation"), row.get("operation")),
                      "daily_limit": row.get("daily_unit_limit"),
                      "unit": row.get("quota_unit")}
                     for row in (dict(pairs) for pairs in entry["quotas"])
