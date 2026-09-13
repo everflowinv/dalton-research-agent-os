@@ -3995,9 +3995,17 @@ class CockpitPlane:
             return "未登记模型"
         model = str(profile.get("model") or "").strip()
         family = str(profile.get("family") or "").strip()
-        if model and family and family.casefold() not in model.casefold():
-            return f"{model}（{family}）"
-        return model or family or "未命名模型"
+        provider = str(profile.get("provider") or "").strip()
+        provider_label = {
+            "openai": "OpenAI", "anthropic": "Anthropic", "google": "Google",
+            "antigravity": "Antigravity",
+            "antigravity-cli-gateway": "Antigravity",
+            "deepseek": "DeepSeek", "zai": "智谱",
+        }.get(provider, "已登记渠道" if provider else "")
+        base = (f"{model}（{family}）"
+                if model and family and family.casefold() not in model.casefold()
+                else model or family or "未命名模型")
+        return f"{base} · {provider_label}" if provider_label else base
 
     def models(self) -> dict[str, Any]:
         """Per calling stage: the tier, the chain it will really use, and a choice.
@@ -4253,6 +4261,7 @@ class CockpitPlane:
             return {"available": False,
                     "reason": "本机尚未配置模型路由库，暂时无法读取路由"}
         from .model_fallback_chain import FallbackChainError, routing_overview
+        from .model_selection import PURPOSE_LABELS
         from .model_router import ModelRouter
 
         broker = (None if self.config.openclaw_config_path is None
@@ -4291,6 +4300,8 @@ class CockpitPlane:
                         served["profile_id"], catalogue),
                     "position": served["chain_position"],
                     "purpose": served["purpose"],
+                    "purpose_label": PURPOSE_LABELS.get(
+                        served["purpose"], "未登记用途"),
                     "at": served["created_at"],
                 },
                 "last_served_note": (
@@ -4302,7 +4313,14 @@ class CockpitPlane:
                     {"model": link["profile_id"],
                      "display_name": self._model_display_name(
                          link["profile_id"], catalogue),
-                     "reason": link["skip_reason"]}
+                     "reason": link["skip_reason"],
+                     "reason_label": {
+                         "transport_failure": "连接未成功",
+                         "content_refusal": "模型未返回可用内容",
+                         "budget_refused": "本次请求超出适用额度",
+                         "verifier_not_independent": "不满足独立复核要求",
+                         "unclassified": "未能确认跳过原因",
+                     }.get(link["skip_reason"], "未能确认跳过原因")}
                     for link in entry["skipped_since_last_served"][-4:]
                 ],
             })

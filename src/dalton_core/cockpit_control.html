@@ -802,10 +802,10 @@ function renderSources(sheet,r){sheet.replaceChildren(readerClose(),node("h2","�
   m.tiers.forEach(t=>{const d=node("div",null,"lane");d.append(node("span",null,"st"));
     const c=node("div");c.append(node("b",t.label));
     c.append(node("small",t.chain.map(l=>`${l.position}. ${l.display_name}${l.registered?"":"（缺档案）"}`).join(" → ")));
-    c.append(node("small",t.last_served?`上一次：${t.last_served.display_name}（${t.last_served.purpose}） · ${t.last_served_note}`:t.last_served_note,"raw"));
+    c.append(node("small",t.last_served?`上一次：${t.last_served.display_name}（${t.last_served.purpose_label}） · ${t.last_served_note}`:t.last_served_note,"raw"));
     if((t.skipped_since_last_served||[]).length)
-      c.append(node("small",`跳过：${t.skipped_since_last_served.map(s=>`${s.display_name}（${s.reason}）`).join("、")}`,"raw"));
-    const routeTech=technicalDetails({profile_ids:t.chain.map(l=>l.model),last_served_profile_id:t.last_served&&t.last_served.model});if(routeTech)c.append(routeTech);
+      c.append(node("small",`跳过：${t.skipped_since_last_served.map(s=>`${s.display_name}（${s.reason_label}）`).join("、")}`,"raw"));
+    const routeTech=technicalDetails({profile_ids:t.chain.map(l=>l.model),last_served_profile_id:t.last_served&&t.last_served.model,last_served_purpose:t.last_served&&t.last_served.purpose,skip_reasons:(t.skipped_since_last_served||[]).map(s=>s.reason)});if(routeTech)c.append(routeTech);
     d.append(c);box.append(d)});
   if(m.unmapped_note)box.append(node("div",`${m.unmapped_note}：${m.unmapped_purposes.join("、")}`,"gap"));
   if(m.catalog){const c=node("div",null,m.catalog.in_sync?"hint":"gap");

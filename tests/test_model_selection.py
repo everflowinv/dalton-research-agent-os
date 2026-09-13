@@ -1789,6 +1789,24 @@ class CockpitModelPageTests(unittest.TestCase):
         self.assertFalse(view["available"])
         self.assertIn("模型路由库", view["reason"])
 
+    def test_same_named_models_are_distinguished_by_registered_provider(self) -> None:
+        catalogue = {
+            "profile:google": {"model": "gemini-3.8-flash", "family": "google-gemini-3",
+                               "provider": "google"},
+            "profile:antigravity": {"model": "gemini-3.8-flash", "family": "google-gemini-3",
+                                    "provider": "antigravity-cli-gateway"},
+        }
+        self.assertEqual(
+            self.plane(with_model_config=False)._model_display_name(
+                "profile:google", catalogue),
+            "gemini-3.8-flash（google-gemini-3） · Google",
+        )
+        self.assertEqual(
+            self.plane(with_model_config=False)._model_display_name(
+                "profile:antigravity", catalogue),
+            "gemini-3.8-flash（google-gemini-3） · Antigravity",
+        )
+
     def test_page_uses_the_server_restart_status_after_selection(self) -> None:
         page = (Path(__file__).resolve().parents[1]
                 / "src/dalton_core/cockpit_control.html").read_text("utf-8")
