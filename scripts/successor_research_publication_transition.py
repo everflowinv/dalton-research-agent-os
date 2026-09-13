@@ -195,8 +195,8 @@ def apply(*, packet_root: Path, state_dir: Path, launch_agents_dir: Path | None,
                   "research publication target has a symlink component")
             _need(not target.exists() and not target.is_symlink(),
                   f"research publication target already exists: {row['path']}")
-            target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             data = artifact_bytes(packet_root, row)
+            target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, row["mode"])
             try:
                 with os.fdopen(fd, "wb") as stream:
