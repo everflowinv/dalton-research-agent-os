@@ -90,6 +90,79 @@ class SchedulerTests(unittest.TestCase):
         self.assertIsNotNone(lease)
         return lease
 
+    def interruption_proof(self, durable=False):
+        proof = {"schema_version": "dalton-model-interruption-proof:0.1",
+                 "broker_journal_sha256": "1" * 64,
+                 "process_command_sha256": "2" * 64}
+        if durable:
+            proof |= {"route_decision_ref": "route:1", "profile_version_ref": "profile:1",
+                      "invocation_ref": "invocation:result-1",
+                      "broker_record_sha256": "3" * 64,
+                      "budget_admission_id": "admission:1",
+                      "budget_settlement_id": "settlement:1",
+                      "budget_settlement_sha256": "4" * 64}
+        else:
+            proof |= {"route_absence_sha256": "3" * 64,
+                      "journal_absence_sha256": "4" * 64,
+                      "admission_absence_sha256": "5" * 64}
+        return proof
+
+    def test_operator_reconciles_exact_durable_model_completion(self):
+        lease = self.enqueue_claim()
+        envelope = ResultEnvelope.from_dict(result("result-1")).to_dict()
+        recovered = self.scheduler.reconcile_interrupted_model_attempt(
+            "work-1", 1, "worker:a", lease_revision_ref=lease["lease"]["id"],
+            lease_hash=lease["lease"]["content_hash"],
+            work_order_hash=lease["work_order_hash"], process_pid=25400,
+            process_start="2026-09-13T13:26:00-04:00",
+            process_is_alive=lambda pid: False, disposition="durable_completion",
+            recovery_proof=self.interruption_proof(True),
+            idempotency_key="recover:model:work-1:1", result_envelope=envelope,
+            result_envelope_hash=content_hash(envelope))
+        self.assertEqual(recovered["work_state"], "succeeded")
+        self.assertEqual(self.scheduler.formal_result("work-1")["result_envelope_id"],
+                         "result-1")
+        duplicate = self.scheduler.reconcile_interrupted_model_attempt(
+            "work-1", 1, "worker:a", lease_revision_ref=lease["lease"]["id"],
+            lease_hash=lease["lease"]["content_hash"],
+            work_order_hash=lease["work_order_hash"], process_pid=25400,
+            process_start="2026-09-13T13:26:00-04:00",
+            process_is_alive=lambda pid: False, disposition="durable_completion",
+            recovery_proof=self.interruption_proof(True),
+            idempotency_key="recover:model:work-1:1", result_envelope=envelope,
+            result_envelope_hash=content_hash(envelope))
+        self.assertEqual(duplicate["status"], "duplicate")
+
+    def test_operator_releases_only_proved_undispatched_attempt(self):
+        lease = self.enqueue_claim()
+        recovered = self.scheduler.reconcile_interrupted_model_attempt(
+            "work-1", 1, "worker:a", lease_revision_ref=lease["lease"]["id"],
+            lease_hash=lease["lease"]["content_hash"],
+            work_order_hash=lease["work_order_hash"], process_pid=25400,
+            process_start="2026-09-13T13:26:00-04:00",
+            process_is_alive=lambda pid: False, disposition="undispatched",
+            recovery_proof=self.interruption_proof(),
+            idempotency_key="recover:model:work-1:1")
+        self.assertEqual(recovered["work_state"], "ready")
+        self.assertEqual(self.scheduler.status("work-1")["attempt_number"], 2)
+
+    def test_operator_model_recovery_rejects_live_pid_and_cas_drift(self):
+        lease = self.enqueue_claim()
+        args = dict(work_order_id="work-1", attempt_number=1, owner_ref="worker:a",
+                    lease_revision_ref=lease["lease"]["id"],
+                    lease_hash=lease["lease"]["content_hash"],
+                    work_order_hash=lease["work_order_hash"], process_pid=25400,
+                    process_start="2026-09-13T13:26:00-04:00",
+                    disposition="undispatched", recovery_proof=self.interruption_proof(),
+                    idempotency_key="recover:model:work-1:1")
+        with self.assertRaisesRegex(SchedulerConflict, "still alive"):
+            self.scheduler.reconcile_interrupted_model_attempt(
+                **args, process_is_alive=lambda pid: True)
+        with self.assertRaisesRegex(SchedulerConflict, "CAS authority"):
+            self.scheduler.reconcile_interrupted_model_attempt(
+                **(args | {"lease_hash": "0" * 64}),
+                process_is_alive=lambda pid: False)
+
     def test_enqueue_claim_renew_and_success_are_append_only(self):
         self.assertEqual(self.scheduler.enqueue(work_order())["status"], "fresh")
         self.assertEqual(self.scheduler.enqueue(work_order())["status"], "duplicate")

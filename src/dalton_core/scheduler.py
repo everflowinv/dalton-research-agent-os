@@ -602,6 +602,141 @@ class Scheduler:
         with self._transaction() as cur:
             return self._expire_due(cur, now_dt, now)
 
+    def reconcile_interrupted_model_attempt(
+        self, work_order_id: str, attempt_number: int, owner_ref: str,
+        *, lease_revision_ref: str, lease_hash: str, work_order_hash: str,
+        process_pid: int, process_start: str,
+        process_is_alive: Callable[[int], bool], disposition: str,
+        recovery_proof: Mapping[str, Any], idempotency_key: str,
+        result_envelope: ResultEnvelope | Mapping[str, Any] | None = None,
+        result_envelope_hash: str | None = None,
+    ) -> dict[str, Any]:
+        """Close one exact lease abandoned by a proved-dead model caller.
+
+        The caller is an operator recovery coordinator, not a worker.  A
+        durable completion must already bind the broker journal and settled
+        original budget admission in ``recovery_proof``.  An undispatched
+        recovery proves all three authorities (route, journal, admission)
+        absent and only opens the scheduler-policy-bounded next attempt.
+        Existing rows are never rewritten.
+        """
+        work_order_id = _nonempty(work_order_id, "work_order_id")
+        attempt_number = _positive_int(attempt_number, "attempt_number")
+        owner_ref = _nonempty(owner_ref, "owner_ref")
+        lease_revision_ref = _nonempty(lease_revision_ref, "lease_revision_ref")
+        lease_hash = _sha256(lease_hash, "lease_hash")
+        work_order_hash = _sha256(work_order_hash, "work_order_hash")
+        process_start = _nonempty(process_start, "process_start")
+        idempotency_key = _nonempty(idempotency_key, "idempotency_key")
+        if isinstance(process_pid, bool) or not isinstance(process_pid, int) or process_pid < 2:
+            raise SchedulerValidationError("process_pid must be a positive non-system PID")
+        if process_is_alive(process_pid):
+            raise SchedulerConflict("interrupted model owner process is still alive")
+        if disposition not in {"durable_completion", "undispatched"}:
+            raise SchedulerValidationError("model recovery disposition is invalid")
+        proof = dict(recovery_proof) if isinstance(recovery_proof, Mapping) else {}
+        common = {"schema_version", "broker_journal_sha256", "process_command_sha256"}
+        durable = common | {"route_decision_ref", "profile_version_ref", "invocation_ref",
+                            "broker_record_sha256", "budget_admission_id",
+                            "budget_settlement_id", "budget_settlement_sha256"}
+        undispatched = common | {"route_absence_sha256", "journal_absence_sha256",
+                                "admission_absence_sha256"}
+        if set(proof) != (durable if disposition == "durable_completion" else undispatched):
+            raise SchedulerValidationError("model recovery proof has an invalid closed shape")
+        if proof.get("schema_version") != "dalton-model-interruption-proof:0.1":
+            raise SchedulerValidationError("model recovery proof schema is invalid")
+        for key in set(proof) - {"schema_version", "route_decision_ref",
+                                "profile_version_ref", "invocation_ref",
+                                "budget_admission_id", "budget_settlement_id"}:
+            _sha256(proof[key], key)
+        wire = None
+        calculated_hash = None
+        if disposition == "durable_completion":
+            if result_envelope is None:
+                raise SchedulerValidationError("durable recovery requires a ResultEnvelope")
+            wire = self._result_wire(result_envelope)
+            calculated_hash = content_hash(wire)
+            if (wire["work_order_ref"] != work_order_id
+                    or wire["invocation_ref"] != proof["invocation_ref"]
+                    or wire["status"] not in {"succeeded", "failed"}
+                    or result_envelope_hash != calculated_hash):
+                raise SchedulerValidationError("durable model result authority does not match")
+        elif result_envelope is not None or result_envelope_hash is not None:
+            raise SchedulerValidationError("undispatched recovery cannot carry a result")
+        request = {"operation": "reconcile_interrupted_model_attempt",
+                   "work_order_id": work_order_id, "attempt_number": attempt_number,
+                   "owner_ref": owner_ref, "lease_revision_ref": lease_revision_ref,
+                   "lease_hash": lease_hash, "work_order_hash": work_order_hash,
+                   "process_pid": process_pid, "process_start": process_start,
+                   "disposition": disposition, "recovery_proof": proof,
+                   "result_envelope_hash": calculated_hash}
+        request_hash = content_hash(request)
+        now = _timestamp(self._now())
+        with self._transaction() as cur:
+            idem = cur.execute("SELECT request_hash,result_json FROM scheduler_completion_idempotency WHERE idempotency_key=?", (idempotency_key,)).fetchone()
+            if idem:
+                if idem["request_hash"] != request_hash:
+                    return {"status": "conflict", "request_hash": request_hash,
+                            "existing_request_hash": idem["request_hash"]}
+                saved = json.loads(idem["result_json"]); saved["status"] = "duplicate"
+                return saved
+            work = cur.execute("SELECT work_order_hash FROM scheduler_work_orders WHERE work_order_id=?", (work_order_id,)).fetchone()
+            current = self._latest_event(cur, work_order_id)
+            lease = cur.execute("SELECT * FROM scheduler_leases WHERE lease_revision_id=?", (lease_revision_ref,)).fetchone()
+            if (work is None or work["work_order_hash"] != work_order_hash
+                    or current is None or current["state"] != "leased"
+                    or int(current["attempt_number"]) != attempt_number
+                    or current["lease_revision_id"] != lease_revision_ref
+                    or lease is None or lease["content_hash"] != lease_hash
+                    or lease["work_order_id"] != work_order_id
+                    or int(lease["attempt_number"]) != attempt_number
+                    or lease["owner_ref"] != owner_ref):
+                raise SchedulerConflict("interrupted model lease CAS authority drifted")
+            next_event = None
+            if disposition == "undispatched":
+                event = self._append_event(cur, work_order_id=work_order_id,
+                    attempt_number=attempt_number, state="expired", now=now,
+                    lease_revision_id=lease_revision_ref,
+                    reason="operator_proved_undispatched:" + content_hash(proof))
+                next_event = self._new_ready_or_exhausted(cur,
+                    work_order_id=work_order_id, completed_attempt=attempt_number,
+                    now=now, exhaustion_reason="retry_exhausted_after_interruption")
+                final_state = next_event["state"]
+            else:
+                assert wire is not None and calculated_hash is not None
+                receipt = {"result_envelope_id": wire["id"], "work_order_id": work_order_id,
+                           "attempt_number": attempt_number,
+                           "result_envelope_hash": calculated_hash,
+                           "outcome": wire["status"], "created_at": now}
+                try:
+                    cur.execute("INSERT INTO scheduler_result_envelopes (result_envelope_id,work_order_id,attempt_number,result_envelope_hash,result_envelope_json,outcome,content_hash,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                        (wire["id"], work_order_id, attempt_number, calculated_hash,
+                         canonical_json(wire), wire["status"], content_hash(receipt), now))
+                except sqlite3.IntegrityError as exc:
+                    raise SchedulerConflict("recovered model ResultEnvelope id already exists") from exc
+                event = self._append_event(cur, work_order_id=work_order_id,
+                    attempt_number=attempt_number, state=wire["status"], now=now,
+                    lease_revision_id=lease_revision_ref, result_envelope_id=wire["id"],
+                    result_envelope_hash=calculated_hash,
+                    reason="operator_reconciled_model_journal:" + content_hash(proof))
+                formal = {"id": _id("formal-result"), "work_order_id": work_order_id,
+                          "attempt_number": attempt_number, "result_envelope_id": wire["id"],
+                          "result_envelope_hash": calculated_hash,
+                          "terminal_state": wire["status"], "created_at": now}
+                cur.execute("INSERT INTO scheduler_formal_results (result_record_id,work_order_id,attempt_number,result_envelope_id,result_envelope_hash,result_envelope_json,terminal_state,content_hash,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                    (formal["id"], work_order_id, attempt_number, wire["id"],
+                     calculated_hash, canonical_json(wire), wire["status"],
+                     content_hash(formal), now))
+                final_state = wire["status"]
+            response = {"status": "fresh", "request_hash": request_hash,
+                        "work_order_id": work_order_id, "attempt_number": attempt_number,
+                        "work_state": final_state, "attempt_event": event,
+                        "next_event": next_event, "recovery_proof_hash": content_hash(proof),
+                        "result_envelope_hash": calculated_hash}
+            cur.execute("INSERT INTO scheduler_completion_idempotency (idempotency_key,request_hash,result_json,created_at) VALUES(?,?,?,?)",
+                        (idempotency_key, request_hash, canonical_json(response), now))
+            return response
+
     def claim(
         self,
         owner_ref: str,
