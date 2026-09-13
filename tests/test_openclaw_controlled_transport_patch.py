@@ -17,9 +17,8 @@ from integrations.openclaw_host_patches.patch_provider_output_control_endpoint i
 
 def installed_openclaw_root(test: unittest.TestCase) -> Path:
     named = os.environ.get("DALTON_TEST_OPENCLAW_INSTALL_ROOT")
-    if not named:
-        test.skipTest("set DALTON_TEST_OPENCLAW_INSTALL_ROOT for installed-runtime validation")
-    root = Path(named).resolve(strict=True)
+    root = (Path(named).resolve(strict=True) if named else Path(__file__).parent /
+            "fixtures/openclaw-controlled-repair-2026.9.3")
     if not (root / "package.json").is_file() or not (root / "dist").is_dir():
         raise AssertionError("DALTON_TEST_OPENCLAW_INSTALL_ROOT must name the OpenClaw package root")
     return root
@@ -220,6 +219,8 @@ console.log(JSON.stringify({{...observed,proof}}));
                              "google-generative-ai-count-tokens-v1")
 
     def test_installed_control_patches_match_repo_owned_contracts(self):
+        if not os.environ.get("DALTON_TEST_OPENCLAW_INSTALL_ROOT"):
+            self.skipTest("set DALTON_TEST_OPENCLAW_INSTALL_ROOT for installed-runtime validation")
         root = installed_openclaw_root(self)
         # Both installed bytes and behavior are checked against repository-owned
         # contracts.  The behavioral harness uses only loopback mock transports;

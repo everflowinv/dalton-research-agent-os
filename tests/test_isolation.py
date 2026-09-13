@@ -11,7 +11,7 @@ REPOSITORY_ROOT = PACKAGE_ROOT.parents[1]
 
 
 class IsolationTests(unittest.TestCase):
-    def test_installed_openclaw_tests_require_an_explicit_package_root(self) -> None:
+    def test_installed_openclaw_tests_never_auto_discover_the_user_install(self) -> None:
         paths = [
             REPOSITORY_ROOT / "tests/test_portable_verifier_contracts.py",
             REPOSITORY_ROOT / "tests/test_openclaw_controlled_transport_patch.py",
