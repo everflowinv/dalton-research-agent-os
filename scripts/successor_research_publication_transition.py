@@ -65,6 +65,17 @@ def _allowed(path: str, *, kind: str) -> bool:
     return kind == "seed" and any(pattern.fullmatch(path) for pattern in _SEED_PATTERNS)
 
 
+def _no_symlink_components(root: Path, path: Path, *, include_leaf: bool) -> bool:
+    relative = path.relative_to(root)
+    cursor = root
+    parts = relative.parts if include_leaf else relative.parts[:-1]
+    for part in parts:
+        cursor = cursor / part
+        if cursor.is_symlink():
+            return False
+    return True
+
+
 def validate_transition(value: Mapping[str, Any]) -> dict[str, Any]:
     _need(isinstance(value, Mapping) and set(value) == {
         "schema_version", "kind", "launch_agent_label", "files"
@@ -108,11 +119,40 @@ def validate_transition(value: Mapping[str, Any]) -> dict[str, Any]:
     return {**dict(value), "files": sorted(parsed, key=lambda row: row["path"])}
 
 
+def build_transition(*, packet_root: Path,
+                     authority_files: Mapping[str, Path],
+                     seed_files: Mapping[str, Path],
+                     launch_agent_path: Path) -> dict[str, Any]:
+    """Build the closed row from packet-confined frozen artifacts."""
+    _need(set(authority_files) == FIXED_FILES,
+          "research publication authority inventory differs")
+    sources = [(name, "authority", path) for name, path in authority_files.items()]
+    sources += [(name, "seed", path) for name, path in seed_files.items()]
+    sources.append((LAUNCH_AGENT_NAME, "launch_agent", launch_agent_path))
+    packet = packet_root.resolve(); rows = []
+    for name, kind, source in sources:
+        source = source.absolute()
+        _need(source.is_relative_to(packet),
+              "research publication artifact is outside packet")
+        relative = source.relative_to(packet).as_posix()
+        data = source.read_bytes() if source.is_file() and not source.is_symlink() else b""
+        _need(data or (kind == "seed" and name.endswith(".index.lock")),
+              "research publication artifact is unavailable")
+        rows.append({"path": name, "kind": kind, "artifact": relative,
+                     "sha256": _sha(data), "size": len(data),
+                     "mode": 0o644 if kind == "launch_agent" else 0o600})
+    return validate_transition({"schema_version": SCHEMA_VERSION,
+        "kind": "exclusive_add", "launch_agent_label": LAUNCH_AGENT_LABEL,
+        "files": rows})
+
+
 def artifact_bytes(packet_root: Path, row: Mapping[str, Any]) -> bytes:
     packet_root = packet_root.resolve()
     path = packet_root / row["artifact"]
     _need(path.is_relative_to(packet_root) and path.is_file()
-          and not path.is_symlink(), "research publication artifact is unavailable")
+          and not path.is_symlink()
+          and _no_symlink_components(packet_root, path, include_leaf=True),
+          "research publication artifact is unavailable")
     data = path.read_bytes()
     _need(len(data) == row["size"] and _sha(data) == row["sha256"],
           "research publication artifact bytes differ")
@@ -132,6 +172,8 @@ def apply(*, packet_root: Path, state_dir: Path, launch_agents_dir: Path,
                       if row["kind"] == "launch_agent" else state / row["path"])
             root = roots["launch_agent"] if row["kind"] == "launch_agent" else state
             _need(target.is_relative_to(root), "research publication target escaped its root")
+            _need(_no_symlink_components(root, target, include_leaf=True),
+                  "research publication target has a symlink component")
             _need(not target.exists() and not target.is_symlink(),
                   f"research publication target already exists: {row['path']}")
             target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
