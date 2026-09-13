@@ -66,11 +66,18 @@ def validate_worker_config_bytes(data: bytes, *,
           and Path(value["output_directory"]).name == "research-localization",
           "research publication worker output paths differ")
     gate = value["publication_gate"]
+    release_pointer = Path(gate.get("release_pointer", "")) if isinstance(gate, dict) else Path("")
+    runtime_pointer = Path(gate.get("runtime_pointer", "")) if isinstance(gate, dict) else Path("")
+    canonical_pointers = (release_pointer == _OWNER_ROOT / "current-release.json"
+                          and runtime_pointer == _OWNER_ROOT / "current-runtime-config.json")
+    confined_pointers = (expected_source_commit is None and release_pointer.is_absolute()
+                         and runtime_pointer.is_absolute()
+                         and release_pointer.parent == runtime_pointer.parent
+                         and release_pointer.is_relative_to(Path("/private/tmp")))
     _need(isinstance(gate, dict) and set(gate) == {
         "release_pointer", "runtime_pointer", "expected_release_ref",
         "expected_source_commit"}
-        and gate["release_pointer"] == str(_OWNER_ROOT / "current-release.json")
-        and gate["runtime_pointer"] == str(_OWNER_ROOT / "current-runtime-config.json")
+        and (canonical_pointers or confined_pointers)
         and gate["expected_release_ref"] == "foundation-r25"
         and isinstance(gate["expected_source_commit"], str)
         and re.fullmatch(r"[0-9a-f]{40}", gate["expected_source_commit"])

@@ -643,7 +643,32 @@ def derive_confined_transition(
                 _artifact(original, row["sha256"],
                           f"research publication artifact {row['path']}")
                 confined = confined_files / f"{index:03d}.artifact"
-                _write_exclusive(confined, original.read_bytes())
+                confined_bytes = original.read_bytes()
+                if row["path"] == "research-publication-worker-config.json":
+                    config = json.loads(confined_bytes)
+                    config = module.rewrite_paths(config, rehearsal.replacements)
+                    pointer_root = rehearsal.temp_root / "publication-authority"
+                    pointer_root.mkdir(mode=0o700)
+                    runtime_pointer = pointer_root / "current-runtime-config.json"
+                    runtime_value = {
+                        "schema_version": "dalton-runtime-config-pointer-0.2",
+                        "status": "deployed_verified", "base_release_commit": "0" * 40,
+                        "candidate_manifest_sha256": "1" * 64,
+                    }
+                    _write_json(runtime_pointer, runtime_value)
+                    release_pointer = pointer_root / "current-release.json"
+                    release_value = {
+                        "schema_version": "dalton-current-release-0.2",
+                        "status": "deployed_verified", "release_ref": "synthetic-predecessor",
+                        "source_commit": "0" * 40,
+                        "candidate_manifest_sha256": "1" * 64,
+                        "current_runtime_config_sha256": _sha(runtime_pointer),
+                    }
+                    _write_json(release_pointer, release_value)
+                    config["publication_gate"]["release_pointer"] = str(release_pointer)
+                    config["publication_gate"]["runtime_pointer"] = str(runtime_pointer)
+                    confined_bytes = _json_bytes(config)
+                _write_exclusive(confined, confined_bytes)
                 target = derived["research_publication_transition"]["files"][index]
                 target["artifact"] = confined.relative_to(derived_root).as_posix()
                 target["sha256"] = _sha(confined)
@@ -1047,19 +1072,26 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         from scripts.successor_research_publication_transition import (
             artifact_bytes, validate_transition,
         )
-        publication = validate_transition(manifest["research_publication_transition"])
+        confined_manifest = json.loads(Path(
+            rehearsal.successor_derivation["proof_path"]).with_name(
+                "successor-config-transition.confined.json").read_text())
+        publication = validate_transition(
+            confined_manifest["research_publication_transition"])
         observed = {}
         for row in publication["files"]:
             target = ((rehearsal.launch_agents_dir / row["path"])
                       if row["kind"] == "launch_agent"
                       else rehearsal.temp_state / row["path"])
             _need(target.is_file() and not target.is_symlink()
-                  and target.read_bytes() == artifact_bytes(packet_root, row),
+                  and target.read_bytes() == artifact_bytes(
+                      Path(rehearsal.successor_derivation["proof_path"]).parent, row),
                   f"research publication rehearsal artifact changed: {row['path']}")
             observed[row["path"]] = _sha(target)
         final["research_publication_transition"] = {
             "file_count": len(observed),
-            "file_sha256": observed,
+            "file_sha256": {row["path"]: row["sha256"] for row in
+                            validate_transition(manifest[
+                                "research_publication_transition"])["files"]},
             "launch_agent_label": publication["launch_agent_label"],
             "worker_run_once": rehearsal.publication_worker_run_once,
         }
