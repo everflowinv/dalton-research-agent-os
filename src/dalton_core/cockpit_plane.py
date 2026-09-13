@@ -1862,6 +1862,13 @@ class CockpitPlane:
                 text_localizations = {}
         except (ImportError, OSError, sqlite3.Error, ValueError, TypeError):
             text_localizations = {}
+        language_review_required = False
+        try:
+            policy = _load_json(self.config.core_db.parent / "research-language-policy.json")
+            language_review_required = (isinstance(policy, Mapping)
+                                        and policy.get("required") is True)
+        except (OSError, ValueError, TypeError):
+            language_review_required = False
         heartbeat = _load_json(self.config.heartbeat_path) or {}
         with self._core() as core:
             try:
@@ -2101,6 +2108,7 @@ class CockpitPlane:
             "feedback_enabled": journal["enabled"],
             "model_available": self._model_status(),
             "text_localizations": text_localizations,
+            "publication_policy": {"language_review_required": language_review_required},
         }
 
     def _stage_rows(self, core: sqlite3.Connection, mission: Mapping[str, Any]) -> list[dict[str, Any]]:

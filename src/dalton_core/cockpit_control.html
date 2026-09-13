@@ -418,7 +418,9 @@ pre.table{background:#f6f8fb;color:#28364b;border-color:var(--line)}table{color:
 const GRADE_LABEL={"company-filed-document":"公司文件披露","earnings-call-transcript":"电话会口述"};
 const $=id=>document.getElementById(id);
 let UI_TEXT={};
+let FINAL_RESEARCH_REQUIRED=false;
 const displayText=value=>typeof value==="string"&&Object.prototype.hasOwnProperty.call(UI_TEXT,value)?UI_TEXT[value]:value;
+const finalResearchText=value=>{if(typeof value!=="string"||!value)return value;const shown=displayText(value);return FINAL_RESEARCH_REQUIRED&&shown===value?"正文正在检查文字表达，完成后会显示。":shown};
 const rawNode=(tag,text,cls)=>{const n=document.createElement(tag);if(text!=null)n.textContent=text;if(cls)n.className=cls;return n};
 const node=(tag,text,cls)=>rawNode(tag,text==null?text:displayText(text),cls);
 function formatDisplayMetric(value,{unit=null,currency=null,scale=null,metric_ref=""}={}){
@@ -560,6 +562,7 @@ async function loadResearchProducts(companyRef,box){
 // ---------- overview
 function renderOverview(o){
   UI_TEXT=o.text_localizations&&typeof o.text_localizations==="object"?o.text_localizations:{};
+  FINAL_RESEARCH_REQUIRED=o.publication_policy?.language_review_required===true;
   const workspace=o.workspace;
   $("workspace-name").textContent=workspace&&workspace.mode==="isolated"?workspace.slug:"研究系统";
   $("workspace-name").title=workspace&&workspace.workspace_id?`分析师工作区 ${workspace.workspace_id}`:"";
@@ -715,7 +718,7 @@ function eventsBlock(e){const d=node("div",null,"mdl");d.append(node("b",`${e.da
   d.append(node("div",(e.kinds||[]).map(k=>`${k.label} ${k.count}`).join(" · "),"hint"));
   const ul=node("ul",null,"latest");
   (e.latest||[]).forEach(x=>{const li=node("li");
-    li.append(node("span",`${x.kind_label}：${x.summary||"—"}`),
+    li.append(node("span",`${x.kind_label}：${finalResearchText(x.summary)||"—"}`),
       /* The tier travels with the event: a filing and a tweet are both
          events and are not worth the same. */
       node("span",` ${x.tier_label}`,"figp"));ul.append(li)});
@@ -724,25 +727,25 @@ function judgementBlock(j){const d=node("div",null,"mdl");d.append(node("b",`研
   const ul=node("ul",null,"latest");
   (j.latest||[]).forEach(x=>{const li=node("li");
     li.append(node("span",`${x.decision_label} → ${x.action_label}`,"figv"));
-    if(x.because)li.append(node("span",` ${x.because}`));
-    const tail=[];if(x.effect)tail.push(`落地：${x.effect}`);tail.push(x.verifier_label);
+    if(x.because)li.append(node("span",` ${finalResearchText(x.because)}`));
+    const tail=[];if(x.effect)tail.push(`落地：${finalResearchText(x.effect)}`);tail.push(x.verifier_label);
     li.append(node("span",` ${tail.join(" · ")}`,"figp"));ul.append(li)});
   d.append(ul);return d}
 function reflectionBlock(rows){const d=node("div",null,"mdl");d.append(node("b","反思"));
   rows.forEach(r=>{const w=node("div");w.append(node("div",r.trigger_label,"hint"));
-    w.append(node("div",`我们当时以为：${r.what_we_expected||"—"}`));
-    w.append(node("div",`实际发生的：${r.what_happened||"—"}`));
-    if(r.why)w.append(node("div",`为什么：${r.why}`,"hint"));
+    w.append(node("div",`我们当时以为：${finalResearchText(r.what_we_expected)||"—"}`));
+    w.append(node("div",`实际发生的：${finalResearchText(r.what_happened)||"—"}`));
+    if(r.why)w.append(node("div",`为什么：${finalResearchText(r.why)}`,"hint"));
     if((r.missed_debates||[]).length){const ul=node("ul",null,"latest");
-      r.missed_debates.forEach(m=>ul.append(node("li",`可能漏掉的争论：${m.question}`)));w.append(ul)}
+      r.missed_debates.forEach(m=>ul.append(node("li",`可能漏掉的争论：${finalResearchText(m.question)}`)));w.append(ul)}
     const fu=[...(r.followup_tracking||[]).map(f=>`${f.source_label} 改成${f.interval_label||"新频率"}`),
-              ...(r.followup_research||[]).map(f=>f.question)];
+              ...(r.followup_research||[]).map(f=>finalResearchText(f.question))];
     if(fu.length)w.append(node("div",`想跟进：${fu.join("；")}`,"hint"));
     /* A follow-up here changed nothing. Saying so is the difference between
        a candidate and a decision. */
     w.append(node("div",r.note,"hint"));
-    if(r.market_view)w.append(node("div",`和市场比：${r.market_view.summary||"—"}`,"hint"));
-    if(r.convergence_pathway)w.append(node("div",`市场会怎么向我们靠拢：${r.convergence_pathway}`,"hint"));
+    if(r.market_view)w.append(node("div",`和市场比：${finalResearchText(r.market_view.summary)||"—"}`,"hint"));
+    if(r.convergence_pathway)w.append(node("div",`市场会怎么向我们靠拢：${finalResearchText(r.convergence_pathway)}`,"hint"));
     d.append(w)});
   return d}
 function tasksBlock(rows){const d=node("div",null,"mdl");d.append(node("b","正在专项研究"));
@@ -751,7 +754,7 @@ function tasksBlock(rows){const d=node("div",null,"mdl");d.append(node("b","正�
     li.append(node("span",` ${t.state_label} · ${t.budget_label}`,"figp"));
     /* Conclusion or gap, never a blank: an unfinished task with a blank
        result reads exactly like one that found nothing. */
-    li.append(node("span",` ${t.conclusion||t.gap||""}`));ul.append(li)});
+    li.append(node("span",` ${finalResearchText(t.conclusion||t.gap||"")}`));ul.append(li)});
   d.append(ul);return d}
 function cadenceBlock(rows){const d=node("details");const s=node("summary","我们多久看它一次");d.append(s);
   const ul=node("ul",null,"latest");
@@ -906,7 +909,7 @@ async function openReflection(){const sheet=prepareReader("研究详情");
 function renderReflection(sheet,r){sheet.replaceChildren(readerClose(),node("h2","每周投研运行复盘"));
   if(!r.available){sheet.append(node("div",r.reason,"empty"));return}
   sheet.append(node("div",`${r.iso_week} · ${fmtDate(r.written_at)} · 第 ${r.version} 版${r.historical?" · 历史记录":""}${r.content_as_of?" · 内容截至 "+fmtDate(r.content_as_of):""}`,"meta"));
-  const s=node("section");s.append(node("h3",r.title));renderText(s,r.prose||"");
+  const s=node("section");s.append(node("h3",r.title));renderText(s,finalResearchText(r.prose||""));
   sheet.append(s);
   if((r.table||[]).length){const t=node("section");t.append(node("h3","各预算池支出"));
     const ul=node("ul",null,"latest");

@@ -165,6 +165,12 @@ class CockpitPlaneTests(unittest.TestCase):
         self.assertEqual(log["cursor"], log["events"][0]["at"])
         self.assertEqual(self.c.plane.log(since=log["cursor"])["events"], [])
 
+    def test_overview_projects_required_language_publication_policy_read_only(self) -> None:
+        policy_path = self.c.core_path.parent / "research-language-policy.json"
+        self.assertFalse(self.c.plane.overview()["publication_policy"]["language_review_required"])
+        policy_path.write_text(json.dumps({"required": True}), encoding="utf-8")
+        self.assertTrue(self.c.plane.overview()["publication_policy"]["language_review_required"])
+
     def test_sources_separate_connector_installation_from_mission_state(self) -> None:
         rows = self.c.plane.sources()["sources"]
         guidepoint = next(row for row in rows if row["slug"] == "guidepoint")
