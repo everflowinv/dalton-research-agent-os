@@ -9,11 +9,15 @@ from typing import Any, Callable, Mapping
 
 from .cockpit_model import CockpitModel, unwrap_json_object
 from .model_router import ModelRouter
+from .model_fallback_chain import TIER_BRAIN, TIER_CHEAP, register_purpose_tier
 from .research_language_review import (
     BRAIN_PURPOSE, CHECKER_MODEL, CHECKER_PURPOSE, ResearchLanguageReviewError,
     run_language_review,
 )
-from .store import canonical_json
+from .store import canonical_json, content_hash
+
+register_purpose_tier(CHECKER_PURPOSE, TIER_CHEAP)
+register_purpose_tier(BRAIN_PURPOSE, TIER_BRAIN)
 
 
 def _hash_bytes(data: bytes) -> str:
@@ -54,7 +58,18 @@ def run(product: Mapping[str, Any], *, mission: Mapping[str, Any], request_id: s
         model_factory: Callable[[Mapping[str, Any]], Any] | None=None) -> dict[str, Any]:
     """Run exactly one checker and one brain call, persisting a closed receipt."""
     checker_raw=_load(checker_config); brain_raw=_load(brain_config)
-    make=model_factory or (lambda cfg:CockpitModel(cfg,scheduler_db=scheduler_db))
+    proof_key=sha256((request_id+":"+sha256((canonical_json(product)+"\n").encode()).hexdigest()).encode()).hexdigest()[:24]
+    proof_base=None if artifact_dir is None else artifact_dir/proof_key
+    if proof_base is not None and proof_base.with_suffix(".json").exists():
+        payload=proof_base.with_suffix(".json").read_bytes(); prior=json.loads(payload)
+        if prior.get("status")!="ready_for_publication": raise ResearchLanguageReviewError("既有语言审查记录未完成")
+        return {**prior,"artifact_ref":proof_base.name,"artifact_sha256":_hash_bytes(payload)}
+    def default_factory(cfg: Mapping[str,Any]):
+        checker=cfg is checker_raw
+        return CockpitModel(cfg,scheduler_db=scheduler_db,max_input_tokens=120_000,
+                            max_output_tokens=12_000 if checker else 16_000,
+                            timeout_seconds=600,max_cost_usd=1.0)
+    make=model_factory or default_factory
     calls: dict[str,dict[str,Any]]={}
     def invoke(label: str, purpose: str, cfg: Mapping[str,Any], prompt: str) -> Mapping[str,Any]:
         call=make(cfg).call(purpose=purpose,request_id=f"{request_id}:{label}",prompt=prompt,mission=mission)
@@ -63,19 +78,26 @@ def run(product: Mapping[str, Any], *, mission: Mapping[str, Any], request_id: s
         if not isinstance(parsed,Mapping): raise ResearchLanguageReviewError("语言审查模型没有返回有效结构")
         return parsed
     # Identity passed into the pure review is validated again from persisted router records below.
+    identity_failure: list[Exception] = []
+    def brain_after_checker(prompt: str) -> Mapping[str,Any]:
+        identity=_route_identity(checker_raw,calls["checker"])
+        if identity["provider"]!="antigravity-cli-gateway" or identity["model"]!="gemini-3.8-flash":
+            error=ResearchLanguageReviewError("语言检查模型身份不符合发布要求"); identity_failure.append(error); raise error
+        return invoke("brain",BRAIN_PURPOSE,brain_raw,prompt)
     result=run_language_review(product,
         checker=lambda prompt:invoke("checker",CHECKER_PURPOSE,checker_raw,prompt),
-        brain=lambda prompt:invoke("brain",BRAIN_PURPOSE,brain_raw,prompt),
+        brain=brain_after_checker,
         checker_identity={"provider":"antigravity-cli-gateway","model":"antigravity-cli-gateway/gemini-3.8-flash"})
+    if identity_failure: raise identity_failure[0]
     if result["status"]=="ready_for_publication":
         checker_identity=_route_identity(checker_raw,calls["checker"])
         if checker_identity["provider"]!="antigravity-cli-gateway" or checker_identity["model"]!="gemini-3.8-flash":
             raise ResearchLanguageReviewError("语言检查模型身份不符合发布要求")
         result["runtime_identity"]={"checker":checker_identity,"brain":_route_identity(brain_raw,calls["brain"])}
         result["call_evidence"]={k:{x:v.get(x) for x in ("work_order_ref","result_envelope_ref","invocation_ref","cost_micros","replayed")} for k,v in calls.items()}
+        result["content_hash"]=content_hash({k:v for k,v in result.items() if k!="content_hash"})
     if artifact_dir is not None:
-        key=sha256((request_id+":"+result["source_hash"]).encode()).hexdigest()[:24]
-        base=artifact_dir/key
+        base=proof_base
         if result.get("suggestions_markdown") is not None:
             _write_once(base.with_suffix(".md"),result["suggestions_markdown"].encode())
         payload=(canonical_json(result)+"\n").encode();_write_once(base.with_suffix(".json"),payload)

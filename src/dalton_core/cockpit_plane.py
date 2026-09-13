@@ -36,7 +36,7 @@ import time
 from collections.abc import Mapping
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
@@ -1539,15 +1539,20 @@ class CockpitPlane:
         if not _table_exists(core, "research_events"):
             return {}
         out: dict[str, dict[str, Any]] = {}
-        today = self.clock().date().isoformat()
+        now = self.clock()
+        if now.tzinfo is None: now = now.replace(tzinfo=timezone.utc)
+        utc_day = now.astimezone(timezone.utc).date()
+        today = utc_day.isoformat()
+        tomorrow = (utc_day + timedelta(days=1)).isoformat()
         for row in self._rows(core,
             "SELECT company_ref, kind, evidence_tier, occurred_at, record_json "
-            "FROM research_events WHERE substr(occurred_at,1,10)=? "
-            "ORDER BY occurred_at, event_id", (today,),
+            "FROM research_events WHERE datetime(occurred_at)>=datetime(?) "
+            "AND datetime(occurred_at)<datetime(?) ORDER BY occurred_at, event_id",
+            (today + "T00:00:00+00:00", tomorrow + "T00:00:00+00:00"),
         ):
             entry = out.setdefault(row["company_ref"], {
                 "total": 0, "by_kind": {}, "latest": [],
-                "date": today, "date_basis": "cockpit_clock_calendar_date",
+                "date": today, "date_basis": "utc_calendar_date",
             })
             entry["total"] += 1
             entry["by_kind"][row["kind"]] = entry["by_kind"].get(row["kind"], 0) + 1

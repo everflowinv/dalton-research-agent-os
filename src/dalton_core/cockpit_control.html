@@ -704,7 +704,7 @@ function catalystBlock(k){const d=node("div",null,"mdl");
   d.append(node("div",line.join(" · "),"hint"));
   if(k.disagreement)d.append(node("div",`两个来源的日期不一致：${(k.disagreeing_dates||[]).join("、")}`,"hint"));
   return d}
-function eventsBlock(e){const d=node("div",null,"mdl");d.append(node("b",`今日事件 · 一共 ${e.total} 件`));
+function eventsBlock(e){const d=node("div",null,"mdl");d.append(node("b",`${e.date?e.date+" 动态（UTC）":"近期动态"} · 一共 ${e.total} 件`));
   d.append(node("div",(e.kinds||[]).map(k=>`${k.label} ${k.count}`).join(" · "),"hint"));
   const ul=node("ul",null,"latest");
   (e.latest||[]).forEach(x=>{const li=node("li");

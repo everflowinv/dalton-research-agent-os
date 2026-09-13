@@ -19,6 +19,7 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from contextlib import closing
 from pathlib import Path
 
@@ -239,6 +240,10 @@ class Int2Case(unittest.TestCase):
 
 
 class EventsOnTheCardTests(Int2Case):
+    def setUp(self) -> None:
+        super().setUp()
+        self.plane.clock = lambda: datetime(2026, 9, 8, 12, tzinfo=timezone.utc)
+
     def test_a_core_without_the_table_shows_the_card_it_always_showed(self) -> None:
         card = self.card()
         self.assertIsNone(card["events"])
@@ -783,7 +788,7 @@ class BudgetPoolTests(Int2Case):
         # A lane that wanted to run and could not is named in the owner's
         # words, not by its driver key.
         stalled = {row["lane"]: row for row in ticks["stalled_lanes"]}
-        self.assertEqual(stalled["event_judgement"]["lane_label"], "判断新发生的事要不要动")
+        self.assertEqual(stalled["event_judgement"]["lane_label"], "评估最新市场动态对投资观点的影响")
         self.assertEqual(stalled["event_judgement"]["stalls"], 1)
 
 
