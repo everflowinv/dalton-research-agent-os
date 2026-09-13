@@ -22,7 +22,8 @@ def main(argv=None):
         if row is None:p.error('candidate source version was not found')
         mission=CoverageMissionAuthority(store).mission(row['mission_version_ref'])
         result=GateReopenAuthority(store).propose_human_revision(candidate=candidate,
-            candidate_hash=content_hash(candidate),mission=mission,actor_ref=a.actor_ref)
+            candidate_hash=content_hash(candidate),candidate_file_sha256=a.expected_candidate_sha256,
+            mission=mission,actor_ref=a.actor_ref)
     print(json.dumps(result,ensure_ascii=False,sort_keys=True,separators=(',',':')))
     return 0
 

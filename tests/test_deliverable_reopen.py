@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import tempfile
 import unittest
+from pathlib import Path
 
 from dalton_core.deliverable_reopen import (
     CHANGE_REASON_EVIDENCE,
@@ -31,7 +33,7 @@ from dalton_core.mission_deliverable import (
     MissionDeliverableValidationError,
     validate_revision,
 )
-from dalton_core.store import content_hash
+from dalton_core.store import DaltonStore, content_hash
 from tests.p14a_fixtures import ACN, AUTOMATION, CTSH, OWNER, P14aHarness
 
 SECTION_TITLES = ("一、公司在做什么", "二、行业位置", "三、最近发生了什么",
@@ -275,37 +277,142 @@ class AssessmentTests(ReopenHarness):
 
 
 class HumanErratumProposalTests(ReopenHarness):
+    def publish_numbered(self):
+        sections = self.sections()
+        numbers = []
+        for ref in self.claim_refs[:4]:
+            claim = json.loads(self.store.connection.execute(
+                "SELECT claim_json FROM claim_versions WHERE claim_version_id=?", (ref,)
+            ).fetchone()[0])
+            numbers.append({"claim_version_ref": ref,
+                            "text": claim["normalized_statement"],
+                            "period": claim["period"]})
+        sections[3]["numbers"] = numbers
+        return self.publish(sections=sections)
+
     def candidate(self, version):
         import hashlib
         before = version["sections"][3]["body"]
         old = before
         after = before + "已纠正。"
-        return {"schema_version":"epam-initial-screen-factual-erratum-candidate-0.1",
+        candidate = {"schema_version":"epam-initial-screen-factual-erratum-candidate-0.1",
             "status":"reviewable_not_applied","subject_ref":ACN,
             "deliverable_ref":version["deliverable_ref"],
-            "source_version":{"version_ref":version["id"],"content_hash":version["content_hash"],"version_number":1},
-            "scope":{"change_reason":"human_revision","section_index":3},
+            "source_version":{"version_ref":version["id"],"content_hash":version["content_hash"],
+                "version_number":1,"body_sha256":hashlib.sha256(before.encode()).hexdigest()},
+            "scope":{"change_reason":"human_revision","section_index":3,
+                "section_title":version["sections"][3]["title"],
+                "classification":"owner_directed_factual_erratum",
+                "gate_result_carried_forward":False},
             "replacement":{"before":before,"after":after,"after_sha256":hashlib.sha256(after.encode()).hexdigest(),
                 "substitutions":[{"before":old,"after":after}]},
-            "authority":{"claim_numbers":[{"claim_version_ref":ref,"claim_content_hash":
-                self.store.connection.execute("SELECT content_hash FROM claim_versions WHERE claim_version_id=?",(ref,)).fetchone()[0]}
-                for ref in self.claim_refs[:4]]}}
+            "authority":{"claim_numbers":[]},
+            "invariants":{"section_count":len(version["sections"]),
+                "unchanged_sections":[i for i in range(len(version["sections"])) if i != 3],
+                "numbers_unchanged":version["sections"][3]["numbers"],
+                "claim_refs_unchanged":version["sections"][3]["claim_refs"],
+                "gaps_unchanged":version["sections"][3]["gaps"],"gate_approval_created":False},
+            "execution_contract":{"requires_new_append_only_version":True,
+                "requires_gate_reopen_decision":True,"decision_actor_contract":"human:*",
+                "current_api_blocker":"none","forbidden":"carry old gate"}}
+        for ref in self.claim_refs[:4]:
+            row = self.store.connection.execute(
+                "SELECT content_hash,claim_json FROM claim_versions WHERE claim_version_id=?", (ref,)
+            ).fetchone()
+            claim = json.loads(row["claim_json"])
+            candidate["authority"]["claim_numbers"].append({
+                "claim_version_ref":ref,"claim_content_hash":row["content_hash"],
+                "period":claim["period"],"value":claim["value"],"unit":claim["unit"]})
+        return candidate
 
     def test_owner_erratum_proposes_without_evidence_flip_and_still_needs_decision(self):
-        version=self.publish();self.pass_gate(version);candidate=self.candidate(version)
-        proposal=self.reopens.propose_human_revision(candidate=candidate,candidate_hash=content_hash(candidate),mission=self.mission,actor_ref=AUTOMATION)
+        version=self.publish_numbered();gate=self.pass_gate(version);candidate=self.candidate(version)
+        proposal=self.reopens.propose_human_revision(candidate=candidate,candidate_hash=content_hash(candidate),candidate_file_sha256="f"*64,mission=self.mission,actor_ref=AUTOMATION)
         self.assertEqual(proposal["flipped"],[]);self.assertEqual(proposal["change_reason"],"human_revision")
+        row = self.store.connection.execute(
+            "SELECT flipped_count FROM gate_reopen_proposals WHERE proposal_id=?",
+            (proposal["id"],),
+        ).fetchone()
+        self.assertEqual(row["flipped_count"], 0)
+        self.assertEqual(proposal["passed_at"], gate["created_at"])
+        self.assertEqual(proposal["erratum"]["candidate_file_sha256"], "f" * 64)
         self.assertIsNone(self.reopens.decision_for(proposal["id"]))
-        self.assertEqual(self.reopens.propose_human_revision(candidate=candidate,candidate_hash=content_hash(candidate),mission=self.mission,actor_ref=AUTOMATION)["status"],"duplicate")
+        self.assertEqual(self.reopens.propose_human_revision(candidate=candidate,candidate_hash=content_hash(candidate),candidate_file_sha256="f"*64,mission=self.mission,actor_ref=AUTOMATION)["status"],"duplicate")
 
     def test_owner_erratum_rejects_source_claim_and_projection_drift(self):
-        version=self.publish();self.pass_gate(version);candidate=self.candidate(version)
+        version=self.publish_numbered();self.pass_gate(version);candidate=self.candidate(version)
         for mutate,message in ((lambda c:c["source_version"].update(content_hash="0"*64),"source"),
             (lambda c:c["authority"]["claim_numbers"][0].update(claim_content_hash="0"*64),"Claim"),
             (lambda c:c["replacement"].update(after="different"),"projection")):
             changed=json.loads(json.dumps(candidate));mutate(changed)
             with self.assertRaisesRegex(DeliverableReopenConflict,message):
-                self.reopens.propose_human_revision(candidate=changed,candidate_hash=content_hash(changed),mission=self.mission,actor_ref=AUTOMATION)
+                self.reopens.propose_human_revision(candidate=changed,candidate_hash=content_hash(changed),candidate_file_sha256="f"*64,mission=self.mission,actor_ref=AUTOMATION)
+
+    def test_owner_erratum_rejects_semantic_authority_and_invariant_drift(self):
+        version=self.publish_numbered();self.pass_gate(version);candidate=self.candidate(version)
+        mutations = (
+            lambda c: c["authority"]["claim_numbers"][0].update(period="2025Q2"),
+            lambda c: c["invariants"].update(gaps_unchanged=["hidden"]),
+            lambda c: c["scope"].update(gate_result_carried_forward=True),
+            lambda c: c.update(unreviewed=True),
+        )
+        for mutate in mutations:
+            changed=json.loads(json.dumps(candidate));mutate(changed)
+            with self.assertRaises((DeliverableReopenConflict,
+                                    DeliverableReopenValidationError)):
+                self.reopens.propose_human_revision(
+                    candidate=changed, candidate_hash=content_hash(changed),
+                    candidate_file_sha256="f"*64, mission=self.mission,
+                    actor_ref=AUTOMATION)
+
+
+class HumanRevisionSchemaMigrationTests(unittest.TestCase):
+    def test_an_existing_positive_flip_table_is_widened_without_weakening_below_zero(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with DaltonStore(str(Path(tmp) / "core.sqlite")) as store:
+                legacy = Path(__file__).parents[1] / "src/dalton_core/deliverable_reopen_schema.sql"
+                store.connection.executescript(
+                    legacy.read_text(encoding="utf-8").replace(
+                        "flipped_count >= 0", "flipped_count >= 1"
+                    )
+                )
+                with store._transaction() as cur:
+                    cur.execute(
+                        "INSERT INTO gate_reopen_proposals VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        ("p","c","d","initial_screen","v","h","a",1,
+                         "gate_reopen","evidence_thicker","m","{}","h","a","t"),
+                    )
+                    cur.execute(
+                        "INSERT INTO gate_reopen_decisions VALUES(?,?,?,?,?,?,?,?,?,?)",
+                        ("decision","p","h","c","decline","reason","{}","h","human:o","t"),
+                    )
+                GateReopenAuthority(store)
+                sql = store.connection.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='table' "
+                    "AND name='gate_reopen_proposals'"
+                ).fetchone()[0]
+                self.assertIn("flipped_count >= 0", sql)
+                self.assertEqual(store.connection.execute(
+                    "SELECT proposal_id FROM gate_reopen_proposals"
+                ).fetchone()[0], "p")
+                self.assertEqual(store.connection.execute(
+                    "SELECT proposal_ref FROM gate_reopen_decisions"
+                ).fetchone()[0], "p")
+                triggers = store.connection.execute(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' "
+                    "AND name LIKE 'gate_reopen_%'"
+                ).fetchone()[0]
+                self.assertEqual(triggers, 6)
+                self.assertEqual(store.connection.execute(
+                    "PRAGMA foreign_keys"
+                ).fetchone()[0], 1)
+                with self.assertRaises(sqlite3.IntegrityError):
+                    with store._transaction() as cur:
+                        cur.execute(
+                            "INSERT INTO gate_reopen_proposals VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                            ("p","c","d","initial_screen","v","h","a",-1,
+                             "gate_reopen","human_revision","m","{}","h","a","t"),
+                        )
 
 
 class ProposalTests(ReopenHarness):

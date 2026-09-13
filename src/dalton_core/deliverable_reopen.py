@@ -601,7 +601,137 @@ class GateReopenAuthority:
         self.store = store
         self.connection: sqlite3.Connection = store.connection
         self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
+        self._admit_zero_flips_for_human_revisions()
         self._missions: Any = None
+
+    def _admit_zero_flips_for_human_revisions(self) -> None:
+        """Widen the historical evidence-flip constraint without losing rows."""
+        row = self.connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='gate_reopen_proposals'"
+        ).fetchone()
+        if row is None or "flipped_count >= 0" in (row["sql"] or ""):
+            return
+        proposal_columns = [
+            item[1] for item in self.connection.execute(
+                "PRAGMA table_info(gate_reopen_proposals)"
+            ).fetchall()
+        ]
+        decision_columns = [
+            item[1] for item in self.connection.execute(
+                "PRAGMA table_info(gate_reopen_decisions)"
+            ).fetchall()
+        ]
+        decision_row = self.connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='gate_reopen_decisions'"
+        ).fetchone()
+        expected_proposal_columns = [
+            "proposal_id", "company_ref", "deliverable_ref", "stage_ref",
+            "passed_version_ref", "passed_version_hash", "assessment_hash",
+            "flipped_count", "checkpoint_kind", "change_reason", "mission_version_ref",
+            "record_json", "content_hash", "actor_ref", "created_at",
+        ]
+        expected_decision_columns = [
+            "decision_id", "proposal_ref", "proposal_hash", "company_ref", "verdict",
+            "reason", "record_json", "content_hash", "actor_ref", "created_at",
+        ]
+        table_sql = row["sql"] or ""
+        decision_sql = "" if decision_row is None else (decision_row["sql"] or "")
+        if (proposal_columns != expected_proposal_columns
+                or decision_columns != expected_decision_columns
+                or "CHECK(flipped_count >= 1)" not in table_sql
+                or "CHECK(checkpoint_kind = 'gate_reopen')" not in table_sql
+                or "UNIQUE(company_ref, assessment_hash)" not in table_sql
+                or "REFERENCES gate_reopen_proposals(proposal_id)" not in decision_sql
+                or "CHECK(verdict IN ('approve','decline'))" not in decision_sql):
+            raise DeliverableReopenConflict(
+                "gate reopen proposal schema is not a recognized legacy contract"
+            )
+        if self.connection.in_transaction:
+            raise DeliverableReopenConflict(
+                "gate reopen migration requires no open transaction"
+            )
+        foreign_keys = int(self.connection.execute("PRAGMA foreign_keys").fetchone()[0])
+        self.connection.execute("PRAGMA foreign_keys = OFF")
+        try:
+            self.connection.execute("BEGIN IMMEDIATE")
+            for trigger in (
+                "gate_reopen_proposals_insert_guard", "gate_reopen_proposals_no_update",
+                "gate_reopen_proposals_no_delete", "gate_reopen_decisions_insert_guard",
+                "gate_reopen_decisions_no_update", "gate_reopen_decisions_no_delete",
+            ):
+                self.connection.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+            self.connection.execute(
+                """CREATE TABLE gate_reopen_proposals_v2 (
+                    proposal_id TEXT PRIMARY KEY, company_ref TEXT NOT NULL,
+                    deliverable_ref TEXT NOT NULL, stage_ref TEXT NOT NULL,
+                    passed_version_ref TEXT NOT NULL, passed_version_hash TEXT NOT NULL,
+                    assessment_hash TEXT NOT NULL,
+                    flipped_count INTEGER NOT NULL CHECK(flipped_count >= 0),
+                    checkpoint_kind TEXT NOT NULL CHECK(checkpoint_kind = 'gate_reopen'),
+                    change_reason TEXT NOT NULL, mission_version_ref TEXT NOT NULL,
+                    record_json TEXT NOT NULL, content_hash TEXT NOT NULL,
+                    actor_ref TEXT NOT NULL, created_at TEXT NOT NULL,
+                    UNIQUE(company_ref, assessment_hash))"""
+            )
+            self.connection.execute(
+                "INSERT INTO gate_reopen_proposals_v2 SELECT * FROM gate_reopen_proposals"
+            )
+            self.connection.execute(
+                """CREATE TABLE gate_reopen_decisions_v2 (
+                    decision_id TEXT PRIMARY KEY,
+                    proposal_ref TEXT NOT NULL UNIQUE
+                        REFERENCES gate_reopen_proposals_v2(proposal_id),
+                    proposal_hash TEXT NOT NULL, company_ref TEXT NOT NULL,
+                    verdict TEXT NOT NULL CHECK(verdict IN ('approve','decline')),
+                    reason TEXT NOT NULL, record_json TEXT NOT NULL,
+                    content_hash TEXT NOT NULL, actor_ref TEXT NOT NULL,
+                    created_at TEXT NOT NULL)"""
+            )
+            self.connection.execute(
+                "INSERT INTO gate_reopen_decisions_v2 SELECT * FROM gate_reopen_decisions"
+            )
+            self.connection.execute("DROP TABLE gate_reopen_decisions")
+            self.connection.execute("DROP TABLE gate_reopen_proposals")
+            self.connection.execute(
+                "ALTER TABLE gate_reopen_proposals_v2 RENAME TO gate_reopen_proposals"
+            )
+            self.connection.execute(
+                "ALTER TABLE gate_reopen_decisions_v2 RENAME TO gate_reopen_decisions"
+            )
+            self.connection.execute(
+                "CREATE INDEX gate_reopen_proposals_by_company "
+                "ON gate_reopen_proposals(company_ref, created_at DESC, proposal_id)"
+            )
+            trigger_sql = (
+                ("gate_reopen_proposals_insert_guard", "gate_reopen_proposals",
+                 "BEFORE INSERT", "WHEN dalton_authorized() = 0",
+                 "gate reopen proposal insert requires DaltonStore"),
+                ("gate_reopen_proposals_no_update", "gate_reopen_proposals",
+                 "BEFORE UPDATE", "", "gate reopen proposals are immutable"),
+                ("gate_reopen_proposals_no_delete", "gate_reopen_proposals",
+                 "BEFORE DELETE", "", "gate reopen proposals are immutable"),
+                ("gate_reopen_decisions_insert_guard", "gate_reopen_decisions",
+                 "BEFORE INSERT", "WHEN dalton_authorized() = 0",
+                 "gate reopen decision insert requires DaltonStore"),
+                ("gate_reopen_decisions_no_update", "gate_reopen_decisions",
+                 "BEFORE UPDATE", "", "gate reopen decisions are immutable"),
+                ("gate_reopen_decisions_no_delete", "gate_reopen_decisions",
+                 "BEFORE DELETE", "", "gate reopen decisions are immutable"),
+            )
+            for name, table, event, condition, message in trigger_sql:
+                self.connection.execute(
+                    f"CREATE TRIGGER {name} {event} ON {table} {condition} "
+                    f"BEGIN SELECT RAISE(ABORT, '{message}'); END"
+                )
+            if self.connection.execute("PRAGMA foreign_key_check").fetchall():
+                raise DeliverableReopenConflict("gate reopen migration broke foreign keys")
+            self.connection.commit()
+        except Exception:
+            if self.connection.in_transaction:
+                self.connection.rollback()
+            raise
+        finally:
+            self.connection.execute(f"PRAGMA foreign_keys = {foreign_keys}")
 
     def _mission_authority(self) -> Any:
         """The stage ladder, opened once and only when an approval needs it.
@@ -760,22 +890,37 @@ class GateReopenAuthority:
 
     def propose_human_revision(
         self, *, candidate: Mapping[str, Any], candidate_hash: str,
+        candidate_file_sha256: str,
         mission: Mapping[str, Any], actor_ref: str,
     ) -> dict[str, Any]:
         """Propose one source-backed factual erratum without inventing an evidence flip."""
         candidate_hash = _sha256(candidate_hash, "candidate_hash")
+        candidate_file_sha256 = _sha256(candidate_file_sha256, "candidate_file_sha256")
         if content_hash(candidate) != candidate_hash:
             raise DeliverableReopenConflict("human revision candidate hash binding failed")
         actor_ref = _text(actor_ref, "actor_ref")
         if actor_ref != mission.get("autonomy", {}).get("automation_principal"):
             raise DeliverableReopenConflict("automation actor is not the mission principal")
-        scope = candidate.get("scope") or {}
-        if (candidate.get("schema_version") != "epam-initial-screen-factual-erratum-candidate-0.1"
+        expected_top = {"schema_version", "status", "subject_ref", "deliverable_ref",
+                        "source_version", "scope", "authority", "replacement", "invariants",
+                        "execution_contract"}
+        if set(candidate) != expected_top:
+            raise DeliverableReopenValidationError("human revision candidate fields are not closed")
+        scope = candidate.get("scope")
+        if (not isinstance(scope, Mapping)
+                or set(scope) != {"section_index", "section_title", "change_reason",
+                           "classification", "gate_result_carried_forward"}
+                or candidate.get("schema_version") != "epam-initial-screen-factual-erratum-candidate-0.1"
+                or candidate.get("status") != "reviewable_not_applied"
                 or scope.get("change_reason") != CHANGE_REASON_HUMAN
+                or scope.get("classification") != "owner_directed_factual_erratum"
+                or scope.get("gate_result_carried_forward") is not False
                 or candidate.get("subject_ref") not in
                     {row.get("company_ref") for row in mission.get("universe") or ()}):
             raise DeliverableReopenValidationError("human revision candidate shape is invalid")
-        source = candidate.get("source_version") or {}
+        source = candidate.get("source_version")
+        if not isinstance(source, Mapping):
+            raise DeliverableReopenValidationError("source_version must be an object")
         row = self.connection.execute(
             "SELECT * FROM mission_deliverable_versions WHERE version_id=?",
             (source.get("version_ref"),),
@@ -795,10 +940,21 @@ class GateReopenAuthority:
         sections = original.get("sections") or []
         if section_index < 0 or section_index >= len(sections):
             raise DeliverableReopenValidationError("section_index is outside the source version")
-        replacement = candidate.get("replacement") or {}
+        replacement = candidate.get("replacement")
+        if (not isinstance(replacement, Mapping)
+                or set(source) != {"version_ref", "version_number", "content_hash", "body_sha256"}
+                or set(replacement) != {"before", "after", "after_sha256", "substitutions"}
+                or scope.get("section_title") != sections[section_index].get("title")):
+            raise DeliverableReopenValidationError("erratum source or replacement fields are invalid")
         before = replacement.get("before")
         after = replacement.get("after")
-        if sections[section_index].get("body") != before:
+        if (not isinstance(before, str) or not before or len(before) > 20_000
+                or not isinstance(after, str) or not after or len(after) > 20_000):
+            raise DeliverableReopenValidationError("erratum before/after must be bounded text")
+        _sha256(source.get("body_sha256"), "source_version.body_sha256")
+        _sha256(replacement.get("after_sha256"), "replacement.after_sha256")
+        if (sections[section_index].get("body") != before
+                or hashlib.sha256(before.encode()).hexdigest() != source.get("body_sha256")):
             raise DeliverableReopenConflict("erratum before text is not the source section")
         substitutions = replacement.get("substitutions")
         if not isinstance(substitutions, list) or not substitutions or len(substitutions) > 20:
@@ -815,16 +971,60 @@ class GateReopenAuthority:
         if (projected != after or hashlib.sha256(after.encode()).hexdigest()
                 != replacement.get("after_sha256")):
             raise DeliverableReopenConflict("erratum replacement projection failed")
-        claims = (candidate.get("authority") or {}).get("claim_numbers")
-        if not isinstance(claims, list) or len(claims) != 4:
+        invariants = candidate.get("invariants")
+        expected_invariant_keys = {"section_count", "unchanged_sections", "numbers_unchanged",
+                                   "claim_refs_unchanged", "gaps_unchanged",
+                                   "gate_approval_created"}
+        if (not isinstance(invariants, Mapping) or set(invariants) != expected_invariant_keys
+                or invariants.get("section_count") != len(sections)
+                or invariants.get("unchanged_sections") != [
+                    index for index in range(len(sections)) if index != section_index]
+                or invariants.get("numbers_unchanged") != sections[section_index].get("numbers")
+                or invariants.get("claim_refs_unchanged") != sections[section_index].get("claim_refs")
+                or invariants.get("gaps_unchanged") != sections[section_index].get("gaps")
+                or invariants.get("gate_approval_created") is not False):
+            raise DeliverableReopenConflict("erratum invariant binding failed")
+        execution = candidate.get("execution_contract")
+        if (not isinstance(execution, Mapping)
+                or set(execution) != {"requires_new_append_only_version",
+                               "requires_gate_reopen_decision", "decision_actor_contract",
+                               "current_api_blocker", "forbidden"}
+                or execution.get("requires_new_append_only_version") is not True
+                or execution.get("requires_gate_reopen_decision") is not True):
+            raise DeliverableReopenValidationError("erratum execution contract is invalid")
+        authority = candidate.get("authority")
+        claims = authority.get("claim_numbers") if isinstance(authority, Mapping) else None
+        if (not isinstance(authority, Mapping) or set(authority) != {"claim_numbers"}
+                or not isinstance(claims, list) or len(claims) != 4):
             raise DeliverableReopenValidationError("exactly four Claim authorities are required")
+        source_numbers = sections[section_index].get("numbers") or []
+        source_by_ref = {item.get("claim_version_ref"): item for item in source_numbers}
+        if set(source_by_ref) != {
+            claim.get("claim_version_ref") for claim in claims if isinstance(claim, Mapping)
+        }:
+            raise DeliverableReopenConflict("Claim authorities are not the source section numbers")
         evidence_refs = []
         for claim in claims:
             found = self.connection.execute(
-                "SELECT content_hash FROM claim_versions WHERE claim_version_id=?",
+                "SELECT content_hash,claim_json FROM claim_versions WHERE claim_version_id=?",
                 (claim.get("claim_version_ref") if isinstance(claim, Mapping) else None,),
             ).fetchone()
-            if found is None or found["content_hash"] != claim.get("claim_content_hash"):
+            if not isinstance(claim, Mapping) or set(claim) != {
+                "claim_version_ref", "claim_content_hash", "period", "value", "unit"
+            }:
+                raise DeliverableReopenValidationError("Claim authority fields are not closed")
+            live_claim = {} if found is None else json.loads(found["claim_json"])
+            source_number = source_by_ref.get(claim["claim_version_ref"]) or {}
+            if (found is None or found["content_hash"] != claim.get("claim_content_hash")
+                    or live_claim.get("subject_ref") != candidate["subject_ref"]
+                    or live_claim.get("period") != claim.get("period")
+                    or live_claim.get("value") != claim.get("value")
+                    or live_claim.get("unit") != claim.get("unit")
+                    or source_number.get("period") != claim.get("period")
+                    or ("value" in source_number
+                        and source_number.get("value") != claim.get("value"))
+                    or ("unit" in source_number
+                        and source_number.get("unit") != claim.get("unit"))):
                 raise DeliverableReopenConflict("Claim authority binding failed")
             evidence_refs.append(claim["claim_version_ref"])
         assessment_hash = content_hash({"candidate_hash": candidate_hash,
@@ -837,15 +1037,28 @@ class GateReopenAuthority:
             "deliverable_ref": candidate["deliverable_ref"], "stage_ref": STAGE_REF,
             "stage_record_ref": passed["stage_record_ref"],
             "passed_version_ref": source["version_ref"], "passed_version_hash": source["content_hash"],
-            "passed_version_number": source["version_number"], "passed_at": row["created_at"],
+            "passed_version_number": source["version_number"], "passed_at": passed["passed_at"],
             "assessment_hash": assessment_hash, "policy_ref": "owner-directed-factual-erratum:0.1",
             "thresholds": {}, "flipped": [], "regressed": [], "diff": [],
             "evidence_refs": evidence_refs, "gate_recomputed": None,
             "checkpoint_kind": CHECKPOINT_KIND, "change_reason": CHANGE_REASON_HUMAN,
             "mission_version_ref": mission["id"], "mission_version_hash": mission["content_hash"],
-            "actor_ref": actor_ref, "erratum": {"candidate_hash": candidate_hash,
-                "section_index": section_index, "after_hash": replacement["after_sha256"],
-                "substitutions": [dict(x) for x in substitutions]},
+            "actor_ref": actor_ref, "erratum": {
+                "candidate_file_sha256": candidate_file_sha256,
+                "candidate_hash": candidate_hash,
+                "source_version_ref": source["version_ref"],
+                "source_version_hash": source["content_hash"],
+                "source_version_number": source["version_number"],
+                "section_index": section_index,
+                "before_sha256": source["body_sha256"],
+                "after_sha256": replacement["after_sha256"],
+                "substitutions": [dict(x) for x in substitutions],
+                "claim_authorities": [
+                    {"claim_version_ref": item["claim_version_ref"],
+                     "claim_content_hash": item["claim_content_hash"]}
+                    for item in claims
+                ],
+            },
         }
         record["content_hash"] = content_hash(record)
         with self.store._transaction() as cur:
@@ -856,7 +1069,7 @@ class GateReopenAuthority:
             cur.execute("INSERT INTO gate_reopen_proposals(proposal_id,company_ref,deliverable_ref,stage_ref,passed_version_ref,passed_version_hash,assessment_hash,flipped_count,checkpoint_kind,change_reason,mission_version_ref,record_json,content_hash,actor_ref,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (record["id"],record["company_ref"],record["deliverable_ref"],STAGE_REF,
                  record["passed_version_ref"],record["passed_version_hash"],assessment_hash,
-                 len(substitutions),CHECKPOINT_KIND,CHANGE_REASON_HUMAN,mission["id"],
+                 0,CHECKPOINT_KIND,CHANGE_REASON_HUMAN,mission["id"],
                  canonical_json(record),record["content_hash"],actor_ref,record["created_at"]))
         return {**record,"status":"fresh"}
 

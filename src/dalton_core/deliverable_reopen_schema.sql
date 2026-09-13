@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS gate_reopen_proposals (
     passed_version_ref TEXT NOT NULL,
     passed_version_hash TEXT NOT NULL,
     assessment_hash TEXT NOT NULL,
-    flipped_count INTEGER NOT NULL CHECK(flipped_count >= 1),
+    flipped_count INTEGER NOT NULL CHECK(flipped_count >= 0),
     checkpoint_kind TEXT NOT NULL CHECK(checkpoint_kind = 'gate_reopen'),
     change_reason TEXT NOT NULL,
     mission_version_ref TEXT NOT NULL,
