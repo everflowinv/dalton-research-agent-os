@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from dalton_core import research_output_preparation as prep
@@ -83,6 +84,42 @@ class PreparationTests(unittest.TestCase):
         self.assertEqual(len(list(Path(self.temp.name).glob('language-reviews/*.md'))),1)
         self.assertEqual(self.run_one(),result)
         self.assertEqual(len(self.calls),4)
+
+    def test_ui_batch_restores_missing_mapping_from_cached_review_without_model_calls(self):
+        root = Path(self.temp.name)
+        config_paths = {}
+        for name, value in (("model", self.args["draft_config"]),
+                            ("verifier", self.args["verifier_config"]),
+                            ("checker", self.args["checker_config"]),
+                            ("brain", self.args["brain_config"])):
+            path = root / f"{name}.json"
+            path.write_text(json.dumps(value), encoding="utf-8")
+            config_paths[name] = path
+        args = SimpleNamespace(
+            work_dir=root / "work", output_directory=root / "published",
+            scheduler_db=self.args["scheduler_db"], model_config=config_paths["model"],
+            verifier_config=config_paths["verifier"], checker_config=config_paths["checker"],
+            brain_config=config_paths["brain"], workers=1, chunk_chars=4500,
+            max_cost_per_call=.2, attempts=3, only=None, repair_reviewed=True,
+        )
+        product = {"kind": "ui_text", "label": "界面文字", "status": "available",
+                   "subject_ref": "mission:test", "version_ref": "ui-text-batch:test",
+                   "sections": [{"title": "界面文字", "body": "Revenue was 123 USD.",
+                                 "gaps": [], "sources": []}], "gaps": []}
+        first = prep.prepare_ui_batch(args, {}, product)
+        self.assertEqual(first["status"], "completed")
+        self.assertEqual(len(self.calls), 4)
+        mapping_path = args.output_directory / "ui-texts.json"
+        self.assertTrue(mapping_path.is_file())
+        self.assertTrue(list((args.output_directory / "language-reviews").glob("*.json")))
+
+        mapping_path.unlink()
+        second = prep.prepare_ui_batch(args, {}, product)
+        self.assertEqual(second["status"], "completed")
+        self.assertEqual(len(self.calls), 4)
+        restored = json.loads(mapping_path.read_text("utf-8"))
+        self.assertEqual(len(restored["batches"]), 1)
+        self.assertEqual(restored["batches"][0]["source"], product)
 
     def test_route_failure_does_not_redraft_or_call_checker(self):
         self.responses['research_localization']=CockpitModelError('model unavailable')
