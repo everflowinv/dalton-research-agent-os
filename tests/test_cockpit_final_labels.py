@@ -18,7 +18,7 @@ class CockpitFinalLabelsTests(unittest.TestCase):
             "approve": "批准修订", "decline": "保留当前版本"})
 
     def test_direction_copy_only_promises_question_and_goal_changes(self):
-        self.assertIn("整理成对研究问题与目标的具体改动", self.html)
+        self.assertIn("整理为研究问题和目标的调整方案", self.html)
         self.assertIn('id="steer-submit">生成调整方案</button>', self.html)
         self.assertNotIn("翻译成具体改动", self.html)
 

@@ -4001,10 +4001,12 @@ class CockpitPlane:
             "antigravity": "Antigravity",
             "antigravity-cli-gateway": "Antigravity",
             "deepseek": "DeepSeek", "zai": "智谱",
+            "claude-cli-gateway": "Claude 网关", "qwen": "Qwen",
+            "xai": "xAI", "openrouter": "OpenRouter",
         }.get(provider, "已登记渠道" if provider else "")
-        base = (f"{model}（{family}）"
-                if model and family and family.casefold() not in model.casefold()
-                else model or family or "未命名模型")
+        # Classification metadata belongs in model details, not its name.
+        # In particular, unclassified:<provider> is an internal status marker.
+        base = model or (family if not family.startswith("unclassified:") else "") or "未命名模型"
         return f"{base} · {provider_label}" if provider_label else base
 
     def models(self) -> dict[str, Any]:
