@@ -265,7 +265,11 @@ def apply(*, packet_root: Path, state_dir: Path, launch_agents_dir: Path | None,
                   f"research publication target already exists: {row['path']}")
             data = artifact_bytes(packet_root, row)
             target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, row["mode"])
+            _need(target.parent.resolve().is_relative_to(root)
+                  and _no_symlink_components(root, target, include_leaf=False),
+                  "research publication target parent changed")
+            fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                         | getattr(os, "O_NOFOLLOW", 0), row["mode"])
             try:
                 with os.fdopen(fd, "wb") as stream:
                     stream.write(data); stream.flush()
