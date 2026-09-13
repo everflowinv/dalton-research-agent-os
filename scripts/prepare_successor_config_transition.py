@@ -1486,6 +1486,8 @@ def _apply_preserve_transition(
         expected_fields.add("external_config_transition")
         if version == RESEARCH_PUBLICATION_SCHEMA_VERSION:
             expected_fields.add("research_publication_transition")
+            _need(launch_agents_dir is not None,
+                  "research publication transition requires a LaunchAgents directory")
         if version == WRITER_APPEND_SCHEMA_VERSION:
             expected_fields.add("writer_operation_transition")
             expected_boundaries["writer_token_mutations"] = 1

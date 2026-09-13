@@ -18,6 +18,7 @@ import plistlib
 import re
 import stat
 import subprocess
+import time
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -491,6 +492,44 @@ class SuccessorOrchestrator(r11.Orchestrator):
         return super().command(
             argv, timeout=timeout, env=child_env, check=check)
 
+    def _activate_research_publication_worker(
+            self, transition: Mapping[str, Any]) -> None:
+        """Start the newly installed worker and observe its closed prepublish gate."""
+        from scripts.successor_research_publication_transition import (
+            LAUNCH_AGENT_LABEL, LAUNCH_AGENT_NAME, WORKER_CONFIG,
+            artifact_bytes, validate_transition, validate_waiting_checkpoint,
+            validate_worker_config_bytes,
+        )
+        publication = validate_transition(
+            transition["research_publication_transition"])
+        plist_row = next(row for row in publication["files"]
+                         if row["kind"] == "launch_agent")
+        plist = r11.LAUNCH_AGENTS / LAUNCH_AGENT_NAME
+        need(plist.is_file() and not plist.is_symlink()
+             and plist.read_bytes() == artifact_bytes(self.packet, plist_row),
+             "installed research publication LaunchAgent differs")
+        config_row = next(row for row in publication["files"]
+                          if row["path"] == WORKER_CONFIG)
+        config_path = r11.STATE / WORKER_CONFIG
+        need(config_path.is_file() and not config_path.is_symlink()
+             and config_path.read_bytes() == artifact_bytes(self.packet, config_row),
+             "installed research publication worker config differs")
+        config = validate_worker_config_bytes(config_path.read_bytes())
+        checkpoint = Path(config["work_dir"]) / "worker-last-run.json"
+        need(not checkpoint.exists() and not checkpoint.is_symlink(),
+             "research publication waiting checkpoint already exists before activation")
+        self.start(LAUNCH_AGENT_LABEL)
+        for _ in range(300):
+            if checkpoint.is_file() and not checkpoint.is_symlink():
+                try:
+                    validate_waiting_checkpoint(load_json(checkpoint))
+                    return
+                except Exception:
+                    pass
+            time.sleep(.2)
+        raise SuccessorExecuteError(
+            "research publication worker did not reach its publication gate")
+
     @staticmethod
     def _protected_hash_excluding(root: Path, excluded: set[str]) -> str:
         rows = []
@@ -694,6 +733,20 @@ class SuccessorOrchestrator(r11.Orchestrator):
              "live OpenClaw config differs from successor baseline")
         transition = load_json(artifacts["transition_manifest"])
         self.successor_source = source
+        if transition.get("schema_version") == RESEARCH_PUBLICATION_SCHEMA_VERSION:
+            from scripts.successor_research_publication_transition import validate_transition
+            publication = validate_transition(
+                transition["research_publication_transition"])
+            occupied = []
+            for row in publication["files"]:
+                target = ((r11.LAUNCH_AGENTS / row["path"])
+                          if row["kind"] == "launch_agent"
+                          else r11.STATE / row["path"])
+                if target.exists() or target.is_symlink():
+                    occupied.append(row["path"])
+            need(not occupied,
+                 "research publication exclusive targets already exist: "
+                 + ",".join(sorted(occupied)))
         if transition.get("schema_version") == WRITER_APPEND_SCHEMA_VERSION:
             before_writer, _after_writer, _writer_row = expected_writer_operation_transition_state(
                 packet_root=self.packet, manifest=transition, successor_root=source)
@@ -845,6 +898,10 @@ class SuccessorOrchestrator(r11.Orchestrator):
                     PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION,
             COCKPIT_BRAIN_SCHEMA_VERSION, RESEARCH_PUBLICATION_SCHEMA_VERSION} else None),
             accepted_evidence=manifest["acceptance"],
+            launch_agents_dir=(
+                r11.LAUNCH_AGENTS
+                if transition.get("schema_version")
+                == RESEARCH_PUBLICATION_SCHEMA_VERSION else None),
             **({"successor_source_root": source}
                if transition.get("schema_version") == WRITER_APPEND_SCHEMA_VERSION else {}),
         )
@@ -884,17 +941,7 @@ class SuccessorOrchestrator(r11.Orchestrator):
              and not preserved_absent_workspace.is_symlink(),
              "installer wrote through the absent OpenClaw workspace boundary")
         if transition.get("schema_version") == RESEARCH_PUBLICATION_SCHEMA_VERSION:
-            from scripts.successor_research_publication_transition import (
-                LAUNCH_AGENT_NAME, artifact_bytes, validate_transition,
-            )
-            publication = validate_transition(
-                transition["research_publication_transition"])
-            row = next(item for item in publication["files"]
-                       if item["kind"] == "launch_agent")
-            target = r11.LAUNCH_AGENTS / LAUNCH_AGENT_NAME
-            need(target.is_file() and not target.is_symlink()
-                 and target.read_bytes() == artifact_bytes(self.packet, row),
-                 "installed research publication LaunchAgent differs")
+            self._activate_research_publication_worker(transition)
         need(subprocess.check_output(
                  ["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
              == manifest["source"]["commit"]
