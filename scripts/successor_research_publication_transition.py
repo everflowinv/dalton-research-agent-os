@@ -207,7 +207,7 @@ def apply(*, packet_root: Path, state_dir: Path, launch_agents_dir: Path | None,
         raise
 
 
-def rollback(*, state_dir: Path, launch_agents_dir: Path,
+def rollback(*, state_dir: Path, launch_agents_dir: Path | None,
              transition: Mapping[str, Any]) -> list[Path]:
     """Remove only unchanged files installed by this manifest.
 
@@ -215,9 +215,12 @@ def rollback(*, state_dir: Path, launch_agents_dir: Path,
     and are never traversed or removed.
     """
     value = validate_transition(transition)
-    state = state_dir.resolve(); launch = launch_agents_dir.resolve()
+    state = state_dir.resolve()
+    launch = None if launch_agents_dir is None else launch_agents_dir.resolve()
     removed: list[Path] = []
     for row in reversed(value["files"]):
+        if row["kind"] == "launch_agent" and launch is None:
+            continue
         target = ((launch / row["path"])
                   if row["kind"] == "launch_agent" else state / row["path"])
         if not target.exists() and not target.is_symlink():

@@ -1020,17 +1020,31 @@ class SuccessorOrchestrator(r11.Orchestrator):
             result["model_broker_host_patch"] = locals().get("host_verified")
         if transition.get("schema_version") in PRESERVE_SCHEMA_VERSIONS:
             result.update({
-                "configuration_mutations": 0,
+                "configuration_mutations": (
+                    sum(row["kind"] != "launch_agent" for row in
+                        transition.get("research_publication_transition", {}).get("files", ()))
+                    if transition.get("schema_version") == RESEARCH_PUBLICATION_SCHEMA_VERSION
+                    else 0),
                 "service_config_mutations": (
                     0 if transition.get("schema_version") in {
                         EXTERNAL_CAS_SCHEMA_VERSION,
-                        PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION} else 1),
+                        PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION,
+                        RESEARCH_PUBLICATION_SCHEMA_VERSION} else 1),
                 "external_config_mutations": (
                     1 if transition.get("schema_version")
                     == EXTERNAL_CAS_SCHEMA_VERSION else 0),
                 "service_config_sha256": sha(r11.SERVICE_CONFIG),
                 "preserved_state_authorities": state_authorities,
             })
+        if transition.get("schema_version") == RESEARCH_PUBLICATION_SCHEMA_VERSION:
+            from scripts.successor_research_publication_transition import validate_transition
+            publication = validate_transition(transition["research_publication_transition"])
+            result["research_publication_transition"] = {
+                "launch_agent_label": publication["launch_agent_label"],
+                "file_sha256": {row["path"]: row["sha256"]
+                                for row in publication["files"]},
+                "file_count": len(publication["files"]),
+            }
         if transition.get("schema_version") == WRITER_APPEND_SCHEMA_VERSION:
             before_writer, after_writer, writer_row = self._verify_writer_protected_state(
                 initial, require_after=True)

@@ -2,6 +2,7 @@ import hashlib
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts.successor_research_publication_transition import (
     FIXED_FILES, LAUNCH_AGENT_NAME, ResearchPublicationTransitionError,
@@ -61,6 +62,28 @@ class ResearchPublicationTransitionTest(unittest.TestCase):
             rollback(state_dir=self.state, launch_agents_dir=self.launch,
                      transition=self.transition)
         self.assertEqual(target.read_text(), "changed\n")
+
+    def test_partial_apply_preserves_concurrently_changed_created_file(self):
+        import scripts.successor_research_publication_transition as module
+        real = module.artifact_bytes; calls = 0
+        first = None
+        def fail_second(packet, row):
+            nonlocal calls, first
+            calls += 1
+            if calls == 2:
+                assert first is not None
+                first.write_text("concurrent owner bytes\n")
+                raise ResearchPublicationTransitionError("fixture fault")
+            data = real(packet, row)
+            first = ((self.launch / row["path"])
+                     if row["kind"] == "launch_agent" else self.state / row["path"])
+            return data
+        with patch.object(module, "artifact_bytes", side_effect=fail_second), \
+                self.assertRaisesRegex(ResearchPublicationTransitionError,
+                                       "preserved concurrently changed"):
+            apply(packet_root=self.packet, state_dir=self.state,
+                  launch_agents_dir=self.launch, transition=self.transition)
+        self.assertEqual(first.read_text(), "concurrent owner bytes\n")
 
     def test_closed_paths_reject_traversal_and_unlisted_seed(self):
         for path in ("../escape", "research-localization/records/not-a-hash.json",

@@ -183,6 +183,10 @@ def finalize(
              and exact.get("writer_token_mutations")
                  == installed.get("writer_token_mutations") == 1,
              "post-observation writer transition differs from installed verification")
+    if "research_publication_transition" in exact:
+        need(exact["research_publication_transition"]
+             == installed.get("research_publication_transition"),
+             "post-observation research publication transition differs")
     need(manifest_path.read_bytes() == manifest_bytes,
          "accepted successor manifest changed during finalization")
     result = {

@@ -1659,9 +1659,16 @@ def _apply_preserve_transition(
                 "retry_authorized": False, "refund_authorized": False,
             })
         receipt["content_hash"] = canonical_hash(receipt)
-        if fault_hook is not None:
-            fault_hook("before_receipt")
-        _publish_exclusive_json(receipt_path, receipt)
+        try:
+            if fault_hook is not None:
+                fault_hook("before_receipt")
+            _publish_exclusive_json(receipt_path, receipt)
+        except BaseException:
+            if publication_created:
+                from scripts.successor_research_publication_transition import rollback
+                rollback(state_dir=state_dir, launch_agents_dir=launch_agents_dir,
+                         transition=manifest["research_publication_transition"])
+            raise
         return receipt
 
     service_row = manifest.get("service_transition")
