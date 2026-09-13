@@ -6,11 +6,17 @@ import json
 import subprocess
 import tempfile
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 from pathlib import Path
 
 from scripts.prepare_release_acceptance_candidate import (
     ARTIFACT_NAMES,
     CandidateError,
+    RECOVERY_ARTIFACT_MAP,
+    RECOVERY_CANDIDATE_SCHEMA_VERSION,
+    RECOVERY_PROOF_ARTIFACT,
+    RECOVERY_SCHEMA_VERSION,
     _canonical_sha256,
     build_candidate,
     template,
@@ -22,7 +28,7 @@ class ReleaseAcceptanceCandidateTests(unittest.TestCase):
     def setUp(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        self.root = Path(temporary.name).resolve()
         self.source = self.root / "source"
         self.packet = self.root / "packet"
         self.source.mkdir()
@@ -46,8 +52,9 @@ class ReleaseAcceptanceCandidateTests(unittest.TestCase):
         path.write_bytes(value)
         return {"path": name, "sha256": hashlib.sha256(value).hexdigest()}
 
-    def _complete(self, count: int = 15) -> dict[str, object]:
-        document = template()
+    def _complete(self, count: int = 15, *, schema_version=None) -> dict[str, object]:
+        document = template(schema_version=(schema_version or
+                                             "dalton-release-acceptance-candidate-input-0.1"))
         document.update(
             release_ref="R11a",
             status="candidate_inputs_complete",
@@ -89,7 +96,7 @@ class ReleaseAcceptanceCandidateTests(unittest.TestCase):
             "successful": True,
         }
         native_result_bytes = (json.dumps(native_result) + "\n").encode()
-        for name in ARTIFACT_NAMES:
+        for name in document["artifacts"]:
             if name == "final_activated_model_config_snapshot":
                 artifacts[name] = self._write("final-model-configs.json", snapshot_bytes)
             elif name == "latest_backup_manifest":
@@ -155,6 +162,38 @@ class ReleaseAcceptanceCandidateTests(unittest.TestCase):
         }
         document["latest_backup"] = {"snapshot_id": latest["snapshot_id"]}
         return document
+
+    def test_recovery_schema_binds_closed_proof_and_preserves_legacy_inventory(self):
+        identity = {"recovered": "redacted-exact"}
+        document = self._complete(schema_version=RECOVERY_SCHEMA_VERSION)
+        self.assertEqual(
+            set(ARTIFACT_NAMES) | {RECOVERY_PROOF_ARTIFACT,
+                                   *RECOVERY_ARTIFACT_MAP.values()},
+            set(document["artifacts"]),
+        )
+        from scripts.successor_predecessor_recovery import protected_state_hash
+        module = SimpleNamespace(
+            protected_state_hash=protected_state_hash,
+            validate_recovery_proof=lambda proof, *, artifacts: (
+            identity if proof == {"schema_version": "predecessor-recovery-proof-0.1"}
+            and set(artifacts) == set(RECOVERY_ARTIFACT_MAP) else None))
+        rollback_row = document["artifacts"][
+            RECOVERY_ARTIFACT_MAP["rollback_state"]]
+        rollback_path = self.packet / rollback_row["path"]
+        rollback_path.unlink(); rollback_path.mkdir()
+        rollback_row["sha256"] = protected_state_hash(rollback_path)
+        proof_path = self.packet / document["artifacts"][RECOVERY_PROOF_ARTIFACT]["path"]
+        proof_path.write_text(json.dumps({
+            "schema_version": "predecessor-recovery-proof-0.1"}) + "\n")
+        document["artifacts"][RECOVERY_PROOF_ARTIFACT]["sha256"] = hashlib.sha256(
+            proof_path.read_bytes()).hexdigest()
+        with patch.dict("sys.modules", {
+            "scripts.successor_predecessor_recovery": module}):
+            candidate = build_candidate(document)
+        self.assertEqual(RECOVERY_CANDIDATE_SCHEMA_VERSION,
+                         candidate["schema_version"])
+        self.assertEqual(identity, candidate["predecessor_recovery"])
+        self.assertEqual(set(ARTIFACT_NAMES), set(template()["artifacts"]))
 
     def test_template_is_inert_and_has_no_frozen_guess(self) -> None:
         document = template()

@@ -21,6 +21,8 @@ from typing import Any, Mapping, Sequence
 
 SCHEMA_VERSION = "dalton-release-acceptance-candidate-input-0.1"
 CANDIDATE_SCHEMA_VERSION = "dalton-release-acceptance-candidate-0.1"
+RECOVERY_SCHEMA_VERSION = "dalton-release-acceptance-candidate-input-0.2"
+RECOVERY_CANDIDATE_SCHEMA_VERSION = "dalton-release-acceptance-candidate-0.2"
 HEX40 = re.compile(r"[0-9a-f]{40}")
 HEX64 = re.compile(r"[0-9a-f]{64}")
 SNAPSHOT_ID = re.compile(r"[0-9]{8}T[0-9]{6}\.[0-9]{6}Z")
@@ -48,6 +50,32 @@ ARTIFACT_NAMES = (
     "backup_retention_receipt",
     "latest_backup_manifest",
 )
+RECOVERY_ARTIFACT_MAP = {
+    "published_pointer": "predecessor_published_pointer",
+    "published_previous_pointer": "predecessor_published_previous_pointer",
+    "failed_manifest": "predecessor_failed_manifest",
+    "failed_deployment": "predecessor_failed_deployment",
+    "recovery_prestart": "predecessor_recovery_prestart",
+    "recovery_restart": "predecessor_recovery_restart",
+    "accepted_wheel": "predecessor_accepted_wheel",
+    "external_before": "predecessor_external_before",
+    "external_after": "predecessor_external_after",
+    "model_snapshot": "predecessor_model_snapshot",
+    "service_snapshot": "predecessor_service_snapshot",
+    "openclaw_snapshot": "predecessor_openclaw_snapshot",
+    "rollback_state": "predecessor_rollback_state",
+    "rollback_initial": "predecessor_rollback_initial",
+    "published_manifest": "predecessor_published_manifest",
+    "published_deployment": "predecessor_published_deployment",
+    "published_installed": "predecessor_published_installed",
+    "published_health": "predecessor_published_health",
+    "published_finalization": "predecessor_published_finalization",
+    "published_publication": "predecessor_published_publication",
+    "published_runtime_pointer": "predecessor_published_runtime_pointer",
+    "published_previous_runtime_pointer":
+        "predecessor_published_previous_runtime_pointer",
+}
+RECOVERY_PROOF_ARTIFACT = "predecessor_recovery_proof"
 
 TOP_FIELDS = {
     "schema_version",
@@ -95,11 +123,21 @@ def _canonical_sha256(value: Any) -> str:
     return hashlib.sha256(wire.encode("utf-8")).hexdigest()
 
 
-def template(release_ref: str | None = None) -> dict[str, Any]:
+def _artifact_names(schema_version: str) -> tuple[str, ...]:
+    if schema_version == SCHEMA_VERSION:
+        return ARTIFACT_NAMES
+    _need(schema_version == RECOVERY_SCHEMA_VERSION,
+          "candidate input schema differs")
+    return (*ARTIFACT_NAMES, RECOVERY_PROOF_ARTIFACT,
+            *RECOVERY_ARTIFACT_MAP.values())
+
+
+def template(release_ref: str | None = None, *,
+             schema_version: str = SCHEMA_VERSION) -> dict[str, Any]:
     """Return the closed, deliberately incomplete review input."""
 
     return {
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": schema_version,
         "release_ref": release_ref,
         "status": "candidate_inputs_incomplete",
         "acceptance_state": "pending",
@@ -107,7 +145,8 @@ def template(release_ref: str | None = None) -> dict[str, Any]:
         "packet_root": None,
         "source": {"root": None, "commit": None},
         "artifacts": {
-            name: {"path": None, "sha256": None} for name in ARTIFACT_NAMES
+            name: {"path": None, "sha256": None}
+            for name in _artifact_names(schema_version)
         },
         "runtime_configuration": {
             "model_config_count": None,
@@ -127,6 +166,14 @@ def _regular_packet_artifact(packet_root: Path, row: Mapping[str, Any], name: st
     _need(not rel_path.is_absolute() and ".." not in rel_path.parts, f"{name} path escapes packet")
     _need(isinstance(expected, str) and HEX64.fullmatch(expected) is not None, f"{name} SHA-256 is unresolved")
     path = packet_root / rel_path
+    if name == RECOVERY_ARTIFACT_MAP["rollback_state"]:
+        try:
+            from scripts.successor_predecessor_recovery import protected_state_hash
+            actual = protected_state_hash(path)
+        except Exception as exc:
+            raise CandidateError("predecessor rollback-state artifact differs") from exc
+        _need(actual == expected, "predecessor rollback-state SHA-256 changed")
+        return path
     _need(path.is_file() and not path.is_symlink(), f"{name} is not a regular packet artifact")
     _need(path.resolve().is_relative_to(packet_root), f"{name} resolved outside packet")
     _need(_sha256(path) == expected, f"{name} SHA-256 changed")
@@ -319,7 +366,9 @@ def build_candidate(document: Mapping[str, Any]) -> dict[str, Any]:
     """Verify a complete input document and return an inert candidate."""
 
     _need(set(document) == TOP_FIELDS, "candidate input fields are not closed")
-    _need(document.get("schema_version") == SCHEMA_VERSION, "candidate input schema differs")
+    schema_version = document.get("schema_version")
+    _need(schema_version in {SCHEMA_VERSION, RECOVERY_SCHEMA_VERSION},
+          "candidate input schema differs")
     _need(isinstance(document.get("release_ref"), str) and document["release_ref"], "release ref is unresolved")
     _need(document.get("status") == "candidate_inputs_complete", "candidate inputs are not marked complete")
     _need(document.get("acceptance_state") == "pending", "candidate cannot carry acceptance")
@@ -336,10 +385,12 @@ def build_candidate(document: Mapping[str, Any]) -> dict[str, Any]:
     source_root, commit = _validate_source(document.get("source", {}))
 
     artifacts = document.get("artifacts")
-    _need(isinstance(artifacts, Mapping) and set(artifacts) == set(ARTIFACT_NAMES), "artifact inventory differs")
+    artifact_names = _artifact_names(str(schema_version))
+    _need(isinstance(artifacts, Mapping) and set(artifacts) == set(artifact_names),
+          "artifact inventory differs")
     paths = {
         name: _regular_packet_artifact(packet_root, artifacts[name], name)
-        for name in ARTIFACT_NAMES
+        for name in artifact_names
     }
     suite = _validate_full_suite(
         paths["full_suite_receipt"],
@@ -365,8 +416,26 @@ def build_candidate(document: Mapping[str, Any]) -> dict[str, Any]:
         paths["service_config_before_snapshot"],
         paths["service_config_after_candidate"],
     )
+    recovery_identity = None
+    if schema_version == RECOVERY_SCHEMA_VERSION:
+        try:
+            proof = json.loads(paths[RECOVERY_PROOF_ARTIFACT].read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise CandidateError("predecessor recovery proof is invalid JSON") from exc
+        try:
+            from scripts.successor_predecessor_recovery import validate_recovery_proof
+            recovery_identity = validate_recovery_proof(
+                proof,
+                artifacts={key: paths[name]
+                           for key, name in RECOVERY_ARTIFACT_MAP.items()},
+            )
+        except Exception as exc:
+            raise CandidateError("predecessor recovery proof differs") from exc
     candidate = {
-        "schema_version": CANDIDATE_SCHEMA_VERSION,
+        "schema_version": (
+            RECOVERY_CANDIDATE_SCHEMA_VERSION
+            if schema_version == RECOVERY_SCHEMA_VERSION
+            else CANDIDATE_SCHEMA_VERSION),
         "release_ref": document["release_ref"],
         "status": "candidate_pending_owner_acceptance",
         "acceptance_state": "pending",
@@ -375,7 +444,7 @@ def build_candidate(document: Mapping[str, Any]) -> dict[str, Any]:
         "source": {"root": str(source_root), "commit": commit},
         "artifacts": {
             name: {"path": artifacts[name]["path"], "sha256": artifacts[name]["sha256"]}
-            for name in ARTIFACT_NAMES
+            for name in artifact_names
         },
         "runtime_configuration": {
             "model_config_count": count,
@@ -386,6 +455,8 @@ def build_candidate(document: Mapping[str, Any]) -> dict[str, Any]:
         "deployment_operations": {"backup_retention": service_delta},
         "boundaries": dict(BOUNDARIES),
     }
+    if recovery_identity is not None:
+        candidate["predecessor_recovery"] = recovery_identity
     candidate["content_hash"] = _canonical_sha256(candidate)
     return candidate
 

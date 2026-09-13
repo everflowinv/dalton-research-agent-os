@@ -25,6 +25,9 @@ from typing import Any, Mapping, Sequence
 from scripts import execute_r11a_stopped_window_candidate as r11
 from scripts import openclaw_broker_stopped_window as broker_window
 from scripts import prepare_release_acceptance_candidate as release_acceptance
+from scripts.prepare_release_acceptance_candidate import (
+    RECOVERY_ARTIFACT_MAP, RECOVERY_PROOF_ARTIFACT,
+)
 from scripts.successor_ops_binding import OpsBindingError, verify_ops_binding
 from scripts.prepare_successor_config_transition import (
     DOCUMENT_CONFIG, EXTERNAL_CAS_SCHEMA_VERSION, LANE_CONFIG,
@@ -38,6 +41,7 @@ from scripts.prepare_successor_config_transition import (
 
 
 SCHEMA_VERSION = "successor-stopped-window-candidate-0.1"
+RECOVERY_SCHEMA_VERSION = "successor-stopped-window-candidate-0.2"
 HEX40 = re.compile(r"[0-9a-f]{40}")
 HEX64 = re.compile(r"[0-9a-f]{64}")
 ARTIFACT_NAMES = frozenset({
@@ -54,6 +58,7 @@ MANIFEST_FIELDS = frozenset({
     "deployment_state", "source", "artifacts", "acceptance", "runtime",
     "health_acceptance", "boundaries", "content_hash",
 })
+RECOVERY_MANIFEST_FIELDS = MANIFEST_FIELDS | {"predecessor_recovery"}
 PRESERVE_SCHEMA_VERSIONS = frozenset({
     PRESERVE_SCHEMA_VERSION, EXTERNAL_CAS_SCHEMA_VERSION,
     PURE_PRESERVE_SCHEMA_VERSION, WRITER_APPEND_SCHEMA_VERSION,
@@ -169,6 +174,17 @@ def template() -> dict[str, Any]:
     }
 
 
+def recovery_template() -> dict[str, Any]:
+    value = template()
+    value["schema_version"] = RECOVERY_SCHEMA_VERSION
+    value["artifacts"].update({
+        name: {"file": None, "sha256": None}
+        for name in (RECOVERY_PROOF_ARTIFACT, *RECOVERY_ARTIFACT_MAP.values())
+    })
+    value["predecessor_recovery"] = None
+    return value
+
+
 def load_json(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -178,6 +194,26 @@ def load_json(path: Path) -> dict[str, Any]:
     return value
 
 
+def validate_predecessor_recovery(
+    paths: Mapping[str, Path], expected: Mapping[str, Any] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Rebuild the immutable published/failed/recovered predecessor chain."""
+
+    try:
+        from scripts.successor_predecessor_recovery import validate_recovery_proof
+        proof = load_json(paths[RECOVERY_PROOF_ARTIFACT])
+        identity = validate_recovery_proof(
+            proof,
+            artifacts={key: paths[name]
+                       for key, name in RECOVERY_ARTIFACT_MAP.items()},
+        )
+    except Exception as exc:
+        raise SuccessorExecuteError("predecessor recovery proof differs") from exc
+    if expected is not None:
+        need(dict(expected) == identity, "predecessor recovery identity differs")
+    return proof, identity
+
+
 def packet_preflight(packet: Path) -> tuple[dict[str, Any], dict[str, Path]]:
     manifest_path = packet / "release-manifest.candidate.json"
     need(packet.is_dir() and not packet.is_symlink()
@@ -185,8 +221,18 @@ def packet_preflight(packet: Path) -> tuple[dict[str, Any], dict[str, Path]]:
          "successor candidate packet is unavailable")
     manifest = load_json(manifest_path)
     unsigned = dict(manifest); asserted = unsigned.pop("content_hash", None)
-    need(set(manifest) == MANIFEST_FIELDS
-         and manifest.get("schema_version") == SCHEMA_VERSION
+    version = manifest.get("schema_version")
+    expected_fields = (RECOVERY_MANIFEST_FIELDS
+                       if version == RECOVERY_SCHEMA_VERSION else MANIFEST_FIELDS)
+    expected_artifacts = (ARTIFACT_NAMES | {
+        RECOVERY_PROOF_ARTIFACT, *RECOVERY_ARTIFACT_MAP.values()}
+        if version == RECOVERY_SCHEMA_VERSION else ARTIFACT_NAMES)
+    recovery = manifest.get("predecessor_recovery")
+    if version == RECOVERY_SCHEMA_VERSION:
+        need(isinstance(recovery, Mapping) and bool(recovery),
+             "predecessor recovery identity is unresolved")
+    need(set(manifest) == expected_fields
+         and version in {SCHEMA_VERSION, RECOVERY_SCHEMA_VERSION}
          and isinstance(manifest.get("release_ref"), str)
          and bool(manifest["release_ref"].strip())
          and manifest.get("status") == "accepted_for_stopped_window"
@@ -201,7 +247,7 @@ def packet_preflight(packet: Path) -> tuple[dict[str, Any], dict[str, Path]]:
          and HEX40.fullmatch(str(source.get("commit", ""))) is not None,
          "successor frozen source is unresolved")
     artifacts = manifest.get("artifacts")
-    need(isinstance(artifacts, Mapping) and set(artifacts) == ARTIFACT_NAMES,
+    need(isinstance(artifacts, Mapping) and set(artifacts) == expected_artifacts,
          "successor artifact inventory differs")
     paths = {}
     for name, row in artifacts.items():
@@ -211,11 +257,25 @@ def packet_preflight(packet: Path) -> tuple[dict[str, Any], dict[str, Path]]:
              and HEX64.fullmatch(str(row["sha256"])) is not None,
              f"invalid successor artifact: {name}")
         path = packet / row["file"]
-        need(path.is_file() and not path.is_symlink() and sha(path) == row["sha256"],
-             f"successor artifact changed: {name}")
+        if name == RECOVERY_ARTIFACT_MAP["rollback_state"]:
+            try:
+                from scripts.successor_predecessor_recovery import protected_state_hash
+                actual_hash = protected_state_hash(path)
+            except Exception as exc:
+                raise SuccessorExecuteError(
+                    "predecessor rollback-state artifact differs") from exc
+            need(actual_hash == row["sha256"],
+                 "predecessor rollback-state artifact changed")
+        else:
+            need(path.is_file() and not path.is_symlink()
+                 and sha(path) == row["sha256"],
+                 f"successor artifact changed: {name}")
         paths[name] = path
     need(len(set(paths.values())) == len(paths),
          "successor artifact files must be distinct")
+    if version == RECOVERY_SCHEMA_VERSION:
+        validate_predecessor_recovery(
+            paths, expected=recovery)
     acceptance = manifest.get("acceptance", {})
     need(acceptance == {
         "state": "accepted",
@@ -366,6 +426,89 @@ class SuccessorOrchestrator(r11.Orchestrator):
         need(source is not None, "accepted writer successor source is unavailable")
         return expected_writer_operation_transition_state(
             packet_root=self.packet, manifest=transition, successor_root=source)
+
+    def _verify_recovered_predecessor(self, artifacts: Mapping[str, Path]) -> dict[str, Any]:
+        """Reobserve the recovered installed runtime before successor mutation."""
+
+        proof, identity = validate_predecessor_recovery(artifacts)
+        expected = identity["recovery"]["installed_identity"]
+        roots = list((r11.VENV / "lib").glob("python*/site-packages"))
+        need(len(roots) == 1, "recovered predecessor runtime root differs")
+        with zipfile.ZipFile(artifacts["predecessor_accepted_wheel"]) as archive:
+            files = {name: archive.read(name) for name in archive.namelist()
+                     if name.startswith("dalton_core/")
+                     and Path(name).suffix in {".py", ".sql", ".json", ".html"}}
+        actual = {path.relative_to(roots[0]).as_posix()
+                  for path in (roots[0] / "dalton_core").rglob("*")
+                  if path.is_file()
+                  and path.suffix in {".py", ".sql", ".json", ".html"}}
+        need(files and actual == set(files)
+             and all((roots[0] / name).read_bytes() == data
+                     for name, data in files.items())
+             and len(files) == expected["runtime_file_count"],
+             "recovered predecessor runtime differs from accepted wheel")
+        models = r11.current_models()
+        need(models == load_json(artifacts["predecessor_model_snapshot"])
+             and len(models) == expected["model_config_count"]
+             and canonical_hash(models) == expected["model_config_semantic_sha256"],
+             "recovered predecessor model configuration differs")
+        need(r11.SERVICE_CONFIG.read_bytes()
+             == artifacts["predecessor_service_snapshot"].read_bytes()
+             and sha(r11.SERVICE_CONFIG) == expected["service_config_sha256"],
+             "recovered predecessor service configuration differs")
+        need(r11.OPENCLAW.read_bytes()
+             == artifacts["predecessor_openclaw_snapshot"].read_bytes()
+             and sha(r11.OPENCLAW) == expected["openclaw_config_sha256"],
+             "recovered predecessor OpenClaw configuration differs")
+        reviewed_plists = expected["reviewed_plist_sha256"]
+        need(isinstance(reviewed_plists, Mapping)
+             and all((r11.LAUNCH_AGENTS / f"{label}.plist").is_file()
+                     and not (r11.LAUNCH_AGENTS / f"{label}.plist").is_symlink()
+                     and sha(r11.LAUNCH_AGENTS / f"{label}.plist") == digest
+                     for label, digest in reviewed_plists.items()),
+             "recovered predecessor LaunchAgent bytes differ")
+        token = r11.STATE / "writer-tokens.json"
+        need(token.is_file() and not token.is_symlink()
+             and token.stat().st_mode & 0o7777 == 0o600
+             and sha(token) == expected["writer_tokens"]["live_sha256"],
+             "recovered predecessor writer authority differs")
+        protected = [path for path in r11.STATE.glob("*.json")
+                     if path.name not in r11.INSTALLER_MANAGED_STATE_JSON
+                     and path.name != "writer-tokens.json"]
+        for name in ("connector-governance", "governance-decisions", "discovery-plans"):
+            directory = r11.STATE / name
+            if directory.is_dir():
+                protected.extend([directory, *directory.rglob("*")])
+        need(len(set(protected))
+             == expected["protected_entries_excluding_writer_tokens"],
+             "recovered predecessor protected-state inventory differs")
+        from scripts.successor_predecessor_recovery import protected_state_hash
+        need(protected_state_hash(r11.STATE)
+             == expected["protected_state_excluding_writer_tokens_sha256"],
+             "recovered predecessor protected-state bytes differ")
+        observed = dict(expected)
+        observed.update({
+            "source_commit": identity["failed_install"]["source_commit"],
+            "accepted_wheel_sha256": sha(artifacts["predecessor_accepted_wheel"]),
+            "runtime_file_count": len(files),
+            "model_config_count": len(models),
+            "model_config_semantic_sha256": canonical_hash(models),
+            "service_config_sha256": sha(r11.SERVICE_CONFIG),
+            "openclaw_config_sha256": sha(r11.OPENCLAW),
+            "reviewed_plist_sha256": {
+                label: sha(r11.LAUNCH_AGENTS / f"{label}.plist")
+                for label in reviewed_plists},
+            "protected_entries_excluding_writer_tokens": len(set(protected)),
+            "protected_state_excluding_writer_tokens_sha256":
+                protected_state_hash(r11.STATE),
+        })
+        from scripts.successor_predecessor_recovery import verify_installed_predecessor
+        try:
+            verify_installed_predecessor(proof, observed)
+            return identity
+        except Exception as exc:
+            raise SuccessorExecuteError(
+                "installed predecessor no longer matches recovered identity") from exc
 
     def _verify_writer_protected_state(self, initial, *, require_after=False):
         before, after, row = self._writer_projection()
@@ -541,10 +684,20 @@ class SuccessorOrchestrator(r11.Orchestrator):
                   "provider_plugin_tree_sha256": plugin}
         if transition.get("schema_version") in PRESERVE_SCHEMA_VERSIONS:
             result["preserved_state_authorities"] = state_authorities
+        if manifest.get("schema_version") == RECOVERY_SCHEMA_VERSION:
+            self.predecessor_recovery_identity = self._verify_recovered_predecessor(
+                artifacts)
+            need(plugin == self.predecessor_recovery_identity[
+                     "external_dependency"]["authority"]["broker_tree_sha256"],
+                 "recovered predecessor broker tree differs")
+            result["predecessor_recovery"] = self.predecessor_recovery_identity
         return result
 
     def install_successor(self, source: Path, manifest: Mapping[str, Any],
                           artifacts: Mapping[str, Path]) -> None:
+        if manifest.get("schema_version") == RECOVERY_SCHEMA_VERSION:
+            self.predecessor_recovery_identity = self._verify_recovered_predecessor(
+                artifacts)
         self.successor_source = source
         self.artifacts = dict(artifacts)
         self.artifacts["service_config_before"] = artifacts["service_config_snapshot"]
@@ -785,6 +938,13 @@ class SuccessorOrchestrator(r11.Orchestrator):
             result["writer_operation_transition"] = writer_transition_result(
                 before_writer, after_writer, writer_row)
             result["writer_token_mutations"] = 1
+        if manifest.get("schema_version") == RECOVERY_SCHEMA_VERSION:
+            _proof, predecessor_recovery = validate_predecessor_recovery(
+                artifacts, expected=manifest.get("predecessor_recovery"))
+            need(plugin == predecessor_recovery[
+                     "external_dependency"]["authority"]["broker_tree_sha256"],
+                 "recovered external broker tree changed during install")
+            result["predecessor_recovery"] = predecessor_recovery
         return result
 
     def rollback(self):

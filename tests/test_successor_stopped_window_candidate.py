@@ -5,6 +5,7 @@ import json
 import tempfile
 import unittest
 import subprocess
+from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -75,6 +76,56 @@ class SuccessorStoppedWindowCandidateTests(unittest.TestCase):
         self.assertTrue(all(row == {"file": None, "sha256": None}
                             for row in candidate["artifacts"].values()))
         self.assertFalse(candidate["boundaries"]["manifest_publication"])
+
+    def test_recovery_schema_alone_extends_closed_artifact_inventory(self) -> None:
+        legacy = execute.template()
+        recovery = execute.recovery_template()
+        added = {execute.RECOVERY_PROOF_ARTIFACT,
+                 *execute.RECOVERY_ARTIFACT_MAP.values()}
+        self.assertEqual(execute.RECOVERY_SCHEMA_VERSION,
+                         recovery["schema_version"])
+        self.assertEqual(set(legacy["artifacts"]) | added,
+                         set(recovery["artifacts"]))
+        self.assertNotIn("predecessor_recovery", legacy)
+        self.assertIsNone(recovery["predecessor_recovery"])
+
+    def test_recovery_chain_rebuild_uses_exact_artifact_map(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = {}
+            for name in (execute.RECOVERY_PROOF_ARTIFACT,
+                         *execute.RECOVERY_ARTIFACT_MAP.values()):
+                path = root / name
+                write_json(path, {"name": name})
+                paths[name] = path
+            identity = {"schema_version": "successor-predecessor-recovery-0.1"}
+            module = SimpleNamespace(validate_recovery_proof=(
+                lambda proof, *, artifacts: identity
+                if proof == {"name": execute.RECOVERY_PROOF_ARTIFACT}
+                and set(artifacts) == set(execute.RECOVERY_ARTIFACT_MAP)
+                else None))
+            with patch.dict("sys.modules", {
+                "scripts.successor_predecessor_recovery": module}):
+                proof, actual = execute.validate_predecessor_recovery(
+                    paths, expected=identity)
+            self.assertEqual({"name": execute.RECOVERY_PROOF_ARTIFACT}, proof)
+            self.assertEqual(identity, actual)
+
+    def test_recovery_packet_rejects_unbound_normalized_identity(self) -> None:
+        for invalid in (None, {}, []):
+            with self.subTest(invalid=invalid), tempfile.TemporaryDirectory() as temporary:
+                packet = Path(temporary)
+                manifest = execute.recovery_template()
+                manifest["predecessor_recovery"] = invalid
+                manifest["content_hash"] = execute.canonical_hash({
+                    key: value for key, value in manifest.items()
+                    if key != "content_hash"
+                })
+                write_json(packet / "release-manifest.candidate.json", manifest)
+                with self.assertRaisesRegex(
+                        execute.SuccessorExecuteError,
+                        "predecessor recovery identity is unresolved"):
+                    execute.packet_preflight(packet)
 
     def test_unaccepted_or_incomplete_packet_cannot_reach_live_preflight(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
