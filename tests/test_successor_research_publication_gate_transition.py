@@ -9,7 +9,7 @@ from scripts.successor_research_publication_gate_transition import (
 )
 from scripts.prepare_successor_config_transition import (
     RESEARCH_PUBLICATION_GATE_SCHEMA_VERSION, apply_transition_to_scratch,
-    build_preserve_existing_transition,
+    build_preserve_existing_transition, expected_transition_state,
 )
 from tests.test_successor_config_transition import PreserveExistingTransitionTests
 from scripts.run_successor_copied_state_rehearsal import derive_confined_transition
@@ -101,6 +101,8 @@ class GateTransitionTests(unittest.TestCase):
             openclaw_config_before_path=base.packet/'openclaw.preserved.json',
             research_publication_gate_transition=gate)
         self.assertEqual(RESEARCH_PUBLICATION_GATE_SCHEMA_VERSION,manifest['schema_version'])
+        models,document,lane=expected_transition_state(packet_root=base.packet,manifest=manifest)
+        self.assertEqual(base.models,models);self.assertIsInstance(document,dict);self.assertIsInstance(lane,dict)
         base.install_before();(base.state/'research-publication-worker-config.json').write_bytes(before.read_bytes());os.chmod(base.state/'research-publication-worker-config.json',0o600)
         openclaw=base.root/'openclaw.json';openclaw.write_bytes((base.packet/'openclaw.preserved.json').read_bytes())
         manifest_path=base.packet/'gate-manifest.json';write(manifest_path,manifest)
