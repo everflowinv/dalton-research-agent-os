@@ -4604,10 +4604,45 @@ class CockpitPlane:
                 cost_micros += second["cost_micros"]
                 replayed = replayed and second["replayed"]
 
+        language_review = {"status": "not_configured"}
+        reviewed_display_answer = None
+        language_root = self.config.core_db.parent
+        language_policy = language_root / "research-language-policy.json"
+        checker_config = language_root / "language-checker-model-config.json"
+        brain_config = language_root / "language-brain-model-config.json"
+        required = False
+        if language_policy.exists():
+            try:
+                policy = json.loads(language_policy.read_text(encoding="utf-8"))
+                required = isinstance(policy, Mapping) and policy.get("required") is True
+            except (OSError, json.JSONDecodeError):
+                raise CockpitError("发布前语言审查配置无法读取，请修复配置后重试")
+        configured = checker_config.exists() and brain_config.exists()
+        if configured:
+            from .research_language_runtime import run as run_language_review
+            product = {"kind": "ask_answer", "version_ref": f"cockpit-ask:{request_id}",
+                       "sections": [{"title": "回答", "body": answer["answer"],
+                                     "gaps": list(answer["gaps"])}]}
+            try:
+                language_review = run_language_review(
+                    product, mission=mission, request_id=request_id,
+                    checker_config=checker_config, brain_config=brain_config,
+                    scheduler_db=self.config.scheduler_db,
+                    artifact_dir=language_root / "research-language-reviews" / "ask")
+            except Exception as exc:
+                raise CockpitError("回答已生成，但发布前语言审查未完成，请稍后重试") from exc
+            if language_review.get("status") != "ready_for_publication":
+                raise CockpitError("回答已生成，但仍在等待语言审查，尚未发布")
+            section = language_review["brain_revision"]["sections"][0]
+            reviewed_display_answer = section["body"]
+        elif required:
+            raise CockpitError("回答已生成，但发布前语言审查尚未配置，尚未发布")
+
         shown = [dict(row) for row in context["shown"]]
         result = {
             "question": question,
             "answer": answer["answer"],
+            "display_answer": reviewed_display_answer,
             "sentences": answer["sentences"],
             # The page's existing citation card reads ``statement``,
             # ``company``, ``period`` and ``at``; those four keep their names
@@ -4671,6 +4706,9 @@ class CockpitPlane:
             "duplicates_dropped": len(everything) - len(claims),
             "cost_usd": round(cost_micros / 1_000_000, 4),
             "replayed": replayed, "answered_at": _iso(self.clock()),
+            "language_review": {key: language_review.get(key) for key in
+                                ("status", "source_hash", "revision_hash",
+                                 "content_hash", "artifact_ref", "artifact_sha256")},
         }
         # Q1: the answer is a cockpit artifact with no Core record, so the
         # thing a verdict binds to is a hash of what was said and what it
