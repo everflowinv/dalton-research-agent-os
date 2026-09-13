@@ -144,10 +144,27 @@ def install(
     thesis = service["thesis_impact"]["config"]
     state_dir = Path(service["core_db"]).parent
     router_db = str(Path(service["model_router_db"]).resolve())
+    target = state_dir / CONFIG_FILE_NAME
     with ModelRouter(router_db) as router:
         policy = ensure_extraction_policy(
             router, profile_ids=list(profile_ids) if profile_ids else None,
             now=now, tier=tier)
+        routing_policy_ref = policy["policy_version_ref"]
+        if policy.get("status") == "duplicate" and target.exists():
+            existing = json.loads(target.read_text(encoding="utf-8"))
+            existing_ref = existing.get("routing_policy_ref")
+            existing_policy = router.get_policy(existing_ref)
+            if existing_policy.get("id") != POLICY_ID:
+                raise ValueError(
+                    "existing extraction config names a different routing policy")
+            latest_policy = router.get_policy(policy["policy_version_ref"])
+            structural_fields = (
+                "filters", "ordered_preferences", "fallback_chains",
+            )
+            if all(canonical_json(existing_policy.get(field))
+                   == canonical_json(latest_policy.get(field))
+                   for field in structural_fields):
+                routing_policy_ref = existing_ref
         credential_slots = list(credential_slots or ())
         if tier is not None and not credential_slots:
             from .research_planner_setup import credential_slots_for
@@ -158,12 +175,11 @@ def install(
             # missing key and is really a missing line in a config.
             credential_slots = credential_slots_for(
                 router, list(tier_chain(tier)),
-                policy_version_ref=policy["policy_version_ref"])
-    target = state_dir / CONFIG_FILE_NAME
+                policy_version_ref=routing_policy_ref)
     from .budget_config_install import preserved_budget_overrides
     budget_overrides = preserved_budget_overrides(target)
     model_config = validate_model_config({
-        "routing_policy_ref": policy["policy_version_ref"],
+        "routing_policy_ref": routing_policy_ref,
         "credential_slot_refs": list(credential_slots or DEFAULT_CREDENTIAL_SLOTS),
         "model_router_db": router_db,
         "broker_socket": str(Path(planner["planner_broker_socket"]).resolve()),

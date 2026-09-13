@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timezone
 from pathlib import Path
 
 from dalton_core.document_extraction_setup import CONFIG_FILE_NAME, POLICY_ID, install
 from dalton_core.model_router import ModelRouter
+from dalton_core.store import content_hash
 
 
 def _service(root: Path) -> Path:
@@ -35,6 +37,112 @@ def _service(root: Path) -> Path:
 
 
 class ExtractionSetupTests(unittest.TestCase):
+    def test_duplicate_latest_policy_preserves_valid_explicit_prior_ref(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); config_path = _service(root)
+            now = datetime(2026, 9, 7, 12, tzinfo=timezone.utc)
+            first = install(config_path, now=now)
+            target = root / "state" / CONFIG_FILE_NAME
+            before = target.read_bytes()
+            with ModelRouter(str(root / "state" / "model-router.sqlite")) as router:
+                prior = router.get_policy(first["routing_policy_ref"])
+                latest = {k: v for k, v in prior.items() if k != "content_hash"}
+                latest.update({
+                    "policy_version_ref": "model-routing-policy-version:dalton-openclaw-extraction:2",
+                    "version": 2,
+                    "prior_version_ref": first["routing_policy_ref"],
+                    "purpose_overrides": {"research_localization": {
+                        "actor_ref": "operator:test",
+                        "chain": ["profile:zai-glm-5-3-flash"],
+                        "mode": "explicit",
+                    }},
+                })
+                latest["content_hash"] = content_hash(latest)
+                router.register_policy(latest)
+
+            result = install(config_path, now=now)
+            self.assertEqual(result["policy"], {
+                "status": "duplicate",
+                "policy_version_ref": "model-routing-policy-version:dalton-openclaw-extraction:2",
+            })
+            self.assertEqual(result["routing_policy_ref"], first["routing_policy_ref"])
+            self.assertFalse(result["model_config_changed"])
+            self.assertEqual(target.read_bytes(), before)
+
+    def test_duplicate_policy_refuses_missing_or_different_existing_policy(self) -> None:
+        for existing_ref in (
+            "model-routing-policy-version:missing:1",
+            "model-routing-policy-version:other:1",
+        ):
+            with self.subTest(existing_ref=existing_ref), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory); config_path = _service(root)
+                install(config_path)
+                target = root / "state" / CONFIG_FILE_NAME
+                wire = json.loads(target.read_text())
+                if existing_ref.endswith("other:1"):
+                    with ModelRouter(str(root / "state" / "model-router.sqlite")) as router:
+                        other = router.get_policy(wire["routing_policy_ref"])
+                        other = {k: v for k, v in other.items() if k != "content_hash"}
+                        other.update({"id": "model-routing-policy:other",
+                                      "policy_version_ref": existing_ref})
+                        other["content_hash"] = content_hash(other)
+                        router.register_policy(other)
+                wire["routing_policy_ref"] = existing_ref
+                target.write_text(json.dumps(wire))
+                before = target.read_bytes()
+                with self.assertRaises(Exception):
+                    install(config_path)
+                self.assertEqual(target.read_bytes(), before)
+
+    def test_duplicate_latest_does_not_preserve_structurally_stale_prior_ref(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); config_path = _service(root)
+            first = install(config_path, profile_ids=["profile:deepseek-v4-flash"])
+            target = root / "state" / CONFIG_FILE_NAME
+            # Move the requested structure forward, then deliberately restore
+            # the old explicit pin. The latest policy is duplicate on reinstall,
+            # but the old pin no longer represents the requested profile set.
+            second = install(config_path, profile_ids=[
+                "profile:deepseek-v4-flash", "profile:gemini-3-7-flash",
+            ])
+            wire = json.loads(target.read_text())
+            wire["routing_policy_ref"] = first["routing_policy_ref"]
+            target.write_text(json.dumps(wire))
+            result = install(config_path, profile_ids=[
+                "profile:deepseek-v4-flash", "profile:gemini-3-7-flash",
+            ])
+            self.assertEqual(result["policy"]["status"], "duplicate")
+            self.assertEqual(result["routing_policy_ref"], second["routing_policy_ref"])
+            self.assertTrue(result["model_config_changed"])
+
+    def test_credential_slots_are_derived_from_preserved_policy_ref(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); config_path = _service(root)
+            first = install(config_path, tier="cheap",
+                            credential_slots=["credential-slot:openclaw:deepseek"])
+            target = root / "state" / CONFIG_FILE_NAME
+            with ModelRouter(str(root / "state" / "model-router.sqlite")) as router:
+                prior = router.get_policy(first["routing_policy_ref"])
+                latest = {k: v for k, v in prior.items() if k != "content_hash"}
+                latest.update({
+                    "policy_version_ref": "model-routing-policy-version:dalton-openclaw-extraction:2",
+                    "version": 2, "prior_version_ref": first["routing_policy_ref"],
+                    "purpose_overrides": {"research_localization": {
+                        "actor_ref": "operator:test",
+                        "chain": ["profile:zai-glm-5-3-flash"], "mode": "explicit",
+                    }},
+                })
+                latest["content_hash"] = content_hash(latest)
+                router.register_policy(latest)
+            before = target.read_bytes()
+            with patch("dalton_core.research_planner_setup.credential_slots_for",
+                       return_value=["credential-slot:openclaw:deepseek"]) as slots:
+                result = install(config_path, tier="cheap")
+            self.assertEqual(slots.call_args.kwargs["policy_version_ref"],
+                             first["routing_policy_ref"])
+            self.assertEqual(result["routing_policy_ref"], first["routing_policy_ref"])
+            self.assertEqual(target.read_bytes(), before)
+
     def test_reinstall_and_tier_switch_preserve_only_valid_budget_overrides(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); config_path = _service(root)
