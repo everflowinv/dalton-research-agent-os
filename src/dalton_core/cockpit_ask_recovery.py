@@ -5,7 +5,7 @@ from collections.abc import Mapping
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
-from .research_gap_display import display_metadata_text
+from .research_gap_display import ask_gap_display_fields, display_metadata_text
 from .store import canonical_json, content_hash
 class AskRecoveryError(ValueError): pass
 
@@ -54,10 +54,11 @@ def recover_failed_ask_job(connection: sqlite3.Connection, *, job_id: str,
         raise AskRecoveryError('recovery proof differs from sealed language artifact')
     section=(review.get('brain_revision') or {}).get('sections')
     if not isinstance(section,list) or len(section)!=1:raise AskRecoveryError('language artifact section shape differs')
-    section=section[0]; expected_answer=display_metadata_text(section.get('body'));expected_gaps=[display_metadata_text(x) for x in section.get('gaps',[])]
+    section=section[0]; expected_answer=display_metadata_text(section.get('body'));gap_fields=ask_gap_display_fields(section.get('gaps',[]));expected_gaps=gap_fields['display_gaps']
     immutable=('question','answer','sentences','citations','gaps','unknowns','confidence','refused','refusal_reason','refusal_label','refusal_detail','market_vs_us','verification','context','answer_policy','refresh','refreshed_with','refresh_note','claims_considered','claims_total','duplicates_dropped')
     if any(result.get(k)!=producer_result.get(k) for k in immutable):raise AskRecoveryError('recovered result changed producer facts or citations')
-    if result.get('display_answer')!=expected_answer or result.get('display_gaps')!=expected_gaps:raise AskRecoveryError('recovered display differs from reviewed section')
+    if (result.get('display_answer')!=expected_answer or result.get('display_gaps')!=expected_gaps
+            or result.get('display_gap_details')!=gap_fields['display_gap_details']):raise AskRecoveryError('recovered display differs from reviewed section')
     language=result.get('language_review') or {}
     if language.get('status')!='ready_for_publication' or language.get('artifact_ref')!=ref or language.get('artifact_sha256')!=recovery_proof['language_artifact_sha256']:raise AskRecoveryError('result language proof differs')
     expected_cost=round(float(producer_result.get('cost_usd') or 0)+int(review.get('review_cost_micros') or 0)/1_000_000,4)
