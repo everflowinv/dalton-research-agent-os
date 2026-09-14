@@ -483,7 +483,7 @@ const ENUM_LABELS={
   unconfigured:"尚未配置",unapproved:"等待批准",unstarted:"尚未运行",busy:"运行中",
   launched:"运行中",budget_exhausted:"预算已用完",terminal:"本次任务已结束",
   recovery_required:"需要恢复后继续",duplicate:"已有相同结果",
-  dispatched:"本轮已派发处理",irrelevant:"当前无需处理"
+  dispatched:"本轮已派发处理",proposed:"已提交，等待决定",irrelevant:"当前无需处理"
 };
 function enumLabel(value,fallback="状态暂不可读"){return ENUM_LABELS[value]||fallback}
 function looksTechnical(value){return typeof value==="string"&&(/(?:[a-z][a-z0-9_-]+:)[a-z0-9:._-]{8,}|\b[A-Z][A-Z0-9_]{3,}\b|Traceback|Error:|\/Users\/|\/private\//i.test(value))}

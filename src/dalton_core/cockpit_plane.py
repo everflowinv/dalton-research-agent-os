@@ -213,6 +213,7 @@ LANE_STATUS_NOTES = {
     "recovery_required": "上次执行留下待恢复事项，本轮未继续处理",
     "duplicate": "已有相同结果，无需重复生成",
     "dispatched": "本轮任务已派发处理",
+    "proposed": "已提交重审建议，等待你的决定",
     "irrelevant": "当前没有需要处理的事项",
 }
 # The lanes the registry knows about, named for the owner. A lane with no name
@@ -284,6 +285,7 @@ LANE_STATUS_BUCKET_OF: dict[str, str] = {
     "ungranted": "ungranted",
     "unconfigured": "unconfigured", "unstarted": "unconfigured",
     "unapproved": "unapproved",
+    "proposed": "unapproved",
     "idle": "idle", "current": "idle",
     "launched": "running", "busy": "running",
     "held": "held", "failed": "held", "unavailable": "held",

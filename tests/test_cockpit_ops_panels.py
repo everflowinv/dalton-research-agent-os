@@ -398,6 +398,7 @@ class FourPanelTests(PanelCase):
         self.assertEqual(LANE_STATUS_BUCKET_OF["terminal"], "held")
         self.assertEqual(LANE_STATUS_BUCKET_OF["recovery_required"], "held")
         self.assertEqual(LANE_STATUS_BUCKET_OF["duplicate"], "idle")
+        self.assertEqual(LANE_STATUS_BUCKET_OF["proposed"], "unapproved")
 
     def test_the_failure_panel_reads_the_same_ledger_as_the_ops_page(self) -> None:
         self.park()

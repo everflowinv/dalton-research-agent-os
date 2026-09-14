@@ -658,6 +658,16 @@ class LaneVocabularyTests(Wave1Case):
             note = LANE_STATUS_NOTES[status]
             self.assertTrue(note and not note.isascii(), status)
 
+    def test_reopen_proposal_is_presented_as_waiting_for_a_decision(self) -> None:
+        row = self.lanes({"mission_reopen": {
+            "status": "proposed",
+            "proposed": ["gate-reopen:one"],
+            "companies": 3,
+        }})["lane:mission_reopen"]
+        self.assertEqual(row["status"], "proposed")
+        self.assertEqual(row["note"], "已提交重审建议，等待你的决定")
+        self.assertNotIn("状态暂不可读", row["note"])
+
     def test_skipped_reasons_are_a_detail_not_the_note(self) -> None:
         row = self.lanes({"mission_market_prices": {
             "status": "idle",

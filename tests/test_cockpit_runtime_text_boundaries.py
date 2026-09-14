@@ -21,6 +21,7 @@ class CockpitRuntimeTextBoundariesTests(unittest.TestCase):
         self.assertIn('terminal:"本次任务已结束"', source)
         self.assertIn('recovery_required:"需要恢复后继续"', source)
         self.assertIn('duplicate:"已有相同结果"', source)
+        self.assertIn('proposed:"已提交，等待决定"', source)
         self.assertIn('"terminal","recovery_required"', source)
 
     def _evaluate(self, expression: str):
