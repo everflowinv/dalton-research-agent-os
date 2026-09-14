@@ -13,8 +13,9 @@ from dalton_core.store import canonical_json
 def shown_from_prompt(prompt):
  import re
  blocks={letter:name for name,letter in BLOCK_TAGS.items()}
+ letters=re.escape(''.join(sorted(blocks)))
  return [{'tag':tag,'statement':statement,'ref':None,'period':period or None,'company':'','at':'','block':blocks[tag[0]],'block_label':BLOCK_LABELS[blocks[tag[0]]],'recovered_prompt_detail':detail or None}
-         for tag,period,detail,statement in re.findall(r'^([CDBFVPSKEGRTN]\d+)(?: \[([^]]+)\])?(?: （([^）]*)）)? (.*)$',prompt,re.M)]
+         for tag,period,detail,statement in re.findall(rf'^([{letters}]\d+)(?: \[([^]]+)\])?(?: （([^）]*)）)? (.*)$',prompt,re.M)]
 
 def load(p):return json.loads(p.read_text())
 def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
@@ -54,14 +55,17 @@ def main():
  product={'kind':'ask_answer','version_ref':'cockpit-ask:'+request['request_id'],'sections':[{'title':'回答','body':producer['answer'],'gaps':producer['gaps']}]}
  product_source_hash=hashlib.sha256((canonical_json(product)+'\n').encode()).hexdigest()
  if product_source_hash!=a.expected_checker_source_hash:raise SystemExit('reconstructed product does not match the completed checker source')
- plan={'schema_version':'cockpit-ask-language-recovery-plan:0.2','status':'reserved','job_id':a.job_id,'failed_job_hash':a.expected_failed_hash,'producer_result_sha256':producer_sha,'product_source_hash':product_source_hash,'producer_result_envelope_ref':a.producer_result_envelope_ref,'producer_work_order_ref':formal[3],'producer_work_order_sha256':wr[0],'brain_result_envelope_ref':a.brain_result_envelope_ref,'brain_raw_sha256':a.brain_raw_sha256,'original_source_commit':a.original_source_commit,'successor_source_commit':a.successor_source_commit,'planned_model_calls':{'ask':0,'checker':0,'brain':0,'fidelity':1},'executed_model_calls':{'ask':0,'checker':0,'brain':0,'fidelity':0}}
+ plan={'schema_version':'cockpit-ask-language-recovery-plan:0.2','status':'reserved','job_id':a.job_id,'failed_job_hash':a.expected_failed_hash,'producer_result_sha256':producer_sha,'product_source_hash':product_source_hash,'producer_result_envelope_ref':a.producer_result_envelope_ref,'producer_work_order_ref':formal[3],'producer_work_order_sha256':wr[0],'brain_result_envelope_ref':a.brain_result_envelope_ref,'brain_raw_sha256':a.brain_raw_sha256,'original_source_commit':a.original_source_commit,'successor_source_commit':a.successor_source_commit,'planned_model_calls':{'ask':0,'checker':0,'brain':0,'fidelity':1}}
  data=(canonical_json(plan)+'\n').encode();osmod=__import__('os');a.output.parent.mkdir(parents=True,exist_ok=True)
  try:
   fd=osmod.open(a.output,osmod.O_WRONLY|osmod.O_CREAT|osmod.O_EXCL|osmod.O_NOFOLLOW,0o600);osmod.write(fd,data);osmod.fsync(fd);osmod.close(fd);parent=osmod.open(a.output.parent,osmod.O_RDONLY);osmod.fsync(parent);osmod.close(parent)
  except FileExistsError:
   existing=load(a.output)
-  if existing not in (plan,{**plan,'status':'complete'}):raise SystemExit('recovery output is occupied by different bytes')
-  if existing.get('status')=='complete': print(canonical_json(existing));return
+  if existing.get('status')=='complete':
+   core={k:v for k,v in existing.items() if k not in ('result_sha256','recovery_receipt_sha256')};core['status']='reserved'
+   if core!=plan:raise SystemExit('recovery output is occupied by different bytes')
+   if not a.execute:print(canonical_json(existing));return
+  elif existing!=plan:raise SystemExit('recovery output is occupied by different bytes')
  if not a.execute:return
  def finalized(row_json):
   if not a.receipt.is_file() or a.receipt.is_symlink():raise SystemExit('recovered job has no exact durable recovery receipt')
