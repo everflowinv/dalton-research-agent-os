@@ -309,6 +309,10 @@ def run(product: Mapping[str, Any], *, mission: Mapping[str, Any], request_id: s
     result["runtime_identity"]={"checker":checker_identity,"brain":brain_identity,"fidelity":route}
     calls={"checker":checker_call,"brain":brain_call,"fidelity":_call_evidence(calls["fidelity"])}
     result["call_evidence"]=calls
+    if style_stage.get("recovery") is not None:
+        result["brain_recovery"]={**style_stage["recovery"],
+            "checker_stage_sha256":content_hash(checker_stage),
+            "brain_result_envelope_ref":brain_call["result_envelope_ref"]}
     result["review_cost_micros"]=sum(int(v.get("cost_micros") or 0) for v in calls.values())
     result["replayed"]=bool(calls) and all(v.get("replayed") is True for v in calls.values())
     result["content_hash"]=content_hash({k:v for k,v in result.items() if k!="content_hash"})

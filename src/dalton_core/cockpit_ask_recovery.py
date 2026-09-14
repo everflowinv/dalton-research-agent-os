@@ -21,6 +21,7 @@ def _write_once_fsync(path:Path,data:bytes)->None:
         if path.is_symlink() or path.read_bytes()!=data:raise AskRecoveryError('recovery receipt already exists with different bytes')
         return
     with os.fdopen(fd,'wb') as f:f.write(data);f.flush();os.fsync(f.fileno())
+    parent=os.open(path.parent,os.O_RDONLY);os.fsync(parent);os.close(parent)
 
 def recover_failed_ask_job(connection: sqlite3.Connection, *, job_id: str,
         expected_failed_hash: str, producer_result: Mapping[str,Any], result: Mapping[str, Any],
@@ -44,6 +45,13 @@ def recover_failed_ask_job(connection: sqlite3.Connection, *, job_id: str,
     if sha256(payload).hexdigest()!=recovery_proof['language_artifact_sha256']:raise AskRecoveryError('language artifact hash differs')
     review=json.loads(payload)
     if not isinstance(review,dict) or review.get('content_hash')!=content_hash({k:v for k,v in review.items() if k!='content_hash'}) or review.get('status')!='ready_for_publication':raise AskRecoveryError('language artifact is not sealed and ready')
+    recovered=review.get('brain_recovery') or {}; normalization=recovered.get('normalization') or {}
+    if (recovered.get('checker_stage_sha256')!=recovery_proof['checker_stage_sha256']
+            or recovered.get('brain_result_envelope_ref')!=recovery_proof['brain_result_envelope_ref']
+            or normalization.get('raw_sha256')!=recovery_proof['brain_raw_sha256']
+            or normalization.get('fixed_sha256')!=recovery_proof['brain_fixed_sha256']
+            or normalization.get('suffix')!=recovery_proof['brain_suffix']):
+        raise AskRecoveryError('recovery proof differs from sealed language artifact')
     section=(review.get('brain_revision') or {}).get('sections')
     if not isinstance(section,list) or len(section)!=1:raise AskRecoveryError('language artifact section shape differs')
     section=section[0]; expected_answer=display_metadata_text(section.get('body'));expected_gaps=[display_metadata_text(x) for x in section.get('gaps',[])]
