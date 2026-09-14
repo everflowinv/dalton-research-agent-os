@@ -13,6 +13,7 @@ import hashlib
 import inspect
 import json
 import sqlite3
+import subprocess
 import tempfile
 import unittest
 from datetime import date, datetime, timedelta, timezone
@@ -808,6 +809,34 @@ class FeedLaneTickTests(unittest.TestCase):
         self.assertEqual(coordinator.dispatch_once()["status"], "idle")
         self.assertEqual(len(missions.reviews), 3)
         self.assertEqual(len(set(missions.reviews)), 3)
+
+    def test_a_slow_child_keeps_its_ticket_and_returns_at_the_tick_deadline(self) -> None:
+        missions = RecordingMissions([
+            {"record_id": "mission-discovered-document:slow",
+             "document_ref": ACN_NOTE, "source_ref": SALES_NOTES,
+             "company_ref": ACN, "status": "discovered", "ticket_ref": None},
+        ])
+        launcher = mock.Mock()
+        launcher.start_bounded_probe.return_value = {"id": "feed-ticket:slow"}
+        launcher.wait.side_effect = subprocess.TimeoutExpired(["feed-child"], 0.25)
+        coordinator = FeedDiscoveryCoordinator(
+            missions=missions, launcher=launcher, source_ref=SALES_NOTES,
+            plan=load_feed_discovery_plan(PLAN_PATH), acquisitions_per_tick=8,
+            acquisition_wait_seconds=30.0, tick_budget_seconds=0.25,
+        )
+
+        result = coordinator.dispatch_once()
+
+        self.assertEqual(result["status"], "dispatched")
+        self.assertTrue(result["out_of_time"])
+        self.assertEqual(len(result["launched"]), 1)
+        self.assertEqual(
+            missions.rows["mission-discovered-document:slow"]["status"],
+            "acquisition_launched",
+        )
+        launcher.wait.assert_called_once()
+        self.assertLessEqual(launcher.wait.call_args.kwargs["timeout"], 0.25)
+        launcher.status.assert_not_called()
 
     def test_a_child_that_cannot_find_the_document_settles_as_failed(self) -> None:
         missions = RecordingMissions([

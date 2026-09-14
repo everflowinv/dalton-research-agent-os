@@ -35,6 +35,8 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
+import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import MappingProxyType
@@ -615,6 +617,7 @@ class FeedDiscoveryCoordinator:
         clock: Callable[[], datetime] | None = None,
         acquisitions_per_tick: int = ACQUISITIONS_PER_TICK,
         acquisition_wait_seconds: float = ACQUISITION_WAIT_SECONDS,
+        tick_budget_seconds: float = TICK_BUDGET_SECONDS,
         body_reads_per_tick: int | None = None,
         body_read_cursor_ref: str | None = None,
     ) -> None:
@@ -634,6 +637,7 @@ class FeedDiscoveryCoordinator:
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.acquisitions_per_tick = max(1, int(acquisitions_per_tick))
         self.acquisition_wait_seconds = float(acquisition_wait_seconds)
+        self.tick_budget_seconds = max(0.0, float(tick_budget_seconds))
         self.body_reads_per_tick = int(
             self.plan["body_reads_per_tick"] if body_reads_per_tick is None
             else body_reads_per_tick
@@ -1292,12 +1296,30 @@ class FeedDiscoveryCoordinator:
             results["windows"] = windows
             results["partial_windows"] = partial_windows
         else:
+            deadline = time.monotonic() + self.tick_budget_seconds
             for _ in range(self.acquisitions_per_tick):
+                if time.monotonic() >= deadline:
+                    results["out_of_time"] = True
+                    break
                 outcome = self.launch_acquisition()
                 if outcome["status"] != "launched":
                     break
                 results["launched"].append(outcome)
-                self.launcher.wait(timeout=self.acquisition_wait_seconds)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    results["out_of_time"] = True
+                    break
+                try:
+                    self.launcher.wait(
+                        timeout=min(self.acquisition_wait_seconds, remaining)
+                    )
+                except subprocess.TimeoutExpired:
+                    # The child and its durable ticket remain open.  The next
+                    # tick settles them before launching more work; waiting
+                    # past this operation's budget would monopolize the
+                    # writer's single store executor and starve every lane.
+                    results["out_of_time"] = True
+                    break
                 results["settled"].extend(self.settle_documents())
         if results["launched"] or (results["read"] and results["read"]["read"]):
             results["status"] = "dispatched"
