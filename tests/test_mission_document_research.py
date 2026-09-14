@@ -7,6 +7,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
+import dalton_core.mission_document_research_executor as executor_module
 
 from dalton_core.cockpit_model import CockpitModel
 from dalton_core.contracts import ModelInvocation, ResultEnvelope, WorkOrder
@@ -36,6 +37,7 @@ from dalton_core.mission_document_research_executor import (
     effective_mission_document_work_orders,
     exact_mission_document_model_execution_authority,
     read_mission_document_research_observations,
+    _formal_hash, _formal_ref,
 )
 from dalton_core.mission_document_research_lane import (
     MissionDocumentResearchCoordinator,
@@ -49,7 +51,7 @@ from dalton_core.research_question_backlog import ResearchQuestionBacklog
 from dalton_core.research_planner import build_prompt, project_state_for_prompt
 from dalton_core.research_planner_cli import run_planner
 from dalton_core.research_task import inquiry_content_hash, inquiry_ref_for
-from dalton_core.store import content_hash
+from dalton_core.store import canonical_json, content_hash
 from tests.test_document_research import FakeLauncher, FakeReceiptReader
 from tests.test_mission_annual_research import (
     COMPANY, CountingFakeAdapter, MissionAnnualFixture, NOW,
@@ -118,6 +120,31 @@ class EstimatedCostAdapter(RouteBoundCountingFakeAdapter):
             "available": False, "usd": None,
         }
         return ModelInvocation.from_dict(wire), result
+
+
+class HistoricalControlsFailureAdapter(RouteBoundCountingFakeAdapter):
+    def execute(self, work, route, selected):
+        invocation, _result = super().execute(work, route, selected)
+        wire = invocation.to_dict()
+        wire["usage"]["input_tokens"] = None
+        wire["usage"]["output_tokens"] = None
+        wire["usage"]["total_tokens"] = None
+        invocation = ModelInvocation.from_dict(wire)
+        response_hash = "9" * 64
+        return invocation, ResultEnvelope(
+            schema_version="0.1", id="result:historical-controls-test",
+            created_at=NOW.isoformat(), work_order_ref=work.id,
+            invocation_ref=invocation.id, status="failed", outputs={},
+            actual_side_effects=(), usage_refs=(), artifact_refs=(),
+            error={"code": "REQUIRED_CONTROLS_UNAVAILABLE", "message": "historical"},
+            metadata={
+                "route_decision_ref": route["id"], "broker_response_hash": response_hash,
+                "profile_version_ref": route["selected_profile_version_ref"],
+                "required_provider_controls": True,
+                "provider_control_mode": "provider-controlled-v1",
+                "dispatch_proof": None,
+            },
+        )
 
 
 class MissionDocumentResearchTests(unittest.TestCase):
@@ -1052,6 +1079,143 @@ class MissionDocumentResearchTests(unittest.TestCase):
                          "proved_paid_output_contract_failure")
         self.assertGreater(proof["actual_micros"], 0)
         self.assertIsNotNone(proof["usage_entry_ref"])
+
+    def test_owner_authorizes_one_exact_paid_contract_recovery_without_calling_model(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        self._enable_recovery(fixture, maximum=2)
+        admission = authority.admit_from_plan(**args)
+        adapter = CountingFakeAdapter({"schema_version": "0.1", "status": "answered"})
+        executor, _draft, _verifier = self._executor(
+            fixture, authority, draft_adapter=adapter,
+        )
+        while True:
+            current = executor.run_once(admission["id"])
+            if current["status"] == "failed":
+                break
+        work = executor._derive_work(admission, executor._blueprints(admission), 1)
+        formal = executor.scheduler.formal_result(work["id"])
+        body = {
+            "schema_version": "0.1",
+            "actor_ref": "operator:owner-authorized-document-recovery",
+            "admission_ref": admission["id"], "admission_hash": admission["content_hash"],
+            "stage_ordinal": 2, "failed_work_order_ref": work["id"],
+            "failed_work_order_hash": content_hash(work),
+            "formal_result_ref": _formal_ref(formal),
+            "formal_result_hash": _formal_hash(formal),
+            "max_fresh_work_orders": 1,
+            "max_cost_usd": work["budget"]["max_cost_usd"],
+            "authorized_at": (NOW + timedelta(minutes=1)).isoformat(),
+        }
+        authorization = {
+            **body,
+            "id": "mission-document-paid-recovery-authorization:"
+            + content_hash(body)[:32],
+        }
+        authorization["content_hash"] = content_hash(authorization)
+        calls = adapter.calls
+        result = executor.authorize_paid_contract_recovery(
+            admission["id"], authorization)
+        self.assertEqual(result["status"], "admitted")
+        self.assertEqual(result["model_calls"], 0)
+        self.assertEqual(adapter.calls, calls)
+        self.assertEqual(executor.authorize_paid_contract_recovery(
+            admission["id"], authorization), result)
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM mission_document_research_controlled_recovery_authorizations"
+        ).fetchone()[0], 1)
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM mission_document_research_recovery_links"
+        ).fetchone()[0], 1)
+        changed = dict(authorization)
+        changed["max_cost_usd"] = authorization["max_cost_usd"] + 1
+        changed["content_hash"] = content_hash(
+            {key: value for key, value in changed.items() if key != "content_hash"})
+        with self.assertRaises(MissionDocumentResearchExecutorError):
+            executor.authorize_paid_contract_recovery(admission["id"], changed)
+
+    def test_sealed_historical_no_send_proof_admits_one_verifier_retry(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        self._enable_recovery(fixture, maximum=2)
+        admission = authority.admit_from_plan(**args)
+        adapter = HistoricalControlsFailureAdapter({"unused": True})
+        executor, _draft, _verifier_adapter = self._executor(
+            fixture, authority, verifier_adapter=adapter)
+        verifier = executor.verifier_worker
+        while True:
+            current = executor.run_once(admission["id"])
+            if current["status"] == "failed":
+                break
+        works = effective_mission_document_work_orders(
+            authority, executor.scheduler, admission["id"],
+            draft_worker=executor.draft_worker, verifier_worker=verifier)
+        work = works[2]
+        formal = executor.scheduler.formal_result(work["id"])
+        envelope = formal["result_envelope"]
+        route = verifier.router.get_decision(
+            envelope["metadata"]["route_decision_ref"])
+        record = {
+            "admission_ref": admission["id"], "admission_hash": admission["content_hash"],
+            "work_order_ref": work["id"], "work_order_hash": content_hash(work),
+            "attempt_number": formal["attempt_number"],
+            "formal_result_record_ref": _formal_ref(formal),
+            "result_envelope_ref": envelope["id"],
+            "result_envelope_hash": formal["result_envelope_hash"],
+            "route_decision_ref": route["id"],
+            "route_decision_hash": route["content_hash"],
+            "policy_version_ref": route["policy_version_ref"],
+            "profile_version_ref": route["selected_profile_version_ref"],
+            "broker_response_hash": envelope["metadata"]["broker_response_hash"],
+            "classification": "provider_call_definitely_not_sent",
+            "basis": "historical_required_controls_pre_dispatch_branch",
+            "dispatch_proof": None,
+            "usage_telemetry": "all_token_fields_null_cost_unavailable",
+        }
+        receipt = {
+            "schema_version": "historical-required-controls-nosend-sealed-proof:0.1",
+            "status": "verified_read_only",
+            "classification": "provider_call_definitely_not_sent",
+            "historical_broker": {
+                "git_commit": "a" * 40, "source_path": "/reviewed/broker.mjs",
+                "source_sha256": "7" * 64,
+                "snapshot_path": "/reviewed/snapshot.json",
+                "snapshot_sha256": "8" * 64, "snapshot_tree_sha256": "6" * 64,
+                "pre_dispatch_order_verified": True,
+            },
+            "input_sha256": "5" * 64, "live_mutation": False,
+            "records": [record, {"admission_ref": "other:1"},
+                        {"admission_ref": "other:2"}],
+            "model_calls": 0, "scheduler_writes": 0,
+        }
+        receipt["content_hash"] = content_hash(receipt)
+        raw = canonical_json(receipt).encode()
+        path = fixture.state / "historical-nosend-proof.json"
+        path.write_bytes(raw)
+        path.chmod(0o600)
+        with patch.object(executor_module, "_HISTORICAL_NOSEND_RECEIPT_SHA256",
+                          hashlib.sha256(raw).hexdigest()), patch.object(
+            executor_module, "_HISTORICAL_NOSEND_CONTENT_HASH",
+            receipt["content_hash"]), patch.object(
+            executor_module, "_HISTORICAL_BROKER_SOURCE_SHA256", "7" * 64), patch.object(
+            executor_module, "_HISTORICAL_BROKER_SNAPSHOT_SHA256", "8" * 64):
+            authorized = executor.authorize_historical_no_send_recovery(
+                admission["id"], path, (NOW - timedelta(minutes=1)).isoformat())
+            self.assertEqual(authorized["model_calls"], 0)
+            self.assertEqual(executor.authorize_historical_no_send_recovery(
+                admission["id"], path, (NOW - timedelta(minutes=1)).isoformat()),
+                authorized)
+            calls = adapter.calls
+            admitted = executor.run_once(admission["id"])
+            self.assertEqual(admitted["reason"], "fresh_work_recovery")
+            self.assertEqual(adapter.calls, calls)
+            replayed = executor.authorize_historical_no_send_recovery(
+                admission["id"], path, (NOW - timedelta(minutes=1)).isoformat())
+            self.assertEqual(replayed["work_order_ref"], admitted["work_order_ref"])
+            raw_tampered = raw.replace(b"verified_read_only", b"verified_read_onlX")
+            other = fixture.state / "tampered-proof.json"
+            other.write_bytes(raw_tampered); other.chmod(0o600)
+            with self.assertRaises(MissionDocumentResearchExecutorError):
+                executor.authorize_historical_no_send_recovery(
+                    admission["id"], other, (NOW + timedelta(minutes=2)).isoformat())
 
     def test_paid_contract_diagnostic_usage_mismatch_degrades_to_unknown_send(self):
         fixture, authority, args, _registration, _launcher = self._fixture()

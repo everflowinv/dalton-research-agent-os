@@ -27,6 +27,13 @@ CREATE TABLE IF NOT EXISTS mission_document_research_recovery_links (
  record_json TEXT NOT NULL, content_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL,
  UNIQUE(admission_ref,stage_ordinal,recovery_number)
 );
+CREATE TABLE IF NOT EXISTS mission_document_research_controlled_recovery_authorizations (
+ authorization_id TEXT PRIMARY KEY, admission_ref TEXT NOT NULL,
+ stage_ordinal INTEGER NOT NULL CHECK(stage_ordinal IN (2,3)),
+ failed_work_order_ref TEXT NOT NULL UNIQUE,
+ record_json TEXT NOT NULL, content_hash TEXT NOT NULL UNIQUE,
+ created_at TEXT NOT NULL
+);
 CREATE TRIGGER IF NOT EXISTS mission_document_research_starts_no_update
 BEFORE UPDATE ON mission_document_research_starts BEGIN SELECT RAISE(ABORT,'mission document starts are append-only'); END;
 CREATE TRIGGER IF NOT EXISTS mission_document_research_starts_no_delete
@@ -51,3 +58,13 @@ CREATE TRIGGER IF NOT EXISTS mission_document_research_recovery_links_authorized
 BEFORE INSERT ON mission_document_research_recovery_links
 WHEN dalton_mission_document_research_executor_authorized()=0
 BEGIN SELECT RAISE(ABORT,'mission document recovery link insert requires executor'); END;
+CREATE TRIGGER IF NOT EXISTS mission_document_research_controlled_recovery_authorizations_no_update
+BEFORE UPDATE ON mission_document_research_controlled_recovery_authorizations BEGIN
+ SELECT RAISE(ABORT,'mission document controlled recovery authorizations are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS mission_document_research_controlled_recovery_authorizations_no_delete
+BEFORE DELETE ON mission_document_research_controlled_recovery_authorizations BEGIN
+ SELECT RAISE(ABORT,'mission document controlled recovery authorizations are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS mission_document_research_controlled_recovery_authorizations_authorized_insert
+BEFORE INSERT ON mission_document_research_controlled_recovery_authorizations
+WHEN dalton_mission_document_research_executor_authorized()=0
+BEGIN SELECT RAISE(ABORT,'mission document controlled recovery authorization insert requires executor'); END;

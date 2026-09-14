@@ -1,7 +1,10 @@
 """Durable four-stage executor for one source-neutral directed-document admission."""
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import stat
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -31,6 +34,14 @@ from .store import authorization_flag, authorized_flag, canonical_json, content_
 SCHEMA_VERSION = "0.1"
 AUTHORITY_KIND = "mission_document_research_admission"
 _SCHEMA_PATH = Path(__file__).with_name("mission_document_research_executor_schema.sql")
+_HISTORICAL_NOSEND_RECEIPT_SHA256 = (
+    "171bb64af42149ce58c5c7160d37419e7efcfbbbb805bcd4d3da4a154b43d3fa")
+_HISTORICAL_NOSEND_CONTENT_HASH = (
+    "b8a50bbfd81fb318d1be6b67c1bbd29a5ff7118e3e39837205b523aecb5a4930")
+_HISTORICAL_BROKER_SOURCE_SHA256 = (
+    "d2f9f709cf8de37b18ec4b95b74deda032f1d1b4ed876f6ba81a9c575bd1fffb")
+_HISTORICAL_BROKER_SNAPSHOT_SHA256 = (
+    "47c731019dc8016522abfe75481cccb1b96d8d324adef927c7657cab1b5b74de")
 
 
 class MissionDocumentResearchExecutorError(RuntimeError):
@@ -916,6 +927,68 @@ def _verify_recovery_failure_proof(authority: Any, scheduler: Scheduler,
     }
     if any(proof.get(key) != value for key, value in common.items()):
         raise MissionDocumentResearchExecutorError("recovery formal proof drifted")
+    if proof.get("classification") == "owner_authorized_paid_contract_retry":
+        row = authority.store.connection.execute(
+            "SELECT record_json,content_hash FROM "
+            "mission_document_research_controlled_recovery_authorizations "
+            "WHERE authorization_id=?", (proof.get("authorization_ref"),),
+        ).fetchone()
+        if row is None:
+            raise MissionDocumentResearchExecutorError(
+                "paid recovery authorization is unavailable")
+        try:
+            authorization = json.loads(row["record_json"])
+        except (TypeError, ValueError, RecursionError) as exc:
+            raise MissionDocumentResearchExecutorError(
+                "paid recovery authorization is invalid") from exc
+        body = dict(authorization)
+        asserted = body.pop("content_hash", None)
+        actual = _paid_contract_failure_proof(authority, failed, formal, index, worker)
+        if (canonical_json(authorization) != row["record_json"]
+                or asserted != row["content_hash"] or asserted != content_hash(body)
+                or asserted != proof.get("authorization_hash")
+                or authorization.get("id") != proof.get("authorization_ref")
+                or authorization.get("actor_ref")
+                != "operator:owner-authorized-document-recovery"
+                or authorization.get("admission_ref") != admission["id"]
+                or authorization.get("admission_hash") != admission["content_hash"]
+                or authorization.get("stage_ordinal") != index + 1
+                or authorization.get("failed_work_order_ref") != failed["id"]
+                or authorization.get("failed_work_order_hash") != content_hash(failed)
+                or authorization.get("formal_result_ref") != _formal_ref(formal)
+                or authorization.get("formal_result_hash") != _formal_hash(formal)
+                or authorization.get("max_fresh_work_orders") != 1
+                or authorization.get("max_cost_usd")
+                != failed["budget"]["max_cost_usd"]
+                or actual is None or actual != proof.get("paid_contract_proof")):
+            raise MissionDocumentResearchExecutorError(
+                "paid recovery authorization drifted")
+        return
+    if proof.get("classification") == "reconstructed_historical_provider_controls_no_send":
+        row = authority.store.connection.execute(
+            "SELECT record_json,content_hash FROM "
+            "mission_document_research_controlled_recovery_authorizations "
+            "WHERE authorization_id=?", (proof.get("authorization_ref"),),
+        ).fetchone()
+        if row is None:
+            raise MissionDocumentResearchExecutorError(
+                "historical no-send authorization is unavailable")
+        try:
+            authorization = json.loads(row["record_json"])
+        except (TypeError, ValueError, RecursionError) as exc:
+            raise MissionDocumentResearchExecutorError(
+                "historical no-send authorization is invalid") from exc
+        proxy = object.__new__(MissionDocumentResearchExecutor)
+        proxy.authority = authority
+        proxy.verifier_worker = worker
+        actual = proxy._historical_no_send_authority(
+            admission, failed, formal, authorization)
+        if (actual is None or actual != proof
+                or authorization.get("content_hash") != row["content_hash"]
+                or canonical_json(authorization) != row["record_json"]):
+            raise MissionDocumentResearchExecutorError(
+                "historical no-send recovery proof drifted")
+        return
     if authority.store.connection.execute(
         "SELECT 1 FROM model_invocations WHERE work_order_ref=? LIMIT 1", (failed["id"],)
     ).fetchone() is not None:
@@ -1063,6 +1136,10 @@ def _read_recovery_link(
     started = _parse_time(expected["window_started_at"], "recovery window start")
     created = _parse_time(expected["created_at"], "recovery eligibility time")
     proof = wire.get("failure_proof") if isinstance(wire, Mapping) else None
+    owner_authorized = (isinstance(proof, Mapping) and proof.get("classification") in {
+        "owner_authorized_paid_contract_retry",
+        "reconstructed_historical_provider_controls_no_send",
+    })
     failed_formal_time = (
         _parse_time(wire["failure_proof"].get("failed_at"), "failed formal time")
         if isinstance(proof, Mapping) and proof.get("failed_at") is not None else None
@@ -1071,23 +1148,25 @@ def _read_recovery_link(
         _day_budget_recovery_deadline(
             started=started, policy=policy, proof=proof, links=prior_links,
         )
-        if isinstance(proof, Mapping)
+        if isinstance(proof, Mapping) and not owner_authorized
         else started + timedelta(seconds=policy["max_elapsed_seconds"])
     )
     if (canonical_json(wire) != row["record_json"]
             or canonical_json(wire) != canonical_json(expected)
             or any(wire.get(key) != value for key, value in columns.items())
             or number > policy["max_fresh_work_orders"]
-            or (prior is None and failed_formal_time is not None
+            or (not owner_authorized and prior is None and failed_formal_time is not None
                 and started != failed_formal_time)
             or (prior is not None and wire.get("window_started_at")
                 != prior.get("window_started_at"))
-            or (failed_formal_time is not None and created != max(
+            or (not owner_authorized and failed_formal_time is not None and created != max(
                 failed_formal_time + timedelta(seconds=policy["retry_backoff_seconds"]),
                 (datetime.fromisoformat(proof["refusal_day"]).replace(tzinfo=timezone.utc)
                  + timedelta(days=1)) if proof.get("refusal_day") is not None
                 else failed_formal_time,
             ))
+            or (owner_authorized and (prior is not None or created != started
+                                or proof.get("authorization_ref") is None))
             or created < started
             or created >= allowed_deadline):
         raise MissionDocumentResearchExecutorError("recovery link authority drifted")
@@ -1185,6 +1264,16 @@ def effective_mission_document_work_orders(
     return effective
 
 
+
+def _paid_contract_failure_proof(authority, work, formal, index, worker):
+    proxy = object.__new__(MissionDocumentResearchExecutor)
+    proxy.authority = authority
+    proxy.draft_worker = worker if index == 1 else None
+    proxy.verifier_worker = worker if index == 2 else None
+    return MissionDocumentResearchExecutor._paid_contract_failure_proof(
+        proxy, work, formal, index)
+
+
 class MissionDocumentResearchExecutor:
     _authorized = authorized_flag()
 
@@ -1261,6 +1350,225 @@ class MissionDocumentResearchExecutor:
                 "recovery budget rejection authority drifted")
         return dict(wire)
 
+    def _historical_no_send_authority(self, admission, work, formal, authorization):
+        if not isinstance(authorization, Mapping):
+            return None
+        expected_keys = {
+            "schema_version", "id", "kind", "actor_ref", "admission_ref",
+            "admission_hash", "stage_ordinal", "failed_work_order_ref",
+            "failed_work_order_hash", "formal_result_ref", "formal_result_hash",
+            "max_fresh_work_orders", "max_cost_usd", "authorized_at",
+            "sealed_receipt_sha256", "sealed_receipt", "content_hash",
+        }
+        body = dict(authorization)
+        asserted = body.pop("content_hash", None)
+        receipt = authorization.get("sealed_receipt")
+        if (set(authorization) != expected_keys or asserted != content_hash(body)
+                or authorization.get("schema_version") != SCHEMA_VERSION
+                or authorization.get("kind") != "historical_provider_controls_no_send"
+                or authorization.get("actor_ref")
+                != "operator:owner-authorized-document-recovery"
+                or authorization.get("admission_ref") != admission["id"]
+                or authorization.get("admission_hash") != admission["content_hash"]
+                or authorization.get("stage_ordinal") != 3
+                or authorization.get("failed_work_order_ref") != work["id"]
+                or authorization.get("failed_work_order_hash") != content_hash(work)
+                or authorization.get("formal_result_ref") != _formal_ref(formal)
+                or authorization.get("formal_result_hash") != _formal_hash(formal)
+                or authorization.get("max_fresh_work_orders") != 1
+                or authorization.get("max_cost_usd") != work["budget"]["max_cost_usd"]
+                or authorization.get("sealed_receipt_sha256")
+                != _HISTORICAL_NOSEND_RECEIPT_SHA256
+                or not isinstance(receipt, Mapping)):
+            return None
+        receipt_body = dict(receipt)
+        receipt_hash = receipt_body.pop("content_hash", None)
+        historical = receipt.get("historical_broker") or {}
+        if (set(receipt) != {"schema_version", "status", "classification",
+                            "content_hash", "historical_broker", "input_sha256",
+                            "live_mutation", "model_calls", "records",
+                            "scheduler_writes"}
+                or set(historical) != {"git_commit", "pre_dispatch_order_verified",
+                                       "snapshot_path", "snapshot_sha256",
+                                       "snapshot_tree_sha256", "source_path",
+                                       "source_sha256"}
+                or len(receipt.get("records", [])) != 3
+                or receipt_hash != _HISTORICAL_NOSEND_CONTENT_HASH
+                or receipt_hash != content_hash(receipt_body)
+                or receipt.get("schema_version")
+                != "historical-required-controls-nosend-sealed-proof:0.1"
+                or receipt.get("status") != "verified_read_only"
+                or receipt.get("classification") != "provider_call_definitely_not_sent"
+                or receipt.get("live_mutation") is not False
+                or receipt.get("model_calls") != 0 or receipt.get("scheduler_writes") != 0
+                or historical.get("source_sha256")
+                != _HISTORICAL_BROKER_SOURCE_SHA256
+                or historical.get("snapshot_sha256")
+                != _HISTORICAL_BROKER_SNAPSHOT_SHA256
+                or historical.get("pre_dispatch_order_verified") is not True):
+            return None
+        matches = [item for item in receipt.get("records", [])
+                   if isinstance(item, Mapping)
+                   and item.get("admission_ref") == admission["id"]]
+        if len(matches) != 1:
+            return None
+        record = matches[0]
+        try:
+            envelope = ResultEnvelope.from_dict(formal["result_envelope"]).to_dict()
+            route = self.verifier_worker.router.get_decision(
+                record.get("route_decision_ref"))
+        except Exception:
+            return None
+        metadata = envelope.get("metadata") or {}
+        usage = self.verifier_worker.observability.latest_usage(
+            envelope.get("invocation_ref"))
+        if (record.get("classification") != "provider_call_definitely_not_sent"
+                or record.get("basis")
+                != "historical_required_controls_pre_dispatch_branch"
+                or record.get("admission_hash") != admission["content_hash"]
+                or record.get("work_order_ref") != work["id"]
+                or record.get("work_order_hash") != content_hash(work)
+                or record.get("attempt_number") != formal["attempt_number"]
+                or record.get("formal_result_record_ref") != _formal_ref(formal)
+                or record.get("result_envelope_ref") != envelope["id"]
+                or record.get("result_envelope_hash") != formal["result_envelope_hash"]
+                or record.get("route_decision_ref") != route.get("id")
+                or record.get("route_decision_hash") != route.get("content_hash")
+                or route.get("work_order_ref") != work["id"]
+                or route.get("work_order_hash") != content_hash(work)
+                or route.get("attempt_number") != formal["attempt_number"]
+                or route.get("policy_version_ref") != record.get("policy_version_ref")
+                or route.get("selected_profile_version_ref")
+                != record.get("profile_version_ref")
+                or metadata.get("broker_response_hash")
+                != record.get("broker_response_hash")
+                or metadata.get("route_decision_ref") != route.get("id")
+                or metadata.get("profile_version_ref")
+                != record.get("profile_version_ref")
+                or metadata.get("required_provider_controls") is not True
+                or metadata.get("provider_control_mode") != "provider-controlled-v1"
+                or metadata.get("dispatch_proof") is not None
+                or envelope.get("error", {}).get("code")
+                != "REQUIRED_CONTROLS_UNAVAILABLE"
+                or record.get("usage_telemetry")
+                != "all_token_fields_null_cost_unavailable"
+                or any(usage.get(key) is not None for key in (
+                    "input_tokens", "output_tokens", "total_tokens"))):
+            return None
+        return {
+            "classification": "reconstructed_historical_provider_controls_no_send",
+            "failed_at": formal["created_at"],
+            "formal_result_ref": _formal_ref(formal),
+            "formal_result_hash": _formal_hash(formal),
+            "result_envelope_ref": envelope["id"],
+            "result_envelope_hash": formal["result_envelope_hash"],
+            "route_decision_ref": route["id"],
+            "authorization_ref": authorization["id"],
+            "authorization_hash": authorization["content_hash"],
+            "sealed_receipt_sha256": _HISTORICAL_NOSEND_RECEIPT_SHA256,
+            "sealed_receipt_content_hash": _HISTORICAL_NOSEND_CONTENT_HASH,
+            "mission_binding_hash": content_hash(
+                _expected_budget_binding(self.authority, admission, 2)),
+            "budget_authority_ref": None, "budget_authority_hash": None,
+            "budget_settlement_ref": None, "budget_settlement_hash": None,
+            "refusal_day": None, "authorized_at": authorization["authorized_at"],
+        }
+
+    def authorize_historical_no_send_recovery(self, admission_ref, proof_path,
+                                               authorized_at):
+        """Seal one of the three reviewed pre-dispatch failures for bounded retry."""
+        path = Path(proof_path)
+        st = os.lstat(path)
+        raw = path.read_bytes()
+        if (not stat.S_ISREG(st.st_mode) or stat.S_IMODE(st.st_mode) != 0o600
+                or hashlib.sha256(raw).hexdigest()
+                != _HISTORICAL_NOSEND_RECEIPT_SHA256):
+            raise MissionDocumentResearchExecutorError(
+                "historical no-send receipt bytes are not reviewed")
+        try:
+            receipt = json.loads(raw)
+        except (TypeError, ValueError, RecursionError) as exc:
+            raise MissionDocumentResearchExecutorError(
+                "historical no-send receipt is invalid") from exc
+        admission = self.authority.resolve_for_execution(admission_ref)
+        prior_rows = self.connection.execute(
+            "SELECT record_json,content_hash,failed_work_order_ref FROM "
+            "mission_document_research_controlled_recovery_authorizations "
+            "WHERE admission_ref=? AND stage_ordinal=3", (admission["id"],),
+        ).fetchall()
+        if prior_rows:
+            if len(prior_rows) != 1:
+                raise MissionDocumentResearchExecutorError(
+                    "historical no-send authorization is ambiguous")
+            prior = json.loads(prior_rows[0]["record_json"])
+            failed_row = self.scheduler.work_order_authority(
+                prior_rows[0]["failed_work_order_ref"])
+            formal = self.scheduler.formal_result(prior_rows[0]["failed_work_order_ref"])
+            if (failed_row is None or formal is None
+                    or prior.get("content_hash") != prior_rows[0]["content_hash"]
+                    or prior.get("authorized_at") != authorized_at
+                    or prior.get("sealed_receipt") != receipt
+                    or self._historical_no_send_authority(
+                        admission, failed_row["work_order"], formal, prior) is None):
+                raise MissionDocumentResearchExecutorError(
+                    "historical no-send authorization replay drifted")
+            link = self.connection.execute(
+                "SELECT recovery_work_order_ref FROM "
+                "mission_document_research_recovery_links "
+                "WHERE failed_work_order_ref=?", (prior_rows[0]["failed_work_order_ref"],),
+            ).fetchone()
+            return {"status": "authorized", "authorization_ref": prior["id"],
+                    "work_order_ref": (prior_rows[0]["failed_work_order_ref"]
+                                       if link is None else link["recovery_work_order_ref"]),
+                    "model_calls": 0}
+        work, links = _effective_stage(
+            self.authority, self.scheduler, admission, 2,
+            worker=self.verifier_worker)
+        formal = self.scheduler.formal_result(work["id"])
+        if links or formal is None:
+            raise MissionDocumentResearchExecutorError(
+                "historical no-send target was already recovered")
+        body = {
+            "schema_version": SCHEMA_VERSION,
+            "kind": "historical_provider_controls_no_send",
+            "actor_ref": "operator:owner-authorized-document-recovery",
+            "admission_ref": admission["id"], "admission_hash": admission["content_hash"],
+            "stage_ordinal": 3, "failed_work_order_ref": work["id"],
+            "failed_work_order_hash": content_hash(work),
+            "formal_result_ref": _formal_ref(formal),
+            "formal_result_hash": _formal_hash(formal),
+            "max_fresh_work_orders": 1,
+            "max_cost_usd": work["budget"]["max_cost_usd"],
+            "authorized_at": authorized_at,
+            "sealed_receipt_sha256": _HISTORICAL_NOSEND_RECEIPT_SHA256,
+            "sealed_receipt": receipt,
+        }
+        body["id"] = _ref("mission-document-nosend-recovery-authorization", body)
+        body["content_hash"] = content_hash(body)
+        proof = self._historical_no_send_authority(admission, work, formal, body)
+        if proof is None:
+            raise MissionDocumentResearchExecutorError(
+                "historical no-send authority did not bind current records")
+        existing = self.connection.execute(
+            "SELECT record_json,content_hash FROM "
+            "mission_document_research_controlled_recovery_authorizations "
+            "WHERE authorization_id=?", (body["id"],),
+        ).fetchone()
+        if existing is None:
+            with self._transaction() as cur:
+                cur.execute(
+                    "INSERT INTO mission_document_research_controlled_recovery_authorizations "
+                    "VALUES(?,?,?,?,?,?,?)",
+                    (body["id"], admission["id"], 3, work["id"], canonical_json(body),
+                     body["content_hash"], authorized_at),
+                )
+        elif (existing["record_json"] != canonical_json(body)
+              or existing["content_hash"] != body["content_hash"]):
+            raise MissionDocumentResearchExecutorError(
+                "historical no-send authorization conflicted")
+        return {"status": "authorized", "authorization_ref": body["id"],
+                "work_order_ref": work["id"], "model_calls": 0}
+
     def _safe_failure_proof(self, admission, work, formal, index):
         if formal["terminal_state"] != "failed":
             return None
@@ -1276,6 +1584,26 @@ class MissionDocumentResearchExecutor:
                 or envelope["status"] != (
                     "retryable" if formal.get("retry_exhausted") else "failed")):
             raise MissionDocumentResearchExecutorError("failed model authority drifted")
+        if index == 2:
+            row = self.connection.execute(
+                "SELECT record_json,content_hash FROM "
+                "mission_document_research_controlled_recovery_authorizations "
+                "WHERE failed_work_order_ref=?", (work["id"],),
+            ).fetchone()
+            if row is not None:
+                try:
+                    authorization = json.loads(row["record_json"])
+                except (TypeError, ValueError, RecursionError) as exc:
+                    raise MissionDocumentResearchExecutorError(
+                        "historical no-send authorization is invalid") from exc
+                if (canonical_json(authorization) != row["record_json"]
+                        or authorization.get("content_hash") != row["content_hash"]):
+                    raise MissionDocumentResearchExecutorError(
+                        "historical no-send authorization drifted")
+                historical = self._historical_no_send_authority(
+                    admission, work, formal, authorization)
+                if historical is not None:
+                    return historical
         # A persisted invocation means a provider call existed. Generic recovery
         # never guesses whether that request was charged or completed.
         invocation_rows = self.authority.store.connection.execute(
@@ -1527,6 +1855,155 @@ class MissionDocumentResearchExecutor:
             # barrier; it must never disrupt recovery control flow.
             return None
 
+    def authorize_paid_contract_recovery(self, admission_ref, authorization):
+        """Append one owner-reviewed fresh Work for a proved paid contract reject."""
+
+        admission = self.authority.resolve_for_execution(admission_ref)
+        if not isinstance(authorization, Mapping):
+            raise MissionDocumentResearchExecutorError("paid recovery authorization is invalid")
+        allowed = {
+            "schema_version", "id", "actor_ref", "admission_ref", "admission_hash",
+            "stage_ordinal", "failed_work_order_ref", "failed_work_order_hash",
+            "formal_result_ref", "formal_result_hash", "max_fresh_work_orders",
+            "max_cost_usd", "authorized_at", "content_hash",
+        }
+        if set(authorization) != allowed:
+            raise MissionDocumentResearchExecutorError(
+                "paid recovery authorization schema is invalid")
+        body = dict(authorization)
+        asserted = body.pop("content_hash", None)
+        if (authorization.get("schema_version") != SCHEMA_VERSION
+                or authorization.get("actor_ref")
+                != "operator:owner-authorized-document-recovery"
+                or authorization.get("admission_ref") != admission["id"]
+                or authorization.get("admission_hash") != admission["content_hash"]
+                or authorization.get("stage_ordinal") not in {2, 3}
+                or authorization.get("max_fresh_work_orders") != 1
+                or authorization.get("id") != _ref(
+                    "mission-document-paid-recovery-authorization",
+                    {key: value for key, value in body.items() if key != "id"})
+                or asserted != content_hash(body)):
+            raise MissionDocumentResearchExecutorError(
+                "paid recovery authorization authority drifted")
+        _parse_time(authorization["authorized_at"], "paid recovery authorization time")
+        index = authorization["stage_ordinal"] - 1
+        worker = self.draft_worker if index == 1 else self.verifier_worker
+        work, links = _effective_stage(
+            self.authority, self.scheduler, admission, index, worker=worker)
+        if links:
+            last = links[-1]
+            if (len(links) == 1
+                    and last.get("failure_proof", {}).get("authorization_ref")
+                    == authorization["id"]):
+                failed_row = self.scheduler.work_order_authority(
+                    last["failed_work_order_ref"])
+                failed_formal = self.scheduler.formal_result(
+                    last["failed_work_order_ref"])
+                if failed_row is None or failed_formal is None:
+                    raise MissionDocumentResearchExecutorError(
+                        "paid recovery predecessor is unavailable")
+                _verify_recovery_failure_proof(
+                    self.authority, self.scheduler, admission, index,
+                    failed_row["work_order"], last, worker)
+                return {"status": "admitted", "work_order_ref": work["id"],
+                        "authorization_ref": authorization["id"], "model_calls": 0}
+            raise MissionDocumentResearchExecutorError(
+                "paid recovery target was already recovered")
+        formal = self.scheduler.formal_result(work["id"])
+        if (formal is None
+                or authorization.get("failed_work_order_ref") != work["id"]
+                or authorization.get("failed_work_order_hash") != content_hash(work)
+                or authorization.get("formal_result_ref") != _formal_ref(formal)
+                or authorization.get("formal_result_hash") != _formal_hash(formal)
+                or authorization.get("max_cost_usd") != work["budget"]["max_cost_usd"]):
+            raise MissionDocumentResearchExecutorError(
+                "paid recovery target drifted or was already recovered")
+        paid = self._paid_contract_failure_proof(work, formal, index)
+        if paid is None:
+            raise MissionDocumentResearchExecutorError(
+                "paid contract failure proof is unavailable")
+        envelope = ResultEnvelope.from_dict(formal["result_envelope"]).to_dict()
+        proof = {
+            "classification": "owner_authorized_paid_contract_retry",
+            "failed_at": formal["created_at"],
+            "formal_result_ref": _formal_ref(formal),
+            "formal_result_hash": _formal_hash(formal),
+            "result_envelope_ref": envelope["id"],
+            "result_envelope_hash": formal["result_envelope_hash"],
+            "route_decision_ref": envelope.get("metadata", {}).get("route_decision_ref"),
+            "authorization_ref": authorization["id"],
+            "authorization_hash": authorization["content_hash"],
+            "paid_contract_proof": paid,
+            "mission_binding_hash": content_hash(
+                _expected_budget_binding(self.authority, admission, index)),
+            "budget_authority_ref": paid["budget_settlement_ref"],
+            "budget_authority_hash": paid["budget_settlement_hash"],
+            "budget_settlement_ref": paid["budget_settlement_ref"],
+            "budget_settlement_hash": paid["budget_settlement_hash"],
+            "refusal_day": None,
+        }
+        identity = {
+            "admission_ref": admission["id"], "admission_hash": admission["content_hash"],
+            "stage_ordinal": index + 1, "recovery_number": 1,
+            "failed_work_order_ref": work["id"],
+            "failed_work_order_hash": content_hash(work),
+            "prior_recovery_link_ref": None, "prior_recovery_link_hash": None,
+            "policy_hash": content_hash(_recovery_policy(admission, index)),
+            "window_started_at": authorization["authorized_at"],
+            "failure_proof": proof,
+        }
+        link = {
+            "schema_version": SCHEMA_VERSION,
+            "id": _ref("mission-document-research-recovery-link", identity), **identity,
+            "recovery_work_order_ref": "work:mission-document-recovery-"
+            + content_hash(identity)[:32], "created_at": authorization["authorized_at"],
+        }
+        link["content_hash"] = content_hash(link)
+        recovered = _recovery_work(work, link)
+        existing_authorization = self.connection.execute(
+            "SELECT record_json,content_hash FROM "
+            "mission_document_research_controlled_recovery_authorizations "
+            "WHERE authorization_id=?", (authorization["id"],),
+        ).fetchone()
+        if existing_authorization is None:
+            with self._transaction() as cur:
+                cur.execute(
+                    "INSERT INTO mission_document_research_controlled_recovery_authorizations "
+                    "VALUES(?,?,?,?,?,?,?)",
+                    (authorization["id"], admission["id"], index + 1, work["id"],
+                     canonical_json(authorization), authorization["content_hash"],
+                     authorization["authorized_at"]),
+                )
+        elif (existing_authorization["record_json"] != canonical_json(authorization)
+              or existing_authorization["content_hash"] != authorization["content_hash"]):
+            raise MissionDocumentResearchExecutorError(
+                "paid recovery authorization conflicted")
+        enqueued = self.scheduler.enqueue(recovered)
+        if enqueued["status"] not in {"fresh", "duplicate"}:
+            raise MissionDocumentResearchExecutorError("paid recovery enqueue conflicted")
+        existing_link = self.connection.execute(
+            "SELECT record_json,content_hash FROM mission_document_research_recovery_links "
+            "WHERE recovery_link_id=?", (link["id"],),
+        ).fetchone()
+        if existing_link is None:
+            with self._transaction() as cur:
+                cur.execute(
+                    "INSERT INTO mission_document_research_recovery_links "
+                    "VALUES(?,?,?,?,?,?,?,?,?)",
+                    (link["id"], admission["id"], index + 1, 1, work["id"],
+                     recovered["id"], canonical_json(link), link["content_hash"],
+                     link["created_at"]),
+                )
+        elif (existing_link["record_json"] != canonical_json(link)
+              or existing_link["content_hash"] != link["content_hash"]):
+            raise MissionDocumentResearchExecutorError("paid recovery link conflicted")
+        checked, checked_links = _effective_stage(
+            self.authority, self.scheduler, admission, index, worker=worker)
+        if canonical_json(checked) != canonical_json(recovered) or checked_links != [link]:
+            raise MissionDocumentResearchExecutorError("paid recovery did not converge")
+        return {"status": "admitted", "work_order_ref": recovered["id"],
+                "authorization_ref": authorization["id"], "model_calls": 0}
+
     def _start(self, admission, root):
         start_id = _ref("mission-document-research-start", self._run_id(admission))
         body = {"schema_version": SCHEMA_VERSION, "id": start_id,
@@ -1662,7 +2139,12 @@ class MissionDocumentResearchExecutor:
             raise MissionDocumentResearchExecutorError("effective recovery Work drifted")
         proof = self._safe_failure_proof(admission, work, formal, index)
         now = self.clock().astimezone(timezone.utc)
-        started = (_parse_time(formal["created_at"], "failed formal time") if not links
+        owner_started = (proof.get("authorized_at") if isinstance(proof, Mapping)
+                         and proof.get("classification")
+                         == "reconstructed_historical_provider_controls_no_send" else None)
+        started = (_parse_time(owner_started, "authorized recovery time")
+                   if not links and owner_started is not None else
+                   _parse_time(formal["created_at"], "failed formal time") if not links
                    else _parse_time(links[0]["window_started_at"], "recovery window start"))
         deadline = started + timedelta(seconds=policy["max_elapsed_seconds"])
         if proof is None:
@@ -1686,7 +2168,8 @@ class MissionDocumentResearchExecutor:
                 started=started, policy=policy, proof=proof, links=links,
             )
             failed_at = _parse_time(formal["created_at"], "failed formal time")
-            eligible_at = failed_at + timedelta(seconds=policy["retry_backoff_seconds"])
+            eligible_at = (started if owner_started is not None else
+                           failed_at + timedelta(seconds=policy["retry_backoff_seconds"]))
             if proof["refusal_day"] is not None:
                 day_after = datetime.fromisoformat(proof["refusal_day"]).replace(
                     tzinfo=timezone.utc) + timedelta(days=1)
