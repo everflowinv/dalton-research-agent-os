@@ -231,7 +231,7 @@ def render(
         # to ``Standard``; the other agents keep ``Background``.
         "ProcessType": "Standard",
         "ProgramArguments": [
-            str(bin_dir / "dalton-writer"),
+            str(bin_dir / "python"), "-m", "dalton_core.writer_server",
             "--db", str(state / "core.sqlite"),
             "--scheduler", str(state / "scheduler.sqlite"),
             "--socket", str(state / "run" / "writer.sock"),
@@ -383,7 +383,8 @@ def render(
         )
     controller = common | {
         "Label": labels["controller"],
-        "ProgramArguments": [str(bin_dir / "daltond"), "--config", str(config)],
+        "ProgramArguments": [str(bin_dir / "python"), "-m", "dalton_core.service",
+                             "--config", str(config)],
         "StandardOutPath": str(logs / "controller.stdout.log"),
         "StandardErrorPath": str(logs / "controller.stderr.log"),
     }
@@ -396,7 +397,8 @@ def render(
     if service_config is not None and service_config.control is not None:
         control = common | {
             "Label": labels["control"],
-            "ProgramArguments": [str(bin_dir / "dalton-control"), "--config", str(config)],
+            "ProgramArguments": [str(bin_dir / "python"), "-m", "dalton_core.agenda_control",
+                                 "--config", str(config)],
             "StandardOutPath": str(logs / "control.stdout.log"),
             "StandardErrorPath": str(logs / "control.stderr.log"),
         }
@@ -412,7 +414,7 @@ def render(
             "Label": labels["thesis_impact"],
             "StartInterval": int(service_config.thesis_impact_interval_seconds or 300),
             "ProgramArguments": [
-                str(bin_dir / "dalton-thesis-impact"),
+                str(bin_dir / "python"), "-m", "dalton_core.thesis_impact_production",
                 "--config",
                 str(config),
             ],

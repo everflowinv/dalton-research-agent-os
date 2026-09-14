@@ -1773,7 +1773,9 @@ class ServiceTests(unittest.TestCase):
             self.assertEqual(controller["Label"], CONTROLLER_LABEL)
             self.assertTrue(writer["KeepAlive"])
             self.assertTrue(controller["KeepAlive"])
-            self.assertIn("dalton-writer", writer["ProgramArguments"][0])
+            self.assertEqual(writer["ProgramArguments"][:3], [
+                str((root / "venv" / "bin" / "python").resolve()),
+                "-m", "dalton_core.writer_server"])
             self.assertIn("--scheduler", writer["ProgramArguments"])
             writer_args = writer["ProgramArguments"]
             self.assertEqual(
@@ -1784,7 +1786,9 @@ class ServiceTests(unittest.TestCase):
                 writer_args[writer_args.index("--alphaengine-discovery-plan") + 1],
                 str((root / "state").resolve() / "discovery-plans" / "us-it-services-alphaengine-v1.json"),
             )
-            self.assertIn("daltond", controller["ProgramArguments"][0])
+            self.assertEqual(controller["ProgramArguments"][:3], [
+                str((root / "venv" / "bin" / "python").resolve()),
+                "-m", "dalton_core.service"])
             self.assertNotIn("model", " ".join(controller["ProgramArguments"]).lower())
 
     def test_launchagent_persists_the_explicit_web_search_provider(self) -> None:
@@ -1891,7 +1895,9 @@ class ServiceTests(unittest.TestCase):
             self.assertNotIn("KeepAlive", agent)
             self.assertTrue(agent["RunAtLoad"])
             self.assertEqual(agent["StartInterval"], 300)
-            self.assertIn("dalton-thesis-impact", agent["ProgramArguments"][0])
+            self.assertEqual(agent["ProgramArguments"][:3], [
+                str((root / "venv" / "bin" / "python").resolve()),
+                "-m", "dalton_core.thesis_impact_production"])
 
     def test_enabled_control_plane_gets_a_separate_launchagent(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1938,7 +1944,9 @@ class ServiceTests(unittest.TestCase):
             control = plistlib.loads(Path(paths["control"]).read_bytes())
             self.assertEqual(control["Label"], CONTROL_LABEL)
             self.assertTrue(control["KeepAlive"])
-            self.assertIn("dalton-control", control["ProgramArguments"][0])
+            self.assertEqual(control["ProgramArguments"][:3], [
+                str((root / "venv" / "bin" / "python").resolve()),
+                "-m", "dalton_core.agenda_control"])
             writer = plistlib.loads(Path(paths["writer"]).read_bytes())
             self.assertIn("--transcript-spool-dir", writer["ProgramArguments"])
             service = ServiceConfig.from_file(config)
