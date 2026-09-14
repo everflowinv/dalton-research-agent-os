@@ -267,16 +267,29 @@ class MissionModelSpecLaneCoordinator:
                 # becomes safe merely because the generic dependency-probe
                 # interval elapsed (or the writer restarted).
                 held = budget_park
-            if held is None:
+            controlled_reentry = None
+            if held is not None and held.classification.dependency == "model_budget":
+                recovery = getattr(self.launcher, "controlled_budget_reentry", None)
+                controlled_reentry = (
+                    None if recovery is None else recovery(
+                        business_key=business_key, current_permission=permission,
+                        mission=dict(mission)))
+                if controlled_reentry is not None:
+                    held = None
+            if held is None and controlled_reentry is None:
                 held = self.budget.blocked(business_key)
             if held is None:
                 break
             held_companies[company_ref] = held.as_wire()
             excluded.add(company_ref)
         try:
-            ticket = self.launcher.start(
-                company_ref=company_ref, state_hash=state_hash, task_hash=TASK_HASH,
-                repair_policy_hash=repair_policy_hash)
+            launch_kwargs = {
+                "company_ref": company_ref, "state_hash": state_hash,
+                "task_hash": TASK_HASH, "repair_policy_hash": repair_policy_hash,
+            }
+            if controlled_reentry is not None:
+                launch_kwargs["controlled_reentry"] = controlled_reentry
+            ticket = self.launcher.start(**launch_kwargs)
         except LaneChildConflict as exc:
             return {"status": "busy", "company_ref": company_ref, "settled": settled,
                     "reason": f"{type(exc).__name__}: {exc}"}

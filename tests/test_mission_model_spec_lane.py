@@ -33,6 +33,7 @@ class FakeLauncher:
         self.prompt_byte_limit = 120_000
         self.permission_control_version = "runtime:1"
         self.financial_validation_version = "financial-validation:1"
+        self.controlled_suffix = None
 
     def repair_policy_hash(self):
         return content_hash(self.repair_config)
@@ -51,12 +52,13 @@ class FakeLauncher:
         return {"runtime": self.permission_control_version}
 
     def start(self, *, company_ref, state_hash, task_hash=None,
-              repair_policy_hash=None):
+              repair_policy_hash=None, controlled_reentry=None):
         if self.raise_on_start is not None:
             raise self.raise_on_start
         self.started.append({"company_ref": company_ref, "state_hash": state_hash,
                              "task_hash": task_hash,
                              "repair_policy_hash": repair_policy_hash,
+                             "controlled_reentry": controlled_reentry,
                              "financial_validation_contract_hash": (
                                  self.financial_validation_contract_hash())})
         ticket_id = f"company-model-spec-run:{len(self.started):024d}"
@@ -69,6 +71,10 @@ class FakeLauncher:
                 self.financial_validation_contract_hash()),
         }
         return {"id": ticket_id}
+
+    def controlled_budget_reentry(self, **kwargs):
+        self.controlled_query = kwargs
+        return self.controlled_suffix
 
     def finish(self, ticket_id, *, status="succeeded", summary=None):
         self.tickets[ticket_id].update({"status": status, "summary": summary})
@@ -239,6 +245,23 @@ class ModelSpecLaneTests(unittest.TestCase):
         self.assertIn(ACN, held["held"])
         self.assertIn("not a concept", held["reason"])
         self.assertEqual(len(self.launcher.started), 2)
+
+    def test_reviewed_budget_no_send_reentry_bypasses_only_the_exact_park(self):
+        missions = FakeMissions([ACN])
+        lane = MissionModelSpecLaneCoordinator(
+            missions=missions, launcher=self.launcher, mission=lambda: self.mission)
+        launched = lane.dispatch_once()
+        self.launcher.finish(launched["ticket_ref"], summary={
+            "spec_status": "model_unavailable", "failure_codes": ["POOL_EXHAUSTED"],
+            "failure_reason": "CockpitModelError: POOL_EXHAUSTED"})
+        self.assertEqual(lane.dispatch_once()["status"], "held")
+        self.launcher.controlled_suffix = ":operator-recovery:" + "a" * 16
+        recovered = lane.dispatch_once()
+        self.assertEqual(recovered["status"], "launched")
+        self.assertEqual(self.launcher.started[-1]["controlled_reentry"],
+                         self.launcher.controlled_suffix)
+        self.assertTrue(self.launcher.controlled_query["current_permission"].startswith(
+            self.launcher.controlled_query["business_key"] + "|permission:"))
 
     def test_settlement_poll_harvests_terminal_child_without_launching(self):
         launched = self.lane.dispatch_once()

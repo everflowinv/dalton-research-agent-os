@@ -1657,6 +1657,15 @@ class CockpitModel:
                     formal=formal,
                     mission=mission,
                 )
+                if recovery_suffix is None:
+                    from .controlled_budget_reentry import (
+                        approved_request as approved_budget_request,
+                    )
+                    recovery_suffix = approved_budget_request(
+                        self.scheduler_db, self.config["budget_db"],
+                        old_work_order_ref=work.id, formal=formal,
+                        mission=mission,
+                    )
                 if recovery_suffix is not None:
                     if dossier_purpose:
                         parent = _make_dossier_recovery_parent(

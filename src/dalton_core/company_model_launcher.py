@@ -123,7 +123,8 @@ class CompanyModelSpecLauncher(LaneChildLauncher):
 
     def start(self, *, company_ref: str, state_hash: str,
               task_hash: str | None = None,
-              repair_policy_hash: str | None = None) -> dict[str, Any]:
+              repair_policy_hash: str | None = None,
+              controlled_reentry: str | None = None) -> dict[str, Any]:
         if not isinstance(company_ref, str) or not company_ref.strip():
             raise LaneChildRejected("a model specification run needs a company")
         if not isinstance(state_hash, str) or len(state_hash) != 64:
@@ -158,11 +159,30 @@ class CompanyModelSpecLauncher(LaneChildLauncher):
                 "financial_validation_contract_hash": validation_hash,
                 "model_configured": self.configured,
             },
+            _controlled_reentry=(None if controlled_reentry is None else
+                                 (f"{self.TICKET_PREFIX}:{digest}", controlled_reentry)),
             company_ref=company_ref, expected_state_hash=state_hash,
             expected_task_hash=task_hash,
             expected_repair_policy_hash=repair_policy_hash,
             expected_financial_validation_contract_hash=validation_hash,
         )
+
+    def controlled_budget_reentry(self, *, business_key: str,
+                                  current_permission: str,
+                                  mission: dict[str, Any]) -> str | None:
+        """Return the one reviewed no-send budget recovery, if present."""
+        if self.scheduler_db is None or self.model_config_path is None:
+            return None
+        from .controlled_budget_reentry import approved_business_key
+        try:
+            config = self._validated_model_config()
+            return approved_business_key(
+                self.scheduler_db, business_key=business_key,
+                current_permission=current_permission, mission=mission,
+                allowed_purposes={"model_spec"},
+            ) if config and config.get("budget_db") else None
+        except (OSError, TypeError, ValueError):
+            return None
 
 
 __all__ = ["TICKET_PREFIX", "CompanyModelSpecLauncher"]
