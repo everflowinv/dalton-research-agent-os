@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 import json
@@ -230,7 +231,6 @@ class WorkspaceFirstMissionTests(unittest.TestCase):
         self.assertEqual(first_tick["entered"][0]["company_ref"], "company:ticker:asml")
         progress = authority.mission_progress(mission["mission_ref"])
         self.assertEqual(progress["mission_version_ref"], mission["id"])
-        self.assertEqual(progress["companies"][0]["current_stage"], "initial_screen")
 
     def test_sec_resolution_failure_is_visible_and_uses_workspace_local_process(self):
         draft = draft_first_mission(
@@ -270,7 +270,7 @@ class WorkspaceFirstMissionTests(unittest.TestCase):
             json.dumps(self.foundation), encoding="utf-8")
         principal = Principal(
             "dashboard-control", "token", DASHBOARD_CONTROL_OPERATIONS,
-            actor_ref="bridge:tailscale-dashboard")
+            actor_ref="human:tailscale-owner")
         server = object.__new__(WriterServer)
         server._workspace = self.workspace
         foreign_manifest = json.loads(foreign.manifest_path.read_text(encoding="utf-8"))

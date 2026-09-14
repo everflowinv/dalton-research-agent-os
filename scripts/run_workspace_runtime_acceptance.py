@@ -205,7 +205,7 @@ def _wait_more_ticks(workspace: Any, before: int) -> int:
     raise RuntimeError("workspace controller did not continue research scheduling")
 
 
-def _wait_discovery(workspace: Any) -> dict[str, Any]:
+def _wait_discovery(workspace: Any, mission: dict[str, Any]) -> dict[str, Any]:
     deadline = time.monotonic() + 20
     last = {}
     while time.monotonic() < deadline:
@@ -222,9 +222,17 @@ def _wait_discovery(workspace: Any) -> dict[str, Any]:
             if value.get("status") == "succeeded":
                 succeeded.append(value.get("id"))
         if discoveries > 0 and documents > 0 and succeeded:
+            selector = json.loads((workspace.state_dir / "discovery-plans" /
+                                   "web-search-plan-selection-v1.json").read_text())
+            plan = json.loads((workspace.state_dir / "discovery-plans" /
+                               selector["plan_path"]).read_text())
+            if plan.get("mission_ref") != mission["mission_ref"]:
+                raise RuntimeError("web discovery selector points outside workspace mission")
             return {"source_discovery_records": discoveries,
                     "discovered_document_records": documents,
-                    "succeeded_ticket_refs": succeeded}
+                    "succeeded_ticket_refs": succeeded,
+                    "selected_plan_ref": selector["plan_ref"],
+                    "selected_mission_ref": plan["mission_ref"]}
         time.sleep(0.05)
     with sqlite3.connect(workspace.state_dir / "tick-ledger.sqlite") as connection:
         lanes = connection.execute(
@@ -295,8 +303,8 @@ def run_acceptance(output: Path) -> dict[str, Any]:
             b, mission_b, _proposal_b, foundation_b = _create(host, release, "beta", _free_port())
             writer_b = _start_writer(b); processes.append(writer_b)
             controller_b = _start_controller(b); processes.append(controller_b)
-            discovery_a = _wait_discovery(a)
-            discovery_b = _wait_discovery(b)
+            discovery_a = _wait_discovery(a, mission_a)
+            discovery_b = _wait_discovery(b, mission_b)
             a_after = _wait_more_ticks(a, a_before)
             if controller_a.pid != a_pid or controller_a.poll() is not None:
                 raise RuntimeError("workspace A controller changed while B was created")
