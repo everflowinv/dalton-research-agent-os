@@ -7,7 +7,8 @@ from pathlib import Path
 from dalton_core.store import content_hash
 from dalton_core.workspace import create_workspace_manifest
 from dalton_core.workspace_mission_setup import (
-    WorkspaceMissionSetupError, draft_first_mission, publish_first_mission,
+    WorkspaceMissionSetupError, draft_first_mission, plan_first_mission_goal,
+    publish_first_mission, publish_first_mission_to_store,
 )
 
 
@@ -53,6 +54,10 @@ class WorkspaceFirstMissionTests(unittest.TestCase):
                 },
             },
             "mission_generated_files": [],
+            "setup_planning_budget": {
+                "max_model_calls": 6, "max_input_tokens": 120000,
+                "max_output_tokens": 24000, "max_cost_usd": 10.0,
+            },
         }
         self.foundation = {**foundation_body, "content_hash": content_hash(foundation_body)}
 
@@ -130,6 +135,69 @@ class WorkspaceFirstMissionTests(unittest.TestCase):
                 actor_ref="human:owner", authority=RecordingMissionAuthority(),
                 prepare_bindings=lambda *_: {},
             )
+
+    def test_model_planner_has_a_pre_mission_budget_context_and_structured_contract(self):
+        class Model:
+            def __init__(self): self.calls = []
+            def call_setup(inner, **kwargs):
+                inner.calls.append(kwargs)
+                return {"text": '{"summary":"s","title":"Chip tools",'
+                        '"objective":"Compare tool vendors",'
+                        '"industry":{"name":"semiconductor equipment","reason":"named"},'
+                        '"research_questions":["Who gains share?"],"subtasks":["filings"],'
+                        '"suggested_companies":[{"ticker":"ASML","name":"ASML","reason":"named"}]}' }
+        model = Model()
+        draft = plan_first_mission_goal(
+            model, self.workspace, goal="Compare ASML", method_foundation=self.foundation,
+            request_id="goal-1", created_at="2026-09-14T12:00:00+00:00")
+        self.assertEqual(draft["mission_body"]["universe"][0]["ticker"], "ASML")
+        context = model.calls[0]["planning_context"]
+        self.assertEqual(context["budget"]["max_daily_paid_calls"], 6)
+        self.assertEqual(context["foundation_hash"], self.foundation["content_hash"])
+        self.assertNotIn("mission", context)
+
+    def test_production_preparer_publishes_real_authority_chain_and_active_mission(self):
+        from dalton_core.store import DaltonStore
+        from tests.p9a_fixtures import bootstrap_method_authorities, constitution_method
+
+        db = Path(self.temp.name) / "core.sqlite"
+        store = DaltonStore(str(db)); self.addCleanup(store.close)
+        seeded = bootstrap_method_authorities(store)
+        driver_value = {
+            "drivers": [{"driver_ref": "driver:volume", "label": "Volume",
+                         "mechanism": "Customer demand changes units sold.",
+                         "metric_refs": ["metric:revenue"]}],
+            "metric_specs": [{"metric_ref": "metric:revenue", "label": "Revenue",
+                              "definition": "Reported revenue", "unit": "USD",
+                              "periodicity": "quarterly",
+                              "preferred_source_refs": ["source:sec-edgar"],
+                              "verification_kind": "numeric", "caveats": []}],
+            "thesis_templates": [{"template_ref": "template:demand", "statement": "Demand changes revenue.",
+                                  "mechanism": "Volume", "driver_refs": ["driver:volume"],
+                                  "implied_expectation": "Revenue follows demand.",
+                                  "falsifier_refs": ["falsifier:revenue"]}],
+        }
+        body = {key: value for key, value in self.foundation.items() if key != "content_hash"}
+        body["methods"] = {
+            "playbook": {"binding": {"ref": seeded["playbook"]["id"],
+                                       "hash": seeded["playbook"]["content_hash"]}},
+            "driver_pack_template": {"value": driver_value,
+                                      "content_hash": content_hash(driver_value)},
+            "constitution_method": {"value": constitution_method(),
+                                    "content_hash": content_hash(constitution_method())},
+        }
+        foundation = {**body, "content_hash": content_hash(body)}
+        draft = draft_first_mission(
+            self.workspace, goal="Research $ASML", industry="semiconductor equipment",
+            method_foundation=foundation)
+        mission = publish_first_mission_to_store(
+            store, self.workspace, proposal=draft, proposal_hash=draft["content_hash"],
+            actor_ref="human:owner", method_foundation=foundation)
+        from dalton_core.coverage_mission import CoverageMissionAuthority
+        authority = CoverageMissionAuthority(store)
+        self.assertEqual(authority.active_mission(mission["mission_ref"])["id"], mission["id"])
+        progress = authority.mission_progress(mission["mission_ref"])
+        self.assertEqual(progress["mission_version_ref"], mission["id"])
 
 
 if __name__ == "__main__":

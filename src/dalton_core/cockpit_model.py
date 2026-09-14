@@ -68,6 +68,40 @@ _SEED_PURPOSES = ("ask", "goal", "steer", "draft", "plan", "model_spec")
 # registration is a snapshot waiting to go stale in whoever imported it first.
 _PURPOSES: set[str] = set(_SEED_PURPOSES)
 
+SETUP_PLANNING_SCHEMA_VERSION = "workspace-setup-planning-context-0.1"
+
+
+def validate_setup_planning_context(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate the authority and spend envelope for a pre-mission goal call."""
+    fields = {"schema_version", "setup_ref", "workspace_id", "foundation_ref",
+              "foundation_hash", "budget", "created_at", "content_hash"}
+    if not isinstance(value, Mapping) or set(value) != fields:
+        raise CockpitModelError("setup planning context has an invalid closed shape")
+    wire = dict(value)
+    asserted = wire.pop("content_hash")
+    if (wire.get("schema_version") != SETUP_PLANNING_SCHEMA_VERSION
+            or not isinstance(asserted, str) or content_hash(wire) != asserted):
+        raise CockpitModelError("setup planning context content hash differs")
+    for name in ("setup_ref", "workspace_id", "foundation_ref", "created_at"):
+        if not isinstance(wire.get(name), str) or not wire[name].strip():
+            raise CockpitModelError(f"setup planning context {name} is invalid")
+    if not re.fullmatch(r"[0-9a-f]{64}", str(wire.get("foundation_hash"))):
+        raise CockpitModelError("setup planning context foundation_hash is invalid")
+    budget = wire.get("budget")
+    required = {"max_daily_paid_calls", "max_daily_cost_usd",
+                "max_alphaengine_calls_24h"}
+    if not isinstance(budget, Mapping) or not required.issubset(budget):
+        raise CockpitModelError("setup planning context lacks its bounded budget")
+    if (isinstance(budget["max_daily_paid_calls"], bool)
+            or not isinstance(budget["max_daily_paid_calls"], int)
+            or not 1 <= budget["max_daily_paid_calls"] <= 6):
+        raise CockpitModelError("setup planning permits at most six paid calls")
+    amount = budget["max_daily_cost_usd"]
+    if (isinstance(amount, bool) or not isinstance(amount, (int, float))
+            or not 0 <= float(amount) <= 10.0):
+        raise CockpitModelError("setup planning cost must be between zero and ten dollars")
+    return {**wire, "budget": dict(budget), "content_hash": asserted}
+
 # Provider-enforced output contracts for independent Cockpit verifiers.  The
 # adapter resolves these opaque allowlisted refs to packaged schemas; callers
 # can never supply a filesystem path or arbitrary JSON schema.
@@ -446,7 +480,8 @@ def build_work(*, purpose: str, request_id: str, prompt: str, mission_version_re
                transport_retry: Mapping[str, Any] | None = None,
                provider_retry: Mapping[str, Any] | None = None,
                broker_frame_policy: Mapping[str, Any] | None = None,
-               producer_route_decision_refs: Sequence[str] = ()) -> WorkOrder:
+               producer_route_decision_refs: Sequence[str] = (),
+               authority_binding: Mapping[str, Any] | None = None) -> WorkOrder:
     if purpose not in _PURPOSES:
         raise CockpitModelError("unknown cockpit model purpose")
     if transport_retry is not None:
@@ -465,6 +500,8 @@ def build_work(*, purpose: str, request_id: str, prompt: str, mission_version_re
                 "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest()}
     if budget_identity is not None:
         identity["budget_fingerprint"] = budget_identity
+    if authority_binding is not None:
+        identity["authority_binding"] = content_hash(authority_binding)
     if verifier_provider_contract is not None:
         identity["verifier_provider_contract"] = verifier_provider_contract
         identity["verifier_provider_schema_hash"] = verifier_provider_schema_hash
@@ -516,6 +553,8 @@ def build_work(*, purpose: str, request_id: str, prompt: str, mission_version_re
                                      "mission_version_ref": mission_version_ref,
                                  **({} if mission_version_hash is None else {
                                      "mission_version_hash": mission_version_hash}),
+                                 **({} if authority_binding is None else {
+                                     "authority_binding": dict(authority_binding)}),
                                  **({} if not producer_route_decision_refs else {
                                      "producer_route_decision_refs": list(producer_route_decision_refs)}),
                                  **({} if request_identity is None else {
@@ -1406,6 +1445,31 @@ class CockpitModel:
                 import time
                 time.sleep(backoff)
 
+    def call_setup(self, *, request_id: str, prompt: str,
+                   planning_context: Mapping[str, Any]) -> dict[str, Any]:
+        """Run the first-goal call against an explicit setup authority.
+
+        A blank workspace has no CoverageMission and must not manufacture one
+        merely to spend on planning.  The setup context binds the workspace's
+        method foundation and its separately configured one-call budget.  The
+        scheduler's historical field remains named ``mission_version_ref``;
+        for this call it contains the setup authority ref, and metadata marks
+        the distinct authority kind.
+        """
+        context = validate_setup_planning_context(planning_context)
+        scope = {
+            "id": context["setup_ref"],
+            "mission_ref": f"workspace-setup:{context['workspace_id']}",
+            "content_hash": context["content_hash"],
+            "created_at": context["created_at"],
+            "budget": context["budget"],
+            "_authority_kind": "workspace_setup",
+            "_foundation_ref": context["foundation_ref"],
+            "_foundation_hash": context["foundation_hash"],
+        }
+        return self.call(
+            purpose="goal", request_id=request_id, prompt=prompt, mission=scope)
+
     def _call_once(self, *, purpose: str, request_id: str, prompt: str,
                    mission: Mapping[str, Any],
                    producer_route_decision_refs: Sequence[str] = (),
@@ -1550,6 +1614,11 @@ class CockpitModel:
             "broker_frame_policy": broker_frame_execution_binding(self.config),
             "model_spec_request_identity": _model_spec_request_identity,
             "structured_output_repair": _structured_output_repair,
+            "authority_binding": ({
+                "kind": mission["_authority_kind"],
+                "foundation_ref": mission["_foundation_ref"],
+                "foundation_hash": mission["_foundation_hash"],
+            } if mission.get("_authority_kind") == "workspace_setup" else None),
             "transport_retry": (
                 self.config.get("transport_retry")
                 if purpose == "model_spec" and (

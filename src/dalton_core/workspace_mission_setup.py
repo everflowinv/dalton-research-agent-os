@@ -12,7 +12,15 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from .coverage_mission import CoverageMissionAuthority, validate_mission_body
+from .agenda import AgendaStore
+from .coverage_admission import CoverageAdmissionAuthority
+from .cockpit_model import (
+    SETUP_PLANNING_SCHEMA_VERSION, unwrap_json_object,
+    validate_setup_planning_context,
+)
 from .store import content_hash
+from .research_constitution import ResearchConstitutionAuthority
+from .research_playbook import read_exact_playbook_version
 from .workspace import WorkspacePaths
 
 SCHEMA_VERSION = "workspace-first-mission-draft-0.1"
@@ -117,6 +125,8 @@ def draft_first_mission(
     industry: str | None = None,
     companies: Sequence[Mapping[str, Any]] | None = None,
     research_questions: Sequence[str] | None = None,
+    title: str | None = None,
+    objective: str | None = None,
 ) -> dict[str, Any]:
     """Produce a bounded, reviewable proposal without writing authority."""
     goal = _text(goal, "goal")
@@ -146,7 +156,8 @@ def draft_first_mission(
         ])),
     }
     body = {
-        "title": goal.splitlines()[0][:200], "objective": goal,
+        "title": (_text(title, "title") if title is not None else goal.splitlines()[0])[:200],
+        "objective": (_text(objective, "objective") if objective is not None else goal)[:2000],
         "industry_ref": f"industry:{_slug(industry_name or 'pending-review')}",
         "universe": universe, "research_questions": questions,
         "deliverables": list(defaults.get("deliverables", [
@@ -169,6 +180,87 @@ def draft_first_mission(
         "review_issues": issues, "mission_body": body,
     }
     return {**proposal_body, "content_hash": content_hash(proposal_body)}
+
+
+def setup_planning_context(
+    workspace: WorkspacePaths, *, method_foundation: Mapping[str, Any],
+    created_at: str,
+) -> dict[str, Any]:
+    """Bind the pre-mission model call to its own finite setup allowance."""
+    foundation = _foundation(method_foundation, workspace)
+    allowance = foundation.get("setup_planning_budget")
+    if not isinstance(allowance, Mapping):
+        raise WorkspaceMissionSetupError("method foundation lacks setup planning budget")
+    calls = allowance.get("max_model_calls")
+    cost = allowance.get("max_cost_usd")
+    body = {
+        "schema_version": SETUP_PLANNING_SCHEMA_VERSION,
+        "setup_ref": f"workspace-setup:{workspace.workspace_id}:{foundation['content_hash'][:16]}",
+        "workspace_id": workspace.workspace_id,
+        "foundation_ref": f"workspace-research-foundation:{workspace.workspace_id}",
+        "foundation_hash": foundation["content_hash"],
+        # The shared day-budget authority has historic mission-shaped names.
+        # These values are setup authority, and the WorkOrder says so.
+        "budget": {
+            "max_daily_paid_calls": calls,
+            "max_daily_cost_usd": cost,
+            "max_alphaengine_calls_24h": 0,
+        },
+        "created_at": _text(created_at, "created_at"),
+    }
+    return validate_setup_planning_context({**body, "content_hash": content_hash(body)})
+
+
+def first_mission_goal_prompt(goal: str) -> str:
+    """The structured output contract shared by blank-workspace onboarding."""
+    return "\n".join([
+        "You plan the first mission for a blank autonomous equity research workspace.",
+        "Extract the industry and companies from the owner's words. Do not invent a ticker.",
+        "Turn the goal into 3 to 8 answerable research questions and concrete subtasks.",
+        "Keep the owner's language. Return raw JSON only, without a markdown fence:",
+        '{"summary":"...","title":"...","objective":"...",',
+        ' "industry":{"name":"...","reason":"..."},',
+        ' "research_questions":["..."],"subtasks":["..."],',
+        ' "suggested_companies":[{"ticker":"XYZ","name":"...","reason":"..."}]}',
+        "Use an empty suggested_companies list or empty industry name when the owner did not supply enough information.",
+        "Owner's research goal: " + _text(goal, "goal"),
+    ])
+
+
+def plan_first_mission_goal(
+    model: Any, workspace: WorkspacePaths, *, goal: str,
+    method_foundation: Mapping[str, Any], request_id: str, created_at: str,
+) -> dict[str, Any]:
+    """Make the one production model call, then normalize it into a safe draft."""
+    context = setup_planning_context(
+        workspace, method_foundation=method_foundation, created_at=created_at)
+    call = model.call_setup(
+        request_id=_text(request_id, "request_id"),
+        prompt=first_mission_goal_prompt(goal), planning_context=context,
+    )
+    parsed = unwrap_json_object(call.get("text", "")) if isinstance(call, Mapping) else None
+    if parsed is None:
+        raise WorkspaceMissionSetupError("model did not return a structured first mission")
+    industry_value = parsed.get("industry")
+    industry = (industry_value.get("name") if isinstance(industry_value, Mapping)
+                and isinstance(industry_value.get("name"), str) else None)
+    companies = []
+    for item in parsed.get("suggested_companies", []):
+        if isinstance(item, Mapping) and isinstance(item.get("ticker"), str) \
+                and item["ticker"].strip():
+            ticker = item["ticker"].strip().upper()[:12]
+            companies.append({"company_ref": f"company:ticker:{ticker.lower()}",
+                              "ticker": ticker})
+    questions = [item for item in parsed.get("research_questions", [])
+                 if isinstance(item, str) and item.strip()][:12]
+    return draft_first_mission(
+        workspace, goal=goal, method_foundation=method_foundation,
+        industry=industry, companies=companies,
+        research_questions=questions or None,
+        title=parsed.get("title") if isinstance(parsed.get("title"), str) else None,
+        objective=(parsed.get("objective")
+                   if isinstance(parsed.get("objective"), str) else None),
+    )
 
 
 def publish_first_mission(
@@ -206,4 +298,110 @@ def publish_first_mission(
         version_id=f"coverage-mission-version:{workspace.slug}:{identity}",
         prior_version_ref=None,
         idempotency_key=f"workspace-first-mission:{workspace.workspace_id}:{asserted}",
+    )
+
+
+def prepare_first_mission_bindings(
+    store: Any, *, method_foundation: Mapping[str, Any],
+    proposal: Mapping[str, Any], actor_ref: str,
+) -> dict[str, dict[str, str]]:
+    """Materialise the mission-specific authorities in the workspace Core."""
+    if not isinstance(proposal, Mapping) or not isinstance(proposal.get("mission_body"), Mapping):
+        raise WorkspaceMissionSetupError("proposal lacks a mission body")
+    actor_ref = _text(actor_ref, "actor_ref")
+    if _HUMAN.fullmatch(actor_ref) is None:
+        raise WorkspaceMissionSetupError("actor_ref must use the human: namespace")
+    foundation = dict(method_foundation)
+    methods = foundation.get("methods")
+    if not isinstance(methods, Mapping):
+        raise WorkspaceMissionSetupError("method foundation lacks methods")
+    body = dict(proposal["mission_body"])
+    industry_ref = _text(body.get("industry_ref"), "industry_ref")
+    digest = _text(proposal.get("content_hash"), "proposal.content_hash")
+    suffix = digest[:24]
+
+    playbook_spec = methods.get("playbook")
+    playbook_binding = (playbook_spec.get("binding")
+                        if isinstance(playbook_spec, Mapping) else None)
+    if not isinstance(playbook_binding, Mapping):
+        raise WorkspaceMissionSetupError("method foundation lacks playbook authority binding")
+    playbook = read_exact_playbook_version(store.connection, playbook_binding.get("ref"))
+    if playbook["content_hash"] != playbook_binding.get("hash"):
+        raise WorkspaceMissionSetupError("method foundation playbook binding differs")
+
+    driver_spec = methods.get("driver_pack_template")
+    driver_value = driver_spec.get("value") if isinstance(driver_spec, Mapping) else None
+    if not isinstance(driver_value, Mapping):
+        raise WorkspaceMissionSetupError("method foundation lacks driver pack template value")
+    template_hash = driver_spec.get("content_hash")
+    if template_hash != content_hash(driver_value):
+        raise WorkspaceMissionSetupError("driver pack template content hash differs")
+    required_driver_fields = {"drivers", "metric_specs", "thesis_templates"}
+    if not required_driver_fields.issubset(driver_value):
+        raise WorkspaceMissionSetupError("driver pack template is incomplete")
+
+    mission_budget = dict(body.get("budget", {}))
+    agenda = AgendaStore(store)
+    mandate_ref = f"mandate:first-mission:{suffix}"
+    mandate = agenda.create_mandate(
+        mandate_ref, objective=_text(body.get("objective"), "objective"),
+        scope_refs=[industry_ref], constraints={"research_budget": mission_budget},
+        success_criteria={"deliverables": list(body.get("deliverables", [])),
+                          "research_questions": list(body.get("research_questions", []))},
+        effective_from="1970-01-01T00:00:00.000000+00:00", effective_until=None,
+        actor_ref=actor_ref, activate=True,
+        version_id=f"mandate-version:first-mission:{suffix}:1",
+        idempotency_key=f"workspace-first-mission:{digest}:mandate",
+    )
+    pack = CoverageAdmissionAuthority(store).register_driver_pack(
+        f"driver-pack:first-mission:{suffix}", industry_ref=industry_ref,
+        title=f"{body['title']} Driver Pack",
+        drivers=list(driver_value["drivers"]),
+        metric_specs=list(driver_value["metric_specs"]),
+        thesis_templates=list(driver_value["thesis_templates"]), actor_ref=actor_ref,
+        version_id=f"driver-pack-version:first-mission:{suffix}:1",
+        prior_version_ref=None,
+        idempotency_key=f"workspace-first-mission:{digest}:driver-pack",
+    )
+    method_spec = methods.get("constitution_method")
+    method = method_spec.get("value") if isinstance(method_spec, Mapping) else None
+    if not isinstance(method, Mapping) or method_spec.get("content_hash") != content_hash(method):
+        raise WorkspaceMissionSetupError("constitution method template differs")
+    policy = store.active_policy_version()
+    constitution = ResearchConstitutionAuthority(store).publish_constitution(
+        f"constitution:first-mission:{suffix}", industry_ref=industry_ref,
+        title=f"{body['title']} Research Constitution",
+        bindings={
+            "mandate_version": {"ref": mandate["id"], "hash": mandate["content_hash"]},
+            "driver_pack_version": {"ref": pack["id"], "hash": pack["content_hash"]},
+            "governance_policy_version": {"ref": policy.id, "hash": policy.content_hash},
+            "doctrine_pack_version": None, "weekly_brief_plan": None,
+        }, method=method, actor_ref=actor_ref,
+        version_id=f"constitution-version:first-mission:{suffix}:1",
+        prior_version_ref=None,
+        idempotency_key=f"workspace-first-mission:{digest}:constitution",
+    )
+    return {
+        "playbook_version": {"ref": playbook["id"], "hash": playbook["content_hash"]},
+        "constitution_version": {"ref": constitution["id"], "hash": constitution["content_hash"]},
+        "mandate_version": {"ref": mandate["id"], "hash": mandate["content_hash"]},
+    }
+
+
+def publish_first_mission_to_store(
+    store: Any, workspace: WorkspacePaths, *, proposal: Mapping[str, Any],
+    proposal_hash: str, actor_ref: str,
+    method_foundation: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Production entry point used by the owner-only writer operation."""
+    foundation = _foundation(method_foundation, workspace)
+    if proposal.get("method_foundation_hash") != foundation["content_hash"]:
+        raise WorkspaceMissionSetupError("proposal method foundation binding differs")
+    authority = CoverageMissionAuthority(store)
+    return publish_first_mission(
+        workspace, proposal=proposal, proposal_hash=proposal_hash,
+        actor_ref=actor_ref, authority=authority,
+        prepare_bindings=lambda candidate, actor: prepare_first_mission_bindings(
+            store, method_foundation=foundation, proposal=candidate,
+            actor_ref=actor),
     )

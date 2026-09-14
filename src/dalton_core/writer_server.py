@@ -409,7 +409,7 @@ HUMAN_GOVERNANCE_OPERATIONS = frozenset({
     "publish_forecast_line", "get_forecast_line", "extend_growth_forecast",
     "publish_research_playbook", "get_research_playbook",
     "get_active_research_playbook", "research_playbook_report",
-    "create_coverage_mission", "get_coverage_mission",
+    "create_coverage_mission", "publish_first_workspace_mission", "get_coverage_mission",
     "get_active_coverage_mission", "record_mission_stage",
     "coverage_mission_progress", "coverage_mission_stage_records",
     "reconcile_forecasts", "forecast_reconciliations",
@@ -585,7 +585,7 @@ CORE_OPERATION_LITERALS = frozenset({
     "publish_forecast_line", "get_forecast_line", "extend_growth_forecast",
     "publish_research_playbook", "get_research_playbook",
     "get_active_research_playbook", "research_playbook_report",
-    "create_coverage_mission", "get_coverage_mission",
+    "create_coverage_mission", "publish_first_workspace_mission", "get_coverage_mission",
     "get_active_coverage_mission", "record_mission_stage",
     "coverage_mission_progress", "coverage_mission_stage_records",
     "propose_model_input", "get_model_input_candidate",
@@ -819,6 +819,10 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     "get_active_research_playbook": frozenset({"playbook_ref"}),
     "research_playbook_report": frozenset(),
     "create_coverage_mission": frozenset({"mission_ref", "title", "objective", "industry_ref", "universe", "research_questions", "deliverables", "source_plan", "bindings", "autonomy", "budget", "actor_ref", "version_id", "prior_version_ref", "idempotency_key"}),
+    "publish_first_workspace_mission": frozenset({
+        "workspace_manifest", "method_foundation", "proposal", "proposal_hash",
+        "actor_ref",
+    }),
     "get_coverage_mission": frozenset({"version_id"}),
     "get_active_coverage_mission": frozenset({"mission_ref"}),
     "record_mission_stage": frozenset({"mission_version_ref", "mission_version_hash", "company_ref", "stage_ref", "status", "evidence_refs", "rationale", "actor_ref", "idempotency_key"}),
@@ -1059,6 +1063,7 @@ OPERATION_ACTOR_FIELDS: dict[str, str] = {
     "publish_doctrine_pack": "actor_ref",
     "publish_research_playbook": "actor_ref",
     "create_coverage_mission": "actor_ref",
+    "publish_first_workspace_mission": "actor_ref",
     "resolve_mission_document_review": "actor_ref",
     "reopen_mission_document_review": "actor_ref",
     "mission_document_evidence": "actor_ref",
@@ -3011,6 +3016,17 @@ class WriterServer:
         values = dict(p)
         mission_ref = values.pop("mission_ref")
         return self.coverage_mission.create_mission(mission_ref, **values)
+
+    def _op_publish_first_workspace_mission(self, p: Mapping[str, Any]) -> Any:
+        from .workspace import WorkspacePaths
+        from .workspace_mission_setup import publish_first_mission_to_store
+
+        workspace = WorkspacePaths.from_manifest(p["workspace_manifest"])
+        return publish_first_mission_to_store(
+            self.store, workspace, proposal=p["proposal"],
+            proposal_hash=p["proposal_hash"], actor_ref=p["actor_ref"],
+            method_foundation=p["method_foundation"],
+        )
 
     def _op_get_coverage_mission(self, p: Mapping[str, Any]) -> Any:
         return self.coverage_mission.mission(**dict(p))
