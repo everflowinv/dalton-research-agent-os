@@ -277,7 +277,7 @@ class CockpitLanguageTests(unittest.TestCase):
         self.assertIn('FINAL_RESEARCH_REQUIRED&&!Object.prototype.hasOwnProperty.call(UI_TEXT,value)', text)
         self.assertIn('正文正在检查文字表达，完成后会显示。', text)
         for field in (
-            'finalResearchText(x.because)',
+            'readableEventJudgement(x.because)', 'const shown=finalResearchText(value);',
             'finalResearchText(r.what_we_expected)', 'finalResearchText(r.what_happened)',
         ):
             self.assertIn(field, text)
