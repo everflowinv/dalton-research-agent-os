@@ -159,6 +159,21 @@ class HtmlRenderTests(unittest.TestCase):
         self.assertIn('结构化数据', page)
         self.assertIn('Accenture plc reported Revenues of USD 18718144000', page)
 
+    def test_exact_s6_titles_are_readable_and_original_title_stays_in_details(self):
+        mission, lib = self.fixture()
+        expected = 'S6 估值（市场预期、估值框架、事件路径、IRR）'
+        for raw in (
+            'S6 估值（street 预期、框架、event pathway、IRR）',
+            'S6 估值（street预期、框架、事件路径、IRR）',
+        ):
+            lib['products'][0]['sections'][0]['title'] = raw
+            page = render_research_html(lib, mission=mission)
+            normal, details = page.split('<details class="refs">', 1)
+            self.assertIn(expected, normal)
+            self.assertNotIn(raw, normal)
+            self.assertIn('章节标题原始记录', details)
+            self.assertIn(raw, details)
+
     def test_free_english_gap_is_not_partially_translated(self):
         mission, lib = self.fixture()
         raw = 'Margin outlook unknown because bookings remain unclear'

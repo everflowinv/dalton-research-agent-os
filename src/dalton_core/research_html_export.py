@@ -181,6 +181,10 @@ def _section_title(value: Any) -> str:
         "核心Thesis（简版）": "核心投资逻辑（简版）",
         "S4 风险与 Anti-thesis（简版）": "S4 风险与反向观点（简版）",
         "S4 风险与Anti-thesis（简版）": "S4 风险与反向观点（简版）",
+        "S6 估值（street 预期、框架、event pathway、IRR）":
+            "S6 估值（市场预期、估值框架、事件路径、IRR）",
+        "S6 估值（street预期、框架、事件路径、IRR）":
+            "S6 估值（市场预期、估值框架、事件路径、IRR）",
     }
     return replacements.get(text, text)
 
@@ -590,6 +594,8 @@ def render_research_html(
                          + _esc("\n".join(changed_gaps)) + '</code></details>')
         chunks = []
         for si, section in enumerate(product.get("sections") or [], 1):
+            raw_title = str(section.get("title") or "未命名章节")
+            shown_title = _section_title(raw_title)
             nums = section.get("numbers") or []
             refs = section.get("sources") or []
             number_rows = [(_period_label(n.get("period")), *_number_text(n, claims))
@@ -607,13 +613,15 @@ def render_research_html(
             technical_text = ", ".join(_source_text(ref) for ref in technical_refs) if technical_refs else "暂无来源"
             if original_templates:
                 technical_text += "\n结构化记录原文：\n" + "\n".join(original_templates)
+            if shown_title != raw_title:
+                technical_text += "\n章节标题原始记录：\n" + raw_title
             gap_rows = [(gap, _gap_text(gap)) for gap in (section.get("gaps") or [])]
             changed_gaps = [_gap_raw_text(raw) for raw, shown in gap_rows
                             if shown != _gap_raw_text(raw)]
             if changed_gaps:
                 technical_text += "\n待补项原始记录：\n" + "\n".join(changed_gaps)
             chunks.append(
-                f'<article><h3>{_esc(_section_title(section.get("title")))}</h3><p class="prose">{_esc(_display_metric_terms(section.get("body") or "暂无可核验内容"))}</p>{_chart(nums, claims, f"chart-{pi}-{si}", subject_ref=product.get("subject_ref")) if nums else ""}{("<div class=\"tablewrap\"><table><thead><tr><th>期间</th><th>结构化数据</th></tr></thead><tbody>"+table+"</tbody></table></div>") if table else ""}<details class="refs"><summary>技术详情与来源（{len(technical_refs)}）</summary><code>{_esc(technical_text)}</code></details><p class="gaps">待补资料：{_esc("；".join(shown for _, shown in gap_rows) or "当前未记录待补项")}</p></article>'
+                f'<article><h3>{_esc(shown_title)}</h3><p class="prose">{_esc(_display_metric_terms(section.get("body") or "暂无可核验内容"))}</p>{_chart(nums, claims, f"chart-{pi}-{si}", subject_ref=product.get("subject_ref")) if nums else ""}{("<div class=\"tablewrap\"><table><thead><tr><th>期间</th><th>结构化数据</th></tr></thead><tbody>"+table+"</tbody></table></div>") if table else ""}<details class="refs"><summary>技术详情与来源（{len(technical_refs)}）</summary><code>{_esc(technical_text)}</code></details><p class="gaps">待补资料：{_esc("；".join(shown for _, shown in gap_rows) or "当前未记录待补项")}</p></article>'
             )
         if not chunks:
             chunks = [
