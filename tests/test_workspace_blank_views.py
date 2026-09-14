@@ -55,6 +55,12 @@ class BlankViewsTests(unittest.TestCase):
         self.assertNotIn('socket_path', json.dumps(models))
         self.assertNotIn('credential_slot', json.dumps(sources))
 
+    def test_empty_research_pages_are_readable(self):
+        self.assertEqual(self.plane.approvals()['count'], 0)
+        self.assertEqual(self.plane.log()['events'], [])
+        self.assertEqual(self.plane.claims()['total'], 0)
+        self.assertFalse(self.plane.cycle_reflection()['available'])
+
     def test_first_goal_is_saved_once_without_model_or_mission(self):
         with patch.object(self.plane, '_model_instance', side_effect=AssertionError('no model calls')):
             one = self.plane._initial_goal_draft('owner@example.com', '研究新的行业', 'test-request')

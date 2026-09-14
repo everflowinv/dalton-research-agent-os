@@ -4350,7 +4350,10 @@ class CockpitPlane:
     def log(self, *, since: str | None = None, limit: int = 150) -> dict[str, Any]:
         limit = max(1, min(int(limit), 500))
         with self._core() as core:
-            mission = self._mission(core)
+            try:
+                mission = self._mission(core)
+            except CockpitMissionMissing:
+                return {"as_of": _iso(self.clock()), "events": [], "service_state": "awaiting_mission", "last_tick_at": None}
             members = self._members(mission)
             claims = self._claims(core)
             reviews = core.execute(
@@ -4453,7 +4456,10 @@ class CockpitPlane:
     def approvals(self) -> dict[str, Any]:
         items: list[dict[str, Any]] = []
         with self._core() as core:
-            mission = self._mission(core)
+            try:
+                mission = self._mission(core)
+            except CockpitMissionMissing:
+                return {"as_of": _iso(self.clock()), "items": [], "count": 0}
             members = self._members(mission)
             for row in self._rows(core,
                 "SELECT c.* FROM thesis_admission_candidates c LEFT JOIN thesis_admission_decisions d "
@@ -5112,7 +5118,14 @@ class CockpitPlane:
         if company_ref is not None:
             company_ref = _text(company_ref, "company_ref", maximum=512)
         with self._core() as core:
-            mission = self._mission(core)
+            try:
+                mission = self._mission(core)
+            except CockpitMissionMissing:
+                return {"as_of": _iso(self.clock()), "indexed": True, "total": 0,
+                        "returned_count": 0, "next_cursor": None, "items": [], "companies": [],
+                        "filters": {"company_ref": company_ref, "aspect": index_aspect,
+                                    "importance": importance, "canonical_only": canonical_only},
+                        "vocabulary": {"aspects": [], "importance": []}}
             members = self._members(mission)
             rows = self._claims(core)
             if company_ref is not None:
@@ -5859,7 +5872,11 @@ class CockpitPlane:
         """Q2: 每周回头看 -- the latest week's "我们把时间花在哪"."""
 
         with self._core() as core:
-            mission = self._mission(core)
+            try:
+                mission = self._mission(core)
+            except CockpitMissionMissing:
+                return {"as_of": _iso(self.clock()), "available": False,
+                        "reason": "本环境尚未开始研究，暂无每周复盘"}
             if not _table_exists(core, "research_cycle_reflection_versions"):
                 return {"as_of": _iso(self.clock()), "available": False,
                         "reason": "这个 Core 还没有写过每周回头看"}
