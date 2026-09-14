@@ -19,6 +19,7 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from unittest import mock
 from datetime import datetime, timezone
 from contextlib import closing
 from pathlib import Path
@@ -843,6 +844,26 @@ class WeeklyLookBackTests(Int2Case):
 
 
 class BudgetPoolTests(Int2Case):
+    def test_historical_rejection_does_not_claim_a_pool_with_balance_is_empty(self) -> None:
+        names = ("coverage", "event_response", "adhoc", "maintenance")
+        entries = {name: {
+            "cap_micros": 50_000_000, "spent_micros": 17_000_000,
+            "remaining_micros": 33_000_000, "borrowed_micros": 0,
+            "borrowed_from": {}, "lent_micros": 0,
+            "exhausted": name == "event_response",
+        } for name in names}
+        fake = {"day": "2026-09-14", "pools": entries,
+                "caps_defaulted": False, "borrow_open": False,
+                "unpooled_micros": 0, "exhausted_lane_count": 1,
+                "exhausted_lanes": []}
+        with mock.patch("dalton_core.budget_pools.pool_status", return_value=fake):
+            result = self.plane._pools(self.mission, "2026-09-14")
+        event = next(row for row in result["pools"]
+                     if row["pool"] == "event_response")
+        self.assertFalse(event["exhausted"])
+        self.assertTrue(event["had_rejections"])
+        self.assertIn("当前仍有余额", event["note"])
+
     def test_a_ledger_from_before_the_pools_shows_no_pool_panel(self) -> None:
         # A day ledger installed before C2 has no ``pool`` column at all; the
         # page must degrade to no panel rather than raise.

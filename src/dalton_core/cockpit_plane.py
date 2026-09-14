@@ -211,6 +211,8 @@ LANE_STATUS_NOTES = {
     "terminal": "本次任务已结束，需更新资料或条件后再重新运行",
     "recovery_required": "上次执行留下待恢复事项，本轮未继续处理",
     "duplicate": "已有相同结果，无需重复生成",
+    "dispatched": "本轮任务已派发处理",
+    "irrelevant": "当前没有需要处理的事项",
 }
 # The lanes the registry knows about, named for the owner. A lane with no name
 # here still appears -- silence about a lane is exactly what this panel exists
@@ -3535,18 +3537,26 @@ class CockpitPlane:
         pools = []
         for name in POOL_NAMES:
             entry = status["pools"][name]
+            remaining = int(entry["remaining_micros"])
+            currently_exhausted = remaining <= 0
+            had_rejections = bool(entry["exhausted"])
             pools.append({
                 "pool": name, "label": POOL_LABELS.get(name, name),
                 "cap_usd": round(entry["cap_micros"] / 1_000_000, 4),
                 "spent_usd": round(entry["spent_micros"] / 1_000_000, 4),
-                "remaining_usd": round(entry["remaining_micros"] / 1_000_000, 4),
+                "remaining_usd": round(remaining / 1_000_000, 4),
                 "borrowed_usd": round(entry["borrowed_micros"] / 1_000_000, 4),
                 "borrowed_from": [POOL_LABELS.get(key, key)
                                   for key in entry["borrowed_from"]],
                 "lent_usd": round(entry["lent_micros"] / 1_000_000, 4),
-                "exhausted": entry["exhausted"],
-                "note": ("这一池今天已经用完，剩下的请求会被拒" if entry["exhausted"]
-                         else None),
+                "exhausted": currently_exhausted,
+                "had_rejections": had_rejections,
+                "note": (
+                    "这一池今天已经没有余额，新的请求会被拒"
+                    if currently_exhausted else
+                    "今天曾有请求因当时预算准入不足而未执行；当前仍有余额"
+                    if had_rejections else None
+                ),
             })
         return {
             "day": status["day"], "pools": pools,
@@ -4143,6 +4153,11 @@ class CockpitPlane:
                 continue
             status = str(result.get("status") or "idle")
             detail = str(result.get("reason") or "")
+            if status.startswith("unavailable:"):
+                raw_status = status
+                status = "unavailable"
+                detail = (f"{detail}；原始状态：{raw_status}"
+                          if detail else f"原始状态：{raw_status}")
             note = LANE_STATUS_NOTES.get(status)
             record = self._lane_governance_record(spec, context)
             if record is not None and record in governance and governance[record] != "approved":

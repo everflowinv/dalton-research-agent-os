@@ -447,7 +447,8 @@ const ENUM_LABELS={
   idle:"待命",ready:"就绪",paused:"已暂停",ungranted:"未获授权",
   unconfigured:"尚未配置",unapproved:"等待批准",unstarted:"尚未运行",busy:"运行中",
   launched:"运行中",budget_exhausted:"预算已用完",terminal:"本次任务已结束",
-  recovery_required:"需要恢复后继续",duplicate:"已有相同结果"
+  recovery_required:"需要恢复后继续",duplicate:"已有相同结果",
+  dispatched:"本轮已派发处理",irrelevant:"当前无需处理"
 };
 function enumLabel(value,fallback="状态暂不可读"){return ENUM_LABELS[value]||fallback}
 function looksTechnical(value){return typeof value==="string"&&(/(?:[a-z][a-z0-9_-]+:)[a-z0-9:._-]{8,}|\b[A-Z][A-Z0-9_]{3,}\b|Traceback|Error:|\/Users\/|\/private\//i.test(value))}
@@ -750,7 +751,7 @@ function renderOverview(o){
     if(p.borrowed_usd)c.append(node("small",`向${p.borrowed_from.join("、")}借了 $${p.borrowed_usd}`,"raw"));
     if(p.note)c.append(node("small",p.note,"raw"));d.append(c);return d}));
     $("pools-note").textContent=displayText([pools.caps_note,pools.borrow_note,
-      pools.exhausted_lane_count?`今天有 ${pools.exhausted_lane_count} 次请求因对应预算池额度用尽而未执行`:""].filter(Boolean).join(" · "))}
+      pools.exhausted_lane_count?`今天有 ${pools.exhausted_lane_count} 次请求曾因当时预算准入不足而未执行`:""].filter(Boolean).join(" · "))}
   /* Q2 asked for this and could not have it: the driver's summary used to be
      overwritten every tick. It has a ledger now. */
   const tk=o.activity.ticks;

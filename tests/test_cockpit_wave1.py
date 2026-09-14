@@ -667,6 +667,18 @@ class LaneVocabularyTests(Wave1Case):
         self.assertEqual(row["note"], "配置正常，本轮没有待办")
         self.assertIn("recently_current", row["detail"])
 
+    def test_typed_dispatch_and_compound_unavailable_are_readable(self) -> None:
+        dispatched = self.lanes({"sales_notes_feed": {
+            "status": "dispatched", "reason": "outcomes=50",
+        }})["lane:sales_notes_feed"]
+        self.assertEqual(dispatched["note"], "本轮任务已派发处理")
+        unavailable = self.lanes({"company_wiki_feed": {
+            "status": "unavailable:RemoteError", "reason": "timeout",
+        }})["lane:company_wiki_feed"]
+        self.assertEqual(unavailable["status"], "unavailable")
+        self.assertEqual(unavailable["note"], "本轮无法取得所需资料或依赖")
+        self.assertIn("unavailable:RemoteError", unavailable["detail"])
+
     def test_guidepoint_mission_refusal_is_not_presented_as_idle(self) -> None:
         row = self.lanes({"guidepoint_discovery": {
             "status": "idle",
