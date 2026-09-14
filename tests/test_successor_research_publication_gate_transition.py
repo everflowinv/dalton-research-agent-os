@@ -13,6 +13,9 @@ from scripts.prepare_successor_config_transition import (
 )
 from tests.test_successor_config_transition import PreserveExistingTransitionTests
 from scripts.run_successor_copied_state_rehearsal import derive_confined_transition
+from scripts.execute_successor_stopped_window_candidate import (
+    SuccessorExecuteError, validate_publication_gate_rehearsal,
+)
 
 def write(path:Path,value:dict)->None:
     path.write_text(json.dumps(value,indent=2)+"\n");os.chmod(path,0o600)
@@ -41,6 +44,26 @@ class GateTransitionTests(unittest.TestCase):
         self.assertEqual('rolled_back',rollback(packet_root=self.packet,state_dir=self.state,transition=self.transition)['status'])
         self.assertEqual(0o600,(self.state/'research-publication-worker-config.json').stat().st_mode&0o777)
         self.assertEqual('already_rolled_back',rollback(packet_root=self.packet,state_dir=self.state,transition=self.transition)['status'])
+
+    def test_packet_preflight_gate_branch_closes_exact_rehearsal_proof(self):
+        import hashlib
+        before, after = expected_state(self.packet, self.transition)
+        transition = {
+            "research_publication_gate_transition": self.transition}
+        proof = {
+            "before_sha256": hashlib.sha256(before).hexdigest(),
+            "after_sha256": hashlib.sha256(after).hexdigest(),
+            "successor": self.transition["successor"],
+        }
+        validate_publication_gate_rehearsal(
+            self.packet, transition,
+            {"results": {"research_publication_gate_transition": proof}})
+        proof["after_sha256"] = "0" * 64
+        with self.assertRaisesRegex(
+                SuccessorExecuteError, "does not prove publication gate"):
+            validate_publication_gate_rehearsal(
+                self.packet, transition,
+                {"results": {"research_publication_gate_transition": proof}})
     def test_rejects_non_gate_change_and_cas_drift(self):
         changed=config('foundation-r25b','b'*40);changed['workers']=8;write(self.after,changed)
         with self.assertRaisesRegex(ResearchPublicationGateTransitionError,'only publication gate'):

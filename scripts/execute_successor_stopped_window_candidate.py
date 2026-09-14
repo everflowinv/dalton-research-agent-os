@@ -91,6 +91,22 @@ def canonical_hash(value: Any) -> str:
         + "\n").encode()).hexdigest()
 
 
+def validate_publication_gate_rehearsal(packet: Path,
+                                        transition: Mapping[str, Any],
+                                        binding: Mapping[str, Any]) -> None:
+    """Close the 0.8 copied-state proof over its exact gate artifacts."""
+    from scripts.successor_research_publication_gate_transition import expected_state
+    gate = transition["research_publication_gate_transition"]
+    before_gate, after_gate = expected_state(packet, gate)
+    proof = binding.get("results", {}).get(
+        "research_publication_gate_transition")
+    need(proof == {
+        "before_sha256": hashlib.sha256(before_gate).hexdigest(),
+        "after_sha256": hashlib.sha256(after_gate).hexdigest(),
+        "successor": gate["successor"],
+    }, "copied-state rehearsal does not prove publication gate update")
+
+
 def verify_provider_plugin_for_config(snapshot_path: Path,
                                       openclaw_sha256: str) -> str:
     """Verify the existing provider tree against an explicit config state."""
@@ -383,15 +399,7 @@ def packet_preflight(packet: Path) -> tuple[dict[str, Any], dict[str, Path]]:
              and proof["worker_run_once"].get("provider_calls") == 0,
              "copied-state rehearsal does not prove research publication files")
     if transition.get("schema_version") == RESEARCH_PUBLICATION_GATE_SCHEMA_VERSION:
-        from scripts.successor_research_publication_gate_transition import expected_state
-        before_gate, after_gate = expected_state(
-            packet, transition["research_publication_gate_transition"])
-        proof = binding.get("results", {}).get("research_publication_gate_transition")
-        need(proof == {
-            "before_sha256": sha256_bytes(before_gate),
-            "after_sha256": sha256_bytes(after_gate),
-            "successor": transition["research_publication_gate_transition"]["successor"],
-        }, "copied-state rehearsal does not prove publication gate update")
+        validate_publication_gate_rehearsal(packet, transition, binding)
     if transition.get("schema_version") in PRESERVE_SCHEMA_VERSIONS:
         service_before, service_after = expected_service_transition_state(
             packet_root=packet, manifest=transition)
