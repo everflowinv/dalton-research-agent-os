@@ -43,11 +43,24 @@ def count_recent_alphaengine_calls(
 ) -> int:
     now = as_of or _utcnow()
     window_start = (now - TRAILING_WINDOW).isoformat(timespec="microseconds")
+    now_text = now.isoformat(timespec="microseconds")
     placeholders = ",".join("?" for _ in ALPHAENGINE_PROFILE_REFS)
     row = connection.execute(
-        "SELECT COUNT(*) FROM connector_invocations "
-        f"WHERE connector_profile_ref IN ({placeholders}) AND created_at >= ?",
-        (*ALPHAENGINE_PROFILE_REFS, window_start),
+        "SELECT ("
+        "SELECT COUNT(*) FROM connector_physical_attempts a "
+        "JOIN connector_invocations i ON i.connector_invocation_id=a.connector_invocation_ref "
+        f"WHERE i.connector_profile_ref IN ({placeholders}) AND a.started_at >= ?"
+        ") + ("
+        "SELECT COUNT(*) FROM connector_quota_reservations r "
+        "JOIN connector_invocations i ON i.connector_invocation_id=r.connector_invocation_ref "
+        "LEFT JOIN connector_physical_attempts a ON a.reservation_ref=r.reservation_id "
+        f"WHERE i.connector_profile_ref IN ({placeholders}) AND r.created_at >= ? "
+        "AND a.physical_attempt_id IS NULL AND r.expires_at > ? AND r.window_ends_at > ? "
+        "AND NOT EXISTS (SELECT 1 FROM connector_quota_settlements s "
+        "WHERE s.reservation_ref=r.reservation_id)"
+        ")",
+        (*ALPHAENGINE_PROFILE_REFS, window_start,
+         *ALPHAENGINE_PROFILE_REFS, window_start, now_text, now_text),
     ).fetchone()
     return int(row[0])
 
