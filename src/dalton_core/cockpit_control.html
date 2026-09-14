@@ -718,8 +718,11 @@ function renderOverview(o){
     $("plan-inquiries-block").hidden=!plan.inquiries.length;
     $("plan-inquiries").replaceChildren(...plan.inquiries.map(q=>{
       const li=node("li");
+      const original=displayText(q.wants);
+      const wants=original.replaceAll("需要接通公司投资者关系来源，或提供经批准获取的对应原始公告。","可通过公司官网的投资者关系页面查找对应原始公告。");
       li.append(node("div",`${displayText(q.subject)}：${displayText(q.question)}`),
-                node("div",`需要核实：${displayText(q.wants)}`,"hint"));
+                node("div",`需要核实：${wants}`,"hint"));
+      if(wants!==original)li.append(technicalDetails({original_text:q.wants}));
       return li}));
     $("plan-when").textContent=`建议生成于 ${fmtDate(plan.decided_at)}`+
       (plan.stopped?` · ${plan.stopped} 项建议暂停`:"");
