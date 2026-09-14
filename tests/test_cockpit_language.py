@@ -299,6 +299,8 @@ class CockpitLanguageTests(unittest.TestCase):
 
     def test_reviewed_period_display_preserves_urls_code_and_brand_names(self) -> None:
         from dalton_core.research_gap_display import display_metadata_text
+        self.assertEqual(display_metadata_text("FY26/FY27；Audi Q4；本季 Q4"),
+                         "2026财年/2027财年；Audi Q4；本季 第四季度")
         raw = "路径 https://example.test/FY2026/Q1；`FY2026 Q1`；Audi Q4；本季 Q4"
         self.assertEqual(
             display_metadata_text(raw),

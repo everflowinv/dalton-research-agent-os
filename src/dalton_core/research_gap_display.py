@@ -140,7 +140,7 @@ def _display_embedded_periods(part: str) -> str:
     def replace(match: re.Match[str]) -> str:
         raw = match.group(0)
         if (re.fullmatch(r"Q[1-4]", raw, re.IGNORECASE)
-                and re.search(r"[A-Za-z][A-Za-z0-9.-]*\s+$", part[:match.start()])):
+                and re.search(r"[A-Za-z][A-Za-z0-9.-]*\s+$", match.string[:match.start()])):
             return raw
         fiscal_quarter = re.fullmatch(
             r"(?:(FY|CY)((?:20)?\d{2})\s+Q([1-4])|Q([1-4])\s+(FY|CY)((?:20)?\d{2}))",
