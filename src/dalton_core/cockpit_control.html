@@ -544,7 +544,7 @@ function readableReflectionAuthority(value){
 function displayMissionText(value){
   if(typeof value!=="string")return value;
   return displayText(value)
-    .replace(/^US IT Services 首次覆盖任务 v(\d+)$/,"美国 IT 服务行业首次覆盖任务（v$1）")
+    .replace(/^US IT Services 首次覆盖任务 v\d+$/,"美国 IT 服务行业首次覆盖任务")
     .replaceAll("初筛（Initial Screen）","初步筛查报告")
     .replaceAll("投资逻辑（Thesis）","投资论点")
     .replaceAll("variant view","差异化观点");
