@@ -202,6 +202,18 @@ class WorkspaceFirstMissionTests(unittest.TestCase):
         selected_plan = load_discovery_plan(_web_discovery_plan(self.workspace.state_dir))
         self.assertEqual(selected_plan["mission_ref"], mission["mission_ref"])
         self.assertEqual(set(selected_plan["companies"]), {"company:ticker:asml"})
+        from dalton_core.company_dossier import load_policy as load_dossier_policy
+        from dalton_core.industry_framework import load_policy as load_framework_policy
+        dossier = load_dossier_policy(self.workspace.state_dir / "p12a-dossier-policy-v1.json")
+        framework = load_framework_policy(
+            self.workspace.state_dir / "p12e-industry-framework-policy-v1.json")
+        self.assertTrue(dossier["causal_chain_maps"][0]["constitution_ref"].startswith(
+            "constitution:first-mission:"))
+        self.assertEqual(framework["causal_chain_titles"][0]["titles"],
+                         constitution_method()["causal_chain"])
+        rendered = json.dumps({"dossier": dossier, "framework": framework}).lower()
+        self.assertNotIn("us-it-services", rendered)
+        self.assertNotIn("acn", rendered)
         materialize_first_mission_discovery_plans(
             self.workspace, mission,
             sec_ticker_resolver=lambda ticker: {

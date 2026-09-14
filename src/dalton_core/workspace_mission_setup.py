@@ -416,6 +416,11 @@ def publish_first_mission_to_store(
             store, method_foundation=foundation, proposal=candidate,
             actor_ref=actor),
     )
+    constitution = ResearchConstitutionAuthority(store).constitution(
+        mission["bindings"]["constitution_version"]["ref"])
+    materialize_first_mission_output_policies(
+        workspace, mission=mission, constitution=constitution,
+        driver_pack=foundation["methods"]["driver_pack_template"]["value"])
     materialize_first_mission_discovery_plans(workspace, mission)
     return mission
 
@@ -432,6 +437,66 @@ def _atomic_json(path: Any, value: Mapping[str, Any]) -> None:
     finally:
         try: os.unlink(temporary_name)
         except FileNotFoundError: pass
+
+
+def materialize_first_mission_output_policies(
+    workspace: WorkspacePaths, *, mission: Mapping[str, Any],
+    constitution: Mapping[str, Any], driver_pack: Mapping[str, Any],
+) -> dict[str, str]:
+    """Bind generic dossier/framework policy shapes to the published method."""
+    from .company_dossier import causal_chain_hash, validate_policy as validate_dossier_policy
+    from .industry_framework import validate_policy as validate_framework_policy
+
+    method = constitution["method"]
+    chain = list(method["causal_chain"])
+    chain_hash = causal_chain_hash(chain)
+    constitution_ref = constitution["constitution_ref"]
+    rubric = list(method["output_rubric"]["criteria"])
+    suffix = mission["mission_ref"].split(":", 1)[-1]
+    dossier = validate_dossier_policy({
+        "schema_version": "0.1", "policy_ref": f"dossier-policy:{suffix}:v1",
+        "causal_chain_maps": [{
+            "constitution_ref": constitution_ref, "causal_chain_hash": chain_hash,
+            "sections": ["demand_drivers" for _ in chain],
+            "note": "The reusable method defines one observable-input chain; its links are presented in the demand-driver section without changing their text.",
+        }],
+        "output_rubric_bindings": [{
+            "criterion_hash": content_hash(str(criterion)), "check": None,
+            "reason": "This reusable criterion is evaluated by the bound verifier; no narrower structural check is asserted here.",
+        } for criterion in rubric],
+    })
+    framework = validate_framework_policy({
+        "schema_version": "0.1",
+        "policy_ref": f"industry-framework-policy:{suffix}:v1",
+        "causal_chain_titles": [{
+            "constitution_ref": constitution_ref, "causal_chain_hash": chain_hash,
+            "titles": chain,
+            "note": "Titles preserve the published reusable causal-chain text verbatim.",
+        }],
+        "driver_horizons": [{
+            "driver_ref": item["driver_ref"], "horizons": ["short_term", "long_term"],
+            "note": "The reusable driver remains visible at both horizons until mission evidence narrows it.",
+        } for item in driver_pack["drivers"]],
+        "gap_checklist": [{
+            "gap_ref": f"gap:{suffix}:mission-specific-evidence",
+            "label": "Mission-specific industry evidence",
+            "what_is_missing": "Evidence for the mission's causal links and driver metrics has not yet been collected.",
+            "content_kind": "primary_source", "driver_refs": [],
+            "cost_note": "Use only sources and budgets authorized by the CoverageMission.",
+            "blocks_links": list(range(len(chain))),
+        }],
+        "output_rubric_bindings": [{
+            "criterion_hash": content_hash(str(criterion)), "checks": [],
+            "reason": "This reusable criterion is evaluated by the bound verifier; no narrower structural check is asserted here.",
+        } for criterion in rubric],
+    })
+    paths = {
+        "dossier": workspace.state_dir / "p12a-dossier-policy-v1.json",
+        "industry_framework": workspace.state_dir / "p12e-industry-framework-policy-v1.json",
+    }
+    _atomic_json(paths["dossier"], dossier)
+    _atomic_json(paths["industry_framework"], framework)
+    return {key: str(value) for key, value in paths.items()}
 
 
 def materialize_first_mission_discovery_plans(
