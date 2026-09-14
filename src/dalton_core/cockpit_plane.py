@@ -1090,6 +1090,12 @@ def claim_period_display_label(value: Any) -> str | None:
     if not isinstance(value, str) or not value.strip():
         return None
     text = value.strip()
+    fiscal_years = re.fullmatch(
+        r"fiscal years ((?:19|20)\d{2}(?:,\s*(?:19|20)\d{2})*)"
+        r",?\s+and\s+((?:19|20)\d{2})", text, flags=re.IGNORECASE)
+    if fiscal_years:
+        years = re.findall(r"(?:19|20)\d{2}", fiscal_years[1])
+        return "、".join(years) + "及" + fiscal_years[2] + "财年"
     quarter = re.fullmatch(r"(?:(FY|CY))?(\d{4})Q([1-4])", text,
                            flags=re.IGNORECASE)
     if quarter:
