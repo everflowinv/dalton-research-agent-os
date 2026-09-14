@@ -132,12 +132,12 @@ class HtmlRenderTests(unittest.TestCase):
         self.assertIn("结构化数据序列：营业收入同比增速", page)
         self.assertIn("来源说明（保留原文）：revenue_yoy_growth $10B", page)
         self.assertNotIn("not_applicable", page)
-        self.assertNotIn("not_drafted_this_run", page)
         self.assertIn("缺少可比营业利润率（营业利润率）", page)
-        self.assertNotIn("operating_margin", page)
         self.assertIn("成本结构 与 单位经济性 尚缺数据", page)
-        self.assertNotIn("cost_structure", page)
-        self.assertNotIn("unit_economics", page)
+        self.assertIn("待补项原始记录", page)
+        for raw in ("not_drafted_this_run", "operating_margin",
+                    "cost_structure", "unit_economics"):
+            self.assertIn(raw, page)
         self.assertNotIn("<th>证据编号</th>", page)
         self.assertNotIn("<td><code>claim:1</code></td>", page)
         self.assertIn("技术详情与来源（2）", page)
@@ -155,8 +155,18 @@ class HtmlRenderTests(unittest.TestCase):
         self.assertIn('模型调用未成功', page)
         for shown in ('利用率', '利润率', '分部利润', '订单额'):
             self.assertIn(shown, page)
+        self.assertIn(section['gaps'][0], page)
         self.assertIn('结构化数据', page)
         self.assertIn('Accenture plc reported Revenues of USD 18718144000', page)
+
+    def test_free_english_gap_is_not_partially_translated(self):
+        mission, lib = self.fixture()
+        raw = 'Margin outlook unknown because bookings remain unclear'
+        lib['products'][0]['sections'][0]['gaps'] = [raw]
+        page = render_research_html(lib, mission=mission)
+        self.assertIn(f'待补资料：{raw}', page)
+        self.assertNotIn('利润率 outlook', page)
+        self.assertNotIn('订单额 remain', page)
 
     def test_sec_auto_template_is_chinese_display_with_raw_template_in_details(self):
         mission, lib = self.fixture()

@@ -360,7 +360,15 @@ def _gap_text(value: Any) -> str:
         )
     else:
         text = "未说明的待补项"
-    text = text.replace("the model call did not succeed", "模型调用未成功")
+    closed = gap_display_text(_display_reason(text))
+    # Free-form English may be quoted source prose.  Translating a metric in
+    # isolation produces a misleading half-English sentence, so only apply
+    # the metric vocabulary to closed machine reasons or Chinese prose.
+    known_machine = "the model call did not succeed" in text
+    if (closed == text and not known_machine
+            and re.search(r"[\u3400-\u9fff]", text) is None):
+        return text
+    text = closed.replace("the model call did not succeed", "模型调用未成功")
     # These occur inside a known missing-information field, not in quoted
     # source prose. Keep product and company names untouched.
     for source, shown in {
@@ -369,7 +377,16 @@ def _gap_text(value: Any) -> str:
     }.items():
         text = re.sub(rf"(?<![A-Za-z_]){re.escape(source)}(?![A-Za-z_])", shown,
                       text, flags=re.IGNORECASE)
-    return _display_metric_terms(gap_display_text(_display_reason(text)))
+    return _display_metric_terms(text)
+
+
+def _gap_raw_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, Mapping):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True,
+                          separators=(",", ":"))
+    return str(value)
 
 
 def _assets(asset_manifest: Mapping[str, Any] | None) -> list[dict[str, str]]:
@@ -495,7 +512,13 @@ def render_research_html(
         if product.get("reason"):
             head += f'<p class="unavailable">{_esc(_display_reason(product["reason"]))}</p>'
         if product.get("gaps"):
-            head += f'<p class="gaps">产物待补资料：{_esc("；".join(_gap_text(g) for g in product["gaps"]))}</p>'
+            product_gaps = [(gap, _gap_text(gap)) for gap in product["gaps"]]
+            head += f'<p class="gaps">产物待补资料：{_esc("；".join(shown for _, shown in product_gaps))}</p>'
+            changed_gaps = [_gap_raw_text(raw) for raw, shown in product_gaps
+                            if shown != _gap_raw_text(raw)]
+            if changed_gaps:
+                head += ('<details class="refs"><summary>查看待补项原始记录</summary><code>'
+                         + _esc("\n".join(changed_gaps)) + '</code></details>')
         chunks = []
         for si, section in enumerate(product.get("sections") or [], 1):
             nums = section.get("numbers") or []
@@ -515,8 +538,13 @@ def render_research_html(
             technical_text = ", ".join(_source_text(ref) for ref in technical_refs) if technical_refs else "暂无来源"
             if original_templates:
                 technical_text += "\n结构化记录原文：\n" + "\n".join(original_templates)
+            gap_rows = [(gap, _gap_text(gap)) for gap in (section.get("gaps") or [])]
+            changed_gaps = [_gap_raw_text(raw) for raw, shown in gap_rows
+                            if shown != _gap_raw_text(raw)]
+            if changed_gaps:
+                technical_text += "\n待补项原始记录：\n" + "\n".join(changed_gaps)
             chunks.append(
-                f'<article><h3>{_esc(_section_title(section.get("title")))}</h3><p class="prose">{_esc(_display_metric_terms(section.get("body") or "暂无可核验内容"))}</p>{_chart(nums, claims, f"chart-{pi}-{si}", subject_ref=product.get("subject_ref")) if nums else ""}{("<div class=\"tablewrap\"><table><thead><tr><th>期间</th><th>结构化数据</th></tr></thead><tbody>"+table+"</tbody></table></div>") if table else ""}<details class="refs"><summary>技术详情与来源（{len(technical_refs)}）</summary><code>{_esc(technical_text)}</code></details><p class="gaps">待补资料：{_esc("；".join(_gap_text(gap) for gap in (section.get("gaps") or [])) or "当前未记录待补项")}</p></article>'
+                f'<article><h3>{_esc(_section_title(section.get("title")))}</h3><p class="prose">{_esc(_display_metric_terms(section.get("body") or "暂无可核验内容"))}</p>{_chart(nums, claims, f"chart-{pi}-{si}", subject_ref=product.get("subject_ref")) if nums else ""}{("<div class=\"tablewrap\"><table><thead><tr><th>期间</th><th>结构化数据</th></tr></thead><tbody>"+table+"</tbody></table></div>") if table else ""}<details class="refs"><summary>技术详情与来源（{len(technical_refs)}）</summary><code>{_esc(technical_text)}</code></details><p class="gaps">待补资料：{_esc("；".join(shown for _, shown in gap_rows) or "当前未记录待补项")}</p></article>'
             )
         if not chunks:
             chunks = [
