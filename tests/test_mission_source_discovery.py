@@ -45,7 +45,10 @@ from dalton_core.mission_source_discovery import (
     load_discovery_plan,
     validate_discovery_plan,
 )
-from dalton_core.mission_source_discovery import _next_page_binding
+from dalton_core.mission_source_discovery import (
+    _failed_cursor_dispatch_exists,
+    _next_page_binding,
+)
 from dalton_core.observability import ObservabilityStore
 from dalton_core.raw_spool import RawSpool
 from dalton_core.runner_journal import RunnerJournal
@@ -784,6 +787,39 @@ class CoordinatorTests(unittest.TestCase):
         self.clock.advance(days=2)
         tick = self.coordinator.dispatch_once()
         self.assertEqual(tick["discovery"]["company_ref"], ACN)
+
+    def test_failed_expired_cursor_is_bound_to_exact_dispatch(self) -> None:
+        v1 = self.create_mission()
+        mission = self.mission_v2(v1)
+        authorization = self.missions.authorize_source_discovery(
+            company_ref=ACN, source_ref="source:alphaengine", requested_by=AUTOMATION,
+        )
+        parameters = build_discovery_parameters(
+            self.plan, spec_ref="earnings-call-transcripts", company_ref=ACN,
+            as_of=self.clock().date(), cursor="ae1:expired",
+        )
+        dispatch = self.missions.record_discovery_dispatch(
+            authorization=authorization, discovery_plan_ref=self.plan["id"],
+            discovery_plan_hash=self.plan["content_hash"],
+            spec_ref="earnings-call-transcripts",
+            query_hash=search_spec_hash(parameters),
+            ticket_ref="alphaengine-discovery:111111111111111111111111",
+        )
+        self.missions.settle_discovery_dispatch(
+            dispatch["dispatch_id"], status="failed", reason="cursor expired",
+        )
+        common = {
+            "mission_version_ref": mission["id"], "company_ref": ACN,
+            "source_ref": "source:alphaengine", "spec_ref": "earnings-call-transcripts",
+            "plan": self.plan, "discovery_created_at": dispatch["created_at"],
+        }
+        self.assertTrue(_failed_cursor_dispatch_exists(
+            self.h.core.connection, parameters=parameters, **common,
+        ))
+        self.assertFalse(_failed_cursor_dispatch_exists(
+            self.h.core.connection,
+            parameters={**parameters, "cursor": "ae1:different"}, **common,
+        ))
 
     def test_successful_search_below_floor_retries_after_short_interval(self) -> None:
         v1 = self.create_mission()

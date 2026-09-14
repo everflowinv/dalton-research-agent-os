@@ -635,6 +635,35 @@ def _next_page_binding(discovery: Mapping[str, Any], envelope: Mapping[str, Any]
     return {"cursor": cursor, "as_of": as_of}
 
 
+def _failed_cursor_dispatch_exists(
+    connection: Any, *, mission_version_ref: str, company_ref: str,
+    source_ref: str, spec_ref: str, plan: Mapping[str, Any],
+    parameters: Mapping[str, Any], discovery_created_at: str,
+) -> bool:
+    """Whether this exact cursor-bound request already failed after its page.
+
+    AlphaEngine cursors expire after fifteen minutes, while mission retries are
+    normally at least a day apart. Reusing a failed cursor can therefore make a
+    durable retry loop. The query hash keeps the reset scoped to the exact
+    request; unrelated transient failures do not discard pagination state.
+    """
+
+    if not parameters.get("cursor"):
+        return False
+    row = connection.execute(
+        "SELECT 1 FROM coverage_mission_discovery_dispatches "
+        "WHERE mission_version_ref=? AND company_ref=? AND source_ref=? "
+        "AND spec_ref=? AND discovery_plan_ref=? AND discovery_plan_hash=? "
+        "AND query_hash=? AND status='failed' AND updated_at>=? LIMIT 1",
+        (
+            mission_version_ref, company_ref, source_ref, spec_ref,
+            plan["id"], plan["content_hash"], discovery_query_hash(plan, parameters),
+            discovery_created_at,
+        ),
+    ).fetchone()
+    return row is not None
+
+
 # ---------------------------------------------------------------------------
 # launcher
 # ---------------------------------------------------------------------------
@@ -1882,6 +1911,20 @@ class MissionSourceDiscoveryCoordinator:
                 variant_index=index; break
         if variant_index is None:
             return None
+        if continuation is not None:
+            continued = build_discovery_parameters(
+                self.plan, spec_ref=spec_ref, company_ref=company_ref,
+                as_of=as_of, variant_index=variant_index,
+                missing_periods=missing_periods, cursor=continuation["cursor"],
+            )
+            if _failed_cursor_dispatch_exists(
+                self.store.connection,
+                mission_version_ref=mission_version_ref,
+                company_ref=company_ref, source_ref=self.source_ref,
+                spec_ref=spec_ref, plan=self.plan, parameters=continued,
+                discovery_created_at=discoveries[0]["created_at"],
+            ):
+                continuation = {"cursor": None, "as_of": as_of.isoformat()}
         requires_selection=spec.get('document_type')=='meeting_minutes'
         if requires_selection:
             if self.selection_launcher is None:
