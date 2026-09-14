@@ -1133,6 +1133,53 @@ class MissionDocumentResearchTests(unittest.TestCase):
         with self.assertRaises(MissionDocumentResearchExecutorError):
             executor.authorize_paid_contract_recovery(admission["id"], changed)
 
+    def test_owner_paid_recovery_extends_one_prior_generic_recovery(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        self._enable_recovery(fixture, maximum=2)
+        admission = authority.admit_from_plan(**args)
+        adapter = CapacityOnceAdapter({"schema_version": "0.1", "status": "answered"})
+        executor, _draft, _verifier = self._executor(
+            fixture, authority, draft_adapter=adapter)
+        # First failure is proved no-send.  The generic recovery is then sent,
+        # paid, and rejected by the output contract, matching live EPAM 6a2b.
+        for _ in range(20):
+            current = executor.run_once(admission["id"])
+            if current.get("reason") == "paid_send_output_contract_failed":
+                break
+        else:
+            self.fail("fixture did not reach paid rejection after generic recovery")
+        work, prior = executor_module._effective_stage(
+            authority, executor.scheduler, admission, 1,
+            worker=executor.draft_worker)
+        self.assertEqual(len(prior), 1)
+        formal = executor.scheduler.formal_result(work["id"])
+        body = {
+            "schema_version": "0.1",
+            "actor_ref": "operator:owner-authorized-document-recovery",
+            "admission_ref": admission["id"], "admission_hash": admission["content_hash"],
+            "stage_ordinal": 2, "failed_work_order_ref": work["id"],
+            "failed_work_order_hash": content_hash(work),
+            "formal_result_ref": _formal_ref(formal),
+            "formal_result_hash": _formal_hash(formal),
+            "max_fresh_work_orders": 1,
+            "max_cost_usd": work["budget"]["max_cost_usd"],
+            "authorized_at": (NOW + timedelta(minutes=1)).isoformat(),
+        }
+        authorization = {**body, "id":
+            "mission-document-paid-recovery-authorization:" + content_hash(body)[:32]}
+        authorization["content_hash"] = content_hash(authorization)
+        calls = adapter.calls
+        result = executor.authorize_paid_contract_recovery(
+            admission["id"], authorization)
+        self.assertEqual(result["model_calls"], 0)
+        self.assertEqual(adapter.calls, calls)
+        _work, links = executor_module._effective_stage(
+            authority, executor.scheduler, admission, 1,
+            worker=executor.draft_worker)
+        self.assertEqual(len(links), 2)
+        self.assertEqual(links[1]["prior_recovery_link_ref"], links[0]["id"])
+        self.assertEqual(links[1]["recovery_number"], 2)
+
     def test_sealed_historical_no_send_proof_admits_one_verifier_retry(self):
         fixture, authority, args, _registration, _launcher = self._fixture()
         self._enable_recovery(fixture, maximum=2)

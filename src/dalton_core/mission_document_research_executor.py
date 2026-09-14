@@ -1154,10 +1154,10 @@ def _read_recovery_link(
     if (canonical_json(wire) != row["record_json"]
             or canonical_json(wire) != canonical_json(expected)
             or any(wire.get(key) != value for key, value in columns.items())
-            or number > policy["max_fresh_work_orders"]
+            or (not owner_authorized and number > policy["max_fresh_work_orders"])
             or (not owner_authorized and prior is None and failed_formal_time is not None
                 and started != failed_formal_time)
-            or (prior is not None and wire.get("window_started_at")
+            or (not owner_authorized and prior is not None and wire.get("window_started_at")
                 != prior.get("window_started_at"))
             or (not owner_authorized and failed_formal_time is not None and created != max(
                 failed_formal_time + timedelta(seconds=policy["retry_backoff_seconds"]),
@@ -1165,7 +1165,7 @@ def _read_recovery_link(
                  + timedelta(days=1)) if proof.get("refusal_day") is not None
                 else failed_formal_time,
             ))
-            or (owner_authorized and (prior is not None or created != started
+            or (owner_authorized and (created != started
                                 or proof.get("authorization_ref") is None))
             or created < started
             or created >= allowed_deadline):
@@ -1902,8 +1902,7 @@ class MissionDocumentResearchExecutor:
             self.authority, self.scheduler, admission, index, worker=worker)
         if links:
             last = links[-1]
-            if (len(links) == 1
-                    and last.get("failure_proof", {}).get("authorization_ref")
+            if (last.get("failure_proof", {}).get("authorization_ref")
                     == authorization["id"]):
                 failed_row = self.scheduler.work_order_authority(
                     last["failed_work_order_ref"])
@@ -1917,8 +1916,10 @@ class MissionDocumentResearchExecutor:
                     failed_row["work_order"], last, worker)
                 return {"status": "admitted", "work_order_ref": work["id"],
                         "authorization_ref": authorization["id"], "model_calls": 0}
-            raise MissionDocumentResearchExecutorError(
-                "paid recovery target was already recovered")
+            if any(link.get("failure_proof", {}).get("classification")
+                   == "owner_authorized_paid_contract_retry" for link in links):
+                raise MissionDocumentResearchExecutorError(
+                    "paid recovery target was already owner-recovered")
         formal = self.scheduler.formal_result(work["id"])
         if (formal is None
                 or authorization.get("failed_work_order_ref") != work["id"]
@@ -1954,10 +1955,11 @@ class MissionDocumentResearchExecutor:
         }
         identity = {
             "admission_ref": admission["id"], "admission_hash": admission["content_hash"],
-            "stage_ordinal": index + 1, "recovery_number": 1,
+            "stage_ordinal": index + 1, "recovery_number": len(links) + 1,
             "failed_work_order_ref": work["id"],
             "failed_work_order_hash": content_hash(work),
-            "prior_recovery_link_ref": None, "prior_recovery_link_hash": None,
+            "prior_recovery_link_ref": None if not links else links[-1]["id"],
+            "prior_recovery_link_hash": None if not links else links[-1]["content_hash"],
             "policy_hash": content_hash(_recovery_policy(admission, index)),
             "window_started_at": authorization["authorized_at"],
             "failure_proof": proof,
@@ -2000,7 +2002,7 @@ class MissionDocumentResearchExecutor:
                 cur.execute(
                     "INSERT INTO mission_document_research_recovery_links "
                     "VALUES(?,?,?,?,?,?,?,?,?)",
-                    (link["id"], admission["id"], index + 1, 1, work["id"],
+                    (link["id"], admission["id"], index + 1, len(links) + 1, work["id"],
                      recovered["id"], canonical_json(link), link["content_hash"],
                      link["created_at"]),
                 )
@@ -2009,7 +2011,8 @@ class MissionDocumentResearchExecutor:
             raise MissionDocumentResearchExecutorError("paid recovery link conflicted")
         checked, checked_links = _effective_stage(
             self.authority, self.scheduler, admission, index, worker=worker)
-        if canonical_json(checked) != canonical_json(recovered) or checked_links != [link]:
+        if (canonical_json(checked) != canonical_json(recovered)
+                or checked_links != [*links, link]):
             raise MissionDocumentResearchExecutorError("paid recovery did not converge")
         return {"status": "admitted", "work_order_ref": recovered["id"],
                 "authorization_ref": authorization["id"], "model_calls": 0}
