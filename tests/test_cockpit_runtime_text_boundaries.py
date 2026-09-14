@@ -31,7 +31,7 @@ class CockpitRuntimeTextBoundariesTests(unittest.TestCase):
         program = "\n".join([
             "const UI_TEXT={};",
             "const FINAL_RESEARCH_REQUIRED=false;",
-            "const displayText=value=>value;",
+            "const displayText=value=>typeof value==='string' && Object.prototype.hasOwnProperty.call(UI_TEXT,value)?UI_TEXT[value]:value;",
             "const looksTechnical=value=>typeof value==='string' && /[a-z_]{4,}/.test(value);",
             *functions,
             f"console.log(JSON.stringify({expression}));",
@@ -54,6 +54,26 @@ class CockpitRuntimeTextBoundariesTests(unittest.TestCase):
         result = self._evaluate(f"readableLaneDetail({json.dumps(unknown)})")
         self.assertEqual(result["display"], "运行说明见技术详情。")
         self.assertEqual(result["technical"], unknown)
+
+    def test_reviewed_lane_translation_is_matched_before_raw_is_folded(self):
+        raw = "no source:prior-research lane on this writer"
+        mapped = "该写作者没有source:prior-research通道。"
+        expression = (
+            f"(Object.assign(UI_TEXT, {{{json.dumps(raw)}:{json.dumps(mapped)}}}),"
+            f" readableLaneDetail({json.dumps(raw)}))"
+        )
+        result = self._evaluate(expression)
+        self.assertEqual(result["display"], "尚未接入既有研究资料来源。")
+        self.assertEqual(result["technical"], raw)
+
+        reviewed = "配置正常，本轮没有待办。"
+        expression = (
+            f"(Object.assign(UI_TEXT, {{{json.dumps(raw)}:{json.dumps(reviewed)}}}),"
+            f" readableLaneDetail({json.dumps(raw)}))"
+        )
+        result = self._evaluate(expression)
+        self.assertEqual(result["display"], reviewed)
+        self.assertEqual(result["technical"], raw)
 
     def test_deep_insight_log_classification_is_translated_without_guessing_unknown(self):
         known = "深度认知门十二问草稿 v1，分类 turnaround，等待人裁决"

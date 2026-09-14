@@ -455,6 +455,7 @@ function technicalDetails(value,label="技术详情"){
 }
 function readableLaneDetail(value){
   if(typeof value!=="string"||!value)return {display:value,technical:null};
+  const shown=displayText(value);
   const rules=[
     [/^该写作者没有source:prior-research通道。$/,"尚未接入既有研究资料来源。"],
     [/^all_grants_refused；跳过原因：CoverageMissionConflict——任务配置将 source:guidepoint 标记为 尚未连接。$/,"专家访谈资料来源尚未连接。"],
@@ -464,10 +465,11 @@ function readableLaneDetail(value){
     [/^market_view_not_supported_by_cited_rows$/,"现有引用不足以支持这项市场判断。"],
     [/^company:[^： ]+：问题一将该分类定为 (?:insufficient_evidence|contract_compounder)，但其草稿所依据的档案将该分类定为 (?:insufficient_evidence|contract_compounder)。$/,"研究草稿与现有公司档案的分类不一致，需要复核。"],
   ];
-  const found=rules.find(([pattern])=>pattern.test(value));
+  const found=rules.find(([pattern])=>pattern.test(value)||pattern.test(shown));
   if(found)return {display:found[1],technical:value};
+  if(shown!==value)return {display:shown,technical:looksTechnical(value)?value:null};
   if(looksTechnical(value))return {display:"运行说明见技术详情。",technical:value};
-  return {display:displayText(value),technical:null};
+  return {display:shown,technical:null};
 }
 function readableLogText(value){
   if(typeof value!=="string"||!value)return {display:value,technical:null};
