@@ -4836,7 +4836,7 @@ class CockpitPlane:
                     continue
                 decidable = _table_exists(core, decisions)
                 sql = f"SELECT t.* FROM {table} t "
-                if decidable:
+                if decidable and kind != "gate_reopen":
                     join = f"LEFT JOIN {decisions} d ON d.{ref_column}=t.{key} "
                     # ``defer`` is a decision that does not close the
                     # candidate, so on the full ledger only a terminal row
@@ -4876,6 +4876,16 @@ class CockpitPlane:
                         latest[group][key]: count - 1
                         for group, count in counts.items() if count > 1
                     }
+                    if decidable:
+                        terminal_sql = f"SELECT {ref_column} FROM {decisions}"
+                        if _column_exists(core, decisions, "terminal"):
+                            terminal_sql += " WHERE terminal=1"
+                        terminal_refs = {
+                            decision_row[ref_column]
+                            for decision_row in self._rows(core, terminal_sql)
+                        }
+                        rows = [candidate_row for candidate_row in rows
+                                if candidate_row[key] not in terminal_refs]
                 for row in rows:
                     record = json.loads(row["record_json"])
                     zero_base = None

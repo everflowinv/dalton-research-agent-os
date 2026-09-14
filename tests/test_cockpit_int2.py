@@ -544,6 +544,52 @@ class ApprovalsTests(Int2Case):
         latest = next(item for item in items if item["ref"] == "gate-reopen:latest")
         self.assertEqual(latest["occurrence_count"], 2)
 
+    def test_deciding_latest_gate_reopen_does_not_revive_older_proposals(self) -> None:
+        with closing(sqlite3.connect(self.c.core_path)) as core:
+            core.execute(
+                "CREATE TABLE gate_reopen_proposals(proposal_id TEXT PRIMARY KEY,"
+                "company_ref TEXT, record_json TEXT, content_hash TEXT,"
+                "created_at TEXT)")
+            core.execute(
+                "CREATE TABLE gate_reopen_decisions(decision_id TEXT PRIMARY KEY,"
+                "proposal_ref TEXT, terminal INTEGER)")
+
+            def proposal(ref: str, stage: str, passed: str, at: str) -> None:
+                record = {"company_ref": ACN, "stage_ref": stage,
+                          "passed_version_ref": passed, "because": ref}
+                core.execute("INSERT INTO gate_reopen_proposals VALUES(?,?,?,?,?)",
+                             (ref, ACN, json.dumps(record), "a" * 64, at))
+
+            proposal("gate-reopen:old", "initial_screen", "version:one",
+                     "2026-09-09T00:00:00+00:00")
+            proposal("gate-reopen:latest", "initial_screen", "version:one",
+                     "2026-09-10T00:00:00+00:00")
+            core.commit()
+            items = [item for item in self.plane.approvals()["items"]
+                     if item["kind"] == "gate_reopen"]
+            self.assertEqual([item["ref"] for item in items], ["gate-reopen:latest"])
+
+            core.execute("INSERT INTO gate_reopen_decisions VALUES(?,?,1)",
+                         ("decision:latest", "gate-reopen:latest"))
+            core.commit()
+            self.assertEqual(
+                [item for item in self.plane.approvals()["items"]
+                 if item["kind"] == "gate_reopen"], [])
+
+            proposal("gate-reopen:new", "initial_screen", "version:one",
+                     "2026-09-11T00:00:00+00:00")
+            proposal("gate-reopen:other-stage", "investment_memo", "version:one",
+                     "2026-09-08T00:00:00+00:00")
+            proposal("gate-reopen:other-version", "initial_screen", "version:two",
+                     "2026-09-08T01:00:00+00:00")
+            core.commit()
+        items = [item for item in self.plane.approvals()["items"]
+                 if item["kind"] == "gate_reopen"]
+        self.assertEqual({item["ref"] for item in items}, {
+            "gate-reopen:new", "gate-reopen:other-stage",
+            "gate-reopen:other-version",
+        })
+
     def test_a_decided_checkpoint_drops_off_when_a_decisions_table_exists(self) -> None:
         candidate = self.candidate()
         with closing(sqlite3.connect(self.c.core_path)) as core:
