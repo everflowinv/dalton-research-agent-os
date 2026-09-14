@@ -99,9 +99,9 @@ def format_prose_usd_amounts(text: str) -> str:
         index = 0
         while index < len(content):
             char = content[index]
-            if quote_end is None and char in {'"', '“'}:
+            if quote_end is None and char in {'"', '“', '`'}:
                 pieces.append(_format_unquoted_usd(content[start:index]))
-                quote_end = '"' if char == '"' else '”'
+                quote_end = {'"': '"', '“': '”', '`': '`'}[char]
                 start = index
             elif (quote_end is not None and char == quote_end
                   and not (char == '"' and _is_escaped_quote(content, index))):
@@ -155,9 +155,9 @@ def format_prose_date_ranges(text: str) -> str:
         index = 0
         while index < len(content):
             char = content[index]
-            if quote_end is None and char in {'"', '“'}:
+            if quote_end is None and char in {'"', '“', '`'}:
                 pieces.append(_format_unquoted_date_ranges(content[start:index]))
-                quote_end = '"' if char == '"' else '”'
+                quote_end = {'"': '"', '“': '”', '`': '`'}[char]
                 start = index
             elif (quote_end is not None and char == quote_end
                   and not (char == '"' and _is_escaped_quote(content, index))):
@@ -185,9 +185,9 @@ def transform_unquoted_prose(text: str, transform: Callable[[str], str]) -> str:
             continue
         pieces, start = [], 0
         for index, char in enumerate(content):
-            if quote_end is None and char in {'"', '“'}:
+            if quote_end is None and char in {'"', '“', '`'}:
                 pieces.append(transform(content[start:index]))
-                quote_end = '"' if char == '"' else '”'
+                quote_end = {'"': '"', '“': '”', '`': '`'}[char]
                 start = index
             elif (quote_end is not None and char == quote_end
                   and not (char == '"' and _is_escaped_quote(content, index))):

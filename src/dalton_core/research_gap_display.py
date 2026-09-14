@@ -123,17 +123,25 @@ _TERM_PATTERN = re.compile(
     + r")(?![A-Za-z0-9_])", re.IGNORECASE)
 
 _EMBEDDED_PERIOD = re.compile(
-    r"(?<![A-Za-z0-9])(?:(?:FY|CY)(?:20)?\d{2}\s+Q[1-4]|"
+    r"(?<![A-Za-z0-9/=?&#%_])(?:(?:FY|CY)(?:20)?\d{2}\s+Q[1-4]|"
     r"Q[1-4]\s+(?:FY|CY)(?:20)?\d{2}|"
-    r"FY(?:20)?\d{2}(?:Q[1-4])?|CY(?:20)?\d{2}(?:Q[1-4])?|"
-    r"20\d{2}Q[1-4]|Q[1-4]\s+20\d{2})(?![A-Za-z0-9])",
+    r"FY\s*(?:20)?\d{2}(?:Q[1-4])?|CY\s*(?:20)?\d{2}(?:Q[1-4])?|"
+    r"F?[1-4]Q\d{2,4}|[1-4]Q|20\d{2}Q[1-4]|Q[1-4]\s+20\d{2}|Q[1-4])"
+    r"(?![A-Za-z0-9/=?&#%_])",
     re.IGNORECASE,
 )
+_SLASH_PERIOD = re.compile(
+    r"(?<![A-Za-z0-9/=?&#%_])(?:F?[1-4]Q(?:20)?\d{2}/FY(?:20)?\d{2}|"
+    r"FY(?:20)?\d{2}/FY(?:20)?\d{2}|Q[1-4]/FY(?:20)?\d{2})"
+    r"(?![A-Za-z0-9/=?&#%_])", re.IGNORECASE)
 
 
 def _display_embedded_periods(part: str) -> str:
     def replace(match: re.Match[str]) -> str:
         raw = match.group(0)
+        if (re.fullmatch(r"Q[1-4]", raw, re.IGNORECASE)
+                and re.search(r"[A-Za-z][A-Za-z0-9.-]*\s+$", part[:match.start()])):
+            return raw
         fiscal_quarter = re.fullmatch(
             r"(?:(FY|CY)((?:20)?\d{2})\s+Q([1-4])|Q([1-4])\s+(FY|CY)((?:20)?\d{2}))",
             raw, re.IGNORECASE)
@@ -154,7 +162,11 @@ def _display_embedded_periods(part: str) -> str:
         from .cockpit_plane import claim_period_display_label
         return claim_period_display_label(raw) or raw
 
-    return _EMBEDDED_PERIOD.sub(replace, part)
+    from .cockpit_plane import claim_period_display_label
+    text = _SLASH_PERIOD.sub(
+        lambda match: claim_period_display_label(match.group(0)) or match.group(0), part)
+    text = _EMBEDDED_PERIOD.sub(replace, text)
+    return re.sub(r"(?<=财年)\s+outlook\b", " 展望", text, flags=re.IGNORECASE)
 
 def display_metadata_text(value: Any) -> str:
     """Replace only registered machine metadata tokens in reader-facing text."""
@@ -170,7 +182,8 @@ def display_metadata_text(value: Any) -> str:
         text,
         lambda part: _display_embedded_periods(
             part.replace("discretionary spending", "可自由支配支出")
-                .replace("discretionary 支出", "可自由支配支出")),
+                .replace("discretionary 支出", "可自由支配支出")
+                .replace("Deep Insight Gate", "深度研究阶段验收")),
     )
     return format_prose_date_ranges(format_prose_usd_amounts(text))
 

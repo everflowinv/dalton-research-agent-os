@@ -1291,6 +1291,41 @@ def claim_period_display_label(value: Any) -> str | None:
                   r"白俄罗斯相关限制持续至 \1 年底", text)
     text = re.sub(r"(?<!各)年度截至 (\d{4}年\d{1,2}月\d{1,2}日)",
                   r"截至 \1 的年度", text)
+    quarter_names = "一二三四"
+    def full_year(raw: str) -> str:
+        return raw if len(raw) == 4 else f"20{raw}"
+    # This function receives period metadata, never research prose. Normalize
+    # complete accounting-period tokens after the descriptive phrases above;
+    # the raw period remains alongside ``period_label`` in every API payload.
+    rules = (
+        (r"(?:财年|FY)\s*((?:20\d{2}|\d{2}))\s*Q([1-4])",
+         lambda m: f"{full_year(m[1])}财年第{quarter_names[int(m[2])-1]}季度"),
+        (r"Q([1-4])\s*(?:财年|FY)\s*((?:20\d{2}|\d{2}))",
+         lambda m: f"{full_year(m[2])}财年第{quarter_names[int(m[1])-1]}季度"),
+        (r"(?:财年|FY)\s*Q([1-4])\s*((?:20\d{2}|\d{2}))",
+         lambda m: f"{full_year(m[2])}财年第{quarter_names[int(m[1])-1]}季度"),
+        (r"(\d{4})\s+Q([1-4])",
+         lambda m: f"{m[1]}年第{quarter_names[int(m[2])-1]}季度"),
+        (r"F([1-4])Q((?:20\d{2}|\d{2}))",
+         lambda m: f"{full_year(m[2])}财年第{quarter_names[int(m[1])-1]}季度"),
+        (r"([1-4])Q((?:20\d{2}|\d{2}))",
+         lambda m: f"{full_year(m[2])}年第{quarter_names[int(m[1])-1]}季度"),
+        (r"(?:财年|FY)\s*((?:20\d{2}|\d{2}))",
+         lambda m: f"{full_year(m[1])}财年"),
+        (r"(?:自然年|CY)\s*((?:20\d{2}|\d{2}))",
+         lambda m: f"{full_year(m[1])}自然年"),
+        (r"Q([1-4])\s+(\d{4})",
+         lambda m: f"{m[2]}年第{quarter_names[int(m[1])-1]}季度"),
+        (r"F([1-4])Q(?!\d)",
+         lambda m: f"财年第{quarter_names[int(m[1])-1]}季度"),
+        (r"([1-4])Q(?!\d)",
+         lambda m: f"第{quarter_names[int(m[1])-1]}季度"),
+        (r"Q([1-4])",
+         lambda m: f"第{quarter_names[int(m[1])-1]}季度"),
+    )
+    for pattern, replacement in rules:
+        text = re.sub(r"(?<![A-Za-z0-9])" + pattern + r"(?![A-Za-z0-9])",
+                      replacement, text, flags=re.IGNORECASE)
     # A partial phrase match must not produce invented mixed-language metadata.
     # Keep familiar financial period notation and proper names, but return an
     # unrecognised period verbatim rather than translate only its generic words.

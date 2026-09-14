@@ -265,13 +265,48 @@ class CockpitLanguageTests(unittest.TestCase):
 
     def test_reviewed_display_formats_closed_periods_and_business_term_only_outside_quotes(self) -> None:
         from dalton_core.research_gap_display import display_metadata_text
-        raw = ('FY27 到 FY2029，2026Q1、Q2 2025、Q1 FY2026、FY2027 Q2 的 discretionary spending；'
+        raw = ('FY27 到 FY2029，2026Q1、Q2 2025、1Q26、F3Q26、Q4、'
+               'Q1 FY2026、FY2027 Q2 的 discretionary spending；'
                '“FY27 discretionary spending”')
         self.assertEqual(
             display_metadata_text(raw),
             ('2027财年 到 2029财年，2026年第一季度、2025年第二季度、'
+             '2026年第一季度、2026财年第三季度、第四季度、'
              '2026财年第一季度、2027财年第二季度 的 可自由支配支出；'
              '“FY27 discretionary spending”'),
+        )
+
+    def test_claim_period_display_closes_actual_quarter_notation(self) -> None:
+        from dalton_core.cockpit_plane import claim_period_display_label
+        expected = {
+            "2026 Q1 and Q2 outlook": "2026年第一季度 及 第二季度 展望",
+            "FY2024, FY2025, and Q1 FY2026":
+                "2024财年, 2025财年, 及 2026财年第一季度",
+            "F3Q26 / FY26": "2026财年第三季度 / 2026财年",
+            "1Q26 and FY2026": "2026年第一季度 及 2026财年",
+            "as of fiscal 2026 Q2": "截至 2026财年第二季度",
+            "fiscal Q4 2026 and fiscal 2027":
+                "2026财年第四季度 及 2027财年",
+            "CY 2027": "2027自然年",
+        }
+        for raw, shown in expected.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(claim_period_display_label(raw), shown)
+        self.assertEqual(claim_period_display_label("FY123"), "FY123")
+        for raw in ("Q5", "https://example.test/FY2026/Q1"):
+            with self.subTest(raw=raw):
+                self.assertEqual(claim_period_display_label(raw), "期间说明见技术详情")
+
+    def test_reviewed_period_display_preserves_urls_code_and_brand_names(self) -> None:
+        from dalton_core.research_gap_display import display_metadata_text
+        raw = "路径 https://example.test/FY2026/Q1；`FY2026 Q1`；Audi Q4；本季 Q4"
+        self.assertEqual(
+            display_metadata_text(raw),
+            "路径 https://example.test/FY2026/Q1；`FY2026 Q1`；Audi Q4；本季 第四季度",
+        )
+        self.assertEqual(
+            display_metadata_text("4Q26 / FY27 outlook；取得Deep Insight Gate分类定义"),
+            "2026年第四季度 / 2027财年 展望；取得深度研究阶段验收分类定义",
         )
 
     def test_model_action_journal_uses_readable_copy(self) -> None:
