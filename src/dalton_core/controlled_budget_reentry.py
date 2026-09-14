@@ -28,11 +28,12 @@ def _load_authority(*, scheduler_db: str | Path, budget_db: str | Path,
         work = db.execute(
             "SELECT work_order_json,work_order_hash FROM scheduler_work_orders "
             "WHERE work_order_id=?", (old_work_order_ref,)).fetchone()
-        formal = db.execute(
+        formal_rows = db.execute(
             "SELECT * FROM scheduler_formal_results WHERE work_order_id=?",
-            (old_work_order_ref,)).fetchone()
-    if work is None or formal is None:
+            (old_work_order_ref,)).fetchall()
+    if work is None or len(formal_rows) != 1:
         raise ControlledBudgetReentryError("failed WorkOrder authority is missing")
+    formal = formal_rows[0]
     work_wire = json.loads(work["work_order_json"])
     envelope = json.loads(formal["result_envelope_json"])
     formal_body = {
@@ -50,6 +51,8 @@ def _load_authority(*, scheduler_db: str | Path, budget_db: str | Path,
     if (canonical_json(envelope) != formal["result_envelope_json"]
             or content_hash(envelope) != formal["result_envelope_hash"]
             or content_hash(formal_body) != formal["content_hash"]
+            or envelope.get("id") != formal["result_envelope_id"]
+            or envelope.get("work_order_ref") != old_work_order_ref
             or formal["terminal_state"] != "failed"
             or (envelope.get("error") or {}).get("code") != ERROR_CODE
             or envelope.get("outputs") != {}):
@@ -67,11 +70,26 @@ def _load_authority(*, scheduler_db: str | Path, budget_db: str | Path,
         raise ControlledBudgetReentryError("pool refusal has no unique pre-dispatch rejection")
     rejection = rejected[0]
     rejection_wire = json.loads(rejection["record_json"])
+    rejection_columns = {
+        "rejection_id": rejection["rejection_id"],
+        "day": rejection["day"], "mission_ref": rejection["mission_ref"],
+        "pool": rejection["pool"], "pool_lane": rejection["pool_lane"],
+        "work_order_ref": rejection["work_order_ref"],
+        "attempt_number": rejection["attempt_number"], "phase": rejection["phase"],
+        "reserved_micros": rejection["reserved_micros"],
+        "spent": rejection["pool_spent_micros"], "cap": rejection["pool_cap_micros"],
+        "borrowable_micros": rejection["borrowable_micros"],
+        "created_at": rejection["created_at"],
+    }
     if (canonical_json(rejection_wire) != rejection["record_json"]
             or rejection_wire.get("content_hash") != rejection["content_hash"]
             or content_hash({k: v for k, v in rejection_wire.items()
                              if k != "content_hash"}) != rejection["content_hash"]
-            or rejection_wire.get("reason") != "pool_exhausted"):
+            or rejection_wire.get("reason") != "pool_exhausted"
+            or any(rejection_wire.get(key) != value
+                   for key, value in rejection_columns.items())
+            or rejection["work_order_ref"] != old_work_order_ref
+            or int(rejection["attempt_number"]) != attempt):
         raise ControlledBudgetReentryError("pool rejection authority is invalid")
     with closing(connect_read_only(core_db)) as db:
         sent = db.execute(

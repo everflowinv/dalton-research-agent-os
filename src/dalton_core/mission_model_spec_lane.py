@@ -273,7 +273,9 @@ class MissionModelSpecLaneCoordinator:
                 controlled_reentry = (
                     None if recovery is None else recovery(
                         business_key=business_key, current_permission=permission,
-                        mission=dict(mission)))
+                        mission=dict(mission), company_ref=company_ref,
+                        state_hash=state_hash, task_hash=TASK_HASH,
+                        repair_policy_hash=repair_policy_hash))
                 if controlled_reentry is not None:
                     held = None
             if held is None and controlled_reentry is None:

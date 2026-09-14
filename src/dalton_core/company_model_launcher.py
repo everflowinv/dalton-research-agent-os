@@ -133,10 +133,8 @@ class CompanyModelSpecLauncher(LaneChildLauncher):
         if task_hash is None:
             from .company_model_spec import TASK_HASH
             task_hash = TASK_HASH
-        identity = f"{self.TICKET_PREFIX}|{company_ref}|{state_hash}"
         if not isinstance(task_hash, str) or len(task_hash) != 64:
             raise LaneChildRejected("task_hash must be a sha256 digest")
-        identity += f"|{task_hash}"
         actual_repair_policy_hash = self.repair_policy_hash()
         if repair_policy_hash is None:
             repair_policy_hash = actual_repair_policy_hash
@@ -146,10 +144,10 @@ class CompanyModelSpecLauncher(LaneChildLauncher):
             or repair_policy_hash != actual_repair_policy_hash
         ):
             raise LaneChildRejected("repair policy hash changed before launch")
-        identity += f"|repair:{repair_policy_hash}"
         validation_hash = self.financial_validation_contract_hash()
-        identity += f"|financial-validation:{validation_hash}"
-        digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
+        digest = self._ticket_digest(
+            company_ref=company_ref, state_hash=state_hash, task_hash=task_hash,
+            repair_policy_hash=repair_policy_hash, validation_hash=validation_hash)
         return self.spawn(
             digest=digest,
             record={
@@ -167,20 +165,37 @@ class CompanyModelSpecLauncher(LaneChildLauncher):
             expected_financial_validation_contract_hash=validation_hash,
         )
 
+    def _ticket_digest(self, *, company_ref: str, state_hash: str,
+                       task_hash: str, repair_policy_hash: str,
+                       validation_hash: str) -> str:
+        identity = f"{self.TICKET_PREFIX}|{company_ref}|{state_hash}|{task_hash}"
+        identity += f"|repair:{repair_policy_hash}|financial-validation:{validation_hash}"
+        return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
+
     def controlled_budget_reentry(self, *, business_key: str,
                                   current_permission: str,
-                                  mission: dict[str, Any]) -> str | None:
+                                  mission: dict[str, Any], company_ref: str,
+                                  state_hash: str, task_hash: str,
+                                  repair_policy_hash: str) -> str | None:
         """Return the one reviewed no-send budget recovery, if present."""
         if self.scheduler_db is None or self.model_config_path is None:
             return None
         from .controlled_budget_reentry import approved_business_key
         try:
             config = self._validated_model_config()
-            return approved_business_key(
+            suffix = approved_business_key(
                 self.scheduler_db, business_key=business_key,
                 current_permission=current_permission, mission=mission,
                 allowed_purposes={"model_spec"},
             ) if config and config.get("budget_db") else None
+            if suffix is None:
+                return None
+            digest = self._ticket_digest(
+                company_ref=company_ref, state_hash=state_hash, task_hash=task_hash,
+                repair_policy_hash=repair_policy_hash,
+                validation_hash=self.financial_validation_contract_hash())
+            ticket_ref = f"{self.TICKET_PREFIX}:{digest}"
+            return None if self.controlled_reentry_claimed(ticket_ref, suffix) else suffix
         except (OSError, TypeError, ValueError):
             return None
 

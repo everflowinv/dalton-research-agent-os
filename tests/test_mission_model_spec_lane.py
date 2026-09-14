@@ -61,6 +61,8 @@ class FakeLauncher:
                              "controlled_reentry": controlled_reentry,
                              "financial_validation_contract_hash": (
                                  self.financial_validation_contract_hash())})
+        if controlled_reentry is not None:
+            self.controlled_suffix = None
         ticket_id = f"company-model-spec-run:{len(self.started):024d}"
         self.tickets[ticket_id] = {
             "id": ticket_id, "status": "running", "summary": None,
@@ -255,13 +257,20 @@ class ModelSpecLaneTests(unittest.TestCase):
             "spec_status": "model_unavailable", "failure_codes": ["POOL_EXHAUSTED"],
             "failure_reason": "CockpitModelError: POOL_EXHAUSTED"})
         self.assertEqual(lane.dispatch_once()["status"], "held")
-        self.launcher.controlled_suffix = ":operator-recovery:" + "a" * 16
+        expected_suffix = ":operator-recovery:" + "a" * 16
+        self.launcher.controlled_suffix = expected_suffix
         recovered = lane.dispatch_once()
         self.assertEqual(recovered["status"], "launched")
         self.assertEqual(self.launcher.started[-1]["controlled_reentry"],
-                         self.launcher.controlled_suffix)
+                         expected_suffix)
         self.assertTrue(self.launcher.controlled_query["current_permission"].startswith(
             self.launcher.controlled_query["business_key"] + "|permission:"))
+        self.launcher.finish(recovered["ticket_ref"], summary={
+            "spec_status": "model_unavailable", "failure_codes": ["POOL_EXHAUSTED"],
+            "failure_reason": "CockpitModelError: POOL_EXHAUSTED"})
+        again = lane.dispatch_once()
+        self.assertEqual(again["status"], "held")
+        self.assertEqual(len(self.launcher.started), 2)
 
     def test_settlement_poll_harvests_terminal_child_without_launching(self):
         launched = self.lane.dispatch_once()
