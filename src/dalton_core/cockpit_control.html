@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%2318a999'/%3E%3Ctext x='32' y='43' text-anchor='middle' font-family='Arial' font-size='34' font-weight='700' fill='white'%3ED%3C/text%3E%3C/svg%3E">
 <title>Dalton 投研工作台</title>
 <style>
 :root{
@@ -718,7 +719,8 @@ async function loadResearchProducts(companyRef,box){
 let workspaceLoad=null,workspaceCreateId=null,workspaceLastName="",workspaceCanCreate=false;
 const workspaceStatusLabel=value=>({ready:"可以进入",running:"可以进入",starting:"正在准备",creating:"正在准备",stopped:"暂未运行",degraded:"部分功能暂不可用",failed:"创建未完成"}[value]||"状态正在更新");
 function workspaceConnectionText(shared={}){
-  const models=shared.models===true,sources=shared.sources===true;
+  const models=Boolean(shared.models),sources=Boolean(shared.sources),modelCount=typeof shared.models==="number"?shared.models:0,sourceCount=typeof shared.sources==="number"?shared.sources:0;
+  if(modelCount>0&&sourceCount>0)return `已登记 ${modelCount} 个模型和 ${sourceCount} 个资料来源的连接配置；实际研究调用需在本环境中配置并确认。`;
   if(models&&sources)return "模型和资料来源的连接配置已登记；实际研究调用需在本环境中配置并确认。";
   if(models)return "模型连接配置已登记；资料来源连接配置尚未登记。";
   if(sources)return "资料来源连接配置已登记；模型连接配置尚未登记。";

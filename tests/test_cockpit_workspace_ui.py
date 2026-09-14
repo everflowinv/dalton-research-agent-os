@@ -1,4 +1,6 @@
 from pathlib import Path
+import json
+import re
 import subprocess
 import unittest
 
@@ -31,6 +33,27 @@ class CockpitWorkspaceUiTests(unittest.TestCase):
         ):
             self.assertIn(phrase, self.source)
         self.assertNotIn("复制研究内容", self.source)
+
+    def test_real_shared_connection_counts_are_visible(self):
+        function = re.search(
+            r"function workspaceConnectionText\([^\n]+\)\{.*?\n\}",
+            self.source,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(function)
+        payload = {"models": 24, "sources": 9, "available": True}
+        result = subprocess.run(
+            ["node", "-e", function.group(0) +
+             f"\nconsole.log(workspaceConnectionText({json.dumps(payload)}));"],
+            text=True, capture_output=True, check=True,
+        )
+        self.assertEqual(
+            "已登记 24 个模型和 9 个资料来源的连接配置；实际研究调用需在本环境中配置并确认。",
+            result.stdout.strip(),
+        )
+
+    def test_favicon_is_inline_and_needs_no_extra_request(self):
+        self.assertIn('<link rel="icon" href="data:image/svg+xml,', self.source)
 
     def test_blank_workspace_can_inspect_shared_models_and_sources(self):
         self.assertIn('id="workspace-open-models"', self.source)
