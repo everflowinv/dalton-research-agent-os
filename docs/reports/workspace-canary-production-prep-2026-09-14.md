@@ -2,7 +2,7 @@
 
 This procedure prepares one empty, isolated workspace without reading from or writing to the legacy Dalton state. The preparation script is read-only: it verifies the release wheel hash, root separation, current port availability, and LaunchAgent label availability, then prints the exact commands for review. It does not create the fleet root, install a release, create a workspace, load services, or change Tailscale.
 
-Use `/Users/everflow/Library/Application Support/DaltonWorkspaces` as the fleet root. The legacy root `/Users/everflow/Library/Application Support/Dalton` must remain outside every workspace and must not appear in `shared_readonly_paths`.
+Use `/Users/everflow/.dalton` as the fleet root. The short path is required because Darwin Unix-domain socket paths may contain at most 103 bytes; the manager's real `ws-<24 hex>` slug produces a 96-byte canonical writer socket path under this root. The legacy root `/Users/everflow/Library/Application Support/Dalton` must remain outside every workspace and must not appear in `shared_readonly_paths`.
 
 The R25f core has no required third-party runtime dependencies. Its packet's single wheel is therefore a complete offline wheelhouse for the core workspace, Cockpit, writer, and controller. Optional connector extras are deliberately absent. A connector that needs an optional parser must remain refused until its reviewed wheels and configuration are added to a later immutable release.
 
@@ -14,7 +14,7 @@ PACKET=/Users/everflow/Projects/dalton-owner-activation-20260910/foundation-r25f
 BOOTSTRAP_PYTHON="/Users/everflow/Library/Application Support/Dalton/runtime/venv/bin/python"
 
 "$BOOTSTRAP_PYTHON" "$SOURCE/scripts/prepare_workspace_canary.py" \
-  --host-root "/Users/everflow/Library/Application Support/DaltonWorkspaces" \
+  --host-root /Users/everflow/.dalton \
   --wheel "$PACKET/dalton_core-0.1.0.dev0-py3-none-any.whl" \
   --wheel-sha256 6da4cb84caeca9dc7738c5157428f493b02f411bf972c3bbc724304854a15f65 \
   --bootstrap-python "$BOOTSTRAP_PYTHON" \

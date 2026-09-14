@@ -39,6 +39,13 @@ def prepare(args: argparse.Namespace) -> dict:
         raise RuntimeError("fleet root and legacy root must not overlap")
     workspace = host / "workspaces" / args.slug
     manifest = workspace / "workspace.json"
+    writer_socket = workspace / "state" / "dalton-core" / "run" / "writer.sock"
+    writer_socket_bytes = len(os.fsencode(writer_socket))
+    # Darwin's sockaddr_un.sun_path is 104 bytes including the trailing NUL.
+    if writer_socket_bytes > 103:
+        raise RuntimeError(
+            f"workspace writer socket path is {writer_socket_bytes} bytes; Darwin permits 103"
+        )
     if workspace.exists() or workspace.is_symlink():
         raise RuntimeError("workspace target already exists")
     release = host / "runtime" / "releases" / actual / "venv"
@@ -79,6 +86,7 @@ def prepare(args: argparse.Namespace) -> dict:
         "legacy_root": str(legacy),
         "legacy_overlap": False,
         "workspace_root": str(workspace),
+        "writer_socket": str(writer_socket),
         "manifest": str(manifest),
         "cockpit_port": args.port,
         "cockpit_url": f"https://{args.tailscale_host}:{args.port}/",
@@ -89,6 +97,8 @@ def prepare(args: argparse.Namespace) -> dict:
             "wheel_sha256_verified": True,
             "port_available_at_check": True,
             "launchagent_labels_available_at_check": True,
+            "writer_socket_path_bytes": writer_socket_bytes,
+            "writer_socket_path_limit": 103,
             "core_wheelhouse_complete": True,
             "optional_provider_extras_included": False,
         },
