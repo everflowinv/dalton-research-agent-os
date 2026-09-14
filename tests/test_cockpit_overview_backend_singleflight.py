@@ -92,3 +92,21 @@ class ColdInputCacheTests(unittest.TestCase):
                   "for 2026-09-14 (14777357 of 15000000 micros)")
         self.assertEqual(_ops_waiting_reason(reason),
                          "事件响应模型预算池今天的余额不足")
+
+class LaneGovernanceCacheTests(unittest.TestCase):
+    def test_transient_fragment_error_is_not_cached(self):
+        from types import SimpleNamespace
+        from dalton_core.cockpit_plane import CockpitPlane
+        plane = CockpitPlane.__new__(CockpitPlane)
+        plane._lane_governance_cache = {}
+        calls = []
+        def fragment(_context):
+            calls.append(1)
+            if len(calls) == 1:
+                raise OSError("temporary config read failure")
+            return ["--governance", "/state/connector-governance/example-v1.json"]
+        spec = SimpleNamespace(driver_key="example", operation="read", argv_fragment=fragment)
+        self.assertIsNone(plane._lane_governance_record(spec, object()))
+        self.assertEqual(plane._lane_governance_record(spec, object()), "example-v1.json")
+        self.assertEqual(plane._lane_governance_record(spec, object()), "example-v1.json")
+        self.assertEqual(len(calls), 2)

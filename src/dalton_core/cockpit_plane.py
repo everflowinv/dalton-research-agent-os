@@ -1941,7 +1941,13 @@ class CockpitPlane:
         # starts.  The first browser request should project current state, not
         # spend seconds parsing ten thousand historical ticket files and the
         # already hash-bound localization store.
-        primed_tickets = self.tickets.tickets()
+        try:
+            primed_tickets = self.tickets.tickets()
+        except OSError:
+            # Prewarming is an optimization.  A transient filesystem error
+            # must not turn control-service startup into an outage; the first
+            # request retains the existing fresh-read behavior.
+            primed_tickets = []
         try:
             from .research_localization_store import load_ui_texts
             load_ui_texts(self.config.core_db)
@@ -3889,7 +3895,6 @@ class CockpitPlane:
         try:
             argv = spec.argv_fragment(context)
         except Exception:  # noqa: BLE001 - a lane's fragment is not the page's problem
-            self._lane_governance_cache[cache_key] = None
             return None
         for value in argv:
             if isinstance(value, str) and "connector-governance" in value:
