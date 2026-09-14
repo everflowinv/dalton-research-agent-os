@@ -127,7 +127,15 @@ class CompanyDossierLauncher(LaneChildLauncher):
 
     def controlled_reentry(self, *, signature: str, company_ref: str | None,
                            mission: dict[str, Any]) -> str | None:
-        """Whether the exact persisted company ticket may run once more."""
+        """Whether the exact persisted company ticket may run once more.
+
+        Existing host/transport redrives remain summary-bound.  A separately
+        reviewed no-send budget refusal has no child failure trace to put in
+        that summary, so the shared proof store is also consulted by the
+        exact permission-bound business key before the unchanged ticket is
+        released.
+        """
+        from .controlled_budget_reentry import approved_business_key
         from .controlled_lane_reentry import eligible_controlled_reentries
 
         if self.scheduler_db is None:
@@ -157,6 +165,15 @@ class CompanyDossierLauncher(LaneChildLauncher):
                 suffix = entry["authorization_suffix"]
                 if not self.controlled_reentry_claimed(ticket["id"], suffix):
                     return suffix
+            suffix = approved_business_key(
+                self.scheduler_db,
+                business_key=signature, current_permission=signature,
+                mission=mission,
+                allowed_purposes={"dossier", "dossier_verifier"},
+            )
+            if (suffix is not None
+                    and not self.controlled_reentry_claimed(ticket["id"], suffix)):
+                return suffix
         return None
 
 

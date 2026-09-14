@@ -19,6 +19,7 @@ import json
 import re
 import sqlite3
 import tempfile
+import types
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1051,6 +1052,51 @@ class LaneWiringTests(unittest.TestCase):
             self.assertEqual(coordinator.budget.probe_interval_seconds, 1800)
         finally:
             connection.close()
+
+    def test_reviewed_no_send_budget_refusal_releases_exact_ticket_once(self):
+        model = self.state / "model.json"
+        budget = self.state / "budget.sqlite"
+        model.write_text(json.dumps({"budget_db": str(budget)}), encoding="utf-8")
+        launcher = CompanyDossierLauncher(
+            state_dir=self.state, model_config_path=model,
+            scheduler_db=self.state / "scheduler.sqlite",
+        )
+        signature = f"{ACN}|{'a' * 32}|permission:v2:{'b' * 16}"
+        ticket_id = f"company-dossier-run:{run_digest(ACN, signature)}"
+        calls = []
+
+        recovery = types.ModuleType("dalton_core.controlled_budget_reentry")
+        def approved_business_key(scheduler_db, **kwargs):
+            calls.append((scheduler_db, kwargs))
+            return ":budget-recovery:" + "c" * 16
+        recovery.approved_business_key = approved_business_key
+
+        with patch.dict("sys.modules", {
+            "dalton_core.controlled_budget_reentry": recovery,
+        }), patch.object(launcher, "status", return_value={
+            "id": ticket_id, "status": "failed", "summary": {},
+        }), patch(
+            "dalton_core.controlled_lane_reentry.eligible_controlled_reentries",
+            return_value=[],
+        ), patch.object(
+            launcher, "controlled_reentry_claimed", side_effect=[False, True],
+        ):
+            mission = {"id": "coverage-mission-version:test:17"}
+            first = launcher.controlled_reentry(
+                signature=signature, company_ref=ACN, mission=mission)
+            second = launcher.controlled_reentry(
+                signature=signature, company_ref=ACN, mission=mission)
+
+        self.assertEqual(first, ":budget-recovery:" + "c" * 16)
+        self.assertIsNone(second)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0][0], launcher.scheduler_db)
+        self.assertEqual(calls[0][1], {
+            "business_key": signature,
+            "current_permission": signature,
+            "mission": mission,
+            "allowed_purposes": {"dossier", "dossier_verifier"},
+        })
 
     def test_the_ticket_is_named_by_the_evidence_the_run_is_about(self):
         first = run_digest(ACN, "signature-a")
