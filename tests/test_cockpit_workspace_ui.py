@@ -32,6 +32,16 @@ class CockpitWorkspaceUiTests(unittest.TestCase):
             self.assertIn(phrase, self.source)
         self.assertNotIn("复制研究内容", self.source)
 
+    def test_blank_workspace_can_inspect_shared_models_and_sources(self):
+        self.assertIn('id="workspace-open-models"', self.source)
+        self.assertIn('id="workspace-open-sources"', self.source)
+        self.assertIn('$("workspace-open-models").onclick=openModels', self.source)
+        self.assertIn('$("workspace-open-sources").onclick=openSources', self.source)
+        self.assertIn("共用连接 · 本环境尚未配置研究调用", self.source)
+        shared_before_unavailable = self.source.index("const sharedModels=r.shared_catalog")
+        unavailable = self.source.index("if(!r.available)", shared_before_unavailable)
+        self.assertLess(shared_before_unavailable, unavailable)
+
     def test_blank_workspace_keeps_first_goal_form_visible(self):
         self.assertIn('id="goal-create-card"', self.source)
         self.assertIn(

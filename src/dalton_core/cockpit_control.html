@@ -296,6 +296,7 @@ pre.table{background:#f6f8fb;color:#28364b;border-color:var(--line)}table{color:
           <div class="workspace-promise"><b>继续使用现有连接</b><span id="workspace-shared">正在检查模型与资料来源…</span></div>
           <div class="workspace-promise"><b>研究内容彼此独立</b><span>研究目标、公司、任务、资料和审批只属于各自的环境。</span></div>
         </div>
+        <div class="actions"><button class="ghost" id="workspace-open-models">查看可用模型</button><button class="ghost" id="workspace-open-sources">查看资料来源</button></div>
       </div>
       <div class="card workspace-form">
         <label for="workspace-input">新环境名称</label>
@@ -997,6 +998,7 @@ function cadenceBlock(rows){const d=node("details");const s=node("summary","数�
    ways in, one renderer -- a tile whose number and page could disagree is the
    thing the row exists to prevent. */
 $("open-sources").onclick=openSources;
+$("workspace-open-sources").onclick=openSources;
 async function openSources(){const sheet=prepareReader("研究详情");
   sheet.replaceChildren(node("div","正在读取…","empty"));
   try{renderSources(sheet,await getJson("/v1/cockpit/sources"))}
@@ -1038,13 +1040,15 @@ function renderSources(sheet,r){sheet.replaceChildren(readerClose(),node("h2","�
    chain it will actually reach, what answered last time and what that cost,
    and a selector. Below it the gateway's catalog in three columns, with a
    允许使用 button on the one column an owner can act on. */
-$("open-models").onclick=openModels;$("hero-models").onclick=openModels;
+$("open-models").onclick=openModels;$("hero-models").onclick=openModels;$("workspace-open-models").onclick=openModels;
 async function openModels(){const sheet=prepareReader("研究详情");
   sheet.replaceChildren(node("div","正在读取…","empty"));
   try{renderModels(sheet,await getJson("/v1/cockpit/models"))}
   catch(e){sheet.replaceChildren(readerClose());showProblem(sheet,e,"读取模型配置")}}
 function renderModels(sheet,r){sheet.replaceChildren(readerClose(),node("h2","每个环节用哪个模型"),
   node("div","每个环节会说明当前使用的是模型顺序还是候选集。多数修改会在下一次调用生效；需要重启的环节会单独提示。如需恢复原配置，请重新选择原方案。","meta"));
+  const sharedModels=r.shared_catalog&&Array.isArray(r.shared_catalog.models)?r.shared_catalog.models:[];
+  if(sharedModels.length){const shared=node("section");shared.append(node("h3","已连接的模型"));sharedModels.forEach(model=>{const row=node("div",null,"lane");row.append(node("span",null,"st on"));const copy=node("div");copy.append(node("b",model.display_name||"已连接模型"),node("small",[model.provider,model.family_label].filter(Boolean).join(" · ")||"模型信息已登记"),node("small",`能力：${(model.capability_labels||[]).join("、")||"尚未标明"}`,"raw"),node("small","共用连接 · 本环境尚未配置研究调用","raw"));row.append(copy);shared.append(row)});sheet.append(shared)}
   if(!r.available){sheet.append(node("div",r.reason,"empty"));return}
   (r.notices||[]).filter(n=>!n.acknowledged).forEach(n=>{
     const d=node("div",null,"gap");d.append(node("b","模型变动"),node("div",n.message,"raw"));
