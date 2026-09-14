@@ -145,6 +145,67 @@ class OpsBacklogTests(PanelCase):
         self.assertEqual(backlog["parked_items"], 0)
         self.assertEqual(backlog["terminal_count"], 0)
 
+    def test_approved_governance_keeps_old_permission_as_history_not_current_waiting(self) -> None:
+        raw = ("LaneChildRejected: gated:governance invalid yfinance-calendar "
+               "governance: yfinance calendar governance record is not approved")
+        self.park(lane="mission_catalyst_calendar", item="permission|company:a|old",
+                  reason=raw)
+        directory = self.root / "connector-governance"
+        directory.mkdir()
+        (directory / "yfinance-calendar-v1.json").write_text(
+            json.dumps({"status": "approved"}), encoding="utf-8")
+        backlog = self.plane.ops_backlog()
+        self.assertEqual(backlog["permission_count"], 0)
+        self.assertEqual(backlog["historical_count"], 1)
+        self.assertEqual(backlog["historical_items"][0]["history_status"],
+                         "configuration_updated")
+        self.assertEqual(backlog["historical_items"][0]["reason"], raw)
+
+    def test_permission_projection_reloads_governance_after_file_changes(self) -> None:
+        raw = ("LaneChildRejected: gated:governance invalid yfinance daily-prices "
+               "governance: yfinance daily-prices governance record is not approved")
+        self.park(lane="mission_market_prices", item="permission|company:a|old",
+                  reason=raw)
+        directory = self.root / "connector-governance"
+        directory.mkdir()
+        path = directory / "yfinance-daily-prices-v1.json"
+        path.write_text(json.dumps({"status": "proposed"}), encoding="utf-8")
+        self.assertEqual(self.plane.ops_backlog()["permission_count"], 1)
+        path.write_text(json.dumps({"status": "approved"}), encoding="utf-8")
+        changed = self.plane.ops_backlog()
+        self.assertEqual(changed["permission_count"], 0)
+        self.assertEqual(changed["historical_count"], 1)
+
+    def test_unknown_permission_kind_remains_active_after_unrelated_approval(self) -> None:
+        self.park(item="doc:permission",
+                  reason="gated:mission does not grant document_extraction writes")
+        directory = self.root / "connector-governance"
+        directory.mkdir()
+        (directory / "yfinance-calendar-v1.json").write_text(
+            json.dumps({"status": "approved"}), encoding="utf-8")
+        backlog = self.plane.ops_backlog()
+        self.assertEqual(backlog["permission_count"], 1)
+        self.assertEqual(backlog["historical_count"], 0)
+
+    def test_old_version_of_current_mission_is_history_but_current_and_other_scope_stay_active(self) -> None:
+        with self.plane._core() as core:
+            version = self.plane._mission(core)["version"]
+        self.park(item=f"coverage-mission-version:us-it-services:{version - 1}|old")
+        self.park(item=f"coverage-mission-version:us-it-services:{version}|current")
+        self.park(item="coverage-mission-version:other-scope:1|other")
+        self.park(item="coverage-mission-version:us-it-services:not-a-version|unknown")
+        backlog = self.plane.ops_backlog()
+        active = {item["item_key"] for bucket in backlog["dependencies"]
+                  for item in bucket["items"]}
+        historical = {item["item_key"] for item in backlog["historical_items"]}
+        self.assertEqual(active, {
+            f"coverage-mission-version:us-it-services:{version}|current",
+            "coverage-mission-version:other-scope:1|other",
+            "coverage-mission-version:us-it-services:not-a-version|unknown",
+        })
+        self.assertEqual(historical,
+                         {f"coverage-mission-version:us-it-services:{version - 1}|old"})
+
     def test_the_page_carries_no_machine_words_for_a_dependency_it_knows(self) -> None:
         self.park()
         bucket = self.plane.ops_backlog()["dependencies"][0]

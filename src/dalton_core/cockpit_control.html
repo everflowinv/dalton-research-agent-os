@@ -1183,6 +1183,10 @@ function renderOps(sheet,r){sheet.replaceChildren(readerClose(),node("h2","运�
     node("div","权限或治理配置改变后继续；等待期间不重复调用。","hint"));const ul=node("ul",null,"latest");
     (r.permission_items||[]).forEach(it=>{const li=node("li");li.append(node("span",`${it.lane_label} · ${it.item_label}：${it.display_reason}`));
       const tech=technicalDetails(it.technical_details);if(tech)li.append(tech);ul.append(li)});s.append(ul);sheet.append(s)}
+  if((r.historical_items||[]).length){const s=node("section");s.append(node("h3",`历史记录 · ${r.historical_items.length} 件`),
+    node("div","这些记录对应的配置或任务版本已经更新；保留原始失败内容供追溯，等待新运行给出最新结果。","hint"));const ul=node("ul",null,"latest");
+    r.historical_items.forEach(it=>{const li=node("li");li.append(node("span",`${it.lane_label||enumLabel(it.lane)} · ${it.item_label||"任务记录"}：${it.history_note}`));
+      const tech=technicalDetails(it.technical_details||{item_key:it.item_key,reason:it.reason,lane:it.lane});if(tech)li.append(tech);ul.append(li)});s.append(ul);sheet.append(s)}
   if(r.terminal_count){const s=node("section");
     s.append(node("h3",`已经结束且不会自动重试 · ${r.terminal_count} 件`),
              node("div","这些任务已经结束，不会原样重试；每项具体原因见下方分类。","hint"));

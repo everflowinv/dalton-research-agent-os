@@ -3553,19 +3553,67 @@ class CockpitPlane:
             }
         backlog = summarise_events(rows)
         members: dict[str, dict[str, Any]] = {}
+        current_mission_version: str | None = None
         try:
             with self._core() as core:
-                members = self._members(self._mission(core))
+                mission = self._mission(core)
+                members = self._members(mission)
+                mission_ref = mission.get("mission_ref")
+                version = mission.get("version")
+                if (isinstance(mission_ref, str)
+                        and mission_ref.startswith("coverage-mission:")
+                        and isinstance(version, int)):
+                    current_mission_version = (
+                        "coverage-mission-version:"
+                        + mission_ref.removeprefix("coverage-mission:")
+                        + f":{version}"
+                    )
         except (CockpitMissionMissing, sqlite3.Error, ValueError, TypeError):
             pass
+        governance = self._governance_records()
+        permission_records = {
+            "mission_catalyst_calendar": "yfinance-calendar-v1.json",
+            "mission_consensus": "yfinance-analyst-estimates-v1.json",
+            "mission_market_prices": "yfinance-daily-prices-v1.json",
+        }
+
+        def superseded_mission(item_key: Any) -> bool:
+            if current_mission_version is None or not isinstance(item_key, str):
+                return False
+            prefix = item_key.split("|", 1)[0]
+            if not prefix.startswith("coverage-mission-version:"):
+                return False
+            if not prefix.rsplit(":", 1)[-1].isdigit():
+                return False
+            current_scope = current_mission_version.rsplit(":", 1)[0]
+            return prefix.rsplit(":", 1)[0] == current_scope and prefix != current_mission_version
         dependencies = []
+        historical_items = []
         for bucket in backlog["dependencies"]:
+            active = [item for item in bucket["items"]
+                      if not superseded_mission(item.get("item_key"))]
+            historical_items.extend({
+                **item, "history_status": "mission_superseded",
+                "history_note": "任务目标已更新，保留这次等待记录供追溯",
+                "lane_label": REGISTRY_LANE_LABELS.get(item["lane"], item["lane"]),
+                "item_label": _ops_item_label(item.get("item_key"), members),
+                "technical_details": {"item_key": item.get("item_key"),
+                                      "reason": item.get("reason"),
+                                      "lane": item.get("lane")},
+            } for item in bucket["items"] if item not in active)
+            if not active:
+                continue
             dependencies.append({
                 **bucket,
+                "item_count": len(active),
+                "attempts": sum(int(item.get("attempts") or 0) for item in active),
+                "first_seen": min(item["first_seen"] for item in active),
+                "last_seen": max(item["last_seen"] for item in active),
+                "lanes": sorted({item["lane"] for item in active}),
                 "dependency_label": DEPENDENCY_LABELS.get(
                     bucket["dependency"], bucket["dependency"]),
                 "lane_labels": [REGISTRY_LANE_LABELS.get(lane, lane)
-                                for lane in bucket["lanes"]],
+                                for lane in sorted({item["lane"] for item in active})],
                 "items": [
                     {**item,
                      "lane_label": REGISTRY_LANE_LABELS.get(item["lane"], item["lane"]),
@@ -3576,7 +3624,7 @@ class CockpitPlane:
                          "reason": item.get("reason"),
                          "lane": item.get("lane"),
                      }}
-                    for item in bucket["items"]
+                    for item in active
                 ],
             })
         terminal = [
@@ -3603,16 +3651,32 @@ class CockpitPlane:
                  "lane": row.get("lane"),
              }}
             for row in backlog["permission_items"]
+            if governance.get(permission_records.get(row.get("lane"), "")) != "approved"
         ]
+        for row in backlog["permission_items"]:
+            record = permission_records.get(row.get("lane"))
+            if record is not None and governance.get(record) == "approved":
+                historical_items.append({
+                    **row, "history_status": "configuration_updated",
+                    "history_note": "配置已更新，等待新运行确认",
+                    "lane_label": REGISTRY_LANE_LABELS.get(row["lane"], row["lane"]),
+                    "item_label": _ops_item_label(row.get("item_key"), members),
+                    "technical_details": {"item_key": row.get("item_key"),
+                                          "reason": row.get("reason"),
+                                          "lane": row.get("lane")},
+                })
+        active_parked = sum(bucket["item_count"] for bucket in dependencies)
         return {
             "available": True, "as_of": _iso(self.clock()),
             "window": backlog["window"], "events": backlog["events"],
             "dependencies": dependencies,
-            "parked_items": backlog["parked_items"],
+            "parked_items": active_parked,
             "terminal_items": terminal,
             "terminal_count": backlog["terminal_count"],
             "permission_items": permissions,
-            "permission_count": backlog["permission_count"],
+            "permission_count": len(permissions),
+            "historical_items": historical_items,
+            "historical_count": len(historical_items),
             "class_labels": dict(FAILURE_CLASS_LABELS),
             "note": ("挂起 = 依赖不可用，等依赖回来自动重试，不消耗重试预算；"
                      "待授权 = 权限或治理配置改变后再继续；终态 = 这次工作已经结束，"
