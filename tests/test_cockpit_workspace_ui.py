@@ -49,6 +49,16 @@ class CockpitWorkspaceUiTests(unittest.TestCase):
             self.source,
         )
         self.assertIn("空白研究环境 · 等待研究目标", self.source)
+        self.assertIn('$("goal-submit").textContent="保存目标草稿"', self.source)
+
+    def test_initial_goal_is_saved_without_a_false_publish_action(self):
+        marker = 'if(d.schema_version==="workspace-initial-goal-draft-0.1")'
+        self.assertIn(marker, self.source)
+        branch = self.source[self.source.index(marker):]
+        branch = branch[:branch.index("return}")]
+        for phrase in ("目标草稿已保存", "启动前还需设置", "研究公司", "资料范围", "研究预算", "研究规则", "保存草稿不会启动研究"):
+            self.assertIn(phrase, branch)
+        self.assertNotIn("draftActions", branch)
 
     def test_creation_requires_a_name_and_only_enters_a_real_url(self):
         self.assertIn("if(!name){status.className=\"status err\"", self.source)
