@@ -5365,9 +5365,18 @@ class CockpitPlane:
                 rows = []
                 for item in catalog["sources"]:
                     slug = item["connector_ref"].split(":", 1)[-1]
+                    label = {
+                        "alphaengine-library": "卖方研报与电话会 · 资料检索",
+                        "guidepoint-library": "Guidepoint 专家访谈 · 资料检索",
+                        "sec-edgar": "SEC 财报与公告",
+                        "host-tool:company-wiki:get_document": "公司知识库 · 文档读取",
+                        "host-tool:company-wiki:list_documents": "公司知识库 · 资料目录",
+                        "host-tool:sales-notes:get_note": "卖方销售快报 · 内容读取",
+                        "host-tool:sales-notes:list_notes": "卖方销售快报 · 快报目录",
+                    }.get(slug, SOURCE_SLUG_LABELS.get(slug, SOURCE_LABELS.get(
+                        item["connector_ref"], "资料来源配置")))
                     rows.append({"slug": slug, "source_ref": item["connector_ref"],
-                                 "label": SOURCE_SLUG_LABELS.get(slug, SOURCE_LABELS.get(
-                                     item["connector_ref"], "已连接资料来源")),
+                                 "label": label,
                                  "content": [SOURCE_OPERATION_LABELS.get(op, "资料读取")
                                              for op in item["allowed_operations"]],
                                  "connector": {"status": "installed", "status_label": "共用连接已登记"},

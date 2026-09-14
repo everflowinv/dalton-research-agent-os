@@ -22,7 +22,7 @@ class BlankViewsTests(unittest.TestCase):
                  adapter_ref='adapter:test', credential_slot_ref='credential:test',
                  capabilities=['research'],modalities=['text'],
                  transport=dict(kind='broker',endpoint_ref='broker:test',socket_path=None,config_path=None))],
-            'sources':[dict(id='connector:sec:1', connector_ref='connector:sec', capability_id='sec-read',
+            'sources':[dict(id='connector:sec:1', connector_ref='connector:host-tool:company-wiki:get_document', capability_id='sec-read',
                 auth_mode='public',credential_slot_refs=[],allowed_operations=['read'],allowed_hosts=['sec.gov'],
                 transport=dict(kind='connector',endpoint_ref='adapter:sec',socket_path=None,config_path=None))]}
         catalog['content_hash'] = content_hash(catalog)
@@ -52,6 +52,7 @@ class BlankViewsTests(unittest.TestCase):
         self.assertFalse(models['shared_catalog']['workspace_authorized'])
         sources = self.plane.sources()
         self.assertEqual(sources['sources'][0]['mission']['status'], 'undeclared')
+        self.assertEqual(sources['sources'][0]['label'], '公司知识库 · 文档读取')
         self.assertNotIn('socket_path', json.dumps(models))
         self.assertNotIn('credential_slot', json.dumps(sources))
 
