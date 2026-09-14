@@ -13,10 +13,13 @@ only way to check it is to write one.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from dalton_core.lane_child_launcher import LaneChildRejected
 from dalton_core.lane_registry import lane_for_operation, registered_lanes
@@ -66,6 +69,8 @@ class FakeLauncher:
         self.started: list[dict] = []
         self.tickets: dict[str, dict] = {}
         self.reject: Exception | None = None
+        self.recovery_enabled = False
+        self.recovered: list[dict] = []
 
     def approved_operations(self) -> tuple[str, ...]:
         return self._approved
@@ -78,6 +83,12 @@ class FakeLauncher:
                   "status": "running", **kwargs}
         self.tickets[ticket["id"]] = ticket
         return ticket
+
+    def controlled_primary_document_retry(self, **kwargs) -> dict:
+        if not self.recovery_enabled:
+            raise LaneChildRejected("no exact historical recovery proof")
+        self.recovered.append(dict(kwargs))
+        return self.start(**kwargs, controlled_reentry=True)
 
     def settle(self, ticket_ref: str, summary: dict, status: str = "succeeded") -> None:
         self.tickets[ticket_ref].update({"status": status, "summary": summary})
@@ -161,6 +172,80 @@ class RegistrationTests(unittest.TestCase):
     def test_a_company_ref_carries_its_cik(self) -> None:
         self.assertEqual(issuer_for(ACN), ACN_CIK)
         self.assertIsNone(issuer_for("company:ticker:ACN"))
+
+
+class ControlledPrimaryDocumentRetryTests(unittest.TestCase):
+    def test_only_exact_legacy_403_reuses_the_same_ticket_once(self) -> None:
+        from dalton_core.sec_ownership_launcher import (
+            GOVERNANCE_FILENAME_BY_OPERATION,
+            SecOwnershipLauncher,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            governance = root / "governance"
+            governance.mkdir()
+            (governance / GOVERNANCE_FILENAME_BY_OPERATION[FORM4_OPERATION]).write_text(
+                "{}\n", encoding="utf-8"
+            )
+            (root / "state").mkdir()
+            launcher = SecOwnershipLauncher(
+                state_dir=root / "state", governance_dir=governance,
+            )
+            accession = "0002005007-26-000005"
+            company_ref = "company:sec-cik:0000051143"
+            digest = hashlib.sha256(
+                f"sec-ownership-run|{FORM4_OPERATION}|{company_ref}|{accession}"
+                .encode("utf-8")
+            ).hexdigest()[:24]
+            ticket_id = f"sec-ownership-run:{digest}"
+            ticket_path = launcher._ticket_path(ticket_id)
+            ticket_path.parent.mkdir(parents=True)
+            ticket_path.write_text(json.dumps({
+                "id": ticket_id, "status": "failed", "company_ref": company_ref,
+                "operation": FORM4_OPERATION, "accession": accession,
+                "form_type": "4", "issuer": "0000051143",
+                "command": ["python", "-m", "dalton_core.sec_ownership_cli"],
+            }), encoding="utf-8")
+            summary = {
+                "status": "failed", "company_ref": company_ref,
+                "operation": FORM4_OPERATION, "accession": accession,
+                "form_type": "4",
+                "failure_reason": "HTTPError: HTTP Error 403: Forbidden",
+            }
+            ticket_path.with_name("summary.json").write_text(
+                json.dumps(summary), encoding="utf-8"
+            )
+
+            with patch.object(launcher, "spawn", return_value={
+                "id": ticket_id, "status": "running",
+            }) as spawn:
+                result = launcher.controlled_primary_document_retry(
+                    operation=FORM4_OPERATION, company_ref=company_ref,
+                    accession=accession, form_type="4", issuer="0000051143",
+                    primary_document="xslF345X06/form4.xml",
+                    filed_at="2026-09-10",
+                )
+            self.assertEqual(result["id"], ticket_id)
+            kwargs = spawn.call_args.kwargs
+            self.assertEqual(kwargs["digest"], digest)
+            self.assertEqual(kwargs["primary_document"],
+                             "xslF345X06/form4.xml")
+            self.assertEqual(kwargs["_controlled_reentry"][0], ticket_id)
+            self.assertIn(hashlib.sha256(
+                ticket_path.with_name("summary.json").read_bytes()
+            ).hexdigest(), kwargs["_controlled_reentry"][1])
+
+            summary["failure_reason"] = "HTTPError: HTTP Error 404: Not Found"
+            ticket_path.with_name("summary.json").write_text(
+                json.dumps(summary), encoding="utf-8"
+            )
+            with self.assertRaises(LaneChildRejected):
+                launcher.controlled_primary_document_retry(
+                    operation=FORM4_OPERATION, company_ref=company_ref,
+                    accession=accession, form_type="4", issuer="0000051143",
+                    primary_document="xslF345X06/form4.xml",
+                )
 
 
 class GrantTests(unittest.TestCase):
@@ -284,6 +369,32 @@ class CoordinatorTests(unittest.TestCase):
         self.assertEqual(result["status"], "idle")
         held = [row for row in result["skipped"] if row["reason"] == "held"]
         self.assertEqual([row["company_ref"] for row in held], [ACN])
+
+    def test_exact_controlled_retry_settles_the_same_held_filing(self) -> None:
+        for _ in range(3):
+            launched = self.coordinator.dispatch_once()
+            self.launcher.settle(
+                launched["ticket_ref"], summary([], failure_reason="old 403"),
+                status="failed",
+            )
+        self.launcher.recovery_enabled = True
+        retried = self.coordinator.dispatch_once()
+        self.assertEqual(retried["status"], "launched")
+        self.assertTrue(retried["controlled_reentry"])
+        self.assertEqual(retried["company_ref"], ACN)
+        self.assertEqual(retried["accession"], "0001467373-26-000045")
+        self.assertEqual(self.launcher.recovered[0]["primary_document"],
+                         "primary_doc.xml")
+
+        self.launcher.settle(
+            retried["ticket_ref"], summary([insider_event()]))
+        settled = self.coordinator.dispatch_once()
+        self.assertEqual(settled["settled"]["status"], "succeeded")
+        self.assertEqual(settled["status"], "idle")
+        self.assertNotIn("0001467373-26-000045", [
+            row["accession"]
+            for row in self._candidates({"company_ref": ACN})["filings"]
+        ])
 
     def test_a_13f_in_a_company_s_own_index_names_that_company_as_the_manager(self) -> None:
         # Accenture files seven 13F-HRs of its own. The manager on those is

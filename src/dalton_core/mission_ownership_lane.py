@@ -437,6 +437,51 @@ class MissionOwnershipLaneCoordinator:
             company_ref = company["company_ref"]
             blocked = self.budget.blocked(company_ref)
             if blocked is not None:
+                # A pre-fix Form 4 run could fetch ``primary_doc.xml`` instead
+                # of the filename frozen in the SEC index and receive a 403.
+                # The launcher admits only that exact historical proof and
+                # preserves it through LaneChildLauncher's one-shot marker.
+                # Looking at candidates is local; a rejected candidate makes
+                # no call and remains parked as before.
+                found = self.candidates(company)
+                recovery = getattr(
+                    self.launcher, "controlled_primary_document_retry", None)
+                if found.get("status") == "read" and callable(recovery):
+                    for filing in found.get("filings") or ():
+                        if (filing.get("operation") != "form4_transactions"
+                                or not filing.get("primary_document")):
+                            continue
+                        try:
+                            ticket = recovery(
+                                operation=filing["operation"],
+                                company_ref=company_ref,
+                                accession=filing["accession"],
+                                form_type=filing["form"],
+                                issuer=company["issuer"],
+                                primary_document=filing["primary_document"],
+                                filed_at=filing["filing_date"],
+                            )
+                        except LaneChildConflict as exc:
+                            return {
+                                "status": "busy", "company_ref": company_ref,
+                                "settled": settled, "skipped": skipped,
+                                "ir_pages": ir_pages,
+                                "reason": f"{type(exc).__name__}: {exc}",
+                            }
+                        except LaneChildRejected:
+                            continue
+                        self._open = ticket["id"]
+                        return {
+                            "status": "launched", "company_ref": company_ref,
+                            "operation": filing["operation"],
+                            "accession": filing["accession"],
+                            "form_type": filing["form"],
+                            "filed_at": filing["filing_date"],
+                            "ticket_ref": ticket["id"], "settled": settled,
+                            "skipped": skipped, "ir_pages": ir_pages,
+                            "controlled_reentry": True,
+                            "pending_count": len(found["filings"]),
+                        }
                 # P17d: three words, not one. ``held`` will change on a deploy,
                 # ``parked`` when the dependency answers, ``terminal`` never.
                 skipped.append({

@@ -24,6 +24,7 @@ import base64
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import threading
@@ -191,6 +192,7 @@ class LaneChildLauncher:
 
     def _claim_controlled_reentry_locked(
         self, ticket_id: str, authorization: str,
+        expected_summary_sha256: str | None = None,
     ) -> None:
         """Persist one exact child attempt. Caller holds ``self._lock``."""
         if not isinstance(authorization, str) or not authorization:
@@ -221,18 +223,40 @@ class LaneChildLauncher:
             summary_bytes = summary_path.read_bytes()
         except OSError as exc:
             raise LaneChildRejected("controlled reentry summary is unavailable") from exc
+        summary_sha256 = hashlib.sha256(summary_bytes).hexdigest()
+        if (expected_summary_sha256 is not None
+                and summary_sha256 != expected_summary_sha256):
+            raise LaneChildRejected("controlled reentry summary changed before spawn")
+        log_path = ticket_path.with_name("run.log")
+        prior_log_bytes = None
+        if log_path.exists() or log_path.is_symlink():
+            try:
+                log_stat = log_path.lstat()
+                if not stat.S_ISREG(log_stat.st_mode):
+                    raise LaneChildRejected("controlled reentry log is not a regular file")
+                prior_log_bytes = log_path.read_bytes()
+            except OSError as exc:
+                raise LaneChildRejected("controlled reentry log is unavailable") from exc
         marker = hashlib.sha256(authorization.encode("utf-8")).hexdigest()[:24]
         marker_path = ticket_path.with_name(f"controlled-reentry-{marker}.json")
-        record = json.dumps({
-            "schema_version": "0.2", "ticket_ref": ticket_id,
+        record_value = {
+            "schema_version": "0.3", "ticket_ref": ticket_id,
             "authorization": authorization,
             "lane_input": ticket.get("signature", ticket.get("batch_ref")),
-            "prior_summary_sha256": hashlib.sha256(summary_bytes).hexdigest(),
+            "prior_summary_sha256": summary_sha256,
             # The marker is the immutable owner-only archive. Base64 keeps the
             # exact old bytes even after the child replaces summary.json.
             "prior_summary_base64": base64.b64encode(summary_bytes).decode("ascii"),
             "claimed_at": wire_time(self.clock()),
-        }, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n"
+        }
+        if prior_log_bytes is not None:
+            record_value.update({
+                "prior_log_sha256": hashlib.sha256(prior_log_bytes).hexdigest(),
+                "prior_log_base64": base64.b64encode(prior_log_bytes).decode("ascii"),
+            })
+        record = json.dumps(
+            record_value, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8") + b"\n"
         try:
             descriptor = os.open(str(marker_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL,
                                  0o600)
@@ -250,7 +274,7 @@ class LaneChildLauncher:
             self._claim_controlled_reentry_locked(ticket_id, authorization)
 
     def spawn(self, *, digest: str, record: Mapping[str, Any],
-              _controlled_reentry: tuple[str, str] | None = None,
+              _controlled_reentry: tuple[str, str] | tuple[str, str, str] | None = None,
               **command_kwargs: Any) -> dict[str, Any]:
         """Start one child and return its ticket.
 
@@ -290,10 +314,14 @@ class LaneChildLauncher:
             except WorkspaceRuntimeError as exc:
                 raise LaneChildRejected(str(exc)) from exc
             if _controlled_reentry is not None:
-                prior_ticket_id, authorization = _controlled_reentry
+                prior_ticket_id, authorization = _controlled_reentry[:2]
+                expected_summary_sha256 = (
+                    _controlled_reentry[2] if len(_controlled_reentry) == 3 else None
+                )
                 if prior_ticket_id != ticket_id:
                     raise LaneChildRejected("controlled reentry ticket changed before spawn")
-                self._claim_controlled_reentry_locked(ticket_id, authorization)
+                self._claim_controlled_reentry_locked(
+                    ticket_id, authorization, expected_summary_sha256)
             ticket_dir = secure_dir(ticket_dir)
             log_path = ticket_dir / "run.log"
             log_fd = os.open(str(log_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)

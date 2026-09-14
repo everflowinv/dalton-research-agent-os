@@ -101,6 +101,8 @@ class LauncherTests(unittest.TestCase):
         path = launcher._ticket_path(ticket["id"])
         summary = b'{"failed_model_traces":[]}\n'
         path.with_name("summary.json").write_bytes(summary)
+        prior_log = b"old SEC failure details\n"
+        path.with_name("run.log").write_bytes(prior_log)
         authorization = ":operator-recovery:" + "a" * 16
         launcher.claim_controlled_reentry(ticket["id"], authorization)
         self.assertTrue(launcher.controlled_reentry_claimed(
@@ -113,12 +115,17 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(record["prior_summary_sha256"],
                          hashlib.sha256(summary).hexdigest())
         self.assertEqual(base64.b64decode(record["prior_summary_base64"]), summary)
+        self.assertEqual(record["prior_log_sha256"],
+                         hashlib.sha256(prior_log).hexdigest())
+        self.assertEqual(base64.b64decode(record["prior_log_base64"]), prior_log)
         self.assertEqual(marker.stat().st_mode & 0o777, 0o600)
         with self.assertRaises(LaneChildRejected):
             launcher.claim_controlled_reentry(ticket["id"], authorization)
 
         path.with_name("summary.json").write_bytes(b'{"status":"replacement"}\n')
+        path.with_name("run.log").write_bytes(b"new run\n")
         self.assertEqual(base64.b64decode(record["prior_summary_base64"]), summary)
+        self.assertEqual(base64.b64decode(record["prior_log_base64"]), prior_log)
 
     def test_a_running_child_cannot_claim_controlled_reentry(self):
         launcher = self.launcher("import time; time.sleep(10)")
@@ -128,6 +135,27 @@ class LauncherTests(unittest.TestCase):
         with self.assertRaises(LaneChildConflict):
             launcher.claim_controlled_reentry(
                 ticket["id"], ":operator-recovery:" + "b" * 16)
+        self.assertEqual(list(path.parent.glob("controlled-reentry-*.json")), [])
+
+    def test_controlled_spawn_rejects_a_changed_prior_summary(self):
+        launcher = self.launcher()
+        digest = "0" * 24
+        old = launcher.spawn(digest=digest, record={"signature": "exact-input"})
+        launcher.wait(timeout=30)
+        launcher.status(old["id"])
+        path = launcher._ticket_path(old["id"])
+        prior = b'{"status":"failed","detail":"old"}\n'
+        path.with_name("summary.json").write_bytes(prior)
+        expected = hashlib.sha256(prior).hexdigest()
+        path.with_name("summary.json").write_bytes(
+            b'{"status":"failed","detail":"changed"}\n')
+        with self.assertRaisesRegex(LaneChildRejected, "changed before spawn"):
+            launcher.spawn(
+                digest=digest, record={"signature": "exact-input"},
+                _controlled_reentry=(
+                    old["id"], ":operator-recovery:" + "d" * 16, expected,
+                ),
+            )
         self.assertEqual(list(path.parent.glob("controlled-reentry-*.json")), [])
 
     def test_controlled_claim_and_spawn_share_one_launcher_critical_section(self):
