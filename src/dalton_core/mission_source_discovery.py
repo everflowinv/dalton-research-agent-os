@@ -885,13 +885,27 @@ class _SearchLauncherBase:
             log_path = ticket_dir / "run.log"
             log_fd = os.open(str(log_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             try:
+                # The child changes cwd to the workspace state directory.  A
+                # relative PYTHONPATH (common in tests and source checkouts)
+                # would then resolve somewhere else and can load an older
+                # installed CLI whose argument contract differs from this
+                # launcher.  Bind the child to the exact package tree that
+                # constructed its argv; installed wheels resolve to their own
+                # site-packages directory and source runs resolve to ``src``.
+                package_root = str(Path(__file__).resolve().parents[1])
+                inherited_pythonpath = os.environ.get("PYTHONPATH")
+                child_pythonpath = (
+                    package_root if not inherited_pythonpath
+                    else os.pathsep.join((package_root, inherited_pythonpath))
+                )
                 process = subprocess.Popen(
                     command,
                     cwd=str(self.state_dir),
                     stdin=subprocess.DEVNULL,
                     stdout=log_fd,
                     stderr=subprocess.STDOUT,
-                    env={**os.environ, "PYTHONUNBUFFERED": "1"},
+                    env={**os.environ, "PYTHONUNBUFFERED": "1",
+                         "PYTHONPATH": child_pythonpath},
                 )
             finally:
                 os.close(log_fd)
