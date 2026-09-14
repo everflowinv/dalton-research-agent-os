@@ -33,3 +33,5 @@ data/
 state/
 temp/
 legacy-artifacts/
+.playwright-cli/
+output/playwright/

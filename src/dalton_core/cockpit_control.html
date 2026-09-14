@@ -302,14 +302,14 @@ pre.table{background:#f6f8fb;color:#28364b;border-color:var(--line)}table{color:
       <div class="card workspace-form">
         <label for="workspace-input">新环境名称</label>
         <input id="workspace-input" maxlength="80" autocomplete="off" placeholder="例如：欧洲支付公司研究">
-        <p class="hint">创建后进入空白环境，再设定第一项研究目标。</p>
+        <p class="hint">新建后自动启用上述已连接来源的检索与读取，并准备研究流程。进入后只需设定研究目标。</p>
         <div class="actions"><button class="primary" id="workspace-create">新建空白研究环境</button></div>
         <div class="status" id="workspace-create-status" role="status"></div>
       </div>
     </div>
     <div class="card">
       <h2>已有研究环境</h2>
-      <p class="sub">进入另一个环境时，该环境自己的研究内容和待办事项会显示在新页面中。</p>
+      <p class="sub">切换后显示该环境的研究内容和待办；其他环境的后台任务继续运行。</p>
       <div class="status" id="workspace-status">正在读取…</div>
       <div class="workspace-list" id="workspace-list"></div>
     </div>
@@ -1328,7 +1328,7 @@ function renderFirstMissionDraft(r){
   box.append(node("p","研究环境已准备好，请确认这次研究的范围。","summary"),node("h4","研究目标"),node("div",m.title),node("div",m.objective));
   const companies=node("ul");m.universe.forEach(c=>companies.append(node("li",c.ticker)));
   const questions=node("ul");m.research_questions.forEach(q=>questions.append(node("li",q)));
-  const sources=node("ul");m.source_plan.forEach(s=>sources.append(node("li",({"source:sec-edgar":"SEC 公司申报","source:public-web":"公开网页与网页搜索","source:alphaengine":"AlphaEngine 研报与纪要","source:guidepoint":"Guidepoint 专家访谈","source:company-wiki":"公司知识库","source:sales-notes":"销售纪要","source:yahoo-finance":"Yahoo Finance 行情"})[s.source_ref]||sourceLabel(s.source_ref))));
+  const sources=node("ul");m.source_plan.forEach(s=>sources.append(node("li",({"source:sec-edgar":"SEC 公司申报","source:public-web":"公开网页","source:web-search":"网页搜索","source:alphaengine":"AlphaEngine 研报与纪要","source:guidepoint":"Guidepoint 专家访谈","source:company-wiki":"公司知识库","source:sales-notes":"销售纪要","source:yahoo-finance":"Yahoo Finance 行情"})[s.source_ref]||sourceLabel(s.source_ref))));
   box.append(node("h4","研究公司"),companies,node("h4","研究问题"),questions,node("h4","资料来源"),sources);
   box.append(node("h4","每日预算上限"),node("div",`模型调用 ${m.budget.max_daily_paid_calls} 次，费用 US$${m.budget.max_daily_cost_usd}；AlphaEngine ${m.budget.max_alphaengine_calls_24h} 次。`));
   if(d.setup_state==="ready_for_confirmation"){

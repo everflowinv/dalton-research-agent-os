@@ -12,6 +12,7 @@ import json
 import os
 import re
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -320,6 +321,29 @@ def create_managed_workspace(config_path: Path, login: str, name: str, request_i
                       "status": "creating", "url": None, "workspace_id": None}
             _write(target, record)
         manifest = root / "workspaces" / record["slug"] / "workspace.json"
+        if manifest.exists():
+            held = load_workspace_manifest(manifest)
+            try:
+                _readiness(config, held, timeout=2.0, require_blank=False)
+            except (OSError, ValueError, WorkspaceError):
+                database = held.state_dir / "core.sqlite"
+                if database.is_file():
+                    with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as core:
+                        active = core.execute("SELECT count(*) FROM coverage_mission_pointer").fetchone()[0]
+                    if active:
+                        record.update(status="recovery_required", retryable=False,
+                            failure_reason="该环境已有研究任务，服务需要恢复。研究数据和任务配置已保留。")
+                        _write(target, record)
+                        raise WorkspaceError(record["failure_reason"])
+            else:
+                # A prior route-publication failure must not reset an engine
+                # that already started research through its local endpoint.
+                _serve(config, record["port"])
+                record.update(workspace_id=held.workspace_id, status="running", retryable=False,
+                    url=f"https://{config['tailscale_host']}:{record['port']}/")
+                record.pop("failure_reason", None)
+                _write(target, record)
+                return {"status": "running", "workspace": _public(record, None)}
         try:
             templates = _runtime_templates(config)
             catalog, catalog_paths = _catalog(config)
@@ -353,8 +377,11 @@ def create_managed_workspace(config_path: Path, login: str, name: str, request_i
             service["control"]["config"]["cockpit"]["workspace_manager_config_path"] = str(
                 config_path.resolve())
             from .service import ServiceConfig
+            from .workspace import validate_service_mapping_paths
             parsed_service = ServiceConfig.from_mapping(service)
+            validate_service_mapping_paths(service, workspace)
             _write(workspace.config_path, service)
+            ServiceConfig.from_file(workspace.config_path)
             if not record.get("installed"):
                 install_workspace(manifest, config["launch_agents_dir"])
                 record["installed"] = True

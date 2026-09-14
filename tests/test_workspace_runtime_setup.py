@@ -99,6 +99,8 @@ class WorkspaceRuntimeSetupTests(unittest.TestCase):
 
     def test_operation_specific_host_connectors_share_their_registered_source_identity(self):
         from dalton_core.workspace_runtime_setup import _source_ref
+        self.assertEqual(_source_ref({"connector_ref": "connector:gemini-web-search"}), "source:web-search")
+        self.assertEqual(_source_ref({"connector_ref": "connector:web-fetch"}), "source:public-web")
         for vendor, operations in (("company-wiki", ("get_document", "list_documents")),
                                    ("sales-notes", ("get_note", "list_notes"))):
             for operation in operations:

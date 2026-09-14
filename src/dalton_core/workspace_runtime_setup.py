@@ -188,13 +188,24 @@ def _connector_records(workspace: Any, actor_ref: str) -> tuple[list[str], list[
     unsupported: list[str] = []
     seen: set[tuple[str, int]] = set()
     now = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+    kinds: set[str] = set()
     for source in catalog["sources"]:
         capability = source.get("capability_id")
         try:
-            kind = governance_kind_for_capability(capability)
+            kinds.add(governance_kind_for_capability(capability))
         except (ConnectorGovernanceError, KeyError, TypeError):
             unsupported.append(str(capability))
             continue
+        # Creating an environment reuses the connected source's complete
+        # read workflow: searching without being able to read the result is
+        # not a usable research connection. These are the existing read-only
+        # operations, authorized by the owner's shared-source creation action.
+        kinds.update({
+            "connector:alphaengine-library": {"alphaengine-search-library", "alphaengine-get-document"},
+            "connector:guidepoint-library": {"guidepoint-search-library", "guidepoint-get-transcript"},
+            "connector:sec-edgar": {"sec-filings-index", "sec-company-facts", "sec-financial-statements"},
+        }.get(source.get("connector_ref"), set()))
+    for kind in sorted(kinds):
         # Current consumers require the corrected contracts for these two
         # capabilities.  Every other registered connector remains v1.
         version = 3 if kind in {"sec-company-facts", "sec-financial-statements"} else 1
@@ -215,6 +226,10 @@ def _connector_records(workspace: Any, actor_ref: str) -> tuple[list[str], list[
 def _source_ref(source: Mapping[str, Any]) -> str:
     """Resolve a catalog profile to the packaged connector's source identity."""
     connector_ref = source.get("connector_ref")
+    # Discovery uses the search capability, while downloaded pages retain the
+    # public-web evidence identity. Both are needed by the existing engine.
+    if connector_ref == "connector:gemini-web-search":
+        return "source:web-search"
     connector_ref = {
         "connector:host-tool:company-wiki:get_document": "connector:company-wiki",
         "connector:host-tool:company-wiki:list_documents": "connector:company-wiki",
