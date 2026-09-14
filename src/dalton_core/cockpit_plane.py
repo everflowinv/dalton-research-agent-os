@@ -85,10 +85,10 @@ def _stage_readiness_labels(entry: Mapping[str, Any]) -> dict[str, Any]:
     gate_status = entry.get("stage_status")
     gate_label = {
         None: "尚无审批记录", "entered": "已进入，等待审批",
-        "gate_passed": "此前已通过", "gate_failed": "此前未通过",
+        "gate_passed": "历史检查已通过", "gate_failed": "历史检查未通过",
     }.get(gate_status, f"此前审批：{entry.get('stage_status_label') or gate_status}")
     readiness_label = "当前资料已齐" if source_ready else "当前资料待补齐"
-    return {
+    result = {
         "journey_status": (f"{gate_label} · {readiness_label}"
                            if entry.get("stage") in {None, "initial_screen"}
                            else gate_label),
@@ -101,6 +101,44 @@ def _stage_readiness_labels(entry: Mapping[str, Any]) -> dict[str, Any]:
             "blocked_on": list(entry.get("blocked_on") or ()),
         },
     }
+    if entry.get("latest_generation_failure"):
+        result["latest_generation_failure"] = entry["latest_generation_failure"]
+    return result
+
+
+def _initial_screen_failure_label(summary: Mapping[str, Any]) -> str | None:
+    """Translate the latest failed generation into owner-facing language."""
+
+    if summary.get("status") != "failed":
+        return None
+    reasons = " ".join(
+        str(section.get("reason") or "")
+        for section in summary.get("sections") or ()
+        if isinstance(section, Mapping)
+    )
+    if "MODEL_ROUTE_REJECTED" in reasons:
+        return "最新一次报告生成失败：模型服务或当时可用运行额度未能承接请求"
+    reason = str(summary.get("failure_reason") or "").strip()
+    return f"最新一次报告生成失败：{reason}" if reason else "最新一次报告生成失败"
+
+
+def _latest_initial_screen_failures(state_dir: Path) -> dict[str, str]:
+    latest: dict[str, tuple[str, str]] = {}
+    root = state_dir / "initial-screens"
+    if not root.is_dir():
+        return {}
+    for path in root.iterdir():
+        ticket, summary = _load_json(path / "ticket.json"), _load_json(path / "summary.json")
+        if not isinstance(ticket, dict) or not isinstance(summary, dict):
+            continue
+        company_ref = (summary.get("drafted") or {}).get("company_ref")
+        label = _initial_screen_failure_label(summary)
+        if not company_ref or not label:
+            continue
+        at = str(ticket.get("completed_at") or ticket.get("started_at") or "")
+        if company_ref not in latest or at > latest[company_ref][0]:
+            latest[company_ref] = (at, label)
+    return {company_ref: value[1] for company_ref, value in latest.items()}
 # P11x: what a figure is worth, in the owner's language. A number the company
 # filed is its published figure; a number said on a call is a record of the
 # saying. Both are kept; the label is how the difference stays visible.
@@ -3114,6 +3152,7 @@ class CockpitPlane:
         by_company: dict[str, list[dict[str, Any]]] = {}
         for claim in claims:
             by_company.setdefault(claim["subject_ref"], []).append(claim)
+        generation_failures = _latest_initial_screen_failures(self.config.state_dir)
         companies = []
         for entry in stages:
             company_ref = entry["company_ref"]
@@ -3129,7 +3168,10 @@ class CockpitPlane:
             done = [i for i in countable if i["status"] == "complete"]
             missing = [i for i in entry["items"] if i["status"] in {"partial", "missing"}]
             blocked = [i for i in entry["items"] if i["status"] in {"not_planned", "source_unavailable"}]
-            stage_readiness = _stage_readiness_labels(entry)
+            stage_readiness = _stage_readiness_labels({
+                **entry,
+                "latest_generation_failure": generation_failures.get(company_ref),
+            })
             if entry["stage"] is None:
                 note = "还没有开始"
             elif missing:
