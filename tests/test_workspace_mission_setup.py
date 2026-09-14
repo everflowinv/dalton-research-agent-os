@@ -4,6 +4,7 @@ import tempfile
 import unittest
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 from dalton_core.store import content_hash
 from dalton_core.workspace import create_workspace_manifest
@@ -11,6 +12,7 @@ from dalton_core.workspace_mission_setup import (
     WorkspaceMissionSetupError, draft_first_mission, plan_first_mission_goal,
     materialize_first_mission_discovery_plans, publish_first_mission,
     publish_first_mission_to_store,
+    resolve_sec_ticker,
 )
 
 
@@ -217,6 +219,30 @@ class WorkspaceFirstMissionTests(unittest.TestCase):
         progress = authority.mission_progress(mission["mission_ref"])
         self.assertEqual(progress["mission_version_ref"], mission["id"])
         self.assertEqual(progress["companies"][0]["current_stage"], "initial_screen")
+
+    def test_sec_resolution_failure_is_visible_and_uses_workspace_local_process(self):
+        draft = draft_first_mission(
+            self.workspace, goal="Research $ASML", industry="semiconductor equipment",
+            method_foundation=self.foundation)
+        mission = {**draft["mission_body"], "mission_ref": "coverage-mission:semiconductors"}
+        materialize_first_mission_discovery_plans(
+            self.workspace, mission,
+            sec_ticker_resolver=lambda ticker: (_ for _ in ()).throw(
+                WorkspaceMissionSetupError(f"SEC timeout for {ticker}")))
+        status = json.loads((self.workspace.state_dir /
+                             "sec-company-resolution-status.json").read_text())
+        self.assertEqual(status["resolved_company_refs"], [])
+        self.assertIn("SEC timeout", status["pending"]["company:ticker:asml"])
+        with patch("dalton_core.workspace_mission_setup.subprocess.run") as run:
+            run.return_value.returncode = 0
+            run.return_value.stdout = json.dumps(
+                {"ticker": "ASML", "cik": "1487729", "name": "ASML Holding NV"})
+            run.return_value.stderr = ""
+            issuer = resolve_sec_ticker("ASML", state_dir=self.workspace.state_dir)
+        self.assertEqual(issuer["cik"], "0001487729")
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[-1], str(self.workspace.state_dir.resolve()))
+        self.assertEqual(run.call_args.kwargs["timeout"], 15.0)
 
     def test_writer_refuses_a_self_consistent_foreign_workspace_before_opening_authority(self):
         from dalton_core.writer_server import (

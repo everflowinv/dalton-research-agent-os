@@ -11,7 +11,10 @@ import re
 import json
 import os
 import tempfile
+import subprocess
+import sys
 from collections.abc import Callable, Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 from .coverage_mission import CoverageMissionAuthority, validate_mission_body
@@ -452,13 +455,17 @@ def materialize_first_mission_discovery_plans(
     plans: list[tuple[str, str, str, dict[str, Any]]] = []
     paid_calls = int(mission["budget"]["max_daily_paid_calls"])
     if SEC_SOURCE_REF in connected:
-        resolver = sec_ticker_resolver or resolve_sec_ticker
+        resolver = sec_ticker_resolver or (
+            lambda ticker: resolve_sec_ticker(ticker, state_dir=workspace.state_dir)
+        )
         resolved: dict[str, dict[str, str]] = {}
+        pending: dict[str, str] = {}
         for company_ref, ticker in companies.items():
             try:
                 issuer = dict(resolver(ticker))
                 cik = str(issuer["cik"]).zfill(10)
-            except (KeyError, TypeError, ValueError, WorkspaceMissionSetupError):
+            except (KeyError, TypeError, ValueError, WorkspaceMissionSetupError) as exc:
+                pending[company_ref] = str(exc)
                 continue
             if re.fullmatch(r"[0-9]{10}", cik):
                 resolved[company_ref] = {"cik": cik}
@@ -482,6 +489,15 @@ def materialize_first_mission_discovery_plans(
                 {**sec_base, "content_hash": content_hash(sec_base)})
             plans.append((SEC_SOURCE_REF, SEC_PLAN_SELECTOR,
                           "sec-discovery-plan-selection-0.1", sec_plan))
+        status_body = {
+            "schema_version": "sec-company-resolution-status-0.1",
+            "mission_ref": mission["mission_ref"],
+            "resolved_company_refs": sorted(resolved),
+            "pending": pending,
+            "retry_after_seconds": 300,
+        }
+        _atomic_json(workspace.state_dir / "sec-company-resolution-status.json",
+                     {**status_body, "content_hash": content_hash(status_body)})
     alpha_calls = int(mission["budget"]["max_alphaengine_calls_24h"])
     if ALPHAENGINE_SOURCE_REF in connected and alpha_calls > 0:
         alpha_companies = {ref: {"name": ticker, "ticker": ticker, "aliases": []}
@@ -535,18 +551,29 @@ def materialize_first_mission_discovery_plans(
     return written
 
 
-def resolve_sec_ticker(ticker: str) -> dict[str, str]:
-    """Resolve a ticker through the installed SEC client, never by guessing."""
+def resolve_sec_ticker(
+    ticker: str, *, state_dir: str | Path, timeout_seconds: float = 15.0,
+) -> dict[str, str]:
+    """Resolve through the SEC client in a bounded, workspace-local process."""
     ticker = _text(ticker, "ticker").upper()
     try:
-        from edgar import Company
-    except ImportError as exc:
-        raise WorkspaceMissionSetupError("SEC company resolver is not installed") from exc
+        result = subprocess.run(
+            [sys.executable, "-m", "dalton_core.sec_company_resolver_cli",
+             "--ticker", ticker, "--state-dir", str(Path(state_dir).resolve())],
+            check=False, capture_output=True, text=True, timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise WorkspaceMissionSetupError(
+            f"SEC ticker resolution timed out for {ticker} after {timeout_seconds:g}s"
+        ) from exc
+    if result.returncode != 0:
+        detail = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "resolver failed"
+        raise WorkspaceMissionSetupError(f"SEC could not resolve ticker {ticker}: {detail}")
     try:
-        company = Company(ticker)
-        cik = str(company.cik)
-        name = str(company.name)
-    except Exception as exc:  # the client gives provider-specific failures
+        payload = json.loads(result.stdout)
+        cik = str(payload["cik"])
+        name = _text(payload["name"], "SEC company name")
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
         raise WorkspaceMissionSetupError(f"SEC could not resolve ticker {ticker}") from exc
     if not cik.isdigit():
         raise WorkspaceMissionSetupError(f"SEC returned an invalid CIK for {ticker}")

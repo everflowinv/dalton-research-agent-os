@@ -22,6 +22,7 @@ import socket
 import stat
 import sys
 import threading
+import time
 import traceback
 from contextlib import ExitStack
 from dataclasses import dataclass, field
@@ -3129,6 +3130,28 @@ class WriterServer:
                 spool_dir=self._transcript_spool_dir,
             )
 
+    def _retry_pending_first_mission_sec_plan(self) -> None:
+        """Retry a failed ticker lookup from the ordinary controller tick."""
+        if self._workspace is None or self._sec_filings_source_discovery is not None:
+            return
+        status_path = self._workspace.state_dir / "sec-company-resolution-status.json"
+        try:
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+            if not status.get("pending"):
+                return
+            # Resolution can contact SEC; keep repeated controller ticks from
+            # turning an outage into a request storm.
+            if time.time() - status_path.stat().st_mtime < float(status["retry_after_seconds"]):
+                return
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return
+        mission = self._active_mission_version()
+        if mission is None or mission.get("mission_ref") != status.get("mission_ref"):
+            return
+        from .workspace_mission_setup import materialize_first_mission_discovery_plans
+        materialize_first_mission_discovery_plans(self._workspace, mission)
+        self._load_first_mission_discovery_plans()
+
     def _op_get_coverage_mission(self, p: Mapping[str, Any]) -> Any:
         return self.coverage_mission.mission(**dict(p))
 
@@ -4312,6 +4335,8 @@ class WriterServer:
         # the controller then reported every lane as unavailable however much
         # work they had actually done.
         from .mission_source_discovery import _monotonic, TICK_BUDGET_SECONDS
+
+        self._retry_pending_first_mission_sec_plan()
 
         deadline = _monotonic() + TICK_BUDGET_SECONDS
         if self._source_discovery is None:
