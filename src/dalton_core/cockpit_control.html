@@ -547,7 +547,9 @@ function displayMissionText(value){
     .replace(/^US IT Services 首次覆盖任务 v\d+$/,"美国 IT 服务行业首次覆盖任务")
     .replaceAll("初筛（Initial Screen）","初步筛查报告")
     .replaceAll("投资逻辑（Thesis）","投资论点")
-    .replaceAll("variant view","差异化观点");
+    .replaceAll("variant view","差异化观点")
+    .replaceAll("（常驻问题，绑定 Bounded Planner）","（长期跟踪问题）")
+    .replaceAll("验证 差异化观点","验证差异化观点");
 }
 function readableEventJudgement(value){
   const shown=finalResearchText(value);
@@ -701,7 +703,7 @@ function renderOverview(o){
   const g=o.goal;
   $("goal-title").textContent=displayMissionText(g.title);$("goal-objective").textContent=displayMissionText(g.objective);
   const tags=$("goal-tags");tags.replaceChildren(node("span",`第 ${g.version} 版 · ${fmtDate(g.published_at)} 发布`,"tag"),node("span",`${o.companies.length} 家公司`,"tag"),node("span",`${o.totals.theses} 条研究论点`,"tag"));
-  const ql=$("goal-questions");ql.replaceChildren(...g.research_questions.map(q=>node("li",displayMissionText(q))));
+  const ql=$("goal-questions");ql.replaceChildren(...g.research_questions.map(q=>{const shown=displayMissionText(q),li=node("li",shown);if(shown!==q)li.append(technicalDetails({original_question:q}));return li}));
   // P13w: what the system decided to do next, and why. It has been steering
   // the lanes for a while with nothing on the page to show for it, and a
   // decision nobody can read is the calendar it replaced.
