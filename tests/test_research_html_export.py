@@ -174,6 +174,36 @@ class HtmlRenderTests(unittest.TestCase):
             self.assertIn('章节标题原始记录', details)
             self.assertIn(raw, details)
 
+    def test_registered_section_keys_are_chinese_and_raw_titles_stay_in_details(self):
+        mission, lib = self.fixture()
+        section = lib['products'][0]['sections'][0]
+        for raw, shown in (
+            ('causal_chain:0', '因果分析 1'),
+            ('business_model', '商业模式'),
+            ('management_and_capital_allocation', '管理层与资本配置'),
+        ):
+            section['title'] = raw
+            page = render_research_html(lib, mission=mission)
+            article = page.split('<article>', 1)[1].split('</article>', 1)[0]
+            visible, details = article.split('<details class="refs">', 1)
+            self.assertIn(f'<h3>{shown}</h3>', visible)
+            self.assertNotIn(raw, visible)
+            self.assertIn('章节标题原始记录', details)
+            self.assertIn(raw, details)
+
+    def test_period_end_in_gap_is_readable_and_raw_gap_stays_in_details(self):
+        mission, lib = self.fixture()
+        raw = '每个单元格对应各自的财务期末日期（period_end）。'
+        lib['products'][0]['sections'][0]['gaps'] = [raw]
+        page = render_research_html(lib, mission=mission)
+        article = page.split('<article>', 1)[1].split('</article>', 1)[0]
+        before_details, after_details = article.split('<details class="refs">', 1)
+        details, after = after_details.split('</details>', 1)
+        self.assertIn('财务期末日期（财务期末日期）', after)
+        self.assertNotIn('period_end', before_details + after)
+        self.assertIn('待补项原始记录', details)
+        self.assertIn(raw, details)
+
     def test_free_english_gap_is_not_partially_translated(self):
         mission, lib = self.fixture()
         raw = 'Margin outlook unknown because bookings remain unclear'

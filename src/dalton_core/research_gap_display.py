@@ -66,6 +66,7 @@ _DISPLAY_TERMS = {
     "revenues": "营业收入",
     "revenue_yoy_growth": "营业收入同比增速",
     "operating_margin": "营业利润率",
+    "period_end": "财务期末日期",
     "gross_margin": "毛利率",
     "diluted_eps": "稀释每股收益",
     "free_cash_flow": "自由现金流",

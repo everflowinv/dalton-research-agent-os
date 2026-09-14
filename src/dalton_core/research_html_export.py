@@ -218,6 +218,23 @@ def _number_text(item: Mapping[str, Any],
 def _section_title(value: Any) -> str:
     text = str(value or "未命名章节")
     replacements = {
+        "business_model": "商业模式",
+        "segments_and_mix": "业务结构",
+        "demand_drivers": "需求驱动",
+        "supply_and_cost": "供给与成本",
+        "competitive_position": "竞争地位",
+        "management_and_capital_allocation": "管理层与资本配置",
+        "guidance_style": "业绩指引与兑现",
+        "kpi_dictionary": "关键指标口径",
+        "catalyst_calendar": "催化剂日历",
+        "history_of_price_drivers": "历史股价驱动",
+        "industry_classification": "行业分类",
+        "variant_view": "差异化观点",
+        "industry_characteristics": "行业特征",
+        "long_term_drivers": "长期驱动因素",
+        "short_term_drivers": "短期驱动因素",
+        "cross_company_comparison": "公司比较",
+        "causal_chain": "因果分析",
         "S3 核心 Thesis（简版）": "S3 核心投资逻辑（简版）",
         "S3 核心Thesis（简版）": "S3 核心投资逻辑（简版）",
         "核心 Thesis（简版）": "核心投资逻辑（简版）",
@@ -229,7 +246,12 @@ def _section_title(value: Any) -> str:
         "S6 估值（street预期、框架、事件路径、IRR）":
             "S6 估值（市场预期、估值框架、事件路径、IRR）",
     }
-    return replacements.get(text, text)
+    if text in replacements:
+        return replacements[text]
+    causal = re.fullmatch(r"causal_chain:(\d+)", text)
+    if causal:
+        return f"因果分析 {int(causal.group(1)) + 1}"
+    return text
 
 
 class ResearchHtmlExportError(RuntimeError):
