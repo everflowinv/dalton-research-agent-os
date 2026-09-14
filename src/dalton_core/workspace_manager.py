@@ -15,6 +15,8 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
+import urllib.request
 from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import urlparse
@@ -64,7 +66,40 @@ def _config(path: Path) -> dict[str, Any]:
     if not isinstance(ports, list) or not ports or len(ports) > 32 or len(set(ports)) != len(ports) \
             or any(type(p) is not int or not 1024 <= p <= 65535 for p in ports):
         raise WorkspaceError("研究环境可用端口无效")
+    if raw.get("connections_path") is not None:
+        connection_path = raw["connections_path"]
+        if not isinstance(connection_path, str) or not Path(connection_path).is_absolute():
+            raise WorkspaceError("共享连接目录路径无效")
     return raw
+
+
+def _catalog(config: Mapping[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
+    """Pin the installed catalog and collect its exact read-only transport paths."""
+    configured = config.get("connections_path")
+    if configured is None:
+        return None, []
+    path = Path(configured).resolve()
+    if path.is_symlink() or not path.is_file():
+        raise WorkspaceError("共享连接目录不可用")
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict) or set(raw) != {
+            "schema_version", "models", "sources", "content_hash"}:
+        raise WorkspaceError("共享连接目录格式无效")
+    from .store import content_hash
+    body = {key: raw[key] for key in raw if key != "content_hash"}
+    if raw["content_hash"] != content_hash(body):
+        raise WorkspaceError("共享连接目录校验失败")
+    transport_paths: list[str] = []
+    for row in [*raw["models"], *raw["sources"]]:
+        if not isinstance(row, dict) or not isinstance(row.get("transport"), dict):
+            raise WorkspaceError("共享连接目录传输配置无效")
+        for key in ("socket_path", "config_path"):
+            value = row["transport"].get(key)
+            if value is not None:
+                if not isinstance(value, str) or not Path(value).is_absolute():
+                    raise WorkspaceError("共享连接目录传输路径无效")
+                transport_paths.append(str(Path(value).resolve()))
+    return {"path": str(path), "content_hash": raw["content_hash"]}, [str(path), *transport_paths]
 
 
 def _public(record: Mapping[str, Any], current_id: str | None) -> dict[str, Any]:
@@ -88,10 +123,15 @@ def list_workspaces(config_path: Path | None, login: str, current_id: str | None
         record = json.loads(path.read_text())
         if record.get("owner_login") == login:
             items.append(_public(record, current_id))
+    catalog, _ = _catalog(config)
+    catalog_counts = {"models": 0, "sources": 0}
+    if catalog is not None:
+        catalog_raw = json.loads(Path(catalog["path"]).read_text(encoding="utf-8"))
+        catalog_counts = {"models": len(catalog_raw["models"]),
+                          "sources": len(catalog_raw["sources"])}
     return {"enabled": True, "can_create": True, "current_workspace_id": current_id or "legacy",
             "items": items, "isolation": "blank",
-            "shared_connections": {"models": bool(config.get("connections_path")),
-                                   "sources": bool(config.get("connections_path"))}}
+            "shared_connections": {**catalog_counts, "available": catalog is not None}}
 
 
 def request_create(config_path: Path, login: str, value: Mapping[str, Any]) -> dict[str, Any]:
@@ -160,6 +200,28 @@ def _serve(config: Mapping[str, Any], port: int) -> None:
             raise WorkspaceError("已有访问地址发生变化，需要检查")
 
 
+def _readiness(config: Mapping[str, Any], workspace: Any, *, timeout: float = 30.0) -> None:
+    """Require the new Cockpit to identify its workspace and blank state."""
+    deadline = time.monotonic() + timeout
+    url = f"http://127.0.0.1:{workspace.cockpit_port}/v1/cockpit/overview"
+    last_error: Exception | None = None
+    while time.monotonic() < deadline:
+        request = urllib.request.Request(
+            url, headers={"Tailscale-User-Login": config["owner_login"],
+                          "Host": "127.0.0.1"})
+        try:
+            with urllib.request.urlopen(request, timeout=1.0) as response:  # noqa: S310
+                payload = json.loads(response.read())
+            if (payload.get("state") == "awaiting_mission"
+                    and payload.get("workspace", {}).get("workspace_id") == workspace.workspace_id):
+                return
+            last_error = WorkspaceError("新研究环境返回了错误的身份或状态")
+        except Exception as exc:  # readiness retries transport and incomplete startup
+            last_error = exc
+        time.sleep(0.1)
+    raise WorkspaceError("新研究环境尚未通过空白状态检查") from last_error
+
+
 def create_managed_workspace(config_path: Path, login: str, name: str, request_id: str) -> dict[str, Any]:
     from .workspace_creation import create_blank_workspace
     from .workspace_control_setup import configure_workspace_control
@@ -180,7 +242,14 @@ def create_managed_workspace(config_path: Path, login: str, name: str, request_i
             if record["name"] != name or record["owner_login"] != login:
                 raise WorkspaceError("这次创建请求已用于其他名称")
             if record["status"] == "running":
-                return {"status": "running", "workspace": _public(record, None)}
+                try:
+                    held = load_workspace_manifest(
+                        root / "workspaces" / record["slug"] / "workspace.json")
+                    _readiness(config, held, timeout=2.0)
+                    return {"status": "running", "workspace": _public(record, None)}
+                except (OSError, ValueError, WorkspaceError):
+                    record.update(status="failed", retryable=True, url=None)
+                    _write(target, record)
         else:
             records = [json.loads(p.read_text()) for p in target.parent.glob("*.json")]
             record = {"name": name, "owner_login": login, "request_id": request_id,
@@ -188,43 +257,62 @@ def create_managed_workspace(config_path: Path, login: str, name: str, request_i
                       "status": "creating", "url": None, "workspace_id": None}
             _write(target, record)
         manifest = root / "workspaces" / record["slug"] / "workspace.json"
-        if not manifest.exists():
+        try:
+            catalog, catalog_paths = _catalog(config)
+            shared_paths = list(config.get("shared_readonly_paths", ()))
+            shared_paths.extend([str(config_path.resolve()), *catalog_paths])
+            # Always call creation: this resumes a manifest-only/bootstrap-only
+            # attempt and preserves the workspace UUID and token bytes.
             create_blank_workspace(
-                root, record["slug"], record["port"], config["release_ref"], config["release_path"],
-                shared_readonly_paths=config.get("shared_readonly_paths", ()),
+                root, record["slug"], record["port"], config["release_ref"],
+                config["release_path"], request_id=request_id, display_name=name,
+                shared_readonly_paths=tuple(dict.fromkeys(shared_paths)),
                 shared_model_capacity_bindings=config.get("shared_model_capacity_bindings", ()),
                 shared_connector_capacity=config.get("shared_connector_capacity", ()),
+                connection_catalog=catalog,
             )
-        workspace = load_workspace_manifest(manifest)
-        record["workspace_id"] = workspace.workspace_id
-        _write(target, record)
-        os.environ["DALTON_WORKSPACE_MANIFEST"] = str(manifest)
-        configure_workspace_control(manifest, owner_login=login,
-                                    tailscale_host=config["tailscale_host"],
-                                    tailscale_executable=config["tailscale_executable"])
-        service = json.loads(workspace.config_path.read_text())
-        service["control"]["config"]["cockpit"]["workspace_manager_config_path"] = str(config_path)
-        _write(workspace.config_path, service)
-        _write(workspace.workspace_root / "display.json", {"name": name})
-        if not record.get("installed"):
-            install_workspace(manifest, config["launch_agents_dir"])
-            record["installed"] = True
+            workspace = load_workspace_manifest(manifest)
+            record["workspace_id"] = workspace.workspace_id
+            record["status"] = "creating"
+            record.pop("retryable", None)
             _write(target, record)
-        namespace = label_namespace(workspace.slug)
-        for role in ("writer", "controller", "control", "thesis-impact"):
-            label = f"{namespace}.{role}"
-            plist = Path(config["launch_agents_dir"]) / f"{label}.plist"
-            if not plist.exists():
-                continue
-            exists = subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{label}"],
-                                    capture_output=True, text=True)
-            if exists.returncode:
-                subprocess.run(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(plist)],
-                               check=True, capture_output=True, text=True)
-        _serve(config, record["port"])
-        record.update(status="running", url=f"https://{config['tailscale_host']}:{record['port']}/")
-        _write(target, record)
-        return {"status": "running", "workspace": _public(record, None)}
+            os.environ["DALTON_WORKSPACE_MANIFEST"] = str(manifest)
+            configure_workspace_control(
+                manifest, owner_login=login, tailscale_host=config["tailscale_host"],
+                tailscale_executable=config["tailscale_executable"])
+            service = json.loads(workspace.config_path.read_text())
+            service["control"]["config"]["cockpit"]["workspace_manager_config_path"] = str(
+                config_path.resolve())
+            from .service import ServiceConfig
+            ServiceConfig.from_mapping(service)
+            _write(workspace.config_path, service)
+            if not record.get("installed"):
+                install_workspace(manifest, config["launch_agents_dir"])
+                record["installed"] = True
+                _write(target, record)
+            namespace = label_namespace(workspace.slug)
+            for role in ("writer", "controller", "control", "thesis-impact"):
+                label = f"{namespace}.{role}"
+                plist = Path(config["launch_agents_dir"]) / f"{label}.plist"
+                if not plist.is_file():
+                    raise WorkspaceError(f"研究环境服务定义缺失: {role}")
+                exists = subprocess.run(
+                    ["launchctl", "print", f"gui/{os.getuid()}/{label}"],
+                    capture_output=True, text=True)
+                if exists.returncode:
+                    subprocess.run(
+                        ["launchctl", "bootstrap", f"gui/{os.getuid()}", str(plist)],
+                        check=True, capture_output=True, text=True)
+            _readiness(config, workspace)
+            _serve(config, record["port"])
+            record.update(status="running", retryable=False,
+                          url=f"https://{config['tailscale_host']}:{record['port']}/")
+            _write(target, record)
+            return {"status": "running", "workspace": _public(record, None)}
+        except Exception:
+            record.update(status="failed", retryable=True, url=None)
+            _write(target, record)
+            raise
 
 
 def main() -> int:

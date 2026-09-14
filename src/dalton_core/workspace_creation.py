@@ -11,9 +11,8 @@ import argparse
 import json
 import os
 import tempfile
-from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 from .bootstrap import bootstrap
 from .store import content_hash
@@ -117,17 +116,6 @@ def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
         Path(temporary).unlink(missing_ok=True)
 
 
-@contextmanager
-def _unbound_runtime_environment() -> Iterable[None]:
-    """Keep a parent Cockpit's workspace binding out of a creation subprocess."""
-    previous = os.environ.pop(ENVIRONMENT_KEY, None)
-    try:
-        yield
-    finally:
-        if previous is not None:
-            os.environ[ENVIRONMENT_KEY] = previous
-
-
 def create_blank_workspace(
     host_root: str | Path,
     slug: str,
@@ -145,6 +133,9 @@ def create_blank_workspace(
     """Create fresh authorities with no inherited research authorization."""
     request = _text(request_id, "request_id")
     name = _text(display_name, "display_name")
+    if os.environ.get(ENVIRONMENT_KEY):
+        raise WorkspaceError(
+            "blank workspace creation requires a subprocess without a workspace binding")
     manifest_path = Path(host_root).expanduser().resolve() / "workspaces" / slug / "workspace.json"
     if manifest_path.is_file():
         workspace = load_workspace_manifest(manifest_path)
@@ -175,9 +166,8 @@ def create_blank_workspace(
             shared_model_capacity_bindings=shared_model_capacity_bindings,
             shared_connector_capacity=shared_connector_capacity,
         )
-    with _unbound_runtime_environment():
-        bootstrap(workspace.state_dir, workspace.config_path,
-                  workspace_manifest=workspace.manifest_path)
+    bootstrap(workspace.state_dir, workspace.config_path,
+              workspace_manifest=workspace.manifest_path)
 
     metadata_body = {
         "schema_version": METADATA_SCHEMA_VERSION,

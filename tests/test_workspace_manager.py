@@ -74,8 +74,33 @@ class WorkspaceManagerTests(unittest.TestCase):
         self.assertTrue(result['items'][0]['current'])
         self.assertNotIn('secret', str(result))
 
+    def test_list_reports_verified_catalog_counts_not_path_truthiness(self):
+        from dalton_core.store import content_hash
+        catalog_body = {
+            'schema_version': 'dalton-shared-connection-catalog-0.1',
+            'models': [], 'sources': [],
+        }
+        catalog = {**catalog_body, 'content_hash': content_hash(catalog_body)}
+        catalog_path = self.root / 'connections.json'
+        catalog_path.write_text(json.dumps(catalog))
+        self.config['connections_path'] = str(catalog_path)
+        self.save()
+        shared = list_workspaces(
+            self.path, 'owner@example.com', None)['shared_connections']
+        self.assertEqual(shared, {'models': 0, 'sources': 0, 'available': True})
+        catalog['content_hash'] = '0' * 64
+        catalog_path.write_text(json.dumps(catalog))
+        with self.assertRaises(WorkspaceError):
+            list_workspaces(self.path, 'owner@example.com', None)
+
     def test_untrusted_configuration_permissions_are_rejected(self):
         self.path.chmod(0o666)
+        with self.assertRaises(WorkspaceError):
+            _config(self.path)
+
+    def test_connection_catalog_path_must_be_absolute(self):
+        self.config['connections_path'] = 'connections.json'
+        self.save()
         with self.assertRaises(WorkspaceError):
             _config(self.path)
 

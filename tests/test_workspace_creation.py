@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from dalton_core.store import content_hash
 from dalton_core.workspace_creation import (
@@ -24,18 +25,12 @@ class BlankWorkspaceCreationTests(unittest.TestCase):
         self.release.mkdir(parents=True)
 
     def test_fresh_authorities_seed_only_connection_definitions(self):
-        old = os.environ.get(ENVIRONMENT_KEY)
-        os.environ[ENVIRONMENT_KEY] = str(Path(self.temp.name) / "other" / "workspace.json")
-        try:
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(ENVIRONMENT_KEY, None)
             result = create_blank_workspace(
                 self.host, "blank", 18881, "release:sha256:" + "a" * 64, self.release,
                 request_id="workspace-request:one", display_name="Blank Research",
             )
-        finally:
-            if old is None:
-                os.environ.pop(ENVIRONMENT_KEY, None)
-            else:
-                os.environ[ENVIRONMENT_KEY] = old
         self.assertEqual(result["state"], "awaiting_mission")
         self.assertFalse(result["research_state_copied"])
         root = self.host / "workspaces" / "blank"
@@ -55,7 +50,7 @@ class BlankWorkspaceCreationTests(unittest.TestCase):
         metadata = json.loads((root / "display.json").read_text())
         self.assertEqual(metadata["display_name"], "Blank Research")
 
-    def test_cli_ignores_inherited_workspace_binding(self):
+    def test_cli_rejects_inherited_workspace_binding(self):
         request = {
             "schema_version": SCHEMA_VERSION, "request_id": "workspace-request:cli",
             "display_name": "CLI Blank", "host_root": str(self.host), "slug": "cli-blank",
@@ -73,8 +68,8 @@ class BlankWorkspaceCreationTests(unittest.TestCase):
             env={**os.environ, ENVIRONMENT_KEY: "/wrong/workspace.json",
                  "PYTHONPATH": str(Path(__file__).parents[1] / "src")},
         )
-        self.assertEqual(completed.returncode, 0, completed.stderr)
-        self.assertEqual(json.loads(completed.stdout)["state"], "awaiting_mission")
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertFalse((self.host / "workspaces/cli-blank").exists())
 
     def test_shared_catalog_is_pinned_readonly_without_local_authority(self):
         catalog_dir = self.host / "connections"
