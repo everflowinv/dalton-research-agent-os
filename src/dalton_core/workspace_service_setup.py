@@ -62,6 +62,13 @@ def export_service_template(source_config: str | Path,
         raise WorkspaceServiceSetupError("source bounded planner engine must be enabled")
     for key in ("scheduler_db", "writer_socket", "token_config", "planner_model_router_db"):
         planner["config"].pop(key, None)
+    # These are Core authority bindings, not reusable engine settings.  The
+    # source values name one legacy industry's mandate/doctrine rows and must
+    # never cross into an empty workspace.  ``None`` is the planner's explicit
+    # unbound state until that workspace publishes matching local authority.
+    planner["config"]["observation_mandate_version_ref"] = None
+    planner["config"]["doctrine_pack_version_ref"] = None
+    planner["config"]["doctrine_pack_version_hash"] = None
     for key in ("scheduler_db", "writer_socket", "token_config", "model_router_db", "budget_db"):
         thesis["config"].pop(key, None)
     thesis["config"]["company_thesis_refs"] = {}
@@ -195,6 +202,23 @@ def install_service_template(workspace_manifest: str | Path,
     operating["backup"]["root"] = str(state / "backups")
     extensions = operating.pop("control_extensions")
     document_research = operating.pop("document_research")
+    try:
+        foundation = _read(state / "research-foundation.json")
+        source_plan = foundation["mission_defaults"]["source_plan"]
+        connected_sources = sorted({
+            row["source_ref"] for row in source_plan
+            if isinstance(row, Mapping) and row.get("status") == "connected"
+        })
+    except (KeyError, TypeError) as exc:
+        raise WorkspaceServiceSetupError(
+            "workspace research foundation lacks connected sources") from exc
+    if not connected_sources:
+        raise WorkspaceServiceSetupError(
+            "workspace research foundation has no connected sources")
+    # Source availability belongs to the new workspace's pinned connection
+    # catalog.  Keep the reusable reading limits and access-policy vocabulary,
+    # but never inherit a legacy environment's enabled source selection.
+    document_research["enabled_sources"] = connected_sources
     control = raw.get("control")
     if not isinstance(control, dict) or not isinstance(control.get("config"), dict):
         raise WorkspaceServiceSetupError("configure workspace control before service setup")

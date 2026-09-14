@@ -126,6 +126,12 @@ class WorkspaceServiceSetupTest(unittest.TestCase):
             release, shared_readonly_paths=shared)
         bootstrap(workspace.state_dir, workspace.config_path,
                   workspace_manifest=workspace.manifest_path)
+        (workspace.state_dir / "research-foundation.json").write_text(json.dumps({
+            "mission_defaults": {"source_plan": [
+                {"source_ref": "source:public-web", "status": "connected"},
+                {"source_ref": "source:sec-edgar", "status": "connected"},
+            ]},
+        }))
         configure_workspace_control(
             workspace.manifest_path, owner_login="owner@example.com",
             tailscale_host="test.tail00000.ts.net", tailscale_executable=tailscale)
@@ -136,6 +142,10 @@ class WorkspaceServiceSetupTest(unittest.TestCase):
         rendered = self.template.read_text()
         self.assertNotIn(str(self.source_state), rendered)
         self.assertNotIn("company:secret", rendered)
+        planner = template["operating"]["bounded_planner"]["config"]
+        self.assertIsNone(planner["observation_mandate_version_ref"])
+        self.assertIsNone(planner["doctrine_pack_version_ref"])
+        self.assertIsNone(planner["doctrine_pack_version_hash"])
         self.assertEqual(template["shared_readonly_paths"],
                          [str(self.socket.resolve()), str(self.key.resolve()),
                           str(self.openclaw.resolve())])
@@ -155,6 +165,8 @@ class WorkspaceServiceSetupTest(unittest.TestCase):
         self.assertTrue(installed["bounded_planner"]["enabled"])
         self.assertEqual(installed["bounded_planner"]["config"]["scheduler_db"],
                          str(workspace.state_dir / "scheduler.sqlite"))
+        self.assertIsNone(installed["bounded_planner"]["config"][
+            "observation_mandate_version_ref"])
         self.assertEqual(installed["thesis_impact"]["config"]["company_thesis_refs"], {})
         self.assertFalse(installed["outbox"]["enabled"])
         self.assertFalse(installed["weekly_brief"]["enabled"])
@@ -164,6 +176,8 @@ class WorkspaceServiceSetupTest(unittest.TestCase):
                          str(workspace.state_dir / "research-review/candidate-staging.sqlite"))
         self.assertEqual(json.loads((workspace.state_dir / "document-research-config.json").read_text())[
             "spool_dir"], str(workspace.state_dir / "transcript-spool"))
+        self.assertEqual(json.loads((workspace.state_dir / "document-research-config.json").read_text())[
+            "enabled_sources"], ["source:public-web", "source:sec-edgar"])
         self.assertEqual(installed["control"]["config"]["cockpit"]["model_config_path"],
                          str(workspace.state_dir / "research-planner-model-config.json"))
         sync = json.loads((workspace.state_dir / "model-catalog-sync.json").read_text())
