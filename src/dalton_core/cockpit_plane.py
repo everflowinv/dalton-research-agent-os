@@ -5066,7 +5066,18 @@ class CockpitPlane:
     @staticmethod
     def _model_family_label(value: Any) -> str:
         family = str(value or "").strip()
-        return "家族尚未确认" if not family or family.startswith("unclassified:") else family
+        labels = {
+            "anthropic-claude-5": "Claude 5 系列",
+            "deepseek-v4": "DeepSeek V4 系列",
+            "google-gemini-3": "Gemini 3 系列",
+            "openai-gpt-5.6": "GPT-5.6 系列",
+            "openai-gpt-6": "GPT-6 系列",
+            "qwen-3.8": "Qwen 3.8 系列",
+            "xai-grok-4": "Grok 4 系列",
+            "xai-grok-build": "Grok Build 系列",
+            "zhipu-glm-5.3": "GLM-5.3 系列",
+        }
+        return labels.get(family, "未标明")
 
     @staticmethod
     def _model_capability_labels(values: Any) -> list[str]:

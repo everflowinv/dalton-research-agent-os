@@ -1859,7 +1859,11 @@ class CockpitModelPageTests(unittest.TestCase):
 
     def test_unclassified_family_and_unknown_capability_do_not_leak(self) -> None:
         self.assertEqual(CockpitPlane._model_family_label("unclassified:fixture"),
-                         "家族尚未确认")
+                         "未标明")
+        self.assertEqual(CockpitPlane._model_family_label("google-gemini-3"),
+                         "Gemini 3 系列")
+        self.assertEqual(CockpitPlane._model_family_label("future-family"),
+                         "未标明")
         self.assertEqual(
             CockpitPlane._model_capability_labels(["research", "new_capability"]),
             ["研究分析", "能力说明待补充"],
