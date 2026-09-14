@@ -567,6 +567,44 @@ class FetchCoordinatorTests(unittest.TestCase):
         self.assertEqual(tick["acquisition"]["status"], "idle")
         self.assertEqual(len(self.fetch_launcher.calls), before)
 
+    def test_legacy_unknown_failure_gets_one_recovery_then_empty_body_is_terminal(self) -> None:
+        """An old untyped row may be retried once; the typed result closes it."""
+
+        self.fetch_launcher.fail = True
+        self.coordinator.dispatch_once()  # discover two URLs
+        self.coordinator.dispatch_once()  # launch first
+        self.coordinator.dispatch_once()  # settle first unknown, launch second
+        self.coordinator.dispatch_once()  # settle second unknown
+        legacy = self.missions.discovered_documents(
+            self.mission["id"], status="acquisition_failed"
+        )
+        self.assertEqual(len(legacy), 2)
+        self.assertTrue(all(row["failure_retryable"] is None for row in legacy))
+
+        self.fetch_launcher.fail_summary = {
+            "failure_reason": "fetch outcome failed; public web fetch returned an empty response body",
+            "failure_retryable": False,
+            "fetch": {"error": {"code": "empty_body"}},
+        }
+        self.clock.advance(days=1, minutes=1)
+        restarted = MissionSourceDiscoveryCoordinator(
+            store=self.h.core, missions=self.missions, plan=self.plan,
+            search_launcher=self.search_launcher,
+            acquisition_launcher=self.fetch_launcher, clock=self.clock,
+        )
+        before = len(self.fetch_launcher.calls)
+        restarted.dispatch_once()  # retry first legacy row
+        restarted.dispatch_once()  # settle terminal, retry second legacy row
+        restarted.dispatch_once()  # settle second terminal
+        terminal = self.missions.discovered_documents(
+            self.mission["id"], status="acquisition_failed"
+        )
+        self.assertEqual(len(self.fetch_launcher.calls), before + 2)
+        self.assertTrue(all(row["failure_retryable"] is False for row in terminal))
+        self.clock.advance(days=2)
+        self.assertEqual(restarted.dispatch_once()["acquisition"]["status"], "idle")
+        self.assertEqual(len(self.fetch_launcher.calls), before + 2)
+
     def test_only_typed_terminal_failure_is_excluded_from_bounded_recovery(self) -> None:
         """Transient and legacy/orphan failures retain the existing recovery path."""
 
