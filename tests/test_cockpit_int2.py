@@ -24,7 +24,9 @@ from contextlib import closing
 from pathlib import Path
 
 from dalton_core.catalyst_calendar import CatalystCalendarAuthority
-from dalton_core.cockpit_plane import CockpitPlane, _claim_period_label
+from dalton_core.cockpit_plane import (
+    REVIEWED_CLAIM_PERIOD_LABELS, CockpitPlane, _claim_period_label,
+)
 from dalton_core.event_judgement import EventJudgementAuthority
 from dalton_core.research_event import ResearchEventAuthority
 from dalton_core.tracking_cadence import TrackingCadenceAuthority, load_policy
@@ -579,6 +581,32 @@ class SourcePanelTests(Int2Case):
         for raw, expected in cases.items():
             with self.subTest(raw=raw):
                 self.assertEqual(expected, _claim_period_label(raw))
+
+    def test_every_reviewed_period_has_an_exact_display_and_unknowns_still_close(self) -> None:
+        self.assertEqual(len(REVIEWED_CLAIM_PERIOD_LABELS), 535)
+        for raw, display in REVIEWED_CLAIM_PERIOD_LABELS.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(_claim_period_label(raw), display)
+                self.assertTrue(display.strip())
+                self.assertNotEqual(display, "期间说明见技术详情")
+        expected = {
+            "2Q and second half, exit rate into next year":
+                "第二季度及下半年，期末水平延续至下一年度",
+            "around 08-26": "约在 08-26 前后（日期格式未注明）",
+            "current (FY2024 exit)": "当前（2024财年末水平）",
+            "the period of the realignment": "业务调整期间",
+            "FY2024 year-to-date through FQ3": "2024财年年初至第三季度",
+            "1Q27E-4Q27E": "2027年第一季度预测值至第四季度预测值",
+            "calendar year to date": "本自然年年初至报告期",
+            "2026 YTD": "2026年年初至报告期",
+            "FY2026 YTD": "2026财年年初至报告期",
+            "next couple of years": "未来约两年",
+            "Forward-looking strategy commentary": "前瞻性战略说明所涉及的期间",
+        }
+        for raw, display in expected.items():
+            self.assertEqual(REVIEWED_CLAIM_PERIOD_LABELS[raw], display)
+        self.assertEqual(_claim_period_label("unreviewed source-specific era"),
+                         "期间说明见技术详情")
 
     def test_every_source_says_what_it_yields_and_what_it_is_worth(self) -> None:
         view = self.plane.sources()
