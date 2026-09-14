@@ -194,6 +194,11 @@ class WorkspaceFirstMissionTests(unittest.TestCase):
         mission = publish_first_mission_to_store(
             store, self.workspace, proposal=draft, proposal_hash=draft["content_hash"],
             actor_ref="human:owner", method_foundation=foundation)
+        from dalton_core.macos_launchagent import _web_discovery_plan
+        from dalton_core.mission_source_discovery import load_discovery_plan
+        selected_plan = load_discovery_plan(_web_discovery_plan(self.workspace.state_dir))
+        self.assertEqual(selected_plan["mission_ref"], mission["mission_ref"])
+        self.assertEqual(set(selected_plan["companies"]), {"company:ticker:asml"})
         from dalton_core.coverage_mission import CoverageMissionAuthority
         authority = CoverageMissionAuthority(store)
         self.assertEqual(authority.active_mission(mission["mission_ref"])["id"], mission["id"])

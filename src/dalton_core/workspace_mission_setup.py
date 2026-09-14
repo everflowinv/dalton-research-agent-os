@@ -8,6 +8,9 @@ through :class:`CoverageMissionAuthority`.
 from __future__ import annotations
 
 import re
+import json
+import os
+import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
@@ -403,10 +406,95 @@ def publish_first_mission_to_store(
     if proposal.get("method_foundation_hash") != foundation["content_hash"]:
         raise WorkspaceMissionSetupError("proposal method foundation binding differs")
     authority = CoverageMissionAuthority(store)
-    return publish_first_mission(
+    mission = publish_first_mission(
         workspace, proposal=proposal, proposal_hash=proposal_hash,
         actor_ref=actor_ref, authority=authority,
         prepare_bindings=lambda candidate, actor: prepare_first_mission_bindings(
             store, method_foundation=foundation, proposal=candidate,
             actor_ref=actor),
     )
+    materialize_first_mission_discovery_plans(workspace, mission)
+    return mission
+
+
+def _atomic_json(path: Any, value: Mapping[str, Any]) -> None:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(value, stream, ensure_ascii=False, sort_keys=True)
+            stream.write("\n"); stream.flush(); os.fsync(stream.fileno())
+        os.chmod(temporary_name, 0o600)
+        os.replace(temporary_name, path)
+    finally:
+        try: os.unlink(temporary_name)
+        except FileNotFoundError: pass
+
+
+def materialize_first_mission_discovery_plans(
+    workspace: WorkspacePaths, mission: Mapping[str, Any],
+) -> dict[str, str]:
+    """Write the approved, mission-specific search plans selected at restart."""
+    from .mission_source_discovery import (
+        ALPHAENGINE_SOURCE_REF, WEB_SEARCH_SOURCE_REF, build_discovery_plan,
+    )
+    from .macos_launchagent import ALPHAENGINE_PLAN_SELECTOR, WEB_PLAN_SELECTOR
+
+    connected = {item["source_ref"] for item in mission["source_plan"]
+                 if item["status"] == "connected"}
+    companies = {item["company_ref"]: item["ticker"] for item in mission["universe"]}
+    created_at = "1970-01-01T00:00:00.000000+00:00"
+    directory = workspace.state_dir / "discovery-plans"
+    plans: list[tuple[str, str, str, dict[str, Any]]] = []
+    alpha_calls = int(mission["budget"]["max_alphaengine_calls_24h"])
+    if ALPHAENGINE_SOURCE_REF in connected and alpha_calls > 0:
+        alpha_companies = {ref: {"name": ticker, "ticker": ticker, "aliases": []}
+                           for ref, ticker in companies.items()}
+        plan = build_discovery_plan(
+            plan_id=f"discovery-plan:{workspace.slug}:alphaengine:1",
+            created_at=created_at, mission_ref=mission["mission_ref"],
+            companies=alpha_companies, source_ref=ALPHAENGINE_SOURCE_REF,
+            max_calls_24h=alpha_calls,
+            specs=[
+                {"spec_ref": "earnings-call-transcripts", "document_type": "meeting_minutes",
+                 "query_variants": [{"query_template": "{name} {quarter} earnings call transcript", "filters": {}}],
+                 "lookback_days": 400, "rediscovery_interval_days": 7, "retry_interval_days": 1},
+                {"spec_ref": "sell-side-reports", "document_type": "sell_side_report",
+                 "query_variants": [{"query_template": "{ticker} analyst research report", "filters": {}}],
+                 "lookback_days": 180, "rediscovery_interval_days": 14, "retry_interval_days": 1},
+            ])
+        plans.append((ALPHAENGINE_SOURCE_REF, ALPHAENGINE_PLAN_SELECTOR,
+                      "alphaengine-discovery-plan-selection-0.1", plan))
+    paid_calls = int(mission["budget"]["max_daily_paid_calls"])
+    if WEB_SEARCH_SOURCE_REF in connected and paid_calls > 0:
+        terms = {ref: ticker for ref, ticker in companies.items()}
+        plan = build_discovery_plan(
+            plan_id=f"discovery-plan:{workspace.slug}:web-search:1",
+            created_at=created_at, mission_ref=mission["mission_ref"], companies=terms,
+            source_ref=WEB_SEARCH_SOURCE_REF,
+            max_calls_24h=paid_calls,
+            specs=[
+                {"spec_ref": "industry-demand", "query_template": "{terms} industry demand outlook",
+                 "lookback_days": 90, "rediscovery_interval_days": 7, "retry_interval_days": 1},
+                {"spec_ref": "competitive-landscape", "query_template": "{terms} competitors market share",
+                 "lookback_days": 180, "rediscovery_interval_days": 14, "retry_interval_days": 1},
+                {"spec_ref": "management-changes", "query_template": "{terms} CEO CFO leadership change",
+                 "lookback_days": 90, "rediscovery_interval_days": 7, "retry_interval_days": 1},
+            ])
+        plans.append((WEB_SEARCH_SOURCE_REF, WEB_PLAN_SELECTOR,
+                      "web-discovery-plan-selection-0.1", plan))
+    written: dict[str, str] = {}
+    for source_ref, selector_name, selector_schema, plan in plans:
+        filename = source_ref.removeprefix("source:") + "-first-mission-v1.json"
+        _atomic_json(directory / filename, plan)
+        selector_body = {
+            "schema_version": selector_schema,
+            "id": f"discovery-plan-selection:{workspace.slug}:{source_ref.split(':')[-1]}:1",
+            "status": "approved", "source_ref": source_ref,
+            "plan_ref": plan["id"], "plan_hash": plan["content_hash"],
+            "plan_path": filename,
+        }
+        _atomic_json(directory / selector_name,
+                     {**selector_body, "content_hash": content_hash(selector_body)})
+        written[source_ref] = str(directory / filename)
+    return written

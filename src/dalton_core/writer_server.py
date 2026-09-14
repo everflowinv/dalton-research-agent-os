@@ -3048,11 +3048,45 @@ class WriterServer:
         if (not isinstance(local_foundation, Mapping)
                 or dict(p["method_foundation"]) != dict(local_foundation)):
             raise PermissionError("first mission foundation differs from workspace authority")
-        return publish_first_mission_to_store(
+        mission = publish_first_mission_to_store(
             self.store, workspace, proposal=p["proposal"],
             proposal_hash=p["proposal_hash"], actor_ref=p["actor_ref"],
             method_foundation=local_foundation,
         )
+        self._load_first_mission_discovery_plans()
+        return mission
+
+    def _load_first_mission_discovery_plans(self) -> None:
+        """Hot-load confirmed plans so a new workspace need not restart."""
+        if self._workspace is None:
+            return
+        from .macos_launchagent import _alphaengine_discovery_plan, _web_discovery_plan
+
+        alpha_path = _alphaengine_discovery_plan(self._workspace.state_dir)
+        if alpha_path.is_file() and self._search_launcher is not None:
+            plan = load_discovery_plan(alpha_path)
+            self._discovery_plan_path = str(alpha_path)
+            self._discovery_plan_error = None
+            self._source_discovery = MissionSourceDiscoveryCoordinator(
+                store=self.store, missions=self.coverage_mission, plan=plan,
+                search_launcher=self._search_launcher,
+                acquisition_launcher=self._acquisition_launcher,
+                selection_launcher=self._discovery_selection_launcher,
+                spool_dir=self._transcript_spool_dir,
+                **({} if self._alphaengine_owner_call_cap is None
+                   else {"owner_call_cap": self._alphaengine_owner_call_cap}),
+            )
+        web_path = _web_discovery_plan(self._workspace.state_dir)
+        if web_path.is_file() and self._web_search_launcher is not None:
+            plan = load_discovery_plan(web_path)
+            self._web_search_plan_path = str(web_path)
+            self._web_search_plan_error = None
+            self._web_source_discovery = MissionSourceDiscoveryCoordinator(
+                store=self.store, missions=self.coverage_mission, plan=plan,
+                search_launcher=self._web_search_launcher,
+                acquisition_launcher=self._web_fetch_launcher,
+                spool_dir=self._transcript_spool_dir,
+            )
 
     def _op_get_coverage_mission(self, p: Mapping[str, Any]) -> Any:
         return self.coverage_mission.mission(**dict(p))
