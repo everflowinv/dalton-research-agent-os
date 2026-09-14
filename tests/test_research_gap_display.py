@@ -25,3 +25,14 @@ class GapDisplayTests(unittest.TestCase):
  def test_unknown_and_existing_chinese_are_preserved_exactly(self):
   for raw in ('仍需管理层说明。','IBM-specific proper name','unknown_metric: keep raw','T. Rowe Price','管理层说："Revenue and price improved."',None):
    self.assertEqual(gap_display_text(raw),'' if raw is None else raw)
+
+
+class AskGapDisplayTests(unittest.TestCase):
+ def test_actual_acquisition_notes_are_separate_and_raw_preserved(self):
+  from dalton_core.research_gap_display import ask_gap_display_fields
+  raw=['缺少订单金额。（技术细节：`transcript → alphaengine`）', '缺少资本开支。（技术细节：`filing → sec`）']
+  self.assertEqual(ask_gap_display_fields(raw), {'display_gaps':['缺少订单金额。','缺少资本开支。'], 'display_gap_details':raw})
+ def test_other_notes_and_source_quotes_stay_visible(self):
+  from dalton_core.research_gap_display import ask_gap_display_fields
+  raw=['缺少订单。（技术细节：`transcript → other`）', '原文：“缺少订单。（技术细节：`transcript → alphaengine`）”', '技术细节：`filing → sec`', '收入下降1.3%，仍缺少订单数据。']
+  self.assertEqual(ask_gap_display_fields(raw), {'display_gaps':raw, 'display_gap_details':[]})

@@ -206,4 +206,21 @@ def gap_display_text(value: Any) -> str:
     if match:return f"模型引用了未纳入依据的内部标签：{match['tags']}。"
     return display_metadata_text(text)
 
-__all__=["display_metadata_text", "gap_display_text"]
+def ask_gap_display_fields(gaps: list[str]) -> dict[str, list[str]]:
+    """Separate the two registered Ask acquisition-route notes from prose."""
+    shown, technical = [], []
+    suffix = re.compile(
+        r"(?P<body>.+?)(?:（技术细节：`(?:transcript → alphaengine|filing → sec)`）"
+        r"|\(技术细节：`(?:transcript → alphaengine|filing → sec)`\))\s*$",
+        re.DOTALL,
+    )
+    for raw in gaps:
+        match = suffix.fullmatch(raw)
+        body = match['body'].rstrip() if match else raw
+        shown.append(display_metadata_text(body))
+        if match:
+            technical.append(raw)
+    return {"display_gaps": shown, "display_gap_details": technical}
+
+
+__all__=["display_metadata_text", "gap_display_text", "ask_gap_display_fields"]

@@ -5953,6 +5953,7 @@ class CockpitPlane:
         language_review = {"status": "not_configured"}
         reviewed_display_answer = None
         reviewed_display_gaps = None
+        reviewed_gap_details = []
         language_root = self.config.core_db.parent
         language_policy = language_root / "research-language-policy.json"
         checker_config = language_root / "research-language-check-model-config.json"
@@ -5982,9 +5983,11 @@ class CockpitPlane:
             if language_review.get("status") != "ready_for_publication":
                 raise CockpitError("回答已生成，但仍在等待语言审查，尚未发布")
             section = language_review["brain_revision"]["sections"][0]
-            from .research_gap_display import display_metadata_text
+            from .research_gap_display import ask_gap_display_fields, display_metadata_text
             reviewed_display_answer = display_metadata_text(section["body"])
-            reviewed_display_gaps = [display_metadata_text(gap) for gap in section["gaps"]]
+            gap_fields = ask_gap_display_fields(section["gaps"])
+            reviewed_display_gaps = gap_fields["display_gaps"]
+            reviewed_gap_details = gap_fields["display_gap_details"]
             cost_micros += int(language_review.get("review_cost_micros") or 0)
             replayed = replayed and (language_review.get("artifact_replayed") is True
                                      or language_review.get("replayed") is True)
@@ -5997,6 +6000,7 @@ class CockpitPlane:
             "answer": answer["answer"],
             "display_answer": reviewed_display_answer,
             "display_gaps": reviewed_display_gaps,
+            "display_gap_details": reviewed_gap_details,
             "sentences": answer["sentences"],
             # The page's existing citation card reads ``statement``,
             # ``company``, ``period`` and ``at``; those four keep their names
