@@ -1,5 +1,5 @@
 from __future__ import annotations
-import json, tempfile, unittest
+import json, sqlite3, tempfile, unittest
 from pathlib import Path
 from unittest.mock import patch
 from dalton_core.research_language_runtime import run
@@ -209,7 +209,12 @@ class TerminalRecoveryTests(unittest.TestCase):
             with patch('dalton_core.research_language_runtime.ModelRouter',FakeRouter): first=run(**args)
             self.assertEqual(first['status'],'pending_brain_revision')
             raw=json.dumps({"decisions":[],"sections":[{"index":0,"title":"回答","body":"收入为 10 美元。","gaps":[]}]},ensure_ascii=False)[:-2]
-            args['brain_recovery']={"result_envelope_ref":"result:x","raw_text":raw,"raw_sha256":__import__('hashlib').sha256(raw.encode()).hexdigest()}
+            raw_hash=__import__('hashlib').sha256(raw.encode()).hexdigest()
+            database=sqlite3.connect(root/'s')
+            database.execute("CREATE TABLE scheduler_result_envelopes(result_envelope_id TEXT PRIMARY KEY,result_envelope_hash TEXT,result_envelope_json TEXT,outcome TEXT,work_order_id TEXT)")
+            envelope=json.dumps({"outputs":{"text":raw,"content_hash":raw_hash}},sort_keys=True,separators=(',',':'))
+            database.execute("INSERT INTO scheduler_result_envelopes VALUES(?,?,?,?,?)",('result:x',__import__('hashlib').sha256(envelope.encode()).hexdigest(),envelope,'succeeded','work:x'));database.commit();database.close()
+            args['brain_recovery']={"result_envelope_ref":"result:x","raw_sha256":raw_hash}
             with patch('dalton_core.research_language_runtime.ModelRouter',FakeRouter): second=run(**args)
             self.assertEqual(second['status'],'ready_for_publication')
             self.assertEqual(calls,['checker','brain','fidelity'])

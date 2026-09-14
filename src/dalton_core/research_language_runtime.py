@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -204,15 +205,33 @@ def run(product: Mapping[str, Any], *, mission: Mapping[str, Any], request_id: s
         if brain_recovery is None:
             return terminal["review"]
         recovered_brain_call = terminal.get("call_evidence")
-        required = {"result_envelope_ref", "raw_text", "raw_sha256"}
+        required = {"result_envelope_ref", "raw_sha256"}
         if not isinstance(brain_recovery, Mapping) or set(brain_recovery) != required:
             raise ResearchLanguageReviewError("语言修订恢复输入格式无效")
         if (not isinstance(recovered_brain_call, Mapping)
                 or brain_recovery["result_envelope_ref"] != recovered_brain_call.get("result_envelope_ref")):
             raise ResearchLanguageReviewError("语言修订恢复结果身份不匹配")
-        raw_text = brain_recovery["raw_text"]
+        envelope_ref = brain_recovery["result_envelope_ref"]
+        try:
+            database = sqlite3.connect(f"file:{Path(scheduler_db).resolve()}?mode=ro", uri=True)
+            database.execute("PRAGMA query_only=ON"); database.execute("BEGIN")
+            row = database.execute(
+                "SELECT result_envelope_hash,result_envelope_json,outcome,work_order_id "
+                "FROM scheduler_result_envelopes WHERE result_envelope_id=?", (envelope_ref,)).fetchone()
+            database.rollback(); database.close()
+        except sqlite3.Error as exc:
+            raise ResearchLanguageReviewError("语言修订恢复无法读取正式结果") from exc
+        if row is None or row[2] != "succeeded" or row[3] != recovered_brain_call.get("work_order_ref"):
+            raise ResearchLanguageReviewError("语言修订恢复正式结果身份不匹配")
+        envelope_json = row[1]
+        if _hash_bytes(envelope_json.encode()) != row[0]:
+            raise ResearchLanguageReviewError("语言修订恢复正式结果哈希不匹配")
+        envelope = json.loads(envelope_json)
+        raw_text = (envelope.get("outputs") or {}).get("text")
+        raw_hash = (envelope.get("outputs") or {}).get("content_hash")
         if (not isinstance(raw_text, str) or not isinstance(brain_recovery["raw_sha256"], str)
-                or _hash_bytes(raw_text.encode()) != brain_recovery["raw_sha256"]):
+                or _hash_bytes(raw_text.encode()) != brain_recovery["raw_sha256"]
+                or raw_hash != brain_recovery["raw_sha256"]):
             raise ResearchLanguageReviewError("语言修订恢复原文哈希不匹配")
         recovered_brain, recovered_brain_proof = parse_stage_output_with_proof(raw_text, stage="brain")
         if recovered_brain_proof["mode"] != "eof_container_closure":

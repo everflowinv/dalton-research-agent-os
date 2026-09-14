@@ -255,6 +255,9 @@ class EofContainerClosureTests(unittest.TestCase):
             '{"decisions":[],"sections":[{"index":0,"title":"回答',
             '{"decisions":[],"sections":[}',
             '{"decisions":tru',
+            '{"decisions":[],"sections":[',
+            '{"decisions":[],"sections":[{"index":0',
+            '{"decisions":[],"sections":[NaN',
         )
         for raw in values:
             with self.subTest(raw=raw), self.assertRaisesRegex(ValueError, "no unique complete"):
@@ -267,3 +270,9 @@ class RestartedStreamCompatibilityTests(unittest.TestCase):
         value, proof=parse_stage_output_with_proof('{"decisions":['+complete,stage='brain')
         self.assertEqual(value,{"decisions":[],"sections":[]})
         self.assertEqual(proof['mode'],'exact')
+
+class BrainOnlyEofRecoveryTests(unittest.TestCase):
+    def test_checker_eof_container_truncation_is_not_repaired(self):
+        from dalton_core.research_language_review import parse_stage_output_with_proof
+        with self.assertRaisesRegex(ValueError, "no unique complete"):
+            parse_stage_output_with_proof('{"overall":"好","suggestions":[]',stage='checker')

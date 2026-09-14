@@ -46,11 +46,22 @@ def _eof_container_closure(text: str) -> tuple[str, str]:
             stack.pop()
     if quoted or escaped or not stack:
         raise ResearchLanguageReviewError("language stage is not an EOF container-only truncation")
+    if text.rstrip()[-1:] not in {'}', ']', '"'}:
+        raise ResearchLanguageReviewError("language stage ends inside a scalar or separator")
     suffix = "".join("}" if char == "{" else "]" for char in reversed(stack))
     fixed = text + suffix
     try:
-        json.loads(fixed)
-    except json.JSONDecodeError as exc:
+        fixed.encode("utf-8", "strict")
+        value = json.loads(fixed, parse_constant=lambda token: (_ for _ in ()).throw(
+            ValueError("non-finite JSON constant")))
+        def valid_unicode(item: Any) -> None:
+            if isinstance(item, str): item.encode("utf-8", "strict")
+            elif isinstance(item, list):
+                for child in item: valid_unicode(child)
+            elif isinstance(item, dict):
+                for key, child in item.items(): valid_unicode(key); valid_unicode(child)
+        valid_unicode(value)
+    except (json.JSONDecodeError, UnicodeError, ValueError) as exc:
         raise ResearchLanguageReviewError(
             "language stage is not an EOF container-only truncation") from exc
     return fixed, suffix
@@ -88,9 +99,9 @@ def parse_stage_output_with_proof(text: str, *, stage: str) -> tuple[dict[str, A
         if isinstance(value, dict) and set(value) == keys[stage]:
             proof = {"mode": "exact", "suffix": "",
                      "raw_sha256": sha256(text.encode()).hexdigest(),
-                     "fixed_sha256": sha256(text[index:].encode()).hexdigest()}
+                     "fixed_sha256": sha256(text[index:index + _].encode()).hexdigest()}
             candidates[_hash(value)] = (value, proof)
-    if not candidates:
+    if not candidates and stage == "brain":
         try:
             fixed, suffix = _eof_container_closure(text)
         except ResearchLanguageReviewError:
