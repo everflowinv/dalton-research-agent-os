@@ -176,6 +176,25 @@ class HtmlRenderTests(unittest.TestCase):
         self.assertNotIn('reported Revenues', normal)
         self.assertIn(raw, details)
 
+    def test_number_row_cannot_borrow_a_different_claim_text_or_period(self):
+        mission, lib = self.fixture()
+        raw = ('Accenture plc reported Revenues of USD 18718144000 for '
+               '2026-03-01..2026-05-31, up 5.59% year over year from USD '
+               '17727871000 in the comparable quarter.')
+        claim = {'id': 'claim:1', 'subject_ref': 'company:acn',
+                 'claim_kind': 'quantitative', 'metric_or_aspect': 'quarterly_revenue_yoy_growth',
+                 'period': '2026-03-01..2026-05-31', 'basis': 'official-filing-xbrl',
+                 'normalized_statement': raw, 'value': '5.59', 'unit': 'percent', 'scale': 'one'}
+        item = lib['products'][0]['sections'][0]['numbers'][0]
+        item.update(text='另一条来源说明', period=claim['period'], claim_version_ref='claim:1')
+        page = render_research_html(lib, mission=mission, claims={'claim:1': claim})
+        self.assertIn('来源说明（保留原文）：另一条来源说明', page)
+        self.assertNotIn('营业收入187.2 亿美元', page)
+        item.update(text=raw, period='2026Q2')
+        page = render_research_html(lib, mission=mission, claims={'claim:1': claim})
+        self.assertIn('来源说明（保留原文）：Accenture plc reported Revenues', page)
+        self.assertNotIn('营业收入187.2 亿美元', page)
+
     def test_incompatible_units_do_not_make_a_chart(self):
         mission, lib = self.fixture()
         nums = lib["products"][0]["sections"][0]["numbers"]

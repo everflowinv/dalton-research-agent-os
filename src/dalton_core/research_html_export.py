@@ -81,14 +81,17 @@ def _number_text(item: Mapping[str, Any],
     raw = str(item.get("text") or "")
     claim = claims.get(item.get("claim_version_ref"))
     if not isinstance(claim, Mapping):
-        return _display_metric_terms(raw), None
+        return f"来源说明（保留原文）：{_display_metric_terms(raw)}", None
+    if (raw != claim.get("normalized_statement")
+            or item.get("period") != claim.get("period")):
+        return f"来源说明（保留原文）：{_display_metric_terms(raw)}", None
     try:
         from .forecast_reconciliation import (
             ForecastReconciliationValidationError, parse_company_facts_claim,
         )
         parsed = parse_company_facts_claim(claim)
     except (ForecastReconciliationValidationError, KeyError, TypeError, ValueError):
-        return _display_metric_terms(raw), None
+        return f"来源说明（保留原文）：{_display_metric_terms(raw)}", None
     amount = lambda value: format_typed_value(
         value, unit="usd", scale="one", currency=parsed["currency"], metric="revenue")
     growth = format_typed_value(
