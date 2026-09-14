@@ -1,11 +1,50 @@
 """Published products are readable without creating or changing authorities."""
 import json
 
-from dalton_core.cockpit_research_library import research_library
+from dalton_core.cockpit_research_library import (_comparison_table_display,
+                                                   research_library)
 from tests.test_mission_deliverable import ACN, DeliverableHarness
 
 
 class ResearchLibraryTests(DeliverableHarness):
+    def test_closed_comparison_keeps_all_twenty_rows_and_eight_periods(self):
+        periods = [f"{year}Q{quarter}" for year in (2024, 2025)
+                   for quarter in range(1, 5)]
+        tickers = ("ACN", "CTSH", "EPAM", "IBM", "DXC")
+        metrics = ("revenue", "revenue_yoy_growth", "gross_margin", "operating_margin")
+        lines = ["company\tmetric\t" + "\t".join(periods)]
+        for ticker in tickers:
+            for metric in metrics:
+                values = (["16405819000"] * 8 if metric == "revenue"
+                          else ["8.34%"] * 8)
+                lines.append("\t".join((ticker, metric, *values)))
+        lines += ["", "# 各公司利润率口径不同，不可直接横向比较。"]
+        number = {
+            "period": "2024Q1",
+            "text": "ACN 2024Q1（期末 2024-02-29）revenue 16405819000",
+            "cell": {"kind": "statement_accession",
+                     "ref": "comparison-cell:company-sec-cik-0001467373:revenue:2024Q1",
+                     "accession": "0001467373-24-000001"},
+        }
+        shown = _comparison_table_display(
+            "cross_company_comparison", "\n".join(lines), [number])
+        self.assertIsNotNone(shown)
+        self.assertEqual(len(shown["headers"]), 10)
+        self.assertEqual(shown["headers"][2:], [
+            "2024年第一季度", "2024年第二季度", "2024年第三季度", "2024年第四季度",
+            "2025年第一季度", "2025年第二季度", "2025年第三季度", "2025年第四季度",
+        ])
+        self.assertEqual(len(shown["rows"]), 20)
+        self.assertTrue(all(len(row) == 10 for row in shown["rows"]))
+        self.assertEqual(shown["rows"][0][2:], ["164.1 亿美元"] * 8)
+        self.assertEqual(shown["rows"][1][2:], ["8.3%"] * 8)
+        self.assertEqual(shown["note"], "各公司利润率口径不同，不可直接横向比较。")
+        self.assertEqual(shown["original"], "\n".join(lines))
+        invalid = lines.copy()
+        invalid[1] = invalid[1].replace("16405819000", "unknown", 1)
+        self.assertIsNone(_comparison_table_display(
+            "cross_company_comparison", "\n".join(invalid), [number]))
+
     def test_published_document_is_readable_under_query_only(self):
         self.grant("deliverable")
         published = self.publish([{"title": "Business", "body": "A sourced business description.",

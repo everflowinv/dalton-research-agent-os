@@ -276,6 +276,12 @@ class CockpitLanguageTests(unittest.TestCase):
              '“FY27 discretionary spending”'),
         )
 
+    def test_research_reader_renders_comparison_rows_and_folds_raw_table(self) -> None:
+        frontend = HTML.read_text(encoding="utf-8")
+        self.assertIn('if(sec.display_comparison)', frontend)
+        self.assertIn('sec.display_comparison.rows.forEach', frontend)
+        self.assertIn('technicalDetails({原始结构化比较:sec.display_body_technical})', frontend)
+
     def test_claim_period_display_closes_actual_quarter_notation(self) -> None:
         from dalton_core.cockpit_plane import claim_period_display_label
         expected = {

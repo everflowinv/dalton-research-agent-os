@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from typing import Any, Mapping
 
@@ -14,6 +15,57 @@ from .debate_map import DebateMapAuthority, DebateMapError
 from .industry_framework import (IndustryFrameworkAuthority, IndustryFrameworkError,
                                  deliverable_sections)
 from .store import content_hash
+
+
+def _comparison_table_display(title: Any, body: Any,
+                              numbers: list[Mapping[str, Any]]) -> dict[str, Any] | None:
+    """Render every cell of the closed governed comparison TSV for the UI."""
+    from .numeric_display import format_typed_value
+    from .research_html_export import _structured_comparison_display
+    from .cockpit_plane import claim_period_display_label
+
+    checked = _structured_comparison_display(str(title or ""), body, numbers)
+    if checked is None:
+        return None
+    raw = str(body or "")
+    lines = raw.splitlines()
+    boundary = next((index for index, line in enumerate(lines[1:], 1)
+                     if not line or line.startswith("# ")), len(lines))
+    cells = [line.split("\t") for line in lines[:boundary]]
+    if not cells:
+        return None
+    metric_keys = {
+        "revenue": ("营业收入", "amount"),
+        "revenue_yoy_growth": ("营业收入同比增速", "percent"),
+        "gross_margin": ("毛利率", "percent"),
+        "operating_margin": ("营业利润率", "percent"),
+        "营业收入": ("营业收入", "amount"),
+        "营业收入同比增速": ("营业收入同比增速", "percent"),
+        "毛利率": ("毛利率", "percent"),
+        "营业利润率": ("营业利润率", "percent"),
+    }
+    headers = ["公司", "指标"] + [claim_period_display_label(value) or value
+                                  for value in cells[0][2:]]
+    rows = []
+    for row in cells[1:]:
+        label_kind = metric_keys.get(row[1])
+        if label_kind is None:
+            return None
+        label, kind = label_kind
+        shown = []
+        for value in row[2:]:
+            if value == "-":
+                shown.append("—")
+            elif kind == "amount" and re.fullmatch(r"[+-]?\d+(?:\.\d+)?", value):
+                shown.append(format_typed_value(
+                    value, unit="usd", scale="one", currency="USD", metric="revenue"))
+            elif kind == "percent" and re.fullmatch(r"[+-]?\d+(?:\.\d+)?%", value):
+                shown.append(format_typed_value(
+                    value[:-1], unit="percent", scale="one", metric=row[1]))
+            else:
+                return None
+        rows.append([row[0], label, *shown])
+    return {"headers": headers, "rows": rows, "note": checked[0], "original": checked[1]}
 
 
 def _reader(connection: sqlite3.Connection, authority: type) -> Any:
@@ -126,7 +178,15 @@ def research_library(connection: sqlite3.Connection, mission: Mapping[str, Any],
         for product in result["products"]:
             product["display_gaps"] = [gap_display_text(gap) for gap in product.get("gaps", [])]
             for section in product.get("sections", []):
-                section["display_body"] = display_metadata_text(section.get("body") or "")
+                comparison = _comparison_table_display(
+                    section.get("title"), section.get("body"),
+                    [row for row in section.get("numbers", []) if isinstance(row, Mapping)])
+                section["display_body"] = display_metadata_text(
+                    comparison["note"] if comparison is not None else section.get("body") or "")
+                if comparison is not None:
+                    section["display_comparison"] = {
+                        "headers": comparison["headers"], "rows": comparison["rows"]}
+                    section["display_body_technical"] = comparison["original"]
                 section["display_gaps"] = [gap_display_text(gap) for gap in section.get("gaps", [])]
         return result
     return result

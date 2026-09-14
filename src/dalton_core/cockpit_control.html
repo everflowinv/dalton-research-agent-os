@@ -258,6 +258,7 @@ pre.table{background:#f6f8fb;color:#28364b;border-color:var(--line)}table{color:
 .nav-item{width:100%;border:0;text-align:left}.nav-item:hover{background:#eef2f7;color:var(--text)}
 .reader .lane,.reader .lane>div{min-width:0}.reader .lane>div,.reader .raw{overflow-wrap:anywhere}
 .technical{margin-top:8px;color:var(--muted);font-size:12px}.technical summary{cursor:pointer}.technical pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f6f8fb;padding:10px;border-radius:8px}.pager{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:14px 0}.field-label{display:block;margin:8px 0 4px;font-weight:600}.decision-context{margin:8px 0;padding:10px 12px;background:#f6f8fb;border-radius:8px}.source-list{margin-top:8px;padding-left:18px}.source-list li{margin:5px 0}
+.comparison{border-collapse:collapse;margin:10px 0;font-size:12px}.comparison th,.comparison td{padding:7px 9px;border:1px solid var(--line);white-space:nowrap;text-align:right}.comparison th:first-child,.comparison th:nth-child(2),.comparison td:first-child,.comparison td:nth-child(2){text-align:left}
 .reader table{display:block;max-width:100%;overflow-x:auto}.reader input,.reader select{max-width:100%}
 @media(max-width:700px){.nav-item{width:auto}.brand{flex:none}}
 </style>
@@ -656,6 +657,8 @@ async function loadResearchProducts(companyRef,box){
       appendProductState(d,p);
       (p.sections||[]).forEach(sec=>{
         const part=node("div",null,"memo-section");part.append(node("h5",sec.label||contentLabel(sec.title,SECTION_LABELS,"研究内容")));renderText(part,sec.display_body||sec.body||"");
+        if(sec.display_comparison){const table=node("table",null,"comparison"),head=node("thead"),hr=node("tr");sec.display_comparison.headers.forEach(value=>hr.append(node("th",value)));head.append(hr);const body=node("tbody");sec.display_comparison.rows.forEach(values=>{const row=node("tr");values.forEach(value=>row.append(node("td",value)));body.append(row)});table.append(head,body);part.append(table)}
+        if(sec.display_body_technical){const tech=technicalDetails({原始结构化比较:sec.display_body_technical});if(tech)part.append(tech)}
         (sec.display_gaps??sec.gaps??[]).forEach(g=>part.append(node("div",g,"gap")));
         if(sec.display_gaps&&JSON.stringify(sec.display_gaps)!==JSON.stringify(sec.gaps)){const tech=technicalDetails({原始资料缺口:sec.gaps});if(tech)part.append(tech)}
         if((sec.sources||[]).length)part.append(node("div",`来源：${sec.sources.map(sourceLabel).join(" · ")}`,"hint"));
