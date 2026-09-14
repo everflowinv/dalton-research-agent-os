@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import plistlib
 import socket
 import sqlite3
 import subprocess
@@ -16,11 +17,14 @@ from typing import Any
 
 from dalton_core.bootstrap import bootstrap
 from dalton_core.coverage_mission import CoverageMissionAuthority
+from dalton_core.macos_launchagent import render as render_launch_agents
+from dalton_core.public_web_core_search import build_web_search_governance_record
 from dalton_core.store import DaltonStore, content_hash
 from dalton_core.workspace import create_workspace_manifest, load_workspace_manifest
 from dalton_core.workspace_mission_setup import (
     draft_first_mission, publish_first_mission_to_store,
 )
+from dalton_core.workspace_process import label_namespace
 from dalton_core.workspace_runtime import validate_child_command
 from dalton_core.workspace_runtime_setup import install as install_runtime
 from dalton_core.writer_client import WriterClient
@@ -81,11 +85,16 @@ def _create(host: Path, release: Path, slug: str, port: int) -> Any:
     foundation_body = {key: value for key, value in foundation.items()
                        if key != "content_hash"}
     foundation_body["mission_defaults"]["source_plan"] = [{
-        "source_ref": "source:sec-edgar", "role": "controlled fixture filings",
+        "source_ref": "source:web-search", "role": "controlled fixture public-web discovery",
         "status": "connected",
     }]
     foundation = {**foundation_body, "content_hash": content_hash(foundation_body)}
     _write(workspace.state_dir / "research-foundation.json", foundation)
+    _write(
+        workspace.state_dir / "connector-governance/gemini-web-search-v1.json",
+        build_web_search_governance_record(
+            approved_by="human:acceptance-owner", status="approved"),
+    )
     proposal = draft_first_mission(
         workspace, goal="Research the fixture software industry and $SAME",
         method_foundation=foundation, industry="Fixture Software",
@@ -109,12 +118,27 @@ def _start(workspace: Any, module: str, *args: str) -> subprocess.Popen[str]:
 
 def _start_writer(workspace: Any) -> subprocess.Popen[str]:
     state = workspace.state_dir
-    process = _start(
-        workspace, "dalton_core.writer_server", "--db", str(state / "core.sqlite"),
-        "--scheduler", str(state / "scheduler.sqlite"),
-        "--socket", str(workspace.writer_socket), "--token-config",
-        str(state / "writer-tokens.json"), "--transcript-spool-dir",
-        str(state / "transcript-spool"))
+    launch_agents = state / "acceptance-launchagents"
+    rendered = render_launch_agents(
+        launch_agents, Path(sys.executable).parent, state, workspace.config_path,
+        workspace.log_dir, label_namespace=label_namespace(workspace.slug),
+        workspace_manifest_path=workspace.manifest_path)
+    with Path(rendered["writer"]).open("rb") as handle:
+        formal_argv = plistlib.load(handle)["ProgramArguments"]
+    citations = state / "acceptance-web-search-citations.json"
+    _write(citations, [{
+        "url": "https://example.com/fixture-software/investors",
+        "title": "Fixture Software investor relations",
+    }])
+    writer_argv = [sys.executable, "-m", "dalton_core.writer_server", *formal_argv[1:],
+                   "--web-search-rehearsal-citations", str(citations),
+                   "--web-search-rehearsal-approved-by", "human:acceptance-owner"]
+    env = {**os.environ,
+           "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"),
+           "PYTHONDONTWRITEBYTECODE": "1",
+           "DALTON_WORKSPACE_MANIFEST": str(workspace.manifest_path)}
+    process = subprocess.Popen(writer_argv, env=env, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, text=True)
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
         if workspace.writer_socket.exists():
@@ -181,6 +205,36 @@ def _wait_more_ticks(workspace: Any, before: int) -> int:
     raise RuntimeError("workspace controller did not continue research scheduling")
 
 
+def _wait_discovery(workspace: Any) -> dict[str, Any]:
+    deadline = time.monotonic() + 20
+    last = {}
+    while time.monotonic() < deadline:
+        with sqlite3.connect(workspace.state_dir / "core.sqlite") as connection:
+            discoveries = connection.execute(
+                "SELECT count(*) FROM coverage_mission_source_discoveries").fetchone()[0]
+            documents = connection.execute(
+                "SELECT count(*) FROM coverage_mission_discovered_documents").fetchone()[0]
+        tickets = sorted((workspace.state_dir / "discoveries").glob("*/ticket.json"))
+        succeeded = []
+        for path in tickets:
+            value = json.loads(path.read_text())
+            last[str(path)] = {key: value.get(key) for key in ("id", "status", "error")}
+            if value.get("status") == "succeeded":
+                succeeded.append(value.get("id"))
+        if discoveries > 0 and documents > 0 and succeeded:
+            return {"source_discovery_records": discoveries,
+                    "discovered_document_records": documents,
+                    "succeeded_ticket_refs": succeeded}
+        time.sleep(0.05)
+    with sqlite3.connect(workspace.state_dir / "tick-ledger.sqlite") as connection:
+        lanes = connection.execute(
+            "SELECT driver_key,status,status_word FROM tick_ledger_lanes "
+            "WHERE driver_key='mission_source_discovery' ORDER BY rowid DESC LIMIT 3").fetchall()
+    raise RuntimeError(
+        "fixture source discovery did not settle into workspace authority: "
+        f"tickets={last!r} lanes={lanes!r}")
+
+
 def _research_tick_evidence(workspace: Any) -> dict[str, Any]:
     with sqlite3.connect(workspace.state_dir / "tick-ledger.sqlite") as connection:
         connection.row_factory = sqlite3.Row
@@ -241,6 +295,8 @@ def run_acceptance(output: Path) -> dict[str, Any]:
             b, mission_b, _proposal_b, foundation_b = _create(host, release, "beta", _free_port())
             writer_b = _start_writer(b); processes.append(writer_b)
             controller_b = _start_controller(b); processes.append(controller_b)
+            discovery_a = _wait_discovery(a)
+            discovery_b = _wait_discovery(b)
             a_after = _wait_more_ticks(a, a_before)
             if controller_a.pid != a_pid or controller_a.poll() is not None:
                 raise RuntimeError("workspace A controller changed while B was created")
@@ -311,6 +367,8 @@ def run_acceptance(output: Path) -> dict[str, Any]:
                            "b_research_tick": _research_tick_evidence(b),
                            "a_mission_progress": stage_a,
                            "b_mission_progress": stage_b,
+                           "a_source_discovery": discovery_a,
+                           "b_source_discovery": discovery_b,
                            "mission_versions": [progress_a["mission_version_ref"],
                                                 progress_b["mission_version_ref"]]},
                 "isolation": {"cross_writer_token": cross_token,

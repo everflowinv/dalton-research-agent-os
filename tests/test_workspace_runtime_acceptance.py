@@ -30,6 +30,10 @@ class WorkspaceRuntimeAcceptanceTests(unittest.TestCase):
             self.assertEqual(
                 result["engine"]["b_mission_progress"]["companies"][0]["current_stage"],
                 "initial_screen")
+            for key in ("a_source_discovery", "b_source_discovery"):
+                self.assertGreater(result["engine"][key]["source_discovery_records"], 0)
+                self.assertGreater(result["engine"][key]["discovered_document_records"], 0)
+                self.assertTrue(result["engine"][key]["succeeded_ticket_refs"])
             self.assertTrue(all(item["refused"] for item in result["isolation"].values()))
             stored = json.loads((output / "receipt.json").read_text())
             asserted = stored.pop("content_hash")
