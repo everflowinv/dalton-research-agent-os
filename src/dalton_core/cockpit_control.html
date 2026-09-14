@@ -1086,14 +1086,16 @@ function renderModel(sheet,m){sheet.replaceChildren(readerClose(),node("h2",`${m
   Object.values(m.invariants||{}).forEach(x=>{const refusal=invariantRefusal(x);if(refusal)sheet.append(refusal)});
   const r=m.readiness||{};
   if(r.drivers_without_history&&r.drivers_without_history.length)
-    sheet.append(node("div",`没有历史可依的驱动因素：${(r.drivers_without_history_labels||[]).join("、")}`,"gap"));
+    sheet.append(readinessGroup("没有历史可依的驱动因素",r.drivers_without_history_labels||[]));
   if(r.results_unavailable&&r.results_unavailable.length)
-    sheet.append(node("div",`当前版本暂无结果的项目：${(r.results_unavailable_labels||[]).join("、")}`,"gap"));
+    sheet.append(readinessGroup("当前版本暂无结果的项目",r.results_unavailable_labels||[]));
   sheet.append(node("pre",m.table,"table"));
   const technical=technicalDetails(m.technical_table,"模型计算与记录详情");if(technical)sheet.append(technical);
   if(m.history&&m.history.length>1){sheet.append(node("h3","这个模型的版本链"));const h=node("div",null,"hist");
     m.history.forEach(x=>h.append(node("div",`${versionLabel(x.version)} · ${fmtDate(x.created_at)}${x.change_reason_label?" · "+displayText(x.change_reason_label):""}`)));
     sheet.append(h)}}
+function readinessGroup(title,labels){const box=node("div",null,"gap"),list=node("ul");box.append(node("b",title));
+  labels.forEach(label=>list.append(node("li",displayText(label))));box.append(list);return box}
 function laneClassOf(s){if(["launched","busy","running"].includes(s))return"on";
   /* Waiting on the owner is not idling, and the dot says so. */
   if(["ungranted","unapproved","unconfigured","unstarted"].includes(s))return"wait";

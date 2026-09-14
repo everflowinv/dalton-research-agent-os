@@ -108,6 +108,19 @@ class ModelDisplayTest(unittest.TestCase):
         self.assertNotIn('12.35%', shown)
         self.assertEqual(before, record)
 
+    def test_trailing_filed_template_and_long_eps_readiness_are_compact_chinese(self):
+        raw = ('the trailing filed history through 2026-06-30 for structure line '
+               'diluted_shares is carried forward unchanged')
+        self.assertEqual('沿用截至 2026-06-30 已申报历史中的摊薄股数结构，保持不变',
+                         model_metadata_text(raw))
+        record = {'drivers': [], 'results': [{
+            'ref': 'result:diluted_eps',
+            'label': '本行为稀释每股收益（Diluted EPS）科目，为单独标注的小值指标。',
+        }]}
+        shown = readiness_labels(record, {'results_unavailable': ['result:diluted_eps']},
+                                  lambda value: value)
+        self.assertEqual(['摊薄每股收益'], shown['results_unavailable_labels'])
+
     def test_closed_forecast_unavailable_templates_are_chinese_without_changing_reasons(self):
         reasons = [
             'statement line result:revenue is explicitly unavailable for forecast',

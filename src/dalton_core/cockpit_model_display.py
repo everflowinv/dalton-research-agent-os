@@ -16,6 +16,7 @@ FIELD_LABELS = {
     'operating_cash_flow': '经营现金流', 'capital_expenditure': '资本开支',
     'free_cash_flow': '自由现金流', 'diluted_eps': '摊薄每股收益',
     'diluted_weighted_average_shares': '摊薄加权平均股数',
+    'diluted_shares': '摊薄股数',
     'company_presented_component': '公司披露的分项',
     'retained_contract_book': '存量合同', 'new_work_conversion': '新增业务收入转化',
     'realized_pricing': '实际成交价格', 'currency_translation': '汇率折算影响',
@@ -106,6 +107,13 @@ def model_metadata_text(value: Any) -> str:
     """Replace only registered accounting concepts and model field roles."""
 
     text = str(value or '')
+    text = re.sub(
+        r'the trailing filed history through (\d{4}-\d{2}-\d{2}) '
+        r'for structure line (.+?) is carried forward unchanged',
+        lambda match: f'沿用截至 {match.group(1)} 已申报历史中的'
+                      f'{field_label(match.group(2))}结构，保持不变',
+        text,
+    )
     fixed_notes = {
         'the specification names no filed counterpart for this line':
             '尚未关联这项指标的历史披露数据',
@@ -171,8 +179,18 @@ def native_chinese_model_text(value: Any) -> str | None:
 
 def readiness_labels(record: Mapping[str, Any], readiness: Mapping[str, Any],
                      translate: Callable[[str], str]) -> dict[str, Any]:
-    labels = {str(row['ref']): field_label(row.get('label') or row['ref'], translate)
-              for name in ('drivers', 'results') for row in record.get(name) or []}
+    labels = {}
+    for name in ('drivers', 'results'):
+        for row in record.get(name) or []:
+            ref = str(row['ref'])
+            shown = field_label(row.get('label') or ref, translate)
+            # Some historical labels are explanatory sentences. They belong
+            # in the report notes, not in the compact missing-item heading.
+            if len(shown) > 36 or shown.endswith(('。', '；')):
+                compact = field_label(ref)
+                if compact != '模型项目（标识见技术详情）':
+                    shown = compact
+            labels[ref] = shown
     return {**readiness, **{name + '_labels': [labels.get(ref, field_label(ref, translate))
              for ref in readiness.get(name) or []]
              for name in ('drivers_without_history', 'results_unavailable')}}

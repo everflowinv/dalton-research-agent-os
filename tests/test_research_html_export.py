@@ -143,6 +143,21 @@ class HtmlRenderTests(unittest.TestCase):
         self.assertIn("技术详情与来源（2）", page)
         self.assertIn("claim:1, claim:2", page)
 
+    def test_reader_titles_and_known_failure_gaps_are_chinese_but_source_rows_remain_verbatim(self):
+        mission, lib = self.fixture()
+        section = lib['products'][0]['sections'][0]
+        section['title'] = 'S4 风险与 Anti-thesis（简版）'
+        section['gaps'] = ['这一节没能起草：the model call did not succeed；缺少 utilization、margin、segment profit、bookings。']
+        section['numbers'][0]['text'] = ('Accenture plc reported Revenues of USD 18718144000 '
+                                         'for 2026Q2, up 5.59% year over year.')
+        page = render_research_html(lib, mission=mission)
+        self.assertIn('S4 风险与反向观点（简版）', page)
+        self.assertIn('模型调用未成功', page)
+        for shown in ('利用率', '利润率', '分部利润', '订单额'):
+            self.assertIn(shown, page)
+        self.assertIn('来源原文中的数值（保留原文）', page)
+        self.assertIn('Accenture plc reported Revenues of USD 18718144000', page)
+
     def test_incompatible_units_do_not_make_a_chart(self):
         mission, lib = self.fixture()
         nums = lib["products"][0]["sections"][0]["numbers"]

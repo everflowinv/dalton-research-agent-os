@@ -65,6 +65,19 @@ def _display_metric_terms(value: Any) -> str:
     return display_metadata_text(value or "暂无可核验内容")
 
 
+def _section_title(value: Any) -> str:
+    text = str(value or "未命名章节")
+    replacements = {
+        "S3 核心 Thesis（简版）": "S3 核心投资逻辑（简版）",
+        "S3 核心Thesis（简版）": "S3 核心投资逻辑（简版）",
+        "核心 Thesis（简版）": "核心投资逻辑（简版）",
+        "核心Thesis（简版）": "核心投资逻辑（简版）",
+        "S4 风险与 Anti-thesis（简版）": "S4 风险与反向观点（简版）",
+        "S4 风险与Anti-thesis（简版）": "S4 风险与反向观点（简版）",
+    }
+    return replacements.get(text, text)
+
+
 class ResearchHtmlExportError(RuntimeError):
     pass
 
@@ -309,6 +322,15 @@ def _gap_text(value: Any) -> str:
         )
     else:
         text = "未说明的待补项"
+    text = text.replace("the model call did not succeed", "模型调用未成功")
+    # These occur inside a known missing-information field, not in quoted
+    # source prose. Keep product and company names untouched.
+    for source, shown in {
+        "utilization": "利用率", "margin": "利润率",
+        "segment profit": "分部利润", "bookings": "订单额",
+    }.items():
+        text = re.sub(rf"(?<![A-Za-z_]){re.escape(source)}(?![A-Za-z_])", shown,
+                      text, flags=re.IGNORECASE)
     return _display_metric_terms(gap_display_text(_display_reason(text)))
 
 
@@ -453,7 +475,7 @@ def render_research_html(
                 if ref and ref not in technical_refs:
                     technical_refs.append(ref)
             chunks.append(
-                f'<article><h3>{_esc(section.get("title") or "未命名章节")}</h3><p class="prose">{_esc(_display_metric_terms(section.get("body") or "暂无可核验内容"))}</p>{_chart(nums, claims, f"chart-{pi}-{si}", subject_ref=product.get("subject_ref")) if nums else ""}{("<div class=\"tablewrap\"><table><thead><tr><th>期间</th><th>来源原文中的数值</th></tr></thead><tbody>"+table+"</tbody></table></div>") if table else ""}<details class="refs"><summary>技术详情与来源（{len(technical_refs)}）</summary><code>{_esc(", ".join(_source_text(ref) for ref in technical_refs) if technical_refs else "暂无来源")}</code></details><p class="gaps">待补资料：{_esc("；".join(_gap_text(gap) for gap in (section.get("gaps") or [])) or "当前未记录待补项")}</p></article>'
+                f'<article><h3>{_esc(_section_title(section.get("title")))}</h3><p class="prose">{_esc(_display_metric_terms(section.get("body") or "暂无可核验内容"))}</p>{_chart(nums, claims, f"chart-{pi}-{si}", subject_ref=product.get("subject_ref")) if nums else ""}{("<div class=\"tablewrap\"><table><thead><tr><th>期间</th><th>来源原文中的数值（保留原文）</th></tr></thead><tbody>"+table+"</tbody></table></div>") if table else ""}<details class="refs"><summary>技术详情与来源（{len(technical_refs)}）</summary><code>{_esc(", ".join(_source_text(ref) for ref in technical_refs) if technical_refs else "暂无来源")}</code></details><p class="gaps">待补资料：{_esc("；".join(_gap_text(gap) for gap in (section.get("gaps") or [])) or "当前未记录待补项")}</p></article>'
             )
         if not chunks:
             chunks = [

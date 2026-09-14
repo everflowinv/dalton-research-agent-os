@@ -289,6 +289,12 @@ class CockpitLanguageTests(unittest.TestCase):
         self.assertIn('fields=[z.title,...(z.sections||[]).flatMap', text)
         self.assertIn('technicalDetails({original_review:z})', text)
 
+    def test_missing_model_items_are_rendered_as_readable_lists(self) -> None:
+        text = HTML.read_text(encoding="utf-8")
+        self.assertIn('readinessGroup("当前版本暂无结果的项目"', text)
+        self.assertIn('labels.forEach(label=>list.append(node("li",displayText(label))))', text)
+        self.assertNotIn('当前版本暂无结果的项目：${(r.results_unavailable_labels||[]).join', text)
+
 
 if __name__ == "__main__":
     unittest.main()
