@@ -1225,10 +1225,8 @@ class FeedEndToEndTests(unittest.TestCase):
         plan = load_feed_discovery_plan(PLAN_PATH)
         self.assertEqual(plan["body_reads_per_tick"], 50)
         self.assertEqual(COMPANY_WIKI_BODY_READS_PER_TICK, 12)
-        # A writer RPC gets less than ten seconds.  One enumerate plus one
-        # body child fits that boundary; the cursor advances on later ticks.
-        self.assertEqual(_feed_body_read_limit(COMPANY_WIKI, plan), 1)
-        self.assertEqual(_feed_body_read_limit(SALES_NOTES, plan), 1)
+        self.assertEqual(_feed_body_read_limit(COMPANY_WIKI, plan), 12)
+        self.assertIsNone(_feed_body_read_limit(SALES_NOTES, plan))
 
     def test_small_batches_resume_after_unattributed_documents(self) -> None:
         attempted = []

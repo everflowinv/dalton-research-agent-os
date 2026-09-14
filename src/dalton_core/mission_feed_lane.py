@@ -1507,9 +1507,9 @@ def _feed_body_read_limit(
 
     if "body_reads_per_tick" not in plan:
         return None
-    ceiling = COMPANY_WIKI_BODY_READS_PER_TICK if source_ref == COMPANY_WIKI_SOURCE_REF \
-        else plan["body_reads_per_tick"]
-    return min(plan["body_reads_per_tick"], ceiling, 1)
+    if source_ref == COMPANY_WIKI_SOURCE_REF:
+        return min(plan["body_reads_per_tick"], COMPANY_WIKI_BODY_READS_PER_TICK)
+    return None
 
 
 def dispatch_sales_notes(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
