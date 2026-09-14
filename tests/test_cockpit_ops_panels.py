@@ -111,6 +111,14 @@ class OpsBacklogTests(PanelCase):
             "doc:number": ("number_not_in_source", "数字缺少可核验来源"),
             "doc:length": ("assessment is longer than 1200 characters", "输出格式或长度不符合要求"),
             "doc:evidence": ("this draft cites nothing new", "现有证据不支持这份产出"),
+            "doc:empty-web": (
+                "fetch outcome failed; public web fetch returned an empty response body; not retryable",
+                "来源页面没有返回正文，因此未登记为可用资料",
+            ),
+            "doc:http-web": (
+                "fetch outcome failed; public web fetch returned HTTP 403; not retryable",
+                "来源页面拒绝访问或返回了失败状态",
+            ),
         }
         moment = datetime(2026, 9, 10, 9, 0, tzinfo=timezone.utc)
         with LaneFailureLedger(default_path(self.root), clock=lambda: moment) as ledger:

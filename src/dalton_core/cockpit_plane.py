@@ -347,6 +347,10 @@ def _terminal_display_reason(reason: Any, failure_class: Any = None) -> str:
         return "产出未通过独立核验"
     if "segment_sum:" in text or "rate_domain:" in text:
         return "历史数字未通过勾稽或单位校验"
+    if "empty_body" in text or "empty response body" in text:
+        return "来源页面没有返回正文，因此未登记为可用资料"
+    if "public web fetch returned http" in text:
+        return "来源页面拒绝访问或返回了失败状态"
     return "当前产出未通过内容或证据校验"
 
 
