@@ -36,7 +36,7 @@ import time
 from collections.abc import Mapping
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
@@ -1086,6 +1086,33 @@ def claim_period_display_label(value: Any) -> str | None:
     if not isinstance(value, str) or not value.strip():
         return None
     text = value.strip()
+    quarter = re.fullmatch(r"(?:(FY|CY))?(\d{4})Q([1-4])", text,
+                           flags=re.IGNORECASE)
+    if quarter:
+        basis = {None: "", "FY": "财年", "CY": "自然年"}[
+            quarter[1].upper() if quarter[1] else None]
+        return f"{quarter[2]}{basis or '年'}第{'一二三四'[int(quarter[3]) - 1]}季度"
+    short_quarter = re.fullmatch(r"(FY|CY)(\d{2})Q([1-4])", text,
+                                 flags=re.IGNORECASE)
+    if short_quarter:
+        basis = "财年" if short_quarter[1].upper() == "FY" else "自然年"
+        return f"20{short_quarter[2]}{basis}第{'一二三四'[int(short_quarter[3]) - 1]}季度"
+    alternate_fiscal = re.fullmatch(r"F([1-4])Q(\d{2})", text,
+                                    flags=re.IGNORECASE)
+    if alternate_fiscal:
+        return f"20{alternate_fiscal[2]}财年第{'一二三四'[int(alternate_fiscal[1]) - 1]}季度"
+    date_range = re.fullmatch(r"(\d{4}-\d{2}-\d{2})\.\.(\d{4}-\d{2}-\d{2})", text)
+    if date_range:
+        try:
+            start, end = date.fromisoformat(date_range[1]), date.fromisoformat(date_range[2])
+        except ValueError:
+            pass
+        else:
+            if start <= end:
+                def shown(day: date) -> str:
+                    return f"{day.year}年{day.month}月{day.day}日"
+                return f"{shown(start)}至{shown(end)}"
+        return "期间说明见技术详情"
     reviewed = REVIEWED_CLAIM_PERIOD_LABELS.get(
         text, COMMON_CLAIM_PERIOD_LABELS.get(text))
     if reviewed is not None:

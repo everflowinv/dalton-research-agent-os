@@ -577,10 +577,26 @@ class SourcePanelTests(Int2Case):
             "2023 through first half of 2024": "2023年至2024年上半年",
             "Back half of fiscal year": "财年下半年",
             "DXC second quarter of fiscal 2026": "DXC 2026财年第二季度",
+            "2026Q1": "2026年第一季度",
+            "2026Q4": "2026年第四季度",
+            "FY2026Q3": "2026财年第三季度",
+            "CY2026Q2": "2026自然年第二季度",
+            "FY26Q3": "2026财年第三季度",
+            "CY26Q2": "2026自然年第二季度",
+            "F3Q26": "2026财年第三季度",
+            "2026-01-01..2026-03-31": "2026年1月1日至2026年3月31日",
+            "2024-02-29..2024-02-29": "2024年2月29日至2024年2月29日",
         }
         for raw, expected in cases.items():
             with self.subTest(raw=raw):
                 self.assertEqual(expected, _claim_period_label(raw))
+
+    def test_invalid_structured_periods_are_not_interpreted(self) -> None:
+        for raw in ("2026Q0", "2026Q5", "FY2026Q9",
+                    "2026-02-29..2026-03-31",
+                    "2026-04-01..2026-03-31"):
+            with self.subTest(raw=raw):
+                self.assertEqual(_claim_period_label(raw), "期间说明见技术详情")
 
     def test_every_reviewed_period_has_an_exact_display_and_unknowns_still_close(self) -> None:
         self.assertEqual(len(REVIEWED_CLAIM_PERIOD_LABELS), 535)

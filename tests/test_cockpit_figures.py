@@ -84,7 +84,7 @@ class FigureProjectionTests(unittest.TestCase):
         self.assertEqual((shown["value"], shown["currency"], shown["scale"]),
                          ("17.7", "USD", "billion"))
         self.assertEqual(shown["display_label"], "营业收入")
-        self.assertEqual(shown["period_label"], "FY2026Q3")
+        self.assertEqual(shown["period_label"], "2026财年第三季度")
 
     def test_display_label_uses_metric_identity_not_value_bearing_source_prose(self):
         from dalton_core.cockpit_plane import _figure_display_label
