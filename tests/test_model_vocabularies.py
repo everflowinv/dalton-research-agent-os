@@ -14,6 +14,8 @@ safe if dropping one is visible.
 from __future__ import annotations
 
 import importlib.util
+import json
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -155,6 +157,55 @@ class ModelConfigurationRegistryTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertNotIn("MODEL_CONFIG_NAMES", source)
+
+    def test_budget_registry_covers_every_reusable_workspace_model_role(self) -> None:
+        from dalton_core.workspace_model_setup import EXPECTED_CONFIG_NAMES
+
+        registered = set(model_config_names())
+        self.assertEqual(EXPECTED_CONFIG_NAMES - registered, set())
+        self.assertEqual({
+            "research-language-check-model-config.json",
+            "research-language-revision-model-config.json",
+            "research-localization-draft-model-config.json",
+            "research-localization-verifier-model-config.json",
+        } - registered, set())
+
+    def test_cap_raise_remains_compatible_with_historical_seventeen_files(self) -> None:
+        from dalton_core.thesis_impact_budget import ThesisImpactBudgetStore
+        from dalton_core.workspace_model_setup import EXPECTED_CONFIG_NAMES
+
+        language = {
+            "research-language-check-model-config.json",
+            "research-language-revision-model-config.json",
+            "research-localization-draft-model-config.json",
+            "research-localization-verifier-model-config.json",
+        }
+        historical = EXPECTED_CONFIG_NAMES - language
+        self.assertEqual(len(historical), 17)
+        spec = importlib.util.spec_from_file_location(
+            "raise_day_budget_cap_compat", ROOT / "scripts" / "raise_day_budget_cap.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            ledger = state / "budget.sqlite"
+            old_ref = "thesis-impact-day-budget-policy:production:1"
+            with ThesisImpactBudgetStore(ledger) as budget:
+                budget.register_policy(policy_version_id=old_ref,
+                                       day_cap_micros=25_000_000)
+            service = state / "service.json"
+            service.write_text(json.dumps({
+                "core_db": str(state / "core.sqlite"),
+                "thesis_impact": {"config": {
+                    "budget_db": str(ledger),
+                    "budget_policy_version_id": old_ref,
+                }},
+            }))
+            for name in historical:
+                (state / name).write_text(json.dumps({"budget_policy_ref": old_ref}))
+            result = module.raise_cap(service, cap_usd=100, apply=True)
+            self.assertEqual(len(result["model_configs"]), 17)
+            self.assertTrue(all(not (state / name).exists() for name in language))
 
 
 if __name__ == "__main__":
