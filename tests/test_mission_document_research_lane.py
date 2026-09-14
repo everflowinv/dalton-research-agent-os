@@ -222,6 +222,37 @@ class MissionDocumentResearchLaneTests(unittest.TestCase):
         holds = json.loads(self.lane.holds_path.read_text(encoding="utf-8"))
         self.assertNotIn(admission["id"], holds["holds"])
 
+    def test_required_hold_finds_exact_owned_ticket_when_work_becomes_resumable(self) -> None:
+        admission = self.store.add(1)
+        self.store.started(admission["id"])
+        suffix = "9" * 24
+        ticket_ref = "mission-document-research:" + suffix
+        self.launcher.tickets[ticket_ref] = {
+            "id": ticket_ref, "status": "succeeded", "summary": {"status": "blocked"},
+            "admission_ref": admission["id"],
+            "admission_hash": admission["content_hash"],
+        }
+        ticket_dir = self.launcher.tickets_dir / suffix
+        ticket_dir.mkdir()
+        (ticket_dir / "ticket.json").write_text("{}\n", encoding="utf-8")
+        body = {"schema_version": "0.1", "holds": {admission["id"]: {
+            "admission_hash": admission["content_hash"], "ticket_ref": None,
+            "reason": "started_without_owned_live_ticket",
+            "disposition": "recovery_required", "retry_at": None,
+        }}}
+        self.lane.holds_path.write_text(
+            canonical_json({**body, "content_hash": content_hash(body)}) + "\n"
+        )
+        self.lane._execution_state = lambda _admission: {
+            "action": "resume", "reason": "outcome_commit_not_yet_finished",
+            "work_order_ref": None,
+        }
+
+        result = self.lane.dispatch_once()
+
+        self.assertEqual(result["status"], "resumed")
+        self.assertEqual(self.launcher.resumed[0]["prior_ticket_ref"], ticket_ref)
+
     def test_legacy_daily_budget_required_hold_is_reclassified_to_wait(self) -> None:
         admission = self.store.add(1)
         self.store.started(admission["id"])
@@ -293,6 +324,10 @@ class MissionDocumentResearchLaneTests(unittest.TestCase):
             {"admission_ref": failed["id"], "outcome": "recovery_required"},
             {"admission_ref": staged["id"], "outcome": "candidate_staged"},
         ]
+        self.lane._execution_state = lambda _admission: {
+            "action": "recovery_required", "reason": "send_state_unproved",
+            "work_order_ref": "work:failed",
+        }
         with patch(
             "dalton_core.mission_document_research_executor."
             "read_mission_document_research_observations",

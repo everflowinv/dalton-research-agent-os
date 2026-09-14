@@ -172,6 +172,28 @@ class MissionDocumentResearchCoordinator:
             )
         return dict(value)
 
+    def _owned_terminal_ticket_ref(
+        self, admission: Mapping[str, Any],
+    ) -> str | None:
+        matches = []
+        for path in self.launcher.tickets_dir.glob("*/ticket.json"):
+            ticket_ref = "mission-document-research:" + path.parent.name
+            try:
+                ticket = self.launcher.status(ticket_ref)
+            except LookupError:
+                continue
+            if (
+                ticket.get("status") != "running"
+                and ticket.get("admission_ref") == admission["id"]
+                and ticket.get("admission_hash") == admission["content_hash"]
+            ):
+                matches.append(ticket_ref)
+        if len(matches) > 1:
+            raise MissionDocumentResearchLaneError(
+                "document research admission has multiple owned terminal tickets"
+            )
+        return matches[0] if matches else None
+
     def _admissions(self) -> list[dict[str, Any]]:
         try:
             has_outcomes = self.store.connection.execute(
@@ -856,15 +878,15 @@ class MissionDocumentResearchCoordinator:
                 and held["disposition"] == "recovery_required"
                 and held["reason"] == "fresh_work_recovery_deadline_exceeded"
             )
-            if held is None or (
-                held["disposition"] != "recovery_wait" and not legacy_day_hold
-            ):
+            if held is None or held["disposition"] not in {
+                "recovery_wait", "recovery_required",
+            }:
                 continue
             if held["admission_hash"] != admission["content_hash"]:
                 raise MissionDocumentResearchLaneError(
                     "document research hold admission hash drifted"
                 )
-            if not legacy_day_hold:
+            if held["disposition"] == "recovery_wait":
                 try:
                     retry_at = datetime.fromisoformat(held["retry_at"]).astimezone(
                         timezone.utc
@@ -892,9 +914,18 @@ class MissionDocumentResearchCoordinator:
                                  else "terminal_hold"),
                 )
                 continue
+            ticket_ref = held["ticket_ref"] or self._owned_terminal_ticket_ref(
+                admission
+            )
+            if ticket_ref is None:
+                self._hold(
+                    holds, admission, reason="controlled_reentry_ticket_unavailable",
+                    ticket_ref=None, disposition="recovery_required",
+                )
+                continue
             try:
                 result = self._resume(
-                    admission, ticket_ref=held["ticket_ref"],
+                    admission, ticket_ref=ticket_ref,
                     recovery=recovery, settled=settled,
                 )
             except LaneChildConflict as exc:
