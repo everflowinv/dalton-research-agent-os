@@ -59,6 +59,51 @@ def _sha(path: Path) -> str:
     return digest.hexdigest()
 
 
+def copy_bound_publication_state(*, live_state: Path, live_launch_agents: Path,
+                                 temp_state: Path, temp_launch_agents: Path,
+                                 expected: Any) -> dict[str, Any]:
+    """Copy only the publication entries closed by the 0.8 transition."""
+    from scripts.successor_research_publication_gate_transition import (
+        validate_preserved_publication_state, verify_preserved_publication_state,
+    )
+
+    rows = validate_preserved_publication_state(expected)
+    for row in rows:
+        source_root = (live_launch_agents if row["kind"] == "launch_agent"
+                       else live_state)
+        target_root = (temp_launch_agents if row["kind"] == "launch_agent"
+                       else temp_state)
+        source = source_root / row["path"]
+        target = target_root / row["path"]
+        _need(not source.is_symlink(),
+              f"preserved publication source is a symlink: {row['path']}")
+        if row["kind"] == "directory":
+            _need(source.is_dir()
+                  and stat.S_IMODE(source.stat().st_mode) == row["mode"],
+                  f"preserved publication directory differs: {row['path']}")
+            _need(not target.exists() and not target.is_symlink(),
+                  f"publication scratch target already exists: {row['path']}")
+            target.mkdir(mode=row["mode"], parents=False)
+            os.chmod(target, row["mode"])
+            continue
+        data, source_stat = _stable_regular_bytes(
+            source, f"preserved publication file {row['path']}")
+        _need(len(data) == row["size"]
+              and hashlib.sha256(data).hexdigest() == row["sha256"]
+              and stat.S_IMODE(source_stat.st_mode) == row["mode"],
+              f"preserved publication file differs: {row['path']}")
+        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        _write_exclusive(target, data, mode=row["mode"])
+        os.chmod(target, row["mode"])
+    verify_preserved_publication_state(
+        state_dir=temp_state, launch_agents_dir=temp_launch_agents,
+        expected=rows)
+    return {
+        "entry_count": len(rows),
+        "inventory_sha256": _canonical_sha256(rows),
+    }
+
+
 MODEL_CATALOG_CONFIG = "model-catalog-sync.json"
 PHASE8_TEMPLATE = "phase8/p14e-adhoc-probe-templates-v1.json"
 MARKET_DIGEST_LINK = "feeds/market-digest-output"
@@ -980,6 +1025,18 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     class SuccessorRehearsal(module.Rehearsal):
         def copy_state(self):
             detail, findings = super().copy_state()
+            self.publication_state_copy = None
+            if manifest.get("schema_version") == RESEARCH_PUBLICATION_GATE_SCHEMA_VERSION:
+                self.publication_state_copy = copy_bound_publication_state(
+                    live_state=self.live_root / module.STATE_SUBDIR,
+                    live_launch_agents=self.real_home / "Library/LaunchAgents",
+                    temp_state=self.temp_state,
+                    temp_launch_agents=self.launch_agents_dir,
+                    expected=manifest["research_publication_gate_transition"][
+                        "preserved_publication_state"],
+                )
+                detail += ("; exact manifest-bound publication tree and plist "
+                           "copied")
             self.existing_install_authorities = None
             if manifest.get("schema_version") in PRESERVE_SCHEMA_VERSIONS:
                 self.existing_install_authorities = (

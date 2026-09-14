@@ -15,7 +15,8 @@ from unittest.mock import patch
 from scripts.run_release_copied_state_rehearsal import RehearsalBindingError
 from scripts.run_successor_copied_state_rehearsal import (
     _run_successor_production_setup,
-    capture_external_market_digest_preservation, derive_confined_transition,
+    capture_external_market_digest_preservation, copy_bound_publication_state,
+    derive_confined_transition,
     replay_preserved_production_setup,
     stage_existing_install_authorities, stage_preserved_runtime_configs,
     validate_external_market_digest_preservation,
@@ -23,11 +24,64 @@ from scripts.run_successor_copied_state_rehearsal import (
     verify_scratch_bootstrap_writer_append,
     run as run_successor_rehearsal,
 )
+from scripts.successor_research_publication_gate_transition import (
+    preserved_publication_state,
+)
 from scripts.prepare_successor_config_transition import (
     apply_transition_to_scratch, canonical_hash,
     expected_openclaw_frame_transition_state,
 )
 from tests.test_successor_config_transition import PreserveExistingTransitionTests
+
+
+class PublicationStateCopyTests(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp(dir="/private/tmp"))
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        self.live_state = self.root / "live/state"
+        self.live_agents = self.root / "live/LaunchAgents"
+        tree = self.live_state / "research-localization"
+        (tree / "records").mkdir(parents=True)
+        (tree / "language-reviews").mkdir()
+        (tree / "index.json").write_text('{"items":[]}\n')
+        (tree / "records" / ("a" * 64 + ".json")).write_text('{"ok":true}\n')
+        self.live_agents.mkdir(parents=True)
+        (self.live_agents / "com.dalton.research-publication-worker.plist").write_bytes(
+            plistlib.dumps({"Label": "com.dalton.research-publication-worker"}))
+        for path in tree.rglob("*"):
+            os.chmod(path, 0o700 if path.is_dir() else 0o600)
+        os.chmod(tree, 0o700)
+        os.chmod(self.live_agents / "com.dalton.research-publication-worker.plist", 0o600)
+        self.expected = preserved_publication_state(
+            state_dir=self.live_state, launch_agents_dir=self.live_agents)
+
+    def test_copies_exact_manifest_bound_tree_and_launch_agent(self):
+        temp_state = self.root / "scratch/state"
+        temp_agents = self.root / "scratch/LaunchAgents"
+        temp_state.mkdir(parents=True)
+        proof = copy_bound_publication_state(
+            live_state=self.live_state, live_launch_agents=self.live_agents,
+            temp_state=temp_state, temp_launch_agents=temp_agents,
+            expected=self.expected)
+        self.assertEqual(len(self.expected), proof["entry_count"])
+        self.assertEqual(canonical_hash(self.expected), proof["inventory_sha256"])
+        self.assertEqual(
+            self.expected,
+            preserved_publication_state(
+                state_dir=temp_state, launch_agents_dir=temp_agents))
+
+    def test_rejects_source_drift_before_copy(self):
+        (self.live_state / "research-localization/index.json").write_text(
+            '{"changed":true}\n')
+        temp_state = self.root / "scratch/state"
+        temp_state.mkdir(parents=True)
+        with self.assertRaisesRegex(RehearsalBindingError,
+                                    "preserved publication file differs"):
+            copy_bound_publication_state(
+                live_state=self.live_state, live_launch_agents=self.live_agents,
+                temp_state=temp_state,
+                temp_launch_agents=self.root / "scratch/LaunchAgents",
+                expected=self.expected)
 
 
 class IdentityModule:
