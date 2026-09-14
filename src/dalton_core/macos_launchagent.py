@@ -300,7 +300,13 @@ def render(
                 # filing whose calendar frame passed to a later one -- so the
                 # lane runs against v3, approved the same way.
                 str(state / "connector-governance" / "sec-company-facts-v3.json"),
-                "--sec-lane-user-agent", SEC_LANE_USER_AGENT,
+                "--sec-lane-user-agent",
+                (
+                    service_config.bounded_planner.user_agent
+                    if service_config is not None
+                    and service_config.bounded_planner is not None
+                    else SEC_LANE_USER_AGENT
+                ),
             ]
             if candidate_staging_path is not None else []
         ) + (

@@ -27,6 +27,7 @@ from dalton_core.macos_launchagent import (
     CONTROLLER_LABEL,
     THESIS_IMPACT_LABEL,
     WRITER_LABEL,
+    SEC_LANE_USER_AGENT,
     render,
 )
 from dalton_core.health import check
@@ -2008,6 +2009,15 @@ class ServiceTests(unittest.TestCase):
                 str((state_dir / "initial-screen-model-config.json").resolve()),
             )
             self.assertIn("--sec-lane-user-agent", writer_args)
+            expected_sec_user_agent = (
+                service.bounded_planner.user_agent
+                if service.bounded_planner is not None
+                else SEC_LANE_USER_AGENT
+            )
+            self.assertEqual(
+                writer_args[writer_args.index("--sec-lane-user-agent") + 1],
+                expected_sec_user_agent,
+            )
             self.assertEqual(
                 writer_args[writer_args.index("--candidate-staging") + 1],
                 str(service.control.research_review.candidate_staging_path),
