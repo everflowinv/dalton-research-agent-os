@@ -114,7 +114,7 @@ DISCOVERY_SCOPE = "source_discovery"
 # here to keep one tick finite, not to ration an upstream.
 ACQUISITIONS_PER_TICK = 8
 ACQUISITION_WAIT_SECONDS = 30.0
-TICK_BUDGET_SECONDS = 20.0
+TICK_BUDGET_SECONDS = 8.0
 ACQUISITION_RETRY_INTERVAL = timedelta(hours=1)
 # The queue reader's own maximum page. One query per status stays far
 # under it; a status bucket that reaches it is reported, not truncated.
@@ -700,7 +700,8 @@ class FeedDiscoveryCoordinator:
         return dict(receipt.observation)
 
     def enumerate_window(
-        self, *, since: str, until: str, depth: int = 0
+        self, *, since: str, until: str, depth: int = 0,
+        deadline: float | None = None,
     ) -> list[dict[str, Any]]:
         """Every observation needed to cover one window without truncation.
 
@@ -713,6 +714,8 @@ class FeedDiscoveryCoordinator:
         smaller window to ask for.
         """
 
+        if deadline is not None and time.monotonic() >= deadline:
+            return []
         observation = self.enumerate_via_runner(since=since, until=until)
         if observation.get("next_cursor") is None:
             return [observation]
@@ -723,10 +726,11 @@ class FeedDiscoveryCoordinator:
         return (
             self.enumerate_window(
                 since=(middle + timedelta(days=1)).isoformat(), until=until,
-                depth=depth + 1,
+                depth=depth + 1, deadline=deadline,
             )
             + self.enumerate_window(
                 since=since, until=middle.isoformat(), depth=depth + 1,
+                deadline=deadline,
             )
         )
 
@@ -865,6 +869,7 @@ class FeedDiscoveryCoordinator:
         known: Sequence[str] = (),
         limit: int | None = None,
         requested_by: str | None = None,
+        deadline: float | None = None,
     ) -> dict[str, Any]:
         """Read a bounded batch of documents and decide what each one is.
 
@@ -905,6 +910,8 @@ class FeedDiscoveryCoordinator:
             pending = pending[pivot:] + pending[:pivot]
         outcomes: list[dict[str, Any]] = []
         for document_ref in pending[: max(0, bound)]:
+            if deadline is not None and time.monotonic() >= deadline:
+                break
             outcome = self._resolve_one(
                 document_ref=document_ref,
                 universe=universe,
@@ -1258,6 +1265,7 @@ class FeedDiscoveryCoordinator:
             "source_ref": self.source_ref, "settled": [], "launched": [],
             "read": None, "status": "idle",
         }
+        deadline = time.monotonic() + self.tick_budget_seconds
         results["settled"].extend(self.settle_documents())
         if self.runner is not None and universe:
             held = self.documents_in_authority()
@@ -1267,11 +1275,15 @@ class FeedDiscoveryCoordinator:
             partial_windows = 0
             reads: list[dict[str, Any]] = []
             for window_since, window_until in self.windows(since=since):
-                if budget <= 0:
+                if budget <= 0 or time.monotonic() >= deadline:
+                    results["out_of_time"] = time.monotonic() >= deadline
                     break
                 for observation in self.enumerate_window(
-                    since=window_since, until=window_until
+                    since=window_since, until=window_until, deadline=deadline
                 ):
+                    if time.monotonic() >= deadline:
+                        results["out_of_time"] = True
+                        break
                     windows += 1
                     if observation.get("next_cursor") is not None:
                         partial_windows += 1
@@ -1284,6 +1296,7 @@ class FeedDiscoveryCoordinator:
                         queue=triage["read_queue"], universe=universe,
                         headers=headers, header_company=triage["header_company"],
                         since=window_since, known=held, limit=budget,
+                        deadline=deadline,
                     )
                     reads.append(read)
                     budget -= read["read"]
@@ -1296,7 +1309,6 @@ class FeedDiscoveryCoordinator:
             results["windows"] = windows
             results["partial_windows"] = partial_windows
         else:
-            deadline = time.monotonic() + self.tick_budget_seconds
             for _ in range(self.acquisitions_per_tick):
                 if time.monotonic() >= deadline:
                     results["out_of_time"] = True
@@ -1364,6 +1376,7 @@ def build_feed_runner(
     source_ref: str,
     actor_ref: str = "automation:coverage-mission",
     clock: Callable[[], datetime] | None = None,
+    timeout_seconds: float | None = None,
 ) -> Any:
     """A host-tool runner bound to one feed operation and its child command.
 
@@ -1383,6 +1396,7 @@ def build_feed_runner(
             **dict(parameters)
         )
 
+    kwargs = {} if timeout_seconds is None else {"timeout_seconds": timeout_seconds}
     return HostToolRunner(
         store=store, connectors=connectors, observability=observability, spool=spool,
         template_key=template_key,
@@ -1392,6 +1406,7 @@ def build_feed_runner(
         connector_slug=template_key,
         actor_ref=actor_ref,
         clock=clock,
+        **kwargs,
     )
 
 
@@ -1442,6 +1457,9 @@ def _dispatch(server: Any, source_ref: str, launcher_kwarg: str) -> dict[str, An
         return {"status": "unconfigured",
                 "reason": "this writer has no connector spool for feed acquisition"}
     plan = load_feed_discovery_plan(plan_path)
+    tick_budget_seconds = float(
+        getattr(launcher, "feed_tick_budget_seconds", TICK_BUDGET_SECONDS)
+    )
     from .feed_launcher import FeedLaunchRejected
 
     operations = (
@@ -1465,6 +1483,7 @@ def _dispatch(server: Any, source_ref: str, launcher_kwarg: str) -> dict[str, An
             governance=governance[name],
             store=server.store, connectors=connectors,
             observability=server.observability, spool=spool, source_ref=source_ref,
+            timeout_seconds=max(0.1, tick_budget_seconds / 2.0),
         )
         for name, operation in operations
     }
@@ -1473,6 +1492,7 @@ def _dispatch(server: Any, source_ref: str, launcher_kwarg: str) -> dict[str, An
         plan=plan,
         body_reads_per_tick=_feed_body_read_limit(source_ref, plan),
         body_read_cursor_ref=getattr(launcher, "_body_read_cursor_ref", None),
+        tick_budget_seconds=tick_budget_seconds,
         **runners,
     )
     result = coordinator.dispatch_once(universe=_mission_universe(server))
@@ -1485,9 +1505,11 @@ def _feed_body_read_limit(
 ) -> int | None:
     """Return a transport bound without changing the signed discovery plan."""
 
-    if source_ref == COMPANY_WIKI_SOURCE_REF:
-        return min(plan["body_reads_per_tick"], COMPANY_WIKI_BODY_READS_PER_TICK)
-    return None
+    if "body_reads_per_tick" not in plan:
+        return None
+    ceiling = COMPANY_WIKI_BODY_READS_PER_TICK if source_ref == COMPANY_WIKI_SOURCE_REF \
+        else plan["body_reads_per_tick"]
+    return min(plan["body_reads_per_tick"], ceiling, 1)
 
 
 def dispatch_sales_notes(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
@@ -1507,6 +1529,9 @@ def add_sales_notes_arguments(parser: Any) -> None:
     parser.add_argument("--sales-notes-governance-list")
     parser.add_argument("--sales-notes-governance-get")
     parser.add_argument("--feed-discovery-plan")
+    parser.add_argument(
+        "--feed-tick-budget-seconds", type=float, default=TICK_BUDGET_SECONDS,
+    )
 
 
 def add_company_wiki_arguments(parser: Any) -> None:
@@ -1517,7 +1542,9 @@ def add_company_wiki_arguments(parser: Any) -> None:
 
 
 def _build(launcher_class: Any, *, plan: Any, spool_dir: Any, state_dir: Any,
-           governance_paths: Mapping[str, Any], **feed_args: Any) -> Any | None:
+           governance_paths: Mapping[str, Any],
+           feed_tick_budget_seconds: float = TICK_BUDGET_SECONDS,
+           **feed_args: Any) -> Any | None:
     if plan is None or any(value is None for value in governance_paths.values()) \
             or any(value is None for value in feed_args.values()):
         return None
@@ -1528,6 +1555,7 @@ def _build(launcher_class: Any, *, plan: Any, spool_dir: Any, state_dir: Any,
     # The plan travels with the launcher because the launcher is what the
     # writer stores; a lane handler has no other way back to its arguments.
     launcher.feed_plan_path = plan
+    launcher.feed_tick_budget_seconds = max(0.1, float(feed_tick_budget_seconds))
     return launcher
 
 
@@ -1544,6 +1572,7 @@ def build_sales_notes_launcher(args: Any) -> Any | None:
             "list_notes": args.sales_notes_governance_list,
             "get_note": args.sales_notes_governance_get,
         },
+        feed_tick_budget_seconds=args.feed_tick_budget_seconds,
         digest_dir=args.sales_notes_digest_dir,
     )
 
@@ -1561,6 +1590,9 @@ def build_company_wiki_launcher(args: Any) -> Any | None:
             "list_documents": args.company_wiki_governance_list,
             "get_document": args.company_wiki_governance_get,
         },
+        feed_tick_budget_seconds=getattr(
+            args, "feed_tick_budget_seconds", TICK_BUDGET_SECONDS
+        ),
         index_db=args.company_wiki_index_db, corpus_root=args.company_wiki_corpus_root,
     )
 
@@ -1580,7 +1612,10 @@ def _feed_argv(context: Any, *, plan_name: str, governance: Sequence[str],
         return []
     if any(not path.exists() for _, path in flags):
         return []
-    argv = ["--feed-discovery-plan", str(plan)]
+    argv = [
+        "--feed-discovery-plan", str(plan),
+        "--feed-tick-budget-seconds", str(TICK_BUDGET_SECONDS),
+    ]
     for flag, path in flags:
         argv += [flag, str(path)]
     return argv
