@@ -773,7 +773,11 @@ class CoordinatorTests(unittest.TestCase):
         self.search_launcher.fail_next = True
         tick = self.coordinator.dispatch_once()
         self.assertEqual(tick["discovery"]["status"], "launched")
-        tick = self.coordinator.dispatch_once()
+        from unittest.mock import patch
+        with patch.object(self.coordinator, "_continuation_page", return_value={
+            "cursor": "ae1:next", "as_of": NOW.date().isoformat(),
+        }):
+            tick = self.coordinator.dispatch_once()
         self.assertEqual(tick["settled_dispatches"][0]["status"], "failed")
         self.assertEqual(tick["discovery"]["company_ref"], CTSH)
         self.assertTrue(any("retry interval" in item["reason"] for item in tick["discovery"]["skipped"]))

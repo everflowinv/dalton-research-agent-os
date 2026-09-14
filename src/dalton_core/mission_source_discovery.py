@@ -1773,7 +1773,13 @@ class MissionSourceDiscoveryCoordinator:
         )
         if not cadence or cadence == "previous discovery still open":
             return cadence
-        if (shortfall and self._continuation_page(
+        # A continuation cursor may bypass the normal rediscovery cadence only
+        # after a successful search.  A failed continuation still owns the
+        # retry interval; otherwise the same provider rejection is relaunched
+        # on every controller tick while the older successful page keeps a
+        # cursor available.
+        if (shortfall and cadence.startswith("rediscovered")
+                and self._continuation_page(
                 mission["id"], company_ref, spec_ref,
                 missing_periods=self._missing_periods(mission,company_ref,spec))):
             return None
