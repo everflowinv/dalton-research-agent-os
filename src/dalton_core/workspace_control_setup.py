@@ -70,6 +70,9 @@ def configure_workspace_control(
             # Re-running the base workspace setup must preserve it rather
             # than treating its closed configuration as a conflicting base.
             existing_base["config"].pop("intent_composer", None)
+            # Research Review is installed by the reusable service runtime and
+            # owns only workspace-local staging and extraction bindings.
+            existing_base["config"].pop("research_review", None)
         if existing_base != desired:
             raise WorkspaceError("workspace control is already configured differently")
     original = config.read_bytes()

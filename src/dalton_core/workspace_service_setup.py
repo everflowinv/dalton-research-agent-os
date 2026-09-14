@@ -41,6 +41,15 @@ def _write(path: Path, value: Mapping[str, Any]) -> None:
     os.replace(temporary, path)
 
 
+def _seed(path: Path, value: Mapping[str, Any]) -> None:
+    """Publish a generic runtime switch without replacing local authority."""
+    if path.exists():
+        if _read(path) != dict(value):
+            raise WorkspaceServiceSetupError(f"workspace runtime switch differs: {path.name}")
+        return
+    _write(path, value)
+
+
 def export_service_template(source_config: str | Path,
                             output_path: str | Path) -> dict[str, Any]:
     """Export model-engine settings, excluding subjects and destinations."""
@@ -68,6 +77,24 @@ def export_service_template(source_config: str | Path,
     if (thesis_socket != broker_values["socket_path"]
             or thesis_key != broker_values["auth_key_path"]):
         raise WorkspaceServiceSetupError("source engines do not share one model broker")
+    control_config = raw.get("control", {}).get("config", {})
+    review = control_config.get("research_review")
+    control_extensions: dict[str, Any] = {}
+    if review is not None:
+        control_extensions["research_review"] = {
+            "reconcile_interval_seconds": review["reconcile_interval_seconds"],
+        }
+    intent = control_config.get("intent_composer")
+    if intent is not None:
+        intent = copy.deepcopy(intent)
+        for key in ("staging_path", "scheduler_db", "model_router_db"):
+            intent.pop(key, None)
+        intent_socket = str(Path(intent.pop("broker_socket")).resolve())
+        intent_key = str(Path(intent.pop("broker_auth_key")).resolve())
+        if (intent_socket != broker_values["socket_path"]
+                or intent_key != broker_values["auth_key_path"]):
+            raise WorkspaceServiceSetupError("source control does not share one model broker")
+        control_extensions["intent_composer"] = intent
     operating: dict[str, Any] = {
         "bounded_planner": planner,
         "thesis_impact": thesis,
@@ -83,6 +110,7 @@ def export_service_template(source_config: str | Path,
                    "config": {}},
         "backup": {k: copy.deepcopy(raw["backup"][k])
                    for k in raw["backup"] if k != "root"},
+        "control_extensions": control_extensions,
     }
     for name in ("alphaengine_owner_call_cap", "web_search_expected_provider"):
         if name in raw:
@@ -118,7 +146,7 @@ def _validate_template(value: Mapping[str, Any]) -> dict[str, Any]:
                                               broker["openclaw_config_path"]]:
         raise WorkspaceServiceSetupError("service template shared path closure is invalid")
     expected = {"bounded_planner", "thesis_impact", "document_extraction",
-                "agenda", "weekly_brief", "outbox", "backup"}
+                "agenda", "weekly_brief", "outbox", "backup", "control_extensions"}
     operating = value.get("operating")
     if not isinstance(operating, Mapping) or set(operating) - {
             *expected, "alphaengine_owner_call_cap", "web_search_expected_provider"} or not expected.issubset(operating):
@@ -160,6 +188,29 @@ def install_service_template(workspace_manifest: str | Path,
         "company_thesis_refs": {},
     })
     operating["backup"]["root"] = str(state / "backups")
+    extensions = operating.pop("control_extensions")
+    control = raw.get("control")
+    if not isinstance(control, dict) or not isinstance(control.get("config"), dict):
+        raise WorkspaceServiceSetupError("configure workspace control before service setup")
+    if "research_review" in extensions:
+        control["config"]["research_review"] = {
+            "candidate_staging_path": str(state / "research-review" / "candidate-staging.sqlite"),
+            "document_extraction_model_config_path": str(
+                state / "document-extraction-model-config.json"),
+            "reconcile_interval_seconds": extensions["research_review"][
+                "reconcile_interval_seconds"],
+            "transcript_review_directory": str(state / "research-review" / "inbox"),
+        }
+    if "intent_composer" in extensions:
+        intent = copy.deepcopy(extensions["intent_composer"])
+        intent.update({
+            "staging_path": str(state / "intent" / "staging.sqlite"),
+            "scheduler_db": str(state / "scheduler.sqlite"),
+            "model_router_db": str(state / "model-router.sqlite"),
+            "broker_socket": broker["socket_path"],
+            "broker_auth_key": broker["auth_key_path"],
+        })
+        control["config"]["intent_composer"] = intent
     # Preserve bootstrap and runtime-setup ownership of base paths, plugins,
     # workspace identity and control. Replace only the exported engine fields.
     raw.update(operating)
@@ -175,8 +226,22 @@ def install_service_template(workspace_manifest: str | Path,
         "openclaw_config_path": broker["openclaw_config_path"],
         "model_router_db": str(state / "model-router.sqlite"),
     })
+    # These switches contain no mission, company or source data.  Their
+    # presence makes the admission-driven lanes available; each lane still
+    # refuses work until Core contains a separately admitted research task.
+    _seed(state / "mission-document-research-lane.json",
+          {"schema_version": "0.1", "enabled": True})
+    _seed(state / "mission-annual-research-lane.json",
+          {"schema_version": "0.1", "enabled": True})
+    _seed(state / "research-language-policy.json",
+          {"schema_version": "research-language-policy:0.1", "required": True})
     _write(workspace.config_path, raw)
     try:
+        # Rebind the Cockpit after research_review has supplied the extraction
+        # fallback.  This is idempotent and also selects the installed planner
+        # model configuration when present.
+        from .cockpit_setup import install as install_cockpit
+        install_cockpit(workspace.config_path)
         ServiceConfig.from_file(workspace.config_path)
     except Exception as exc:
         raise WorkspaceServiceSetupError("installed workspace service config is invalid") from exc

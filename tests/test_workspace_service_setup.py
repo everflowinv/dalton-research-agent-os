@@ -1,12 +1,15 @@
 import json
+import plistlib
 import tempfile
 import unittest
 from pathlib import Path
 
 from dalton_core.bootstrap import bootstrap
 from dalton_core.service import ServiceConfig
+from dalton_core.macos_launchagent import render
 from dalton_core.store import content_hash
 from dalton_core.workspace import create_workspace_manifest
+from dalton_core.workspace_control_setup import configure_workspace_control
 from dalton_core.workspace_service_setup import (
     WorkspaceServiceSetupError,
     export_service_template,
@@ -73,7 +76,14 @@ class WorkspaceServiceSetupTest(unittest.TestCase):
             "weekly_brief": {"enabled": False, "interval_seconds": 300, "config": {}},
             "outbox": {"enabled": False, "interval_seconds": 60, "config": {}},
             "control": {"enabled": False, "config": {"cockpit": {
-                "openclaw_config_path": str(self.openclaw)}}},
+                "openclaw_config_path": str(self.openclaw)},
+                "research_review": {
+                    "candidate_staging_path": str(self.source_state / "research-review/staging.sqlite"),
+                    "document_extraction_model_config_path": str(
+                        self.source_state / "document-extraction-model-config.json"),
+                    "reconcile_interval_seconds": 73,
+                    "transcript_review_directory": str(self.source_state / "research-review/inbox"),
+                }}},
         })
         self.source_config.write_text(json.dumps(raw))
         self.template = self.root / "service-template.json"
@@ -84,13 +94,18 @@ class WorkspaceServiceSetupTest(unittest.TestCase):
     def _workspace(self, include_broker=True, slug="fresh"):
         release = self.root / "release"
         release.mkdir(exist_ok=True)
-        shared = [release, self.socket, self.key, self.openclaw] if include_broker else [release]
+        tailscale = self.root / "tailscale"
+        tailscale.touch(exist_ok=True)
+        shared = [release, tailscale, self.socket, self.key, self.openclaw] if include_broker else [release, tailscale]
         workspace = create_workspace_manifest(
             self.root / "fleet", slug, 18881 if slug == "fresh" else 18882,
             "release:sha256:" + "b" * 64,
             release, shared_readonly_paths=shared)
         bootstrap(workspace.state_dir, workspace.config_path,
                   workspace_manifest=workspace.manifest_path)
+        configure_workspace_control(
+            workspace.manifest_path, owner_login="owner@example.com",
+            tailscale_host="test.tail00000.ts.net", tailscale_executable=tailscale)
         return workspace
 
     def test_export_scrubs_subjects_and_install_makes_runnable_local_engine(self):
@@ -102,6 +117,15 @@ class WorkspaceServiceSetupTest(unittest.TestCase):
                          [str(self.socket.resolve()), str(self.key.resolve()),
                           str(self.openclaw.resolve())])
         workspace = self._workspace()
+        # The model template is installed before the service template in the
+        # production sequence.
+        for name in ("research-planner-model-config.json",
+                     "document-extraction-model-config.json",
+                     "discovery-selection-model-config.json",
+                     "claim-index-model-config.json",
+                     "registered-annual-report-draft-model-config.json",
+                     "registered-annual-report-verifier-model-config.json"):
+            (workspace.state_dir / name).touch()
         receipt = install_service_template(workspace.manifest_path, self.template)
         self.assertEqual(receipt["research_state"], "empty")
         installed = json.loads(workspace.config_path.read_text())
@@ -111,9 +135,32 @@ class WorkspaceServiceSetupTest(unittest.TestCase):
         self.assertEqual(installed["thesis_impact"]["config"]["company_thesis_refs"], {})
         self.assertFalse(installed["outbox"]["enabled"])
         self.assertFalse(installed["weekly_brief"]["enabled"])
+        review = installed["control"]["config"]["research_review"]
+        self.assertEqual(review["reconcile_interval_seconds"], 73)
+        self.assertEqual(review["candidate_staging_path"],
+                         str(workspace.state_dir / "research-review/candidate-staging.sqlite"))
+        self.assertEqual(installed["control"]["config"]["cockpit"]["model_config_path"],
+                         str(workspace.state_dir / "research-planner-model-config.json"))
         sync = json.loads((workspace.state_dir / "model-catalog-sync.json").read_text())
         self.assertEqual(sync["model_router_db"], str(workspace.state_dir / "model-router.sqlite"))
         ServiceConfig.from_file(workspace.config_path)
+        plists = render(
+            self.root / "agents", self.root / "release/bin", workspace.state_dir,
+            workspace.config_path, self.root / "logs",
+            label_namespace="space.lumos.dalton.workspace.fresh",
+            workspace_manifest_path=workspace.manifest_path)
+        writer = plistlib.loads(Path(plists["writer"]).read_bytes())["ProgramArguments"]
+        for flag in ("--candidate-staging", "--document-extraction-model-config",
+                     "--discovery-selection-model-config", "--claim-index-model-config",
+                     "--mission-document-research-lane", "--mission-annual-research-lane"):
+            self.assertIn(flag, writer)
+        # Extension installation is stable and keeps every path workspace-local.
+        install_service_template(workspace.manifest_path, self.template)
+        configure_workspace_control(
+            workspace.manifest_path, owner_login="owner@example.com",
+            tailscale_host="test.tail00000.ts.net", tailscale_executable=self.root / "tailscale")
+        self.assertEqual(installed["workspace"],
+                         json.loads(workspace.config_path.read_text())["workspace"])
 
     def test_exact_broker_declaration_and_template_hash_are_required(self):
         value = export_service_template(self.source_config, self.template)
