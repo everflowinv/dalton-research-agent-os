@@ -3,12 +3,19 @@ from __future__ import annotations
 import unittest
 
 from dalton_core.numeric_display import (
-    format_display_number, format_prose_usd_amounts, format_typed_value,
+    format_display_number, format_prose_date_ranges, format_prose_usd_amounts, format_typed_value,
 )
 from dalton_core.final_text_contract import FINAL_TEXT_RULES_VERSION
 
 
 class NumericDisplayTests(unittest.TestCase):
+    def test_reviewed_date_ranges_are_readable_without_changing_quotes(self):
+        text = ('期间2026-04-01..2026-06-30；“原文2026-04-01..2026-06-30”\n'
+                '> 引文2026-04-01..2026-06-30\n无效2026-02-30..2026-03-31')
+        self.assertEqual(
+            format_prose_date_ranges(text),
+            ('期间2026年4月1日至2026年6月30日；“原文2026-04-01..2026-06-30”\n'
+             '> 引文2026-04-01..2026-06-30\n无效2026-02-30..2026-03-31'))
     def test_formats_only_explicit_large_base_usd_in_chinese_prose(self):
         text = ("收入为 USD 1,535,000,000，成本为14968000000 USD，"
                 "现金流为-14752000000美元。")

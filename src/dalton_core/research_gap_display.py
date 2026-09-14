@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any
 from .driver_template import COST_DRIVER_TEMPLATES
-from .numeric_display import format_prose_usd_amounts
+from .numeric_display import format_prose_date_ranges, format_prose_usd_amounts, transform_unquoted_prose
 
 _QUESTIONS = {
  "Which product/input spread drives realised gross cost?":"哪项产品与投入品价差决定实际毛成本？",
@@ -122,6 +122,28 @@ _TERM_PATTERN = re.compile(
     + "|".join(re.escape(key) for key in sorted((key for key in _DISPLAY_TERMS if "_" in key), key=len, reverse=True))
     + r")(?![A-Za-z0-9_])", re.IGNORECASE)
 
+_EMBEDDED_PERIOD = re.compile(
+    r"(?<![A-Za-z0-9])(?:FY(?:20)?\d{2}(?:Q[1-4])?|CY(?:20)?\d{2}(?:Q[1-4])?|"
+    r"20\d{2}Q[1-4]|Q[1-4]\s+20\d{2})(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
+
+
+def _display_embedded_periods(part: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        raw = match.group(0)
+        alternate = re.fullmatch(r"Q([1-4])\s+(20\d{2})", raw, re.IGNORECASE)
+        if alternate:
+            return f"{alternate[2]}年第{'一二三四'[int(alternate[1]) - 1]}季度"
+        year = re.fullmatch(r"(FY|CY)((?:20)?\d{2})", raw, re.IGNORECASE)
+        if year:
+            full_year = year[2] if len(year[2]) == 4 else f"20{year[2]}"
+            return f"{full_year}{'财年' if year[1].upper() == 'FY' else '自然年'}"
+        from .cockpit_plane import claim_period_display_label
+        return claim_period_display_label(raw) or raw
+
+    return _EMBEDDED_PERIOD.sub(replace, part)
+
 def display_metadata_text(value: Any) -> str:
     """Replace only registered machine metadata tokens in reader-facing text."""
     text = str(value) if value is not None else ""
@@ -131,8 +153,14 @@ def display_metadata_text(value: Any) -> str:
     # Translate those only when the entire value is an exact metadata key.
     if text in _DISPLAY_TERMS:
         return _DISPLAY_TERMS[text]
-    return format_prose_usd_amounts(
-        _TERM_PATTERN.sub(lambda match: _DISPLAY_TERMS[match.group(1).lower()], text))
+    text = _TERM_PATTERN.sub(lambda match: _DISPLAY_TERMS[match.group(1).lower()], text)
+    text = transform_unquoted_prose(
+        text,
+        lambda part: _display_embedded_periods(
+            part.replace("discretionary spending", "可自由支配支出")
+                .replace("discretionary 支出", "可自由支配支出")),
+    )
+    return format_prose_date_ranges(format_prose_usd_amounts(text))
 
 def gap_display_text(value: Any) -> str:
     """Return friendly Chinese for a closed known gap; preserve everything else."""

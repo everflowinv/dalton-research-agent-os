@@ -238,6 +238,37 @@ class CockpitLanguageTests(unittest.TestCase):
         self.assertIn("technicalDetails(e.technical)", frontend)
         self.assertIn('_runtime_error_display(raw_error)', Path(__import__("dalton_core.cockpit_plane", fromlist=["x"]).__file__).read_text())
 
+    def test_deliverable_log_formats_only_system_summary_and_keeps_raw(self) -> None:
+        from dalton_core.cockpit_plane import CockpitPlane
+        raw = ("EPAM 是 AI-native 服务商，最近季度（2026-04-01..2026-06-30）"
+               "收入 USD 1414767000，同比增长 4.53%。")
+        shown, technical = CockpitPlane._deliverable_log_summary(raw)
+        self.assertEqual(
+            shown,
+            "EPAM 是 AI 原生 服务商，最近季度（2026年4月1日至2026年6月30日）"
+            "收入 14.1 亿美元，同比增长 4.5%。",
+        )
+        self.assertEqual(technical, {"original_summary": raw})
+        quoted = '摘要：“AI-native，USD 1414767000，2026-04-01..2026-06-30”，增长 4.53%。'
+        shown, technical = CockpitPlane._deliverable_log_summary(quoted)
+        self.assertIn('“AI-native，USD 1414767000，2026-04-01..2026-06-30”', shown)
+        self.assertTrue(shown.endswith("增长 4.5%。"))
+        self.assertEqual(technical, {"original_summary": quoted})
+        long_raw = raw + "后续原始说明" * 30
+        shown, technical = CockpitPlane._deliverable_log_summary(long_raw)
+        self.assertLessEqual(len(shown), 200)
+        self.assertEqual(technical, {"original_summary": long_raw})
+
+    def test_reviewed_display_formats_closed_periods_and_business_term_only_outside_quotes(self) -> None:
+        from dalton_core.research_gap_display import display_metadata_text
+        raw = ('FY27 到 FY2029，2026Q1、Q2 2025 的 discretionary spending；'
+               '“FY27 discretionary spending”')
+        self.assertEqual(
+            display_metadata_text(raw),
+            ('2027财年 到 2029财年，2026年第一季度、2025年第二季度 的 可自由支配支出；'
+             '“FY27 discretionary spending”'),
+        )
+
     def test_model_action_journal_uses_readable_copy(self) -> None:
         from dalton_core import cockpit_plane
 

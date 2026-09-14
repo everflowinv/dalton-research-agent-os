@@ -5,6 +5,7 @@ from __future__ import annotations
 from decimal import Decimal, ROUND_HALF_UP
 import re
 from typing import Literal
+from typing import Callable
 
 NumericKind = Literal["amount_usd", "percent", "eps", "arpu"]
 
@@ -114,7 +115,93 @@ def format_prose_usd_amounts(text: str) -> str:
     return "".join(rendered)
 
 
-__all__ = ["NumericKind", "format_display_number", "format_prose_usd_amounts",
+_ISO_DATE_RANGE = re.compile(
+    r"(?<![A-Za-z0-9])(?P<start>\d{4}-\d{2}-\d{2})\.\."
+    r"(?P<end>\d{4}-\d{2}-\d{2})(?![A-Za-z0-9])"
+)
+
+
+def _format_unquoted_date_ranges(text: str) -> str:
+    from datetime import date
+
+    def replace(match: re.Match[str]) -> str:
+        try:
+            start = date.fromisoformat(match.group("start"))
+            end = date.fromisoformat(match.group("end"))
+        except ValueError:
+            return match.group(0)
+        if start > end:
+            return match.group(0)
+        return (f"{start.year}年{start.month}月{start.day}日"
+                f"至{end.year}年{end.month}月{end.day}日")
+
+    return _ISO_DATE_RANGE.sub(replace, text)
+
+
+def format_prose_date_ranges(text: str) -> str:
+    """Format strict ISO date ranges in reviewed prose, outside quotations."""
+    if not isinstance(text, str):
+        raise ValueError("display prose must be a string")
+    rendered = []
+    quote_end = None
+    for line in text.splitlines(keepends=True):
+        content = line.rstrip("\r\n")
+        ending = line[len(content):]
+        if content.lstrip().startswith(">"):
+            rendered.append(line)
+            continue
+        pieces = []
+        start = 0
+        index = 0
+        while index < len(content):
+            char = content[index]
+            if quote_end is None and char in {'"', '“'}:
+                pieces.append(_format_unquoted_date_ranges(content[start:index]))
+                quote_end = '"' if char == '"' else '”'
+                start = index
+            elif (quote_end is not None and char == quote_end
+                  and not (char == '"' and _is_escaped_quote(content, index))):
+                pieces.append(content[start:index + 1])
+                start = index + 1
+                quote_end = None
+            index += 1
+        tail = content[start:]
+        pieces.append(tail if quote_end is not None else _format_unquoted_date_ranges(tail))
+        rendered.append("".join(pieces) + ending)
+    return "".join(rendered)
+
+
+def transform_unquoted_prose(text: str, transform: Callable[[str], str]) -> str:
+    """Apply a display transform outside Markdown and typographic quotations."""
+    if not isinstance(text, str):
+        raise ValueError("display prose must be a string")
+    rendered = []
+    quote_end = None
+    for line in text.splitlines(keepends=True):
+        content = line.rstrip("\r\n")
+        ending = line[len(content):]
+        if content.lstrip().startswith(">"):
+            rendered.append(line)
+            continue
+        pieces, start = [], 0
+        for index, char in enumerate(content):
+            if quote_end is None and char in {'"', '“'}:
+                pieces.append(transform(content[start:index]))
+                quote_end = '"' if char == '"' else '”'
+                start = index
+            elif (quote_end is not None and char == quote_end
+                  and not (char == '"' and _is_escaped_quote(content, index))):
+                pieces.append(content[start:index + 1])
+                start = index + 1
+                quote_end = None
+        tail = content[start:]
+        pieces.append(tail if quote_end is not None else transform(tail))
+        rendered.append("".join(pieces) + ending)
+    return "".join(rendered)
+
+
+__all__ = ["NumericKind", "format_display_number", "format_prose_date_ranges", "format_prose_usd_amounts",
+           "transform_unquoted_prose",
            "format_typed_value"]
 
 

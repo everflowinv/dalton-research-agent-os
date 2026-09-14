@@ -3970,6 +3970,32 @@ class CockpitPlane:
                 detail = "新预算已保存"
         return {"title": title, "detail": detail, "technical": technical}
 
+    @staticmethod
+    def _deliverable_log_summary(value: Any) -> tuple[str, dict[str, Any] | None]:
+        """Display a system-authored deliverable summary without changing its bytes."""
+        raw = str(value or "")
+        from decimal import Decimal, ROUND_HALF_UP
+        from .numeric_display import format_display_number, transform_unquoted_prose
+        from .research_gap_display import display_metadata_text
+
+        def summary_values(part: str) -> str:
+            part = re.sub(
+                r"(?i)\bUSD\s+([+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)"
+                r"(?![A-Za-z0-9.,])",
+                lambda match: (f"{(Decimal(match.group(1).replace(',', '')) / Decimal('100000000')).quantize(Decimal('0.1'), rounding=ROUND_HALF_UP)} 亿美元"
+                               if abs(Decimal(match.group(1).replace(',', ''))) >= Decimal('100000000')
+                               else match.group(0)),
+                part,
+            )
+            part = part.replace("AI-native", "AI 原生")
+            return re.sub(
+                r"(?<![A-Za-z0-9.])([+-]?\d+(?:\.\d+)?)%(?![A-Za-z0-9.])",
+                lambda match: format_display_number(match.group(1), kind="percent"), part)
+
+        source_display = raw[:200]
+        shown = display_metadata_text(transform_unquoted_prose(source_display, summary_values))
+        return shown, ({"original_summary": raw} if shown != source_display else None)
+
     def log(self, *, since: str | None = None, limit: int = 150) -> dict[str, Any]:
         limit = max(1, min(int(limit), 500))
         with self._core() as core:
@@ -4012,11 +4038,12 @@ class CockpitPlane:
         ):
             record = json.loads(row["record_json"])
             written = sum(1 for section in record["sections"] if section["body"])
+            summary, summary_technical = self._deliverable_log_summary(record["summary"])
             events.append({
                 "id": f"deliverable:{record['id']}", "at": record["created_at"],
                 "kind": "deliverable", "lane": "写文档",
                 "title": f"写好了初步筛选第 {record['version']} 版（{written}/{len(record['sections'])} 节）",
-                "detail": record["summary"][:200], "state": "done",
+                "detail": summary, "technical": summary_technical, "state": "done",
                 "company": self._label(members, record["subject_ref"]),
             })
         for row in self._rows_from(self.config.core_db,
