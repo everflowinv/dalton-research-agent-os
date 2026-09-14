@@ -130,7 +130,10 @@ def _start_writer(workspace: Any) -> subprocess.Popen[str]:
         "url": "https://example.com/fixture-software/investors",
         "title": "Fixture Software investor relations",
     }])
-    writer_argv = [sys.executable, "-m", "dalton_core.writer_server", *formal_argv[1:],
+    # The acceptance runs from a source checkout rather than an installed
+    # venv, so substitute only the interpreter path.  Preserve the rendered
+    # ``-m dalton_core.writer_server`` and every production lane argument.
+    writer_argv = [sys.executable, *formal_argv[1:],
                    "--web-search-rehearsal-citations", str(citations),
                    "--web-search-rehearsal-approved-by", "human:acceptance-owner"]
     env = {**os.environ,
