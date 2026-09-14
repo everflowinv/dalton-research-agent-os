@@ -2290,7 +2290,7 @@ class MissionSourceDiscoveryCoordinator:
                     return {"status":"selection_pending","reason":f"{type(exc).__name__}: {exc}"[:500]}
                 if ticket["status"] != "succeeded" or not isinstance(ticket.get("summary"),Mapping) or ticket["summary"].get("status") != "succeeded":
                     return {"status":"selection_pending","ticket_ref":ticket.get("id"),"reason":ticket["status"]}
-                selected=[x["document_ref"] for x in ticket["summary"]["selection"]["selected"]]
+                selected = list(ticket.get("effective_selected") or ())
                 if not selected:
                     self.selection_launcher.mark_consumed(ticket)
                     return {"status":"completed_empty","ticket_ref":ticket["id"],"discovery_ref":document["discovery_ref"]}

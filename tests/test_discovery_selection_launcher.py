@@ -113,6 +113,47 @@ class DiscoverySelectionLauncherTests(unittest.TestCase):
             self.assertEqual(launcher.currently_consumed(mission_ref='mission:v1',
                 missing_periods_by_company={"c":["2026-Q2"]}),['discovery:sell-side'])
 
+    def test_historical_wrong_quarter_stays_valid_but_is_not_acquirable(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d);config=root/'model.json';config.write_text('{}');process=Process()
+            launcher=DiscoverySelectionLauncher(state_dir=root,model_config_path=config,
+                                                  scheduler_db=root/'scheduler.sqlite')
+            candidate={"document_ref":"alphaengine-doc:epam-q2-2026","rank":1,
+                       "title":"EPAM Systems Q2 2026"}
+            base={"schema_version":"0.1","contract_ref":CONTRACT_REF,
+                  "source_envelope_ref":"e","source_envelope_hash":"a"*64,
+                  "candidates":[candidate]}
+            view={**base,"content_hash":content_hash(base)}
+            context={"research_purpose":"earnings_call_transcript",
+                     "research_question":"Find the missing call"}
+            with patch('dalton_core.discovery_selection_launcher.subprocess.Popen',
+                       return_value=process):
+                ticket=launcher.start(discovery_ref='discovery:epam',view=view,
+                    mission_ref='mission:v1',company={"company_ref":"c","name":"EPAM Systems",
+                    "ticker":"EPAM","aliases":["EPAM"]},
+                    missing_periods=["FY2025-Q3","FY2025-Q4"],selection_context=context)
+            old_selected=[{"document_ref":candidate["document_ref"],
+                           "reason":"company matched but period did not"}]
+            selection_base={"schema_version":"0.1","contract_ref":CONTRACT_REF,
+                            "candidate_view_hash":view["content_hash"],
+                            "selected":old_selected}
+            selection={**selection_base,"content_hash":content_hash(selection_base),
+                       "work_order_ref":"work-order:paid-old","replayed":False,
+                       "result_envelope_ref":"result-envelope:paid-old",
+                       "invocation_ref":"invocation:paid-old","route_decision_ref":"route:old",
+                       "config_hash":"a"*64,"recovery_epoch":0}
+            directory=launcher.root/ticket['id'].split(':')[1]
+            (directory/'summary.json').write_text(json.dumps({"status":"succeeded",
+                "identity_hash":ticket["identity_hash"],"selection":selection}))
+            process.code=0
+            status=launcher.status(ticket['id'])
+            self.assertEqual(status['status'],'succeeded')
+            self.assertEqual(status['summary']['selection']['selected'],old_selected)
+            self.assertEqual(status['effective_selected'],())
+            self.assertEqual(launcher.current_selections(mission_ref='mission:v1',
+                missing_periods_by_company={"c":["FY2025-Q3","FY2025-Q4"]}),
+                {'discovery:epam':()})
+
     def test_tampered_success_summary_is_failed_closed(self):
         with tempfile.TemporaryDirectory() as d:
             root=Path(d); config=root/'model.json'; config.write_text('{}')

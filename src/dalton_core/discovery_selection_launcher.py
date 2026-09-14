@@ -29,7 +29,9 @@ def _formal_selection_valid(scheduler_db: Path, selection: Mapping[str, Any],
         work = WorkOrder.from_dict(json.loads(work_row["work_order_json"])).to_dict()
         envelope = ResultEnvelope.from_dict(json.loads(formal["result_envelope_json"])).to_dict()
         from .discovery_candidate_selection import selection_prompt, validate_selection
-        validated = validate_selection(
+        raw_validated = validate_selection(
+            envelope.get("outputs", {}).get("text", ""), source["view"])
+        filtered_validated = validate_selection(
             envelope.get("outputs", {}).get("text", ""), source["view"],
             missing_periods=source["missing_periods"],
             selection_context=source.get("selection_context"),
@@ -54,7 +56,12 @@ def _formal_selection_valid(scheduler_db: Path, selection: Mapping[str, Any],
             and selection.get("result_envelope_ref") == envelope["id"]
             and selection.get("invocation_ref") == envelope.get("invocation_ref")
             and selection.get("route_decision_ref") == envelope.get("metadata", {}).get("route_decision_ref")
-            and all(selection.get(key) == value for key, value in validated.items())
+            # Old paid selections remain valid formal results.  New runtime
+            # may store the deterministically filtered form, while historical
+            # runtime stored the model's unfiltered form.  Consumption below
+            # always uses the filtered view in either case.
+            and any(all(selection.get(key) == value for key, value in candidate.items())
+                    for candidate in (raw_validated, filtered_validated))
         )
     except (Exception,):
         return False
@@ -157,8 +164,7 @@ class DiscoverySelectionLauncher:
                     current['selection_context']=source['selection_context']
                 if (ticket['status']=='succeeded'
                         and ticket.get('base_identity_hash')==content_hash(current)):
-                    result[ticket['discovery_ref']]=tuple(
-                        row['document_ref'] for row in ticket['summary']['selection']['selected'])
+                    result[ticket['discovery_ref']]=tuple(ticket['effective_selected'])
             except (OSError,ValueError,KeyError,TypeError):
                 continue
         return result
@@ -242,6 +248,23 @@ class DiscoverySelectionLauncher:
                        'failure_reason': 'selection summary authority drifted'}
                 _write(path, row)
                 parsed = None
-        return {**row,"summary":parsed}
+        effective_selected = None
+        if parsed is not None and isinstance(parsed.get("selection"), Mapping):
+            try:
+                from .discovery_candidate_selection import validate_selection
+                source = json.loads(path.with_name("input.json").read_text())
+                wire = canonical_json({
+                    "selected": parsed["selection"].get("selected")
+                })
+                filtered = validate_selection(
+                    wire, source["view"],
+                    missing_periods=source["missing_periods"],
+                    selection_context=source.get("selection_context"),
+                )
+                effective_selected = tuple(
+                    item["document_ref"] for item in filtered["selected"])
+            except (OSError, ValueError, KeyError, TypeError):
+                effective_selected = None
+        return {**row,"summary":parsed,"effective_selected":effective_selected}
     def _now_datetime(self):
         return datetime.now(timezone.utc)
