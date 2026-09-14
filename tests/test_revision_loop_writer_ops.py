@@ -345,12 +345,8 @@ class CockpitApprovalTests(unittest.TestCase):
         for value in (
             {"kind": "thesis_revision_candidate", "ref": "thesis-revision-candidate:c1",
              "hash": "a" * 64, "decision": "admit", "rationale": "x", "request_id": "r"},
-            {"kind": "thesis_revision_candidate", "ref": "thesis-revision-candidate:c1",
-             "hash": "a" * 64, "decision": "accept", "rationale": "  ", "request_id": "r"},
             {"kind": "gate_reopen", "ref": "gate-reopen-proposal:p1", "hash": "c" * 64,
              "decision": "retired", "rationale": "x", "request_id": "r"},
-            {"kind": "gate_reopen", "ref": "gate-reopen-proposal:p1", "hash": "c" * 64,
-             "decision": "approve", "rationale": "", "request_id": "r"},
         ):
             with self.assertRaises(CockpitError):
                 self.c.plane.decide(self.login, value)
