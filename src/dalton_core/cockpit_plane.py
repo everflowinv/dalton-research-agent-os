@@ -1922,6 +1922,10 @@ class CockpitPlane:
         self._jobs_lock = threading.Lock()
         self._claims_cache: tuple[tuple[int, str | None], list[dict[str, Any]]] | None = None
         self._url_cache: tuple[int, dict[str, dict[str, Any]]] | None = None
+        self._overview_condition = threading.Condition()
+        self._overview_building = False
+        self._overview_generation = 0
+        self._overview_result: dict[str, Any] | None = None
 
     def close(self) -> None:
         self.journal.close()
@@ -2852,6 +2856,40 @@ class CockpitPlane:
     # -- overview ------------------------------------------------------------------
 
     def overview(self) -> dict[str, Any]:
+        """Build one overview at a time and share it with concurrent readers.
+
+        Browsers can overlap the initial request with polling or a retry.  The
+        overview performs several bounded but substantial read projections;
+        running identical projections concurrently makes each one contend for
+        the Python GIL and SQLite page cache.  A caller that arrived while a
+        build was active receives that exact completed snapshot.  A later,
+        sequential request still builds afresh, preserving the existing
+        read-after-write behavior.
+        """
+
+        with self._overview_condition:
+            observed_generation = self._overview_generation
+            while self._overview_building:
+                self._overview_condition.wait()
+                if (self._overview_generation > observed_generation
+                        and self._overview_result is not None):
+                    return self._overview_result
+            self._overview_building = True
+        try:
+            result = self._build_overview()
+        except BaseException:
+            with self._overview_condition:
+                self._overview_building = False
+                self._overview_condition.notify_all()
+            raise
+        with self._overview_condition:
+            self._overview_result = result
+            self._overview_generation += 1
+            self._overview_building = False
+            self._overview_condition.notify_all()
+        return result
+
+    def _build_overview(self) -> dict[str, Any]:
         # UI translations are a read-only adjunct to authority text. Older
         # installations retain their exact payload when the cache is absent.
         try:
