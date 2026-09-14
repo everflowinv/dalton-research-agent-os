@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 from typing import Any,Mapping
 
+_RELEASE_REF = re.compile(r'(?:foundation-r[0-9]+[a-z]?|release:sha256:[0-9a-f]{64})')
 
 def _read(path: str) -> tuple[dict[str,Any],str]:
     p=Path(path)
@@ -23,7 +24,7 @@ def published_runtime_gate(config: Mapping[str,Any]) -> dict[str,Any]:
           'observed_release_sha256':None,'observed_runtime_sha256':None}
     if (not isinstance(config,Mapping) or set(config)!=required
         or not re.fullmatch(r'[0-9a-f]{40}',str(config.get('expected_source_commit','')))
-        or not re.fullmatch(r'foundation-r[0-9]+[a-z]?',str(config.get('expected_release_ref','')))):
+        or _RELEASE_REF.fullmatch(str(config.get('expected_release_ref',''))) is None):
         return {**base,'status':'invalid_release_authority','reason':'发布绑定配置格式无效'}
     try:
         release,rhash=_read(config['release_pointer']);base['observed_release_sha256']=rhash

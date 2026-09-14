@@ -26,6 +26,20 @@ class PublicationGateTests(unittest.TestCase):
     self.write();before=[self.r.read_bytes(),self.c.read_bytes()]
     self.assertEqual(published_runtime_gate(self.cfg)['status'],'active')
     self.assertEqual(before,[self.r.read_bytes(),self.c.read_bytes()])
+ def test_an_exact_immutable_release_hash_can_activate(self):
+    release_ref='release:sha256:'+'d'*64
+    self.cfg['expected_release_ref']=release_ref
+    self.write()
+    release=json.loads(self.r.read_text());release['release_ref']=release_ref
+    self.r.write_text(json.dumps(release))
+    self.assertEqual(published_runtime_gate(self.cfg)['status'],'active')
+    for malformed in ('release:sha256:'+'d'*63, 'release:sha256:'+'G'*64,
+                      'release:sha256:'+'d'*64+':extra'):
+        with self.subTest(malformed=malformed):
+            self.assertEqual(
+                published_runtime_gate({**self.cfg,'expected_release_ref':malformed})['status'],
+                'invalid_release_authority',
+            )
  def test_invalid_pointer_and_symlink_fail_closed(self):
     self.write();self.r.unlink();self.r.symlink_to(self.c)
     self.assertEqual(published_runtime_gate(self.cfg)['status'],'invalid_release_authority')
