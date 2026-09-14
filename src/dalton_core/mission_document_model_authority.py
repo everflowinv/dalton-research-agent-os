@@ -157,6 +157,7 @@ class MissionDocumentModelAuthority:
         capability: str,
         *,
         chain: list[str],
+        purpose_explicit: bool,
     ) -> list[str]:
         reasons: list[str] = []
         filters = policy["filters"]
@@ -168,6 +169,9 @@ class MissionDocumentModelAuthority:
         ):
             allowed = set(filters[filter_name])
             if allowed and profile[profile_name] not in allowed:
+                if (filter_name == "allowed_profile_ids" and purpose_explicit
+                        and profile["id"] in chain):
+                    continue
                 reasons.append(reason)
         if capability not in set(profile["capabilities"]):
             reasons.append("capability_not_supported")
@@ -254,6 +258,13 @@ class MissionDocumentModelAuthority:
                 "policy_hash", "policy_json",
             )
             profiles = {item["id"]: item for item in self.router.latest_profiles()}
+            purpose_entry = (policy.get("purpose_overrides") or {}).get(
+                purposes[stage]
+            )
+            purpose_explicit = (
+                isinstance(purpose_entry, Mapping)
+                and purpose_entry.get("mode") == "explicit"
+            )
             resolved = resolve_chain(
                 policy, tier=tier_for(purposes[stage]),
                 purpose=purposes[stage], profiles=profiles,
@@ -279,7 +290,7 @@ class MissionDocumentModelAuthority:
                     "family": exact["family"],
                     "preflight_reasons": self._profile_reasons(
                         exact, policy, execution, router_capabilities[stage],
-                        chain=chain
+                        chain=chain, purpose_explicit=purpose_explicit,
                     ),
                 })
             usable = [item for item in candidates if not item["preflight_reasons"]]

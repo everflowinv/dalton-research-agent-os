@@ -91,6 +91,84 @@ class MissionDocumentModelAuthorityTests(unittest.TestCase):
                 clock=fixture.harness.clock,
             )()
 
+    def _install_verifier_route(self, fixture, *, mode="explicit",
+                                in_chain=True, reject_provider=False):
+        profile = json.loads(json.dumps(fixture.verifier_profile))
+        profile.update({
+            "id": "profile:explicit-verifier",
+            "profile_version_ref": "model-profile-version:explicit-verifier:1",
+            "family": "explicit-independent",
+        })
+        fixture.router.register_profile(profile)
+        policy = json.loads(json.dumps(fixture.verifier_policy))
+        policy.update({
+            "policy_version_ref": "routing-policy:annual-mission-verifier:2",
+            "version": 2,
+            "prior_version_ref": fixture.verifier_policy["policy_version_ref"],
+        })
+        if reject_provider:
+            policy["filters"]["allowed_providers"] = ["another-provider"]
+        chain = [profile["id"]] if in_chain else [fixture.verifier_profile["id"]]
+        if mode == "explicit":
+            policy["purpose_overrides"] = {
+                VERIFIER_PURPOSE: {"mode": "explicit", "chain": chain}
+            }
+        else:
+            policy["fallback_chains"]["tiers"]["verifier"] = chain
+        fixture.router.register_policy(policy)
+        path = fixture.state / VERIFIER_MODEL_CONFIG_NAME
+        config = json.loads(path.read_text(encoding="utf-8"))
+        config["routing_policy_ref"] = policy["policy_version_ref"]
+        path.write_text(canonical_json(config) + "\n", encoding="utf-8")
+        os.chmod(path, 0o600)
+
+    def test_explicit_purpose_chain_can_select_outside_legacy_profile_allowlist(self):
+        fixture = self._fixture()
+        self._install_verifier_route(fixture)
+        executions, proof = MissionDocumentModelAuthority(
+            state_dir=fixture.state, router=fixture.router,
+            clock=fixture.harness.clock,
+        )()
+        self.assertEqual(executions["verifier"]["routing_policy_ref"],
+                         "routing-policy:annual-mission-verifier:2")
+        candidates = proof["verifier"]["configured_candidate_profiles"]
+        self.assertEqual([row["profile_ref"] for row in candidates],
+                         ["profile:explicit-verifier"])
+        self.assertEqual(candidates[0]["preflight_reasons"], [])
+
+    def test_tier_chain_does_not_override_legacy_profile_allowlist(self):
+        fixture = self._fixture()
+        self._install_verifier_route(fixture, mode="tier")
+        with self.assertRaisesRegex(MissionDocumentModelAuthorityError,
+                                    "no eligible model"):
+            MissionDocumentModelAuthority(
+                state_dir=fixture.state, router=fixture.router,
+                clock=fixture.harness.clock,
+            )()
+
+    def test_explicit_purpose_does_not_relax_other_profile_filters(self):
+        fixture = self._fixture()
+        self._install_verifier_route(fixture, reject_provider=True)
+        with self.assertRaisesRegex(MissionDocumentModelAuthorityError,
+                                    "no eligible model"):
+            MissionDocumentModelAuthority(
+                state_dir=fixture.state, router=fixture.router,
+                clock=fixture.harness.clock,
+            )()
+
+    def test_explicit_purpose_cannot_select_a_profile_outside_its_chain(self):
+        fixture = self._fixture()
+        self._install_verifier_route(fixture, in_chain=False)
+        executions, proof = MissionDocumentModelAuthority(
+            state_dir=fixture.state, router=fixture.router,
+            clock=fixture.harness.clock,
+        )()
+        candidates = proof["verifier"]["configured_candidate_profiles"]
+        self.assertEqual([row["profile_ref"] for row in candidates],
+                         [fixture.verifier_profile["id"]])
+        self.assertNotIn("profile:explicit-verifier",
+                         [row["profile_ref"] for row in candidates])
+
 
 if __name__ == "__main__":
     unittest.main()
