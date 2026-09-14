@@ -7,12 +7,44 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from dalton_core.governance_cli import ephemeral_call
 from dalton_core.writer_server import CORE_OPERATIONS, Principal, load_principals, write_token_config
 
 
 class GovernanceCliTests(unittest.TestCase):
+    def test_ephemeral_principal_contains_only_selected_operation_and_restores_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            tokens = root / "tokens.json"
+            write_token_config(tokens, [
+                Principal("core", "core-secret-token", CORE_OPERATIONS, unrestricted=True),
+            ])
+            original = tokens.read_bytes()
+
+            class InspectingClient:
+                def __init__(self, socket_path, token, timeout):
+                    self.token = token
+
+                def call(self, operation, params):
+                    principals = load_principals(tokens)
+                    human = [p for p in principals.values()
+                             if p.resolved_actor_ref == "human:owner"]
+                    self_test.assertEqual(len(human), 1)
+                    self_test.assertEqual(human[0].operations, frozenset({operation}))
+                    self_test.assertEqual(human[0].token, self.token)
+                    return {"status": "ok"}
+
+            self_test = self
+            with patch("dalton_core.governance_cli.WriterClient", InspectingClient):
+                result = ephemeral_call(
+                    tokens, root / "writer.sock", actor_ref="human:owner",
+                    operation="create_agenda_policy", params={})
+            self.assertEqual(result, {"status": "ok"})
+            self.assertEqual(tokens.read_bytes(), original)
+            self.assertEqual(set(load_principals(tokens)), {"core"})
+
     def test_ephemeral_human_token_is_removed_after_one_operation(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

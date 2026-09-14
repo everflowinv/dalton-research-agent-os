@@ -60,7 +60,11 @@ def ephemeral_call(token_config: str | Path, socket_path: str | Path, *, actor_r
         human = Principal(
             principal_id=principal_id,
             token=token,
-            operations=HUMAN_GOVERNANCE_OPERATIONS,
+            # Give the transient principal only the operation this RPC needs.
+            # Besides being least authority, this keeps a newer control client
+            # compatible with an older writer whose principal loader rejects
+            # operation names that its own protocol does not yet know.
+            operations=frozenset({operation}),
             unrestricted=False,
             actor_ref=actor_ref,
         )
