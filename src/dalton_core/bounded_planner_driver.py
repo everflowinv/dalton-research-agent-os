@@ -275,7 +275,10 @@ def _planner_budget_summary(
     tick spanning a restart can legitimately see both words.
     """
 
-    status = "unknown"
+    # An empty active-loop set made the previous value read as if the budget
+    # system itself were unknown.  No planner call means there was no budget
+    # decision to report this tick.
+    status = "not_applicable"
     if len(words) == 1:
         status = next(iter(words))
     elif words:
@@ -361,8 +364,14 @@ class BoundedPlannerDriver:
             principal = load_principals(config.token_config).get("core")
             if principal is None:
                 raise BoundedPlannerDriverError("core writer principal is unavailable")
+            # A lane RPC may legitimately spend the driver's configured
+            # operation window reading a bounded local feed.  A shorter
+            # transport timeout abandons only the client while the writer
+            # continues, misreporting successful work as unavailable and
+            # inviting the next tick to rediscover it.
             client = WriterClient(
-                str(config.writer_socket), principal.token, timeout=60
+                str(config.writer_socket), principal.token,
+                timeout=float(config.timeout_seconds),
             )
         self.client = client
         self.transport = transport or PublicHttpTransport()

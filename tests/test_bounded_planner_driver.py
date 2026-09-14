@@ -15,6 +15,7 @@ from dalton_core.bounded_planner_driver import (
     BoundedPlannerDriver,
     BoundedPlannerDriverConfig,
     BoundedPlannerDriverError,
+    _planner_budget_summary,
 )
 from dalton_core.bounded_planner_loop import BoundedPlannerAuthority
 from dalton_core.budget_pools import POOL_EXHAUSTED_REASON, POOL_EXHAUSTED_STATUS
@@ -287,6 +288,37 @@ class MissionObservationDispatchTests(unittest.TestCase):
 
 
 class BoundedPlannerDriverTests(unittest.TestCase):
+    def test_no_planner_call_is_not_reported_as_unknown_budget(self) -> None:
+        self.assertEqual(_planner_budget_summary([], set()), {
+            "status": "not_applicable", "pool_holds": 0, "held_pools": [],
+        })
+
+    def test_writer_rpc_uses_the_configured_operation_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            config = BoundedPlannerDriverConfig(
+                writer_socket=root / "writer.sock",
+                token_config=root / "tokens.json",
+                scheduler_db=root / "scheduler.sqlite",
+                user_agent="Dalton Test", max_response_bytes=1_000_000,
+                timeout_seconds=180.0, max_probes_per_tick=1,
+                filed_window_days=400, observation_mandate_version_ref=None,
+                doctrine_pack_version_ref=None, doctrine_pack_version_hash=None,
+                planner_routing_policy_ref=None,
+                planner_credential_slot_refs=None, planner_model_router_db=None,
+                planner_broker_socket=None, planner_broker_auth_key=None,
+                planner_broker_client_id="client:dalton-core",
+                planner_expected_agent_id="chem", planner_max_cost_usd=0.5,
+            )
+            principal = Principal(
+                "core", CORE_TOKEN, CORE_OPERATIONS, unrestricted=True)
+            with patch("dalton_core.writer_server.load_principals",
+                       return_value={"core": principal}), patch(
+                           "dalton_core.bounded_planner_driver.WriterClient") as client:
+                BoundedPlannerDriver(config, transport=object())
+            client.assert_called_once_with(
+                str(config.writer_socket), CORE_TOKEN, timeout=180.0)
+
     def test_child_settlement_calls_only_the_lightweight_writer_operation(self) -> None:
         calls = []
 
