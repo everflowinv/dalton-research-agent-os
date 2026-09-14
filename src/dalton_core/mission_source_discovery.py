@@ -1229,7 +1229,29 @@ class MissionSourceDiscoveryCoordinator:
         """
 
         settled: list[dict[str, Any]] = []
-        for document in self.missions.already_held_documents(source_ref=self.source_ref):
+        documents = self.missions.already_held_documents(source_ref=self.source_ref)
+        if self.source_ref == ALPHAENGINE_SOURCE_REF:
+            # Select the authority-backed rows in SQL.  Taking the first N
+            # generic candidates and testing them one by one permanently
+            # starves a completed fetch sitting behind a large search result.
+            # The exact JSON path is indexed by connector_schema.sql.
+            documents = [dict(row) for row in self.store.connection.execute(
+                "SELECT d.* FROM coverage_mission_discovered_documents d "
+                "JOIN coverage_mission_pointer p "
+                "ON p.mission_version_id=d.mission_version_ref "
+                "WHERE d.source_ref=? "
+                "AND d.status IN ('discovered','already_in_authority','acquisition_failed') "
+                "AND EXISTS (SELECT 1 FROM connector_call_specs c "
+                "JOIN connector_invocations i ON i.call_spec_ref=c.call_spec_id "
+                "JOIN connector_source_envelopes e "
+                "ON e.connector_invocation_ref=i.connector_invocation_id "
+                "WHERE c.operation='get_document' "
+                "AND json_extract(c.record_json,'$.parameters.document_ref')=d.document_ref "
+                "AND e.status IN ('complete','partial')) "
+                "ORDER BY d.updated_at,d.record_id LIMIT 100",
+                (self.source_ref,),
+            ).fetchall()]
+        for document in documents:
             entry: dict[str, Any] = {
                 "record_id": document["record_id"], "document_ref": document["document_ref"],
             }
