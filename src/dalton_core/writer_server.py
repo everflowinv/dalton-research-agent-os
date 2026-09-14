@@ -842,7 +842,10 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     "decide_claim_retirement": frozenset({
         "challenge_ref", "challenge_hash", "decision", "rationale", "actor_ref",
     }),
-    "run_mission_source_discovery": frozenset({"requested_by", "company_ref", "spec_ref", "as_of", "source_ref"}),
+    "run_mission_source_discovery": frozenset({
+        "requested_by", "company_ref", "spec_ref", "as_of", "source_ref",
+        "variant_index", "missing_periods",
+    }),
     "mission_source_discovery_status": frozenset({"ticket_ref"}),
     "mission_source_discoveries": frozenset({"mission_version_ref", "company_ref", "spec_ref", "limit"}),
     "mission_discovered_documents": frozenset({"mission_version_ref", "company_ref", "status", "limit"}),
@@ -4519,12 +4522,34 @@ class WriterServer:
         )
         as_of = values.get("as_of")
         as_of_date = None if as_of is None else date.fromisoformat(as_of)
-        ticket = launcher.start(
-            authorization=authorization, spec_ref=values["spec_ref"], as_of=as_of_date,
-        )
+        requested_variant = values.get("variant_index")
+        variant_index = 0 if requested_variant is None else requested_variant
+        if isinstance(variant_index, bool) or not isinstance(variant_index, int):
+            raise WriterServerError("variant_index must be an integer")
+        missing_periods = values.get("missing_periods", [])
+        if (
+            not isinstance(missing_periods, list)
+            or any(not isinstance(item, str) or not item for item in missing_periods)
+        ):
+            raise WriterServerError("missing_periods must be a list of non-empty text values")
+        # Compile before launch so an out-of-range variant or invalid period is
+        # rejected without creating a child ticket or spending a source call.
         parameters = build_discovery_parameters(
             plan, spec_ref=values["spec_ref"], company_ref=values["company_ref"],
             as_of=as_of_date or datetime.now(timezone.utc).date(),
+            variant_index=variant_index, missing_periods=missing_periods,
+        )
+        page_options = {}
+        if plan.get("schema_version") == "0.6":
+            page_options = {
+                "variant_index": variant_index,
+                "missing_periods": missing_periods,
+            }
+        elif requested_variant is not None or missing_periods:
+            raise WriterServerError("query variants require a discovery plan at schema 0.6")
+        ticket = launcher.start(
+            authorization=authorization, spec_ref=values["spec_ref"], as_of=as_of_date,
+            **page_options,
         )
         dispatch = self.coverage_mission.record_discovery_dispatch(
             authorization=authorization,
