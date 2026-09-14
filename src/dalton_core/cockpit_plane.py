@@ -4827,7 +4827,38 @@ class CockpitPlane:
                     if _column_exists(core, decisions, "terminal"):
                         join += "AND d.terminal=1 "
                     sql += join + "WHERE d.rowid IS NULL "
-                for row in self._rows(core, sql + "ORDER BY t.created_at"):
+                rows = self._rows(core, sql + "ORDER BY t.created_at,t." + key)
+                superseded_counts: dict[str, int] = {}
+                if kind == "gate_reopen":
+                    # A newer assessment of the same company's same passed
+                    # gate replaces the older pending card.  The append-only
+                    # proposals remain in Core for audit; distinct companies,
+                    # stages and passed versions remain separate decisions.
+                    latest: dict[tuple[str, str, str], sqlite3.Row] = {}
+                    ungrouped: list[sqlite3.Row] = []
+                    counts: dict[tuple[str, str, str], int] = {}
+                    for candidate_row in rows:
+                        candidate_record = json.loads(candidate_row["record_json"])
+                        group = (
+                            str(candidate_record.get("company_ref") or ""),
+                            str(candidate_record.get("stage_ref") or ""),
+                            str(candidate_record.get("passed_version_ref") or ""),
+                        )
+                        if not all(group):
+                            ungrouped.append(candidate_row)
+                            continue
+                        latest[group] = candidate_row
+                        counts[group] = counts.get(group, 0) + 1
+                    rows = sorted(
+                        [*ungrouped, *latest.values()],
+                        key=lambda candidate_row: (
+                            candidate_row["created_at"], candidate_row[key]),
+                    )
+                    superseded_counts = {
+                        latest[group][key]: count - 1
+                        for group, count in counts.items() if count > 1
+                    }
+                for row in rows:
                     record = json.loads(row["record_json"])
                     zero_base = None
                     if table == "zero_base_revision_candidates" and _table_exists(core, "zero_base_review_versions"):
@@ -4865,6 +4896,8 @@ class CockpitPlane:
                             record.get("judgement_ref")),
                         "actions": list(CHECKPOINT_ACTIONS[kind]) if decidable else [],
                         "needs_rationale": decidable,
+                        **({"occurrence_count": superseded_counts[row[key]] + 1}
+                           if row[key] in superseded_counts else {}),
                         **({} if decidable else {
                             "note": CHECKPOINT_UNDECIDABLE_NOTES[kind]}),
                     })
