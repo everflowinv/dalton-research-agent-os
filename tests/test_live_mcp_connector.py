@@ -649,6 +649,21 @@ class LiveGateHarness:
 
 
 class LiveMcpContractTests(unittest.TestCase):
+    def test_alphaengine_arguments_respect_desktop_mcp_schema_limits(self) -> None:
+        search, _ = adapter_request("search_library", search_parameters())
+        search["max_records"] = 100
+        search["content_hash"] = content_hash(
+            {key: value for key, value in search.items() if key != "content_hash"}
+        )
+        self.assertEqual(alphaengine_tool_arguments(search)["limit"], 50)
+
+        document, _ = adapter_request("get_document", document_parameters())
+        document["max_response_bytes"] = 1_000_000
+        document["content_hash"] = content_hash(
+            {key: value for key, value in document.items() if key != "content_hash"}
+        )
+        self.assertEqual(alphaengine_tool_arguments(document)["max_chars"], 30_000)
+
     def test_transport_plan_binds_compiled_step_inventory_and_bridge(self) -> None:
         compiled, step = operation_spec("search_library", search_parameters())
         plan = build_live_mcp_transport_plan(compiled, step)

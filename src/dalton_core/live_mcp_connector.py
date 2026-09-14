@@ -1188,6 +1188,13 @@ _DOCUMENT_CATEGORY_MAP = {
     "news": ["news"],
 }
 
+# The Desktop MCP schema is the authority for these limits.  Keep the adapter
+# below them even when a connector profile grants a larger response envelope:
+# the envelope is a Dalton budget, not permission to exceed a tool argument's
+# closed schema.
+_ALPHAENGINE_SEARCH_LIMIT = 50
+_ALPHAENGINE_DOCUMENT_MAX_CHARS = 30_000
+
 
 def alphaengine_tool_arguments(request: Mapping[str, Any]) -> dict[str, Any]:
     wire = validate_live_mcp_adapter_request(request)
@@ -1212,7 +1219,7 @@ def alphaengine_tool_arguments(request: Mapping[str, Any]) -> dict[str, Any]:
             "query": query,
             "document_categories": _DOCUMENT_CATEGORY_MAP[document_type],
             "sort": "relevance",
-            "limit": min(wire["max_records"], 100),
+            "limit": min(wire["max_records"], _ALPHAENGINE_SEARCH_LIMIT),
             "include_snippets": True,
             "optional_only": False,
         }
@@ -1239,7 +1246,10 @@ def alphaengine_tool_arguments(request: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "doc_id": doc_id,
         "offset": offset,
-        "max_chars": min(100_000, max(1, wire["max_response_bytes"] // 6)),
+        "max_chars": min(
+            _ALPHAENGINE_DOCUMENT_MAX_CHARS,
+            max(1, wire["max_response_bytes"] // 6),
+        ),
         "mode": "auto",
     }
 
