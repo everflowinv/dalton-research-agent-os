@@ -127,6 +127,19 @@ def model_metadata_text(value: Any) -> str:
             '现有财务报表中没有这项披露数据',
         'this concept appears in more than one statement':
             '这项披露数据同时出现在多张报表中，暂不用于预测计算',
+        '本行为稀释每股收益（Diluted EPS）科目，为单独标注的小值指标。':
+            '摊薄每股收益',
+        'Total costs and expenses（成本与费用合计）': '成本与费用合计',
+        'Costs of services excluding D&A and restructuring（服务成本，不含折旧摊销及重组费用）':
+            '服务成本（不含折旧摊销及重组费用）',
+        'Selling, general and administrative excluding D&A and restructuring（销售及管理费用，不含折旧摊销及重组费用）':
+            '销售及管理费用（不含折旧摊销及重组费用）',
+        'Depreciation and amortization（折旧与摊销）': '折旧与摊销',
+        'Restructuring costs（重组费用）': '重组费用',
+        'Gain on disposition of businesses（业务处置收益）': '业务处置收益',
+        'Other income, net（其他收益净额）': '其他收益净额',
+        'Net income attributable to DXC common stockholders（归属于 DXC 普通股股东的净利润）':
+            '归属于 DXC 普通股股东的净利润',
     }
     for source, replacement in fixed_notes.items():
         text = text.replace(source, replacement)
@@ -183,7 +196,9 @@ def readiness_labels(record: Mapping[str, Any], readiness: Mapping[str, Any],
     for name in ('drivers', 'results'):
         for row in record.get(name) or []:
             ref = str(row['ref'])
-            shown = field_label(row.get('label') or ref, translate)
+            raw_label = row.get('label') or ref
+            registered = field_label(raw_label)
+            shown = registered if registered != str(raw_label) else field_label(raw_label, translate)
             # Some historical labels are explanatory sentences. They belong
             # in the report notes, not in the compact missing-item heading.
             if len(shown) > 36 or shown.endswith(('。', '；')):

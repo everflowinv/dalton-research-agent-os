@@ -65,6 +65,41 @@ def _display_metric_terms(value: Any) -> str:
     return display_metadata_text(value or "暂无可核验内容")
 
 
+def _period_label(value: Any) -> str:
+    # Import lazily so the standalone export remains independent of the HTTP
+    # plane during module initialization.
+    from .cockpit_plane import claim_period_display_label
+    return claim_period_display_label(value) or "期间未注明"
+
+
+def _number_text(item: Mapping[str, Any],
+                 claims: Mapping[str, Mapping[str, Any]]) -> tuple[str, str | None]:
+    """Present the exact SEC auto-template as Chinese structured data.
+
+    Other text may be a genuine quotation and remains byte-for-byte visible.
+    """
+    raw = str(item.get("text") or "")
+    claim = claims.get(item.get("claim_version_ref"))
+    if not isinstance(claim, Mapping):
+        return _display_metric_terms(raw), None
+    try:
+        from .forecast_reconciliation import (
+            ForecastReconciliationValidationError, parse_company_facts_claim,
+        )
+        parsed = parse_company_facts_claim(claim)
+    except (ForecastReconciliationValidationError, KeyError, TypeError, ValueError):
+        return _display_metric_terms(raw), None
+    amount = lambda value: format_typed_value(
+        value, unit="usd", scale="one", currency=parsed["currency"], metric="revenue")
+    growth = format_typed_value(
+        parsed["growth_percent"], unit="percent", scale="one", metric="revenue_yoy_growth")
+    direction = "增长" if not str(parsed["growth_percent"]).startswith("-") else "下降"
+    shown = (f'{parsed["entity"]}在{_period_label(claim.get("period"))}披露'
+             f'{_metric_label(parsed["label"])}{amount(parsed["current"])}，'
+             f'同比{direction}{growth.lstrip("-")}；上年同期{amount(parsed["prior"])}。')
+    return shown, raw
+
+
 def _section_title(value: Any) -> str:
     text = str(value or "未命名章节")
     replacements = {
@@ -462,11 +497,10 @@ def render_research_html(
         for si, section in enumerate(product.get("sections") or [], 1):
             nums = section.get("numbers") or []
             refs = section.get("sources") or []
-            table = "".join(
-                f'<tr><td>{_esc(n.get("period") or "未知")}</td><td>{_esc(_display_metric_terms(n.get("text")))}</td></tr>'
-                for n in nums
-                if isinstance(n, Mapping)
-            )
+            number_rows = [(_period_label(n.get("period")), *_number_text(n, claims))
+                           for n in nums if isinstance(n, Mapping)]
+            table = "".join(f'<tr><td>{_esc(period)}</td><td>{_esc(shown)}</td></tr>'
+                            for period, shown, _ in number_rows)
             technical_refs = list(refs)
             for number in nums:
                 if not isinstance(number, Mapping):
@@ -474,8 +508,12 @@ def render_research_html(
                 ref = number.get("claim_version_ref") or (number.get("cell") or {}).get("ref")
                 if ref and ref not in technical_refs:
                     technical_refs.append(ref)
+            original_templates = [raw for _, _, raw in number_rows if raw]
+            technical_text = ", ".join(_source_text(ref) for ref in technical_refs) if technical_refs else "暂无来源"
+            if original_templates:
+                technical_text += "\n结构化记录原文：\n" + "\n".join(original_templates)
             chunks.append(
-                f'<article><h3>{_esc(_section_title(section.get("title")))}</h3><p class="prose">{_esc(_display_metric_terms(section.get("body") or "暂无可核验内容"))}</p>{_chart(nums, claims, f"chart-{pi}-{si}", subject_ref=product.get("subject_ref")) if nums else ""}{("<div class=\"tablewrap\"><table><thead><tr><th>期间</th><th>来源原文中的数值（保留原文）</th></tr></thead><tbody>"+table+"</tbody></table></div>") if table else ""}<details class="refs"><summary>技术详情与来源（{len(technical_refs)}）</summary><code>{_esc(", ".join(_source_text(ref) for ref in technical_refs) if technical_refs else "暂无来源")}</code></details><p class="gaps">待补资料：{_esc("；".join(_gap_text(gap) for gap in (section.get("gaps") or [])) or "当前未记录待补项")}</p></article>'
+                f'<article><h3>{_esc(_section_title(section.get("title")))}</h3><p class="prose">{_esc(_display_metric_terms(section.get("body") or "暂无可核验内容"))}</p>{_chart(nums, claims, f"chart-{pi}-{si}", subject_ref=product.get("subject_ref")) if nums else ""}{("<div class=\"tablewrap\"><table><thead><tr><th>期间</th><th>结构化数据</th></tr></thead><tbody>"+table+"</tbody></table></div>") if table else ""}<details class="refs"><summary>技术详情与来源（{len(technical_refs)}）</summary><code>{_esc(technical_text)}</code></details><p class="gaps">待补资料：{_esc("；".join(_gap_text(gap) for gap in (section.get("gaps") or [])) or "当前未记录待补项")}</p></article>'
             )
         if not chunks:
             chunks = [

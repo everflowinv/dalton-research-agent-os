@@ -121,6 +121,27 @@ class ModelDisplayTest(unittest.TestCase):
                                   lambda value: value)
         self.assertEqual(['摊薄每股收益'], shown['results_unavailable_labels'])
 
+    def test_real_dxc_missing_result_labels_are_compact_and_keep_distinctions(self):
+        labels = [
+            'Total costs and expenses（成本与费用合计）',
+            'Costs of services excluding D&A and restructuring（服务成本，不含折旧摊销及重组费用）',
+            'Selling, general and administrative excluding D&A and restructuring（销售及管理费用，不含折旧摊销及重组费用）',
+            'Depreciation and amortization（折旧与摊销）',
+            'Restructuring costs（重组费用）',
+            'Gain on disposition of businesses（业务处置收益）',
+            'Other income, net（其他收益净额）',
+            'Net income attributable to DXC common stockholders（归属于 DXC 普通股股东的净利润）',
+            '本行为稀释每股收益（Diluted EPS）科目，为单独标注的小值指标。',
+        ]
+        record = {'drivers': [], 'results': [
+            {'ref': f'result:r{i}', 'label': label} for i, label in enumerate(labels)]}
+        refs = [row['ref'] for row in record['results']]
+        shown = readiness_labels(record, {'results_unavailable': refs}, lambda value: value)
+        self.assertEqual(len(labels), len(set(shown['results_unavailable_labels'])))
+        self.assertTrue(all(len(label) <= 30 for label in shown['results_unavailable_labels']))
+        self.assertFalse(any('Diluted EPS' in label or 'Total costs' in label
+                             for label in shown['results_unavailable_labels']))
+
     def test_closed_forecast_unavailable_templates_are_chinese_without_changing_reasons(self):
         reasons = [
             'statement line result:revenue is explicitly unavailable for forecast',

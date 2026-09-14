@@ -155,8 +155,26 @@ class HtmlRenderTests(unittest.TestCase):
         self.assertIn('模型调用未成功', page)
         for shown in ('利用率', '利润率', '分部利润', '订单额'):
             self.assertIn(shown, page)
-        self.assertIn('来源原文中的数值（保留原文）', page)
+        self.assertIn('结构化数据', page)
         self.assertIn('Accenture plc reported Revenues of USD 18718144000', page)
+
+    def test_sec_auto_template_is_chinese_display_with_raw_template_in_details(self):
+        mission, lib = self.fixture()
+        raw = ('Accenture plc reported Revenues of USD 18718144000 for '
+               '2026-03-01..2026-05-31, up 5.59% year over year from USD '
+               '17727871000 in the comparable quarter.')
+        lib['products'][0]['sections'][0]['numbers'] = [{
+            'period': '2026-03-01..2026-05-31', 'text': raw,
+            'claim_version_ref': 'claim:1'}]
+        claim = {'id': 'claim:1', 'subject_ref': 'company:acn',
+                 'claim_kind': 'quantitative', 'metric_or_aspect': 'quarterly_revenue_yoy_growth',
+                 'period': '2026-03-01..2026-05-31', 'basis': 'official-filing-xbrl',
+                 'normalized_statement': raw, 'value': '5.59', 'unit': 'percent', 'scale': 'one'}
+        page = render_research_html(lib, mission=mission, claims={'claim:1': claim})
+        normal, details = page.split('<details class="refs">', 1)
+        self.assertIn('营业收入187.2 亿美元，同比增长5.6%；上年同期177.3 亿美元', normal)
+        self.assertNotIn('reported Revenues', normal)
+        self.assertIn(raw, details)
 
     def test_incompatible_units_do_not_make_a_chart(self):
         mission, lib = self.fixture()
