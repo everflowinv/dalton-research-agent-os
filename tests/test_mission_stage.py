@@ -476,6 +476,23 @@ class StageEntryTests(StageHarness):
 
 
 class LaneOrderTests(StageHarness):
+    def test_unselected_candidates_do_not_satisfy_a_discovery_gap(self) -> None:
+        for _ in range(12):
+            self.document(ACN, TRANSCRIPTS, "discovered")
+        companies = self.evaluate()
+        calls = self.item(companies, ACN, "earnings_calls")
+        self.assertEqual((calls["candidate_count"], calls["pending"]), (12, 0))
+        self.assertIn(
+            (ACN, TRANSCRIPTS),
+            [(need["company_ref"], need["spec_ref"])
+             for need in discovery_needs(companies, source_ref="source:alphaengine")],
+        )
+        self.assertIn(
+            (ACN, TRANSCRIPTS),
+            [(need["company_ref"], need["spec_ref"])
+             for need in acquisition_needs(companies, source_ref="source:alphaengine")],
+        )
+
     def test_needs_put_the_priority_company_and_the_playbook_reading_order_first(self) -> None:
         self.document(EPAM, TRANSCRIPTS, "discovered")
         self.document(ACN, REPORTS, "discovered")
