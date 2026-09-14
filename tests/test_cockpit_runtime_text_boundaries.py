@@ -11,6 +11,11 @@ HTML = ROOT / "src" / "dalton_core" / "cockpit_control.html"
 
 
 class CockpitRuntimeTextBoundariesTests(unittest.TestCase):
+    def test_approval_explanation_is_optional_in_the_browser(self):
+        source = HTML.read_text(encoding="utf-8")
+        self.assertIn("补充说明（选填，会随决定保存）", source)
+        self.assertNotIn("请先写明理由", source)
+
     def test_lane_terminal_words_have_visible_labels_and_failure_styling(self):
         source = HTML.read_text(encoding="utf-8")
         self.assertIn('terminal:"本次任务已结束"', source)

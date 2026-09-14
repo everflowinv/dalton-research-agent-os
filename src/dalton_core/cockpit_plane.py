@@ -4900,6 +4900,11 @@ class CockpitPlane:
         rationale = value.get("rationale") or ""
         if not isinstance(rationale, str) or len(rationale) > 4000:
             raise CockpitError("rationale must be text under 4000 characters")
+        supplied_rationale = rationale.strip()
+        # The governance operations historically require a non-empty audit
+        # reason.  Keep that invariant without attributing words to the owner
+        # when the optional Cockpit field is left blank.
+        recorded_rationale = supplied_rationale or "系统记录：用户未填写补充说明"
         request_id = _text(value.get("request_id"), "request_id", maximum=128)
         actor = _subject_for_login(login)
         if kind.startswith("draft:"):
@@ -4915,20 +4920,16 @@ class CockpitPlane:
         if kind == "thesis":
             if decision not in {"admit", "reject"}:
                 raise CockpitError("decision must be admit or reject")
-            if not rationale.strip():
-                raise CockpitError("请写一句理由")
             operation, params = "decide_thesis_admission", {
-                "candidate_id": ref, "candidate_hash": digest, "verdict": decision, "rationale": rationale.strip(),
+                "candidate_id": ref, "candidate_hash": digest, "verdict": decision, "rationale": recorded_rationale,
                 "decision_id": f"thesis-admission-decision:cockpit:{content_hash({'candidate': ref, 'request': request_id})[:24]}"}
             title = ("接受了研究论点" if decision == "admit" else "拒绝了研究论点")
         elif kind == "capability":
             if decision not in {"approve", "reject"}:
                 raise CockpitError("decision must be approve or reject")
-            if not rationale.strip():
-                raise CockpitError("请写一句理由")
             evaluation = value.get("evaluation_id")
             operation, params = "decide_capability_promotion", {
-                "proposal_ref": ref, "decision": decision, "rationale": rationale.strip(),
+                "proposal_ref": ref, "decision": decision, "rationale": recorded_rationale,
                 "decision_id": f"capability-decision:cockpit:{content_hash({'proposal': ref, 'request': request_id})[:24]}",
                 **({"evaluation_id": evaluation} if isinstance(evaluation, str) and evaluation else {})}
             title = ("批准了新工具" if decision == "approve" else "拒绝了新工具")
@@ -4942,36 +4943,30 @@ class CockpitPlane:
                 raise CockpitError("decision must be retired or kept")
             operation, params = "decide_claim_retirement", {
                 "challenge_ref": ref, "challenge_hash": digest, "decision": decision,
-                "rationale": rationale.strip() or ("你确认退役这条结论" if decision == "retired" else "你确认保留这条结论")}
+                "rationale": recorded_rationale}
             title = ("退役了一条结论" if decision == "retired" else "保留了一条被标记的结论")
         elif kind == "deep_insight_gate":
             if decision not in {"approve", "return_for_more_work", "reject"}:
                 raise CockpitError(
                     "decision must be approve, return_for_more_work or reject")
-            if not rationale.strip():
-                raise CockpitError("请写一句理由")
             operation, params = "decide_deep_insight_gate", {
                 "gate_version_ref": ref, "gate_version_hash": digest,
-                "decision": decision, "reason": rationale.strip()}
+                "decision": decision, "reason": recorded_rationale}
             title = {"approve": "通过了深度认知评审", "return_for_more_work": "将深度认知评审退回补充",
                      "reject": "未通过深度认知评审"}[decision]
         elif kind == "investment_memo":
             if decision not in {"approve", "reject"}:
                 raise CockpitError("decision must be approve or reject")
-            if not rationale.strip():
-                raise CockpitError("请写一句理由")
             operation, params = "decide_investment_memo", {
                 "memo_version_ref": ref, "memo_version_hash": digest,
-                "decision": decision, "reason": rationale.strip()}
+                "decision": decision, "reason": recorded_rationale}
             title = ("批准了投资备忘录" if decision == "approve"
                      else "未批准投资备忘录")
         elif kind == "forecast":
             if decision not in {"keep_forecast", "revise_forecast"}:
                 raise CockpitError("decision must be keep_forecast or revise_forecast")
-            if not rationale.strip():
-                raise CockpitError("请写一句理由")
             operation, params = "decide_forecast_overturn", {
-                "reconciliation_ref": ref, "reconciliation_hash": digest, "decision": decision, "rationale": rationale.strip(),
+                "reconciliation_ref": ref, "reconciliation_hash": digest, "decision": decision, "rationale": recorded_rationale,
                 "idempotency_key": f"cockpit-overturn:{ref}:{request_id}"}
             title = ("维持了预测" if decision == "keep_forecast" else "决定修订预测")
         elif kind == "thesis_revision_candidate":
@@ -4980,21 +4975,17 @@ class CockpitPlane:
             # writer refuses the operation for anything else.
             if decision not in {"accept", "reject", "defer"}:
                 raise CockpitError("decision must be accept, reject or defer")
-            if not rationale.strip():
-                raise CockpitError("请写一句理由")
             operation, params = "decide_thesis_revision_candidate", {
                 "candidate_ref": ref, "candidate_hash": digest,
-                "verdict": decision, "reason": rationale.strip()}
+                "verdict": decision, "reason": recorded_rationale}
             title = {"accept": "接受了论点修订", "reject": "未接受论点修订",
                      "defer": "暂缓决定论点修订"}[decision]
         elif kind == "gate_reopen":
             if decision not in {"approve", "decline"}:
                 raise CockpitError("decision must be approve or decline")
-            if not rationale.strip():
-                raise CockpitError("请写一句理由")
             operation, params = "decide_gate_reopen", {
                 "proposal_ref": ref, "proposal_hash": digest,
-                "verdict": decision, "reason": rationale.strip()}
+                "verdict": decision, "reason": recorded_rationale}
             title = ("同意重新出具初步筛查报告" if decision == "approve"
                      else "不同意重新出具初步筛查报告")
         else:
@@ -5003,8 +4994,11 @@ class CockpitPlane:
             result = self.governance_call(self.token_config, self.writer_socket, actor_ref=actor, operation=operation, params=params)
         except (GovernanceCliError, RemoteError) as exc:
             raise CockpitConflict(f"这项决定没有被接受：{_reason(exc)}") from exc
-        self.journal.record_event(kind="approval", title=title, detail=rationale.strip() or None, login=login,
-                                  refs={"kind": kind, "ref": ref, "decision": decision, "operation": operation})
+        self.journal.record_event(kind="approval", title=title,
+                                  detail=supplied_rationale or None, login=login,
+                                  refs={"kind": kind, "ref": ref,
+                                        "decision": decision, "operation": operation,
+                                        "rationale_provided": bool(supplied_rationale)})
         return {"status": "decided", "kind": kind, "ref": ref, "decision": decision,
                 "result": result if isinstance(result, (dict, list)) else None}
 

@@ -433,13 +433,57 @@ class CockpitPlaneTests(unittest.TestCase):
         if not thesis:
             self.skipTest("fixture has no undecided thesis candidate")
         item = thesis[0]
-        with self.assertRaises(CockpitError):
-            self.c.plane.decide(self.login, {"kind": "thesis", "ref": item["ref"], "hash": item["hash"], "decision": "admit", "rationale": "", "request_id": "r"})
         out = self.c.plane.decide(self.login, {"kind": "thesis", "ref": item["ref"], "hash": item["hash"], "decision": "admit",
-                                               "rationale": "reads well", "request_id": "r"})
+                                               "rationale": "", "request_id": "r"})
         self.assertEqual(out["status"], "decided")
         self.assertEqual(self.c.calls[-1][0], "decide_thesis_admission")
         self.assertEqual(self.c.calls[-1][1]["candidate_hash"], item["hash"])
+        self.assertEqual(self.c.calls[-1][1]["rationale"],
+                         "系统记录：用户未填写补充说明")
+
+    def test_every_human_approval_accepts_an_empty_optional_explanation(self) -> None:
+        digest = "e" * 64
+        calls = []
+
+        def governance(*args, operation, params, **kwargs):
+            calls.append((operation, params))
+            return {"status": "accepted"}
+
+        self.c.plane.governance_call = governance
+        cases = (
+            ("thesis", "admit", "decide_thesis_admission", "rationale"),
+            ("capability", "approve", "decide_capability_promotion", "rationale"),
+            ("claim", "kept", "decide_claim_retirement", "rationale"),
+            ("deep_insight_gate", "approve", "decide_deep_insight_gate", "reason"),
+            ("investment_memo", "approve", "decide_investment_memo", "reason"),
+            ("forecast", "keep_forecast", "decide_forecast_overturn", "rationale"),
+            ("thesis_revision_candidate", "defer",
+             "decide_thesis_revision_candidate", "reason"),
+            ("gate_reopen", "decline", "decide_gate_reopen", "reason"),
+        )
+        for index, (kind, decision, operation, reason_field) in enumerate(cases):
+            with self.subTest(kind=kind):
+                result = self.c.plane.decide(self.login, {
+                    "kind": kind, "ref": f"{kind}:fixture", "hash": digest,
+                    "decision": decision, "rationale": "   ",
+                    "request_id": f"optional-{index}",
+                })
+                self.assertEqual(result["status"], "decided")
+                self.assertEqual(calls[-1][0], operation)
+                self.assertEqual(calls[-1][1][reason_field],
+                                 "系统记录：用户未填写补充说明")
+
+        with self.assertRaisesRegex(CockpitError, "admit or reject"):
+            self.c.plane.decide(self.login, {
+                "kind": "thesis", "ref": "candidate:fixture", "hash": digest,
+                "decision": "approve_everything", "rationale": "",
+                "request_id": "bad-action",
+            })
+        with self.assertRaises(CockpitError):
+            self.c.plane.decide(self.login, {
+                "kind": "thesis", "ref": "candidate:fixture", "hash": "not-a-hash",
+                "decision": "admit", "rationale": "", "request_id": "bad-hash",
+            })
 
     def test_model_refusals_are_plain_and_budget_exhaustion_fails_closed(self) -> None:
         # A prompt over the input bound never reaches the router.
