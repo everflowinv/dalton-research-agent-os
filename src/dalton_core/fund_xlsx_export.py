@@ -1630,6 +1630,27 @@ def _verify_statement_filing(
         raise FundWorkbookExportError(str(exc)) from exc
 
 
+def _mission_for_bound_model(missions: Any, active: Mapping[str, Any],
+                             spec: Mapping[str, Any], company_ref: str) -> dict[str, Any]:
+    """Use the immutable mission version that governed the formal model."""
+    bound_ref = spec.get("mission_version_ref")
+    if bound_ref == active.get("id"):
+        return dict(active)
+    try:
+        bound = missions.mission(bound_ref)
+    except Exception as exc:
+        raise FundWorkbookExportError(
+            "forecast model's bound mission version is unavailable") from exc
+    if (bound.get("mission_ref") != active.get("mission_ref")
+            or company_ref not in {item.get("company_ref")
+                                   for item in bound.get("universe") or []}
+            or company_ref not in {item.get("company_ref")
+                                   for item in active.get("universe") or []}):
+        raise FundWorkbookExportError(
+            "forecast model is outside the requested active mission chain")
+    return bound
+
+
 def export_company_workbook(
     core_db: Path, company_ref: str, output: Path,
     *, valuation_scenario: Mapping[str, Any] | None = None,
@@ -1685,12 +1706,11 @@ def export_company_workbook(
                 raise FundWorkbookExportError(
                     "forecast model's exact specification is unavailable")
             spec = missions._model_spec_row(spec_row)
-            if spec["mission_version_ref"] != mission["id"]:
-                raise FundWorkbookExportError(
-                    "latest forecast model is not bound to the current mission version")
+            model_mission = _mission_for_bound_model(
+                missions, mission, spec, company_ref)
             inputs = build_model_inputs(missions, spec)
             member = next(
-                item for item in mission["universe"]
+                item for item in model_mission["universe"]
                 if item["company_ref"] == company_ref
             )
             annual_filings = [
@@ -1719,9 +1739,9 @@ def export_company_workbook(
                 valuation=valuation, valuation_scenario=valuation_scenario,
                 calendar_binding=calendar_binding,
                 annual_projection=models.annual_projection(model["id"]),
-                mission_binding={"ref": mission["id"],
-                                 "content_hash": mission["content_hash"],
-                                 "created_at": mission["created_at"],
+                mission_binding={"ref": model_mission["id"],
+                                 "content_hash": model_mission["content_hash"],
+                                 "created_at": model_mission["created_at"],
                                  "ticker": member["ticker"],
                                  "entity_name": (
                                      latest_annual["entity_name"]

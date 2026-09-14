@@ -15,6 +15,7 @@ from dalton_core.fund_xlsx_export import (
     _formula_for,
     _four_quarter_flow_cells,
     _number_format,
+    _mission_for_bound_model,
     _template_number_kind,
     _template_value,
     _verify_statement_filing,
@@ -29,6 +30,25 @@ from tests.test_model_forecast_driver import ledger, model, spec
 
 
 class FundXlsxExportTests(unittest.TestCase):
+    def test_model_uses_its_exact_older_version_in_same_active_mission_chain(self):
+        company = "company:test"
+        old = {"id": "coverage-mission-version:x:14", "mission_ref": "coverage-mission:x",
+               "content_hash": "a" * 64, "created_at": "2026-09-01", "universe": [{"company_ref": company}]}
+        active = {"id": "coverage-mission-version:x:17", "mission_ref": "coverage-mission:x",
+                  "content_hash": "b" * 64, "created_at": "2026-09-14", "universe": [{"company_ref": company}]}
+        class Missions:
+            def mission(self, ref):
+                self.requested = ref
+                return old
+        authority = Missions()
+        chosen = _mission_for_bound_model(authority, active,
+                                           {"mission_version_ref": old["id"]}, company)
+        self.assertEqual(chosen, old)
+        self.assertEqual(authority.requested, old["id"])
+        with self.assertRaisesRegex(FundWorkbookExportError, "mission chain"):
+            _mission_for_bound_model(authority, active,
+                                     {"mission_version_ref": old["id"]}, "company:outside")
+
     def test_display_units_scale_once_and_keep_per_unit_precision(self):
         self.assertEqual(_template_value("12500000", "USD"), 12.5)
         self.assertEqual(_template_value("12500", "USD_thousands"), 12.5)
