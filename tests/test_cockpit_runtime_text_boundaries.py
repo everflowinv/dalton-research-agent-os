@@ -95,6 +95,31 @@ class CockpitRuntimeTextBoundariesTests(unittest.TestCase):
                 self.assertNotEqual(result["display"], "运行说明见技术详情。")
                 self.assertEqual(result["technical"], raw)
 
+    def test_source_connection_and_connector_approval_are_not_conflated(self):
+        guidepoint = (
+            "all_grants_refused；跳过原因：CoverageMissionConflict: "
+            "mission marks source:guidepoint as not_connected"
+        )
+        result = self._evaluate(f"readableLaneDetail({json.dumps(guidepoint)})")
+        self.assertEqual(result["display"], "当前研究任务未连接专家访谈资料来源，本轮未获取。")
+        self.assertEqual(result["technical"], guidepoint)
+
+        daily_prices = (
+            "covered-company refresh is blocked (not_permitted=5)；"
+            "governance_record=yfinance-daily-prices-v1.json；跳过原因：not_permitted"
+        )
+        result = self._evaluate(f"readableLaneDetail({json.dumps(daily_prices)})")
+        self.assertEqual(result["display"], "每日行情数据源已配置，但治理记录尚未正式批准。")
+        self.assertEqual(result["technical"], daily_prices)
+
+        calendar = (
+            "覆盖公司的刷新操作受阻（not_permitted=5）；"
+            "治理记录：yfinance-calendar-v1.json；跳过原因：not_permitted。"
+        )
+        result = self._evaluate(f"readableLaneDetail({json.dumps(calendar)})")
+        self.assertEqual(result["display"], "行情日历数据源已配置，但治理记录尚未正式批准。")
+        self.assertEqual(result["technical"], calendar)
+
     def test_deep_insight_log_classification_is_translated_without_guessing_unknown(self):
         known = "深度认知门十二问草稿 v1，分类 turnaround，等待人裁决"
         result = self._evaluate(f"readableLogText({json.dumps(known)})")
