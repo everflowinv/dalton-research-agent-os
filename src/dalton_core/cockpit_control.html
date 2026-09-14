@@ -490,6 +490,7 @@ function readableLaneDetail(value){
   ]);
   if(exact.has(value))return {display:exact.get(value),technical:value};
   const rules=[
+    [/^the industry framework is a weekly deliverable; [1-9]\d*s of its interval remain$/,"行业分析框架按周更新，尚未到下一次更新时间。"],
     [/^该写作者没有source:prior-research通道。$/,"尚未接入既有研究资料来源。"],
     [/^all_grants_refused；跳过原因：CoverageMissionConflict——任务配置将 source:guidepoint 标记为 尚未连接。$/,"专家访谈资料来源尚未连接。"],
     [/^覆盖公司的刷新操作受阻（not_permitted=\d+）；治理记录：yfinance-daily-prices-v1\.json；跳过原因：not_permitted。$/,"每日行情数据源已配置，等待批准使用。"],

@@ -87,6 +87,25 @@ class CockpitRuntimeTextBoundariesTests(unittest.TestCase):
         self.assertEqual(result["display"], "运行说明见技术详情。")
         self.assertEqual(result["technical"], unknown)
 
+    def test_weekly_framework_interval_is_waiting_and_keeps_raw_detail(self):
+        raw = (
+            "the industry framework is a weekly deliverable; "
+            "602672s of its interval remain"
+        )
+        result = self._evaluate(f"readableLaneDetail({json.dumps(raw)})")
+        self.assertEqual(result["display"], "行业分析框架按周更新，尚未到下一次更新时间。")
+        self.assertEqual(result["technical"], raw)
+
+        for invalid in (
+            "the industry framework is a weekly deliverable; 0s of its interval remain",
+            "the industry framework is a weekly deliverable; soon of its interval remain",
+            "another task is a weekly deliverable; 602672s of its interval remain",
+        ):
+            with self.subTest(invalid=invalid):
+                result = self._evaluate(f"readableLaneDetail({json.dumps(invalid)})")
+                self.assertEqual(result["display"], "运行说明见技术详情。")
+                self.assertEqual(result["technical"], invalid)
+
     def test_reviewed_lane_translation_is_matched_before_raw_is_folded(self):
         raw = "no source:prior-research lane on this writer"
         mapped = "该写作者没有source:prior-research通道。"
