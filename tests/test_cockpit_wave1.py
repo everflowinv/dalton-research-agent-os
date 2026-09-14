@@ -255,6 +255,30 @@ class MarketCardTests(Wave1Case):
         # percentage whose window the reader cannot see is unusable.
         self.assertEqual((market["change_percent"], market["change_since"]),
                          (10.0, "2026-09-10"))
+        self.assertEqual([row["days"] for row in market["changes"]], [5, 30, 90])
+        self.assertTrue(all(row["status"] == "unavailable"
+                            for row in market["changes"]))
+
+    def test_returns_use_trading_day_closes_and_require_the_prior_close(self) -> None:
+        closes = tuple(str(100 + index) for index in range(91))
+        dates = [f"2026-{1 + index // 28:02d}-{1 + index % 28:02d}"
+                 for index in range(91)]
+        MarketPriceSeriesAuthority(self.store).publish_series(
+            company_ref=ACN, ticker="ACN", currency="USD",
+            bars=[bar(day, close) for day, close in zip(dates, closes)],
+            observations=[], invocation_ref=INVOCATION, artifact_hash=ARTIFACT,
+            governance_ref=GOVERNANCE, governance_hash=GOVERNANCE_HASH,
+            requested_start=dates[0], requested_end=dates[-1], captured_at=SETTLED,
+        )
+        market = self.card(self.plane.overview())["market"]
+        by_days = {row["days"]: row for row in market["changes"]}
+        self.assertEqual(by_days[5], {
+            "days": 5, "horizon": "5D", "label": "近5个交易日",
+            "status": "available",
+            "percent": 2.7, "since": dates[-6], "reason": None,
+        })
+        self.assertEqual(by_days[30]["percent"], 18.8)
+        self.assertEqual(by_days[90]["percent"], 90.0)
 
     def test_a_mid_session_price_says_it_is_not_a_close(self) -> None:
         # A price pulled mid-session has exactly the shape of a close. A card
@@ -814,6 +838,12 @@ class PageVocabularyTests(unittest.TestCase):
         page = self.PAGE.read_text(encoding="utf-8")
         self.assertIn("/v1/cockpit/claims?", page)
         self.assertIn("/v1/cockpit/model?company=", page)
+
+    def test_the_market_card_renders_each_horizon_and_missing_data(self) -> None:
+        page = self.PAGE.read_text(encoding="utf-8")
+        self.assertIn('(m.changes||[]).forEach', page)
+        self.assertIn('${label}：数据不足', page)
+        self.assertIn('Number(x.percent).toFixed(1)', page)
 
     def test_invariant_refusals_are_rendered_where_model_numbers_belong(self) -> None:
         page = self.PAGE.read_text(encoding="utf-8")

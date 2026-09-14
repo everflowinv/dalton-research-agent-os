@@ -772,8 +772,7 @@ function renderOverview(o){
 }
 /* INT1: the four Wave 1 lanes, on the card and in the reader. */
 function marketLine(m){const d=node("div",null,"mkt");d.append(node("span",formatDisplayMetric(m.close,{currency:m.currency,unit:"per_share"}),"px"));
-  if(m.change_percent!=null)d.append(node("span",`${m.change_percent>0?"+":""}${Number(m.change_percent).toFixed(1)}%`,m.change_percent>=0?"up":"dn"));
-  if(m.change_since)d.append(node("span",`自 ${m.change_since}`,"hint"));
+  (m.changes||[]).forEach(x=>{const label=`${x.horizon}（${x.label}）`;if(x.status==="available")d.append(node("span",`${label} ${x.percent>0?"+":""}${Number(x.percent).toFixed(1)}%`,x.percent>=0?"up":"dn"));else d.append(node("span",`${label}：数据不足`,"hint"))});
   d.append(node("span",`${m.as_of}`,"hint"));
   /* A mid-session price has the same shape as a close and is not one. */
   if(m.provisional)d.append(node("span","盘中价，当天还没收盘","prov"));

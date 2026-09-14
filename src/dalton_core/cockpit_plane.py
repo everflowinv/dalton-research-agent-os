@@ -2310,6 +2310,37 @@ class CockpitPlane:
                     (float(newest["close"]) / float(first["close"]) - 1) * 100, 1)
             except (TypeError, ValueError, ZeroDivisionError):
                 change = None
+            changes = []
+            for trading_days in (5, 30, 90):
+                # N-day performance has N close-to-close intervals, hence it
+                # needs N+1 trading-day observations. Calendar gaps do not
+                # count as missing sessions in an exchange close series.
+                item = {"days": trading_days, "horizon": f"{trading_days}D",
+                        "label": f"近{trading_days}个交易日"}
+                if len(bars) <= trading_days:
+                    item.update({
+                        "status": "unavailable", "percent": None,
+                        "since": None,
+                        "reason": f"历史收盘数据不足，暂时无法计算{trading_days}个交易日涨跌幅",
+                    })
+                else:
+                    comparison = bars[-(trading_days + 1)]
+                    try:
+                        percent = round(
+                            (float(newest["close"]) / float(comparison["close"]) - 1)
+                            * 100, 1)
+                    except (TypeError, ValueError, ZeroDivisionError):
+                        item.update({
+                            "status": "unavailable", "percent": None,
+                            "since": None,
+                            "reason": f"历史收盘数据无效，暂时无法计算{trading_days}个交易日涨跌幅",
+                        })
+                    else:
+                        item.update({
+                            "status": "available", "percent": percent,
+                            "since": comparison["date"], "reason": None,
+                        })
+                changes.append(item)
             provisional = bar_is_provisional(newest)
             out[record["company_ref"]] = {
                 "as_of": newest["date"], "close": newest["close"],
@@ -2319,6 +2350,7 @@ class CockpitPlane:
                          if provisional else "收盘价"),
                 "bars": len(bars), "since": record.get("first_bar_date"),
                 "change_percent": change, "change_since": first["date"],
+                "changes": changes,
                 "version": record.get("version"),
             }
         return out
