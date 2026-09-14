@@ -663,7 +663,13 @@ def _claim_period_label(value: Any) -> str | None:
                   r"白俄罗斯相关限制持续至 \1 年底", text)
     text = re.sub(r"(?<!各)年度截至 (\d{4}年\d{1,2}月\d{1,2}日)",
                   r"截至 \1 的年度", text)
-    return text
+    # A partial phrase match must not produce invented mixed-language metadata.
+    # Keep familiar financial period notation and proper names, but return an
+    # unrecognised period verbatim rather than translate only its generic words.
+    remaining = re.sub(
+        r"\b(?:Form 10-K|Kyndryl|TTM|NTM|LTM|FY\d*|CY\d*|F?Q[1-4]\d*|F?[1-4]Q\d*)\b",
+        "", text, flags=re.IGNORECASE)
+    return value.strip() if re.search(r"[A-Za-z]", remaining) else text
 
 
 CONNECTION_STATUS_LABELS = {

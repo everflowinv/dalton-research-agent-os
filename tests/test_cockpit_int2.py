@@ -568,6 +568,8 @@ class SourcePanelTests(Int2Case):
             "Fiscal years 2025, 2024 and 2023": "财年 2025, 2024 及 2023",
             "52-week period up to October 30, 2025": "截至 2025年10月30日 的 52 周期间",
             "unrecognized proprietary period": "unrecognized proprietary period",
+            "current proprietary cycle": "current proprietary cycle",
+            "vendor report": "vendor report",
         }
         for raw, expected in cases.items():
             with self.subTest(raw=raw):
