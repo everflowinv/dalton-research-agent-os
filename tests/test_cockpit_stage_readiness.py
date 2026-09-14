@@ -57,7 +57,7 @@ class StageReadinessProjectionTests(unittest.TestCase):
                 "drafted": {"company_ref": "company:ctsh"},
                 "failure_reason": "没有任何一节写出来，不发布空壳",
                 "sections": [{"status": "model_unavailable",
-                              "reason": "the model call did not succeed (MODEL_ROUTE_REJECTED)"}],
+                              "reason": "no model route is available right now"}],
             }))
             failures = _latest_initial_screen_failures(Path(tmp))
         self.assertEqual(

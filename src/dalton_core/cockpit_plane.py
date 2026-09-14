@@ -116,7 +116,8 @@ def _initial_screen_failure_label(summary: Mapping[str, Any]) -> str | None:
         for section in summary.get("sections") or ()
         if isinstance(section, Mapping)
     )
-    if "MODEL_ROUTE_REJECTED" in reasons:
+    if ("MODEL_ROUTE_REJECTED" in reasons
+            or "no model route is available right now" in reasons.casefold()):
         return "最新一次报告生成失败：模型服务或当时可用运行额度未能承接请求"
     reason = str(summary.get("failure_reason") or "").strip()
     return f"最新一次报告生成失败：{reason}" if reason else "最新一次报告生成失败"
