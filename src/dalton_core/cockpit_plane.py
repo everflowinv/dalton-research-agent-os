@@ -424,10 +424,10 @@ def _ops_superseded_mission(item_key: Any, current: str | None) -> bool:
                for scope, version in parsed)
 
 
-def _ops_superseded_model_spec(
+def _ops_model_spec_history_reason(
         item: Mapping[str, Any], latest: Mapping[str, Mapping[str, Any]],
-        latest_inputs: Mapping[str, Mapping[str, Any]] | None = None) -> bool:
-    """Hide a failed spec only after a later formal specification succeeded."""
+        latest_inputs: Mapping[str, Mapping[str, Any]] | None = None) -> str | None:
+    """Classify a failed spec only from a later success or newer input."""
     if item.get("lane") != "mission_model_spec":
         return False
     item_key = item.get("item_key")
@@ -453,7 +453,17 @@ def _ops_superseded_model_spec(
                    and isinstance(current_input.get("last_seen"), str)
                    and isinstance(last_seen, str)
                    and current_input["last_seen"] > last_seen)
-    return later_success or later_input
+    if later_success:
+        return "later_success"
+    if later_input:
+        return "newer_input"
+    return None
+
+
+def _ops_superseded_model_spec(
+        item: Mapping[str, Any], latest: Mapping[str, Mapping[str, Any]],
+        latest_inputs: Mapping[str, Mapping[str, Any]] | None = None) -> bool:
+    return _ops_model_spec_history_reason(item, latest, latest_inputs) is not None
 
 
 def _runtime_error_display(reason: Any) -> str:
@@ -3693,7 +3703,11 @@ class CockpitPlane:
                     "任务目标已更新，保留这次等待记录供追溯"
                     if _ops_superseded_mission(
                         item.get("item_key"), current_mission_version)
-                    else "后续公司模型定义已成功，保留这次失败记录供追溯"),
+                    else ("后续公司模型定义已成功，保留这次失败记录供追溯"
+                          if _ops_model_spec_history_reason(
+                              item, latest_model_specs, latest_model_inputs)
+                          == "later_success"
+                          else "公司模型输入已经更新，这次旧输入失败仅保留供追溯")),
                 "lane_label": REGISTRY_LANE_LABELS.get(item["lane"], item["lane"]),
                 "item_label": _ops_item_label(item.get("item_key"), members),
                 "technical_details": {"item_key": item.get("item_key"),

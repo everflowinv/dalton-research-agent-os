@@ -25,6 +25,7 @@ from dalton_core.cockpit_plane import (
     REGISTRY_LANE_LABELS,
     _ops_superseded_mission,
     _ops_superseded_model_spec,
+    _ops_model_spec_history_reason,
 )
 from dalton_core.extraction_backlog import observed_yield
 from dalton_core.lane_failure_class import LaneFailureBudget
@@ -250,6 +251,12 @@ class OpsBacklogTests(PanelCase):
             "state_hash": "c" * 64, "last_seen": "2026-09-13T10:00:00+00:00"}}))
         self.assertFalse(_ops_superseded_model_spec(item, {}, {company: {
             "state_hash": "a" * 64, "last_seen": "2026-09-13T10:00:00+00:00"}}))
+        self.assertEqual(_ops_model_spec_history_reason(item, {company: {
+            "state_hash": "b" * 64, "created_at": "2026-09-13T10:00:00+00:00"}}),
+                         "later_success")
+        self.assertEqual(_ops_model_spec_history_reason(item, {}, {company: {
+            "state_hash": "c" * 64, "last_seen": "2026-09-13T10:00:00+00:00"}}),
+                         "newer_input")
 
     def test_the_page_carries_no_machine_words_for_a_dependency_it_knows(self) -> None:
         self.park()
