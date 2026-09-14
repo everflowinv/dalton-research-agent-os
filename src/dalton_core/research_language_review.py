@@ -23,31 +23,98 @@ class ResearchLanguageReviewError(ValueError):
     pass
 
 
-def parse_stage_output(text: str, *, stage: str) -> dict[str, Any]:
-    """Recover one complete closed object from a restarted text stream.
+def _eof_container_closure(text: str) -> tuple[str, str]:
+    """Close only JSON arrays/objects left open at EOF; never edit a scalar."""
+    stack: list[str] = []
+    quoted = escaped = False
+    for char in text:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                quoted = False
+            continue
+        if char == '"':
+            quoted = True
+        elif char in "{[":
+            stack.append(char)
+        elif char in "}]":
+            if not stack or (stack[-1], char) not in (("{", "}"), ("[", "]")):
+                raise ResearchLanguageReviewError("language stage JSON containers are mismatched")
+            stack.pop()
+    if quoted or escaped or not stack:
+        raise ResearchLanguageReviewError("language stage is not an EOF container-only truncation")
+    if text.rstrip()[-1:] not in {'}', ']', '"'}:
+        raise ResearchLanguageReviewError("language stage ends inside a scalar or separator")
+    suffix = "".join("}" if char == "{" else "]" for char in reversed(stack))
+    fixed = text + suffix
+    try:
+        fixed.encode("utf-8", "strict")
+        value = json.loads(fixed, parse_constant=lambda token: (_ for _ in ()).throw(
+            ValueError("non-finite JSON constant")))
+        def valid_unicode(item: Any) -> None:
+            if isinstance(item, str): item.encode("utf-8", "strict")
+            elif isinstance(item, list):
+                for child in item: valid_unicode(child)
+            elif isinstance(item, dict):
+                for key, child in item.items(): valid_unicode(key); valid_unicode(child)
+        valid_unicode(value)
+    except (json.JSONDecodeError, UnicodeError, ValueError) as exc:
+        raise ResearchLanguageReviewError(
+            "language stage is not an EOF container-only truncation") from exc
+    return fixed, suffix
 
-    Some transports retain an incomplete prefix before the model restarts its
-    JSON response. Keep the original call bytes, accept only one unambiguous
-    complete stage object, and leave all content validation to the caller.
-    """
+
+def parse_stage_output_with_proof(text: str, *, stage: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Parse a unique stage object and disclose any deterministic EOF closure."""
     keys = {'draft': {'sections'}, 'checker': {'overall', 'suggestions'},
             'brain': {'decisions', 'sections'}}
     if stage not in keys:
         raise ValueError('unknown language review stage')
     decoder = json.JSONDecoder()
-    candidates = {}
+    candidates: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
+    def add(raw: str, *, suffix: str) -> None:
+        try:
+            value, end = decoder.raw_decode(raw)
+        except json.JSONDecodeError:
+            return
+        if raw[end:].strip() or not isinstance(value, dict) or set(value) != keys[stage]:
+            return
+        proof = {"mode": "exact" if not suffix else "eof_container_closure",
+                 "suffix": suffix, "raw_sha256": sha256(text.encode()).hexdigest(),
+                 "fixed_sha256": sha256(raw.encode()).hexdigest()}
+        candidates[_hash(value)] = (value, proof)
+    # Preserve the pre-existing restarted-stream behavior: a unique complete
+    # stage object may follow an incomplete prefix.  Its scalar bytes are not
+    # normalized or repaired.
     for index, char in enumerate(text):
-        if char != '{':
+        if char != "{":
             continue
         try:
             value, _ = decoder.raw_decode(text[index:])
         except json.JSONDecodeError:
             continue
         if isinstance(value, dict) and set(value) == keys[stage]:
-            candidates[_hash(value)] = value
+            proof = {"mode": "exact", "suffix": "",
+                     "raw_sha256": sha256(text.encode()).hexdigest(),
+                     "fixed_sha256": sha256(text[index:index + _].encode()).hexdigest()}
+            candidates[_hash(value)] = (value, proof)
+    if not candidates and stage == "brain":
+        try:
+            fixed, suffix = _eof_container_closure(text)
+        except ResearchLanguageReviewError:
+            pass
+        else:
+            add(fixed, suffix=suffix)
     if len(candidates) != 1:
         raise ResearchLanguageReviewError('language stage has no unique complete JSON object')
     return next(iter(candidates.values()))
+
+
+def parse_stage_output(text: str, *, stage: str) -> dict[str, Any]:
+    return parse_stage_output_with_proof(text, stage=stage)[0]
 
 
 def _canonical(value: Any) -> bytes:

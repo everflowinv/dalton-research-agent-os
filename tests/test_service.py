@@ -16,6 +16,7 @@ from unittest import mock
 from dalton_core.dashboard import ProjectionWriter
 from dalton_core.bootstrap import bootstrap
 from dalton_core.plugins.static_dashboard import (
+    StaticDashboardPlugin,
     StaticDashboardError,
     TencentCosConfig,
     render_static_dashboard,
@@ -43,6 +44,23 @@ from tests.test_dashboard import snapshot
 
 
 class StaticDashboardTests(unittest.TestCase):
+    def test_public_publisher_is_opt_in_and_disabled_without_network_construction(self) -> None:
+        raw = {
+            "type": "static_dashboard", "enabled": True,
+            "output_path": "/tmp/index.html",
+            "publisher": {"type": "tencent_cos", "bucket": "bucket",
+                "region": "region", "key": "dalton/index.html",
+                "public_url": "https://example.com/dalton/",
+                "keychain_account": "account", "secret_id_service": "id",
+                "secret_key_service": "key", "protected_urls": []},
+        }
+        self.assertIsNone(StaticDashboardPlugin.from_mapping(raw).publisher)
+        raw["public_publish_enabled"] = True
+        self.assertIsNotNone(StaticDashboardPlugin.from_mapping(raw).publisher)
+        raw["public_publish_enabled"] = "false"
+        with self.assertRaisesRegex(StaticDashboardError, "must be a boolean"):
+            StaticDashboardPlugin.from_mapping(raw)
+
     def test_render_embeds_projection_and_escapes_script_end(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -587,6 +605,16 @@ class BootstrapSchemaTests(unittest.TestCase):
                 int(first["schemas_applied"]), len(packaged_schema_files()))
             second = bootstrap(root / "state", root / "service.json")
             self.assertEqual(first, second)
+
+    def test_bootstrap_keeps_public_dashboard_publish_opted_out(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            result = bootstrap(root / "state", root / "service.json")
+            value = json.loads(Path(result["config"]).read_text())
+            dashboard = next(row for row in value["plugins"]
+                             if row["type"] == "static_dashboard")
+            self.assertIs(dashboard["public_publish_enabled"], False)
+            self.assertIsNone(StaticDashboardPlugin.from_mapping(dashboard).publisher)
 
     def test_it_creates_no_database_the_deploy_would_not(self) -> None:
         # A sidecar the Core does not have is applied into a scratch database

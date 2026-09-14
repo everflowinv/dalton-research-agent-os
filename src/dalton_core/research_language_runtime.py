@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -14,7 +15,7 @@ from .model_fallback_chain import TIER_BRAIN, TIER_CHEAP, TIER_VERIFIER, registe
 from .research_localization import build_verifier_prompt
 from .research_language_review import (
     BRAIN_PURPOSE, CHECKER_MODEL, CHECKER_PURPOSE, ResearchLanguageReviewError,
-    build_checker_prompt, parse_stage_output, run_language_review,
+    build_checker_prompt, parse_stage_output_with_proof, run_language_review,
 )
 from .store import canonical_json, content_hash
 
@@ -81,7 +82,8 @@ def _config(path: Path) -> tuple[dict[str, Any], str]:
 
 def _call_evidence(call: Mapping[str,Any]) -> dict[str,Any]:
     return {key:call.get(key) for key in ("route_decision_ref","work_order_ref",
-        "result_envelope_ref","invocation_ref","cost_micros","replayed")}
+        "result_envelope_ref","invocation_ref","cost_micros","replayed",
+        "stage_output_normalization")}
 
 
 def _sealed(value: Mapping[str,Any]) -> dict[str,Any]:
@@ -116,7 +118,8 @@ def _record_failure(root: Path | None, key: str, stage: str,
 def run(product: Mapping[str, Any], *, mission: Mapping[str, Any], request_id: str,
         checker_config: Path, brain_config: Path, verifier_config: Path, scheduler_db: Path,
         producer_route_decision_ref: str, artifact_dir: Path | None=None,
-        model_factory: Callable[[Mapping[str, Any]], Any] | None=None) -> dict[str, Any]:
+        model_factory: Callable[[Mapping[str, Any]], Any] | None=None,
+        brain_recovery: Mapping[str, Any] | None=None) -> dict[str, Any]:
     """Resume completed stages and persist a final closed receipt after fidelity."""
     checker_raw,checker_hash=_config(checker_config)
     brain_raw,brain_hash=_config(brain_config)
@@ -157,8 +160,11 @@ def run(product: Mapping[str, Any], *, mission: Mapping[str, Any], request_id: s
     def invoke(label: str, purpose: str, cfg: Mapping[str,Any], prompt: str) -> Mapping[str,Any]:
         call=make(cfg).call(purpose=purpose,request_id=f"{request_id}:{label}",prompt=prompt,mission=mission)
         calls[label]=dict(call)
-        parsed=(parse_stage_output(call["text"],stage=label)
-                if label in {"checker","brain"} else unwrap_json_object(call["text"]))
+        if label in {"checker", "brain"}:
+            parsed, normalization = parse_stage_output_with_proof(call["text"], stage=label)
+            calls[label]["stage_output_normalization"] = normalization
+        else:
+            parsed = unwrap_json_object(call["text"])
         if not isinstance(parsed,Mapping): raise ResearchLanguageReviewError("语言审查模型没有返回有效结构")
         return parsed
     checker_binding={"source_hash":source_hash,"checker_config_sha256":checker_hash}
@@ -189,11 +195,47 @@ def run(product: Mapping[str, Any], *, mission: Mapping[str, Any], request_id: s
     brain_terminal_path=(None if proof_base is None else
         proof_base.with_name(proof_base.name+".brain-terminal-"+
                              content_hash(style_binding)[:24]+".json"))
+    recovered_brain = None
+    recovered_brain_proof = None
+    recovered_brain_call = None
     if brain_terminal_path is not None and brain_terminal_path.exists():
         terminal,_=_read_sealed(brain_terminal_path)
         if terminal.get("binding")!=style_binding:
             raise ResearchLanguageReviewError("语言修订失败记录身份不匹配")
-        return terminal["review"]
+        if brain_recovery is None:
+            return terminal["review"]
+        recovered_brain_call = terminal.get("call_evidence")
+        required = {"result_envelope_ref", "raw_sha256"}
+        if not isinstance(brain_recovery, Mapping) or set(brain_recovery) != required:
+            raise ResearchLanguageReviewError("语言修订恢复输入格式无效")
+        if (not isinstance(recovered_brain_call, Mapping)
+                or brain_recovery["result_envelope_ref"] != recovered_brain_call.get("result_envelope_ref")):
+            raise ResearchLanguageReviewError("语言修订恢复结果身份不匹配")
+        envelope_ref = brain_recovery["result_envelope_ref"]
+        try:
+            database = sqlite3.connect(f"file:{Path(scheduler_db).resolve()}?mode=ro", uri=True)
+            database.execute("PRAGMA query_only=ON"); database.execute("BEGIN")
+            row = database.execute(
+                "SELECT result_envelope_hash,result_envelope_json,outcome,work_order_id "
+                "FROM scheduler_result_envelopes WHERE result_envelope_id=?", (envelope_ref,)).fetchone()
+            database.rollback(); database.close()
+        except sqlite3.Error as exc:
+            raise ResearchLanguageReviewError("语言修订恢复无法读取正式结果") from exc
+        if row is None or row[2] != "succeeded" or row[3] != recovered_brain_call.get("work_order_ref"):
+            raise ResearchLanguageReviewError("语言修订恢复正式结果身份不匹配")
+        envelope_json = row[1]
+        if _hash_bytes(envelope_json.encode()) != row[0]:
+            raise ResearchLanguageReviewError("语言修订恢复正式结果哈希不匹配")
+        envelope = json.loads(envelope_json)
+        raw_text = (envelope.get("outputs") or {}).get("text")
+        raw_hash = (envelope.get("outputs") or {}).get("content_hash")
+        if (not isinstance(raw_text, str) or not isinstance(brain_recovery["raw_sha256"], str)
+                or _hash_bytes(raw_text.encode()) != brain_recovery["raw_sha256"]
+                or raw_hash != brain_recovery["raw_sha256"]):
+            raise ResearchLanguageReviewError("语言修订恢复原文哈希不匹配")
+        recovered_brain, recovered_brain_proof = parse_stage_output_with_proof(raw_text, stage="brain")
+        if recovered_brain_proof["mode"] != "eof_container_closure":
+            raise ResearchLanguageReviewError("语言修订恢复只接受EOF容器闭合")
     if style_path is not None and style_path.exists():
         style_stage,_=_read_sealed(style_path)
         if style_stage.get("binding")!=style_binding:raise ResearchLanguageReviewError("语言修订缓存身份不匹配")
@@ -203,7 +245,8 @@ def run(product: Mapping[str, Any], *, mission: Mapping[str, Any], request_id: s
     else:
         try:
             result=run_language_review(product,checker=lambda _:checker_value,
-                brain=lambda prompt:invoke("brain",BRAIN_PURPOSE,brain_raw,prompt),
+                brain=((lambda prompt: recovered_brain) if recovered_brain is not None else
+                       (lambda prompt:invoke("brain",BRAIN_PURPOSE,brain_raw,prompt))),
                 checker_identity={"provider":"antigravity-cli-gateway","model":"antigravity-cli-gateway/gemini-3.8-flash"})
         except Exception as exc:
             _record_failure(artifact_dir,proof_key,"brain",{"status":"pending_brain_revision","binding":style_binding,"error_type":type(exc).__name__});raise
@@ -223,9 +266,17 @@ def run(product: Mapping[str, Any], *, mission: Mapping[str, Any], request_id: s
                     "call_evidence":_call_evidence(calls["brain"])})
                 _write_once(brain_terminal_path,(canonical_json(terminal)+"\n").encode())
             return pending
-        brain_call=_call_evidence(calls["brain"]);brain_identity=_route_identity(brain_raw,brain_call)
+        brain_call=(dict(recovered_brain_call) if recovered_brain_call is not None
+                    else _call_evidence(calls["brain"]))
+        if recovered_brain_proof is not None:
+            brain_call["stage_output_normalization"] = recovered_brain_proof
+        brain_identity=_route_identity(brain_raw,brain_call)
         style_stage=_sealed({"schema_version":"research-language-style-stage:0.1","binding":style_binding,
-            "review":result,"call_evidence":brain_call,"route_identity":brain_identity})
+            "review":result,"call_evidence":brain_call,"route_identity":brain_identity,
+            **({"recovery": {"kind": "eof_container_closure",
+                "terminal_sha256": _hash_bytes(brain_terminal_path.read_bytes()),
+                "normalization": recovered_brain_proof}}
+               if recovered_brain_proof is not None else {})})
         if style_path is not None:_write_once(style_path,(canonical_json(style_stage)+"\n").encode())
     semantic_binding={"style_stage_sha256":content_hash(style_stage),
         "verifier_config_sha256":verifier_hash,"producer_route_decision_ref":producer_route_decision_ref}
@@ -258,6 +309,10 @@ def run(product: Mapping[str, Any], *, mission: Mapping[str, Any], request_id: s
     result["runtime_identity"]={"checker":checker_identity,"brain":brain_identity,"fidelity":route}
     calls={"checker":checker_call,"brain":brain_call,"fidelity":_call_evidence(calls["fidelity"])}
     result["call_evidence"]=calls
+    if style_stage.get("recovery") is not None:
+        result["brain_recovery"]={**style_stage["recovery"],
+            "checker_stage_sha256":content_hash(checker_stage),
+            "brain_result_envelope_ref":brain_call["result_envelope_ref"]}
     result["review_cost_micros"]=sum(int(v.get("cost_micros") or 0) for v in calls.values())
     result["replayed"]=bool(calls) and all(v.get("replayed") is True for v in calls.values())
     result["content_hash"]=content_hash({k:v for k,v in result.items() if k!="content_hash"})

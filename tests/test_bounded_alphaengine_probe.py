@@ -50,7 +50,8 @@ class FakeLauncher:
         return {"id": ticket_ref, "status": self.final_status}
 
 
-def seed_invocation(conn, *, hours_ago: float, count: int = 1) -> None:
+def seed_invocation(conn, *, hours_ago: float, count: int = 1,
+                    dispatched: bool = True, reserved: bool = False) -> None:
     created = (NOW - timedelta(hours=hours_ago)).isoformat(timespec="microseconds")
     with conn:
         cur = conn.cursor()
@@ -71,6 +72,17 @@ def seed_invocation(conn, *, hours_ago: float, count: int = 1) -> None:
                     canonical_json({"fixture": True}), "0" * 64, created,
                 ),
             )
+            if dispatched or reserved:
+                reservation = f"reservation:ae:{hours_ago}:{index}"
+                cur.execute("INSERT INTO connector_quota_reservations VALUES(?,?,?,?,?)",
+                            (reservation, f"connector-invocation:ae:{hours_ago}:{index}", created,
+                             (NOW + timedelta(hours=1)).isoformat(timespec="microseconds"),
+                             (NOW + timedelta(hours=1)).isoformat(timespec="microseconds")))
+                if dispatched:
+                    cur.execute("INSERT INTO connector_physical_attempts VALUES(?,?,?,?,?)",
+                                (f"attempt:ae:{hours_ago}:{index}",
+                                 f"connector-invocation:ae:{hours_ago}:{index}",
+                                 reservation, created, "failed"))
 
 
 def seed_call_spec(conn, document_ref: str, *, with_page: bool = True) -> None:
@@ -160,6 +172,17 @@ class BoundedAlphaEngineProbeTests(unittest.TestCase):
             connector_profile_ref TEXT, raw_artifact_version_ref TEXT,
             raw_response_hash TEXT, completeness TEXT, status TEXT,
             record_json TEXT, content_hash TEXT, created_at TEXT
+        );
+        CREATE TABLE connector_quota_reservations (
+            reservation_id TEXT PRIMARY KEY, connector_invocation_ref TEXT,
+            created_at TEXT, expires_at TEXT, window_ends_at TEXT
+        );
+        CREATE TABLE connector_quota_settlements (
+            settlement_id TEXT PRIMARY KEY, reservation_ref TEXT
+        );
+        CREATE TABLE connector_physical_attempts (
+            physical_attempt_id TEXT PRIMARY KEY, connector_invocation_ref TEXT,
+            reservation_ref TEXT, started_at TEXT, outcome TEXT
         );
         """)
 
@@ -295,6 +318,28 @@ class BoundedAlphaEngineProbeTests(unittest.TestCase):
         self.assertEqual(
             0, count_recent_alphaengine_calls(self.conn, as_of=NOW)
         )
+
+    def test_counts_each_failed_retry_and_open_dispatch_reservation(self) -> None:
+        seed_invocation(self.conn, hours_ago=1, count=1, dispatched=True)
+        created = (NOW - timedelta(minutes=45)).isoformat(timespec="microseconds")
+        future = (NOW + timedelta(hours=1)).isoformat(timespec="microseconds")
+        self.conn.execute("INSERT INTO connector_quota_reservations VALUES(?,?,?,?,?)",
+                          ("reservation:retry", "connector-invocation:ae:1:0", created, future, future))
+        self.conn.execute("INSERT INTO connector_physical_attempts VALUES(?,?,?,?,?)",
+                          ("attempt:retry", "connector-invocation:ae:1:0", "reservation:retry", created, "timeout"))
+        seed_invocation(self.conn, hours_ago=.5, dispatched=False, reserved=True)
+        seed_invocation(self.conn, hours_ago=.25, dispatched=False, reserved=False)
+        self.assertEqual(3, count_recent_alphaengine_calls(self.conn, as_of=NOW))
+
+    def test_released_or_expired_undispatched_reservations_do_not_count(self) -> None:
+        seed_invocation(self.conn, hours_ago=.5, dispatched=False, reserved=True)
+        self.conn.execute("INSERT INTO connector_quota_settlements VALUES(?,?)",
+                          ("settlement:released", "reservation:ae:0.5:0"))
+        seed_invocation(self.conn, hours_ago=.25, dispatched=False, reserved=True)
+        self.conn.execute("UPDATE connector_quota_reservations SET expires_at=? WHERE reservation_id=?",
+                          ((NOW-timedelta(seconds=1)).isoformat(timespec="microseconds"),
+                           "reservation:ae:0.25:0"))
+        self.assertEqual(0, count_recent_alphaengine_calls(self.conn, as_of=NOW))
 
     def test_missing_document_acquires_with_automation_principal(self) -> None:
         class Seeding(FakeLauncher):

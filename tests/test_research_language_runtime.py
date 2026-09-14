@@ -1,5 +1,5 @@
 from __future__ import annotations
-import json, tempfile, unittest
+import json, sqlite3, tempfile, unittest
 from pathlib import Path
 from unittest.mock import patch
 from dalton_core.research_language_runtime import run
@@ -173,3 +173,50 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual('ready_for_publication',second['status'])
             self.assertEqual(['checker','brain','fidelity','fidelity'],calls)
 if __name__=='__main__': unittest.main()
+
+class EofRuntimeTests(unittest.TestCase):
+    def test_future_brain_eof_closure_is_disclosed_and_passes_existing_validation(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d); paths=[]
+            for kind in ('checker','brain','fidelity'):
+                p=root/f'{kind}.json'; p.write_text(json.dumps({"model_router_db":str(root/'r'),"fixture_kind":kind})); paths.append(p)
+            class Truncated(Model):
+                def call(self, **kw):
+                    value=super().call(**kw)
+                    if self.kind == 'brain': value['text']=value['text'][:-2]
+                    return value
+            with patch('dalton_core.research_language_runtime.ModelRouter',FakeRouter):
+                result=run(product={"kind":"ask_answer","sections":[{"title":"回答","body":"收入为 10 美元。","gaps":[]}]},mission={},request_id='eof',checker_config=paths[0],brain_config=paths[1],verifier_config=paths[2],producer_route_decision_ref='decision:producer',scheduler_db=root/'s',artifact_dir=root/'proof',model_factory=lambda cfg:Truncated(cfg['fixture_kind']))
+            self.assertEqual(result['status'],'ready_for_publication')
+            normalization=result['call_evidence']['brain']['stage_output_normalization']
+            self.assertEqual(normalization['mode'],'eof_container_closure')
+            self.assertEqual(normalization['suffix'],']}')
+
+class TerminalRecoveryTests(unittest.TestCase):
+    def test_terminal_recovery_reuses_checker_and_brain_envelope_then_only_calls_fidelity(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d);paths=[]
+            for kind in ('checker','brain','fidelity'):
+                p=root/f'{kind}.json';p.write_text(json.dumps({"model_router_db":str(root/'r'),"fixture_kind":kind}));paths.append(p)
+            calls=[]
+            class Broken(Model):
+                def call(self,**kw):
+                    calls.append(self.kind)
+                    value=super().call(**kw)
+                    if self.kind=='brain': value['text']='{"decisions":[],"sections":[{"index":0,"title":"回答'
+                    return value
+            args=dict(product={"kind":"ask_answer","sections":[{"title":"回答","body":"收入为 10 美元。","gaps":[]}]},mission={},request_id='recover-terminal',checker_config=paths[0],brain_config=paths[1],verifier_config=paths[2],producer_route_decision_ref='decision:producer',scheduler_db=root/'s',artifact_dir=root/'proof',model_factory=lambda cfg:Broken(cfg['fixture_kind']))
+            with patch('dalton_core.research_language_runtime.ModelRouter',FakeRouter): first=run(**args)
+            self.assertEqual(first['status'],'pending_brain_revision')
+            raw=json.dumps({"decisions":[],"sections":[{"index":0,"title":"回答","body":"收入为 10 美元。","gaps":[]}]},ensure_ascii=False)[:-2]
+            raw_hash=__import__('hashlib').sha256(raw.encode()).hexdigest()
+            database=sqlite3.connect(root/'s')
+            database.execute("CREATE TABLE scheduler_result_envelopes(result_envelope_id TEXT PRIMARY KEY,result_envelope_hash TEXT,result_envelope_json TEXT,outcome TEXT,work_order_id TEXT)")
+            envelope=json.dumps({"outputs":{"text":raw,"content_hash":raw_hash}},sort_keys=True,separators=(',',':'))
+            database.execute("INSERT INTO scheduler_result_envelopes VALUES(?,?,?,?,?)",('result:x',__import__('hashlib').sha256(envelope.encode()).hexdigest(),envelope,'succeeded','work:x'));database.commit();database.close()
+            args['brain_recovery']={"result_envelope_ref":"result:x","raw_sha256":raw_hash}
+            with patch('dalton_core.research_language_runtime.ModelRouter',FakeRouter): second=run(**args)
+            self.assertEqual(second['status'],'ready_for_publication')
+            self.assertEqual(calls,['checker','brain','fidelity'])
+            self.assertEqual(second['call_evidence']['brain']['stage_output_normalization']['suffix'],']}')
+            self.assertTrue(list((root/'proof').glob('*.brain-terminal-*.json')))

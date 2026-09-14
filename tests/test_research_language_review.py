@@ -238,3 +238,41 @@ class ResearchLanguageReviewTests(unittest.TestCase):
         self.assertEqual(calls, ["checker"])
         self.assertEqual(result["status"], "pending_language_review")
         self.assertIn("quote", result["reason"])
+
+class EofContainerClosureTests(unittest.TestCase):
+    def test_only_missing_array_and_object_closers_are_restored(self):
+        from dalton_core.research_language_review import parse_stage_output_with_proof
+        raw = '{"decisions":[],"sections":[{"index":0,"title":"回答","body":"原值 10 美元。","gaps":[]}'
+        value, proof = parse_stage_output_with_proof(raw, stage="brain")
+        self.assertEqual(proof["mode"], "eof_container_closure")
+        self.assertEqual(proof["suffix"], "]}")
+        self.assertEqual(value["sections"][0]["body"], "原值 10 美元。")
+        self.assertNotEqual(proof["raw_sha256"], proof["fixed_sha256"])
+
+    def test_unclosed_scalar_and_mismatched_container_refuse(self):
+        from dalton_core.research_language_review import parse_stage_output_with_proof
+        values = (
+            '{"decisions":[],"sections":[{"index":0,"title":"回答',
+            '{"decisions":[],"sections":[}',
+            '{"decisions":tru',
+            '{"decisions":[],"sections":[',
+            '{"decisions":[],"sections":[{"index":0',
+            '{"decisions":[],"sections":[NaN',
+        )
+        for raw in values:
+            with self.subTest(raw=raw), self.assertRaisesRegex(ValueError, "no unique complete"):
+                parse_stage_output_with_proof(raw, stage="brain")
+
+class RestartedStreamCompatibilityTests(unittest.TestCase):
+    def test_unique_complete_object_after_incomplete_prefix_still_parses(self):
+        from dalton_core.research_language_review import parse_stage_output_with_proof
+        complete='{"decisions":[],"sections":[]}'
+        value, proof=parse_stage_output_with_proof('{"decisions":['+complete,stage='brain')
+        self.assertEqual(value,{"decisions":[],"sections":[]})
+        self.assertEqual(proof['mode'],'exact')
+
+class BrainOnlyEofRecoveryTests(unittest.TestCase):
+    def test_checker_eof_container_truncation_is_not_repaired(self):
+        from dalton_core.research_language_review import parse_stage_output_with_proof
+        with self.assertRaisesRegex(ValueError, "no unique complete"):
+            parse_stage_output_with_proof('{"overall":"好","suggestions":[]',stage='checker')
