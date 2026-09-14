@@ -676,7 +676,7 @@ class LaneVocabularyTests(Wave1Case):
             "status": "waiting", "reason": raw,
         }})["lane:industry_framework"]
         self.assertEqual(row["status"], "waiting")
-        self.assertEqual(row["note"], "等待下一次运行条件")
+        self.assertEqual(row["note"], "条件满足后继续运行")
         self.assertEqual(row["detail"], raw)
         self.assertNotIn("状态暂不可读", row["note"])
 
