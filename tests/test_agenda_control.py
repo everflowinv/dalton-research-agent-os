@@ -7,6 +7,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from dataclasses import replace
 from datetime import timedelta
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -290,7 +291,7 @@ class AgendaControlTests(unittest.TestCase):
         session_id, session, created = app.session(LOGIN, None)
         self.assertTrue(created)
         same_id, same_session, created_again = app.session(
-            LOGIN, f"dalton_session={session_id}"
+            LOGIN, f"{app.session_cookie_name}={session_id}"
         )
         self.assertEqual(same_id, session_id)
         self.assertIs(same_session, session)
@@ -474,6 +475,65 @@ class AgendaControlTests(unittest.TestCase):
         )
         with self.assertRaises(Exception):
             AgendaControlConfig.from_mapping(raw)
+
+    def test_two_ports_share_cookie_jar_without_session_or_csrf_crosstalk(self):
+        apps = [
+            AgendaControlApplication(replace(self.config, port=port), self.plane, ReviewPlane())
+            for port in (8793, 8794)
+        ]
+        servers = [ThreadingHTTPServer(("127.0.0.1", 0), _handler(app)) for app in apps]
+        threads = [threading.Thread(target=server.serve_forever, daemon=True)
+                   for server in servers]
+        for thread in threads:
+            thread.start()
+        jar: dict[str, str] = {}
+        headers = {"Host": "dalton.example.ts.net", "Tailscale-User-Login": LOGIN}
+
+        def request(index, method, path, *, csrf=None):
+            connection = http.client.HTTPConnection(
+                "127.0.0.1", servers[index].server_port, timeout=5)
+            sent = dict(headers)
+            if jar:
+                sent["Cookie"] = "; ".join(f"{key}={value}" for key, value in jar.items())
+            body = None
+            if method == "POST":
+                body = b"{}"
+                sent.update({"Content-Type": "application/json", "X-Dalton-CSRF": csrf})
+            connection.request(method, path, body=body, headers=sent)
+            response = connection.getresponse()
+            payload = json.loads(response.read())
+            cookie = response.getheader("Set-Cookie")
+            if cookie:
+                name, value = cookie.split(";", 1)[0].split("=", 1)
+                jar[name] = value
+            connection.close()
+            return response.status, payload
+
+        try:
+            first = [request(index, "GET", "/v1/research-review")[1]
+                     for index in range(2)]
+            self.assertNotEqual(apps[0].session_cookie_name, apps[1].session_cookie_name)
+            self.assertEqual(set(jar), {app.session_cookie_name for app in apps})
+            again = [request(index, "GET", "/v1/research-review")[1]
+                     for index in range(2)]
+            self.assertEqual([row["csrf_token"] for row in again],
+                             [row["csrf_token"] for row in first])
+            crossed, _ = request(
+                0, "POST", "/v1/research-review/decision",
+                csrf=first[1]["csrf_token"])
+            self.assertEqual(crossed, 403)
+            for index in range(2):
+                status, payload = request(
+                    index, "POST", "/v1/research-review/decision",
+                    csrf=first[index]["csrf_token"])
+                self.assertEqual(status, 200)
+                self.assertEqual(payload["status"], "research-recorded")
+        finally:
+            for server in servers:
+                server.shutdown()
+                server.server_close()
+            for thread in threads:
+                thread.join(timeout=5)
 
     def test_single_http_surface_serves_cockpit_and_all_review_routes(self):
         review = ReviewPlane()

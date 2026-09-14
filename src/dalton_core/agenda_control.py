@@ -681,6 +681,15 @@ class AgendaControlApplication:
         self.cockpit_plane = cockpit_plane
         self._sessions: dict[str, _Session] = {}
         self._lock = threading.Lock()
+        if config is None:  # narrow unit composition without an HTTP surface
+            self.session_cookie_name = "dalton_session"
+        else:
+            namespace = content_hash({
+                "tailscale_host": config.tailscale_host,
+                "port": config.port,
+                "writer_socket": str(config.writer_socket),
+            })[:16]
+            self.session_cookie_name = f"dalton_session_{namespace}"
 
     def allowed_login(self, value: str | None) -> str | None:
         if not isinstance(value, str) or value not in self.config.allowed_tailscale_logins:
@@ -693,7 +702,14 @@ class AgendaControlApplication:
             cookie = SimpleCookie()
             try:
                 cookie.load(cookie_header)
-                session_id = cookie.get("dalton_session").value if cookie.get("dalton_session") else None
+                held = cookie.get(self.session_cookie_name)
+                # A legacy cookie can only resume a session already held by
+                # this process. New sessions always receive the namespaced
+                # cookie, so two workspaces on one hostname cannot overwrite
+                # each other merely because their ports differ.
+                if held is None:
+                    held = cookie.get("dalton_session")
+                session_id = held.value if held else None
             except Exception:
                 session_id = None
         now = time.monotonic()
@@ -988,7 +1004,8 @@ def _handler(application: AgendaControlApplication) -> type[BaseHTTPRequestHandl
             if session_cookie is not None:
                 self.send_header(
                     "Set-Cookie",
-                    f"dalton_session={session_cookie}; Path=/; Secure; HttpOnly; SameSite=Strict",
+                    f"{application.session_cookie_name}={session_cookie}; "
+                    "Path=/; Secure; HttpOnly; SameSite=Strict",
                 )
             self.end_headers()
             self.wfile.write(body)
