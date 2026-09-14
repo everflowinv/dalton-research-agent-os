@@ -62,6 +62,7 @@ def _forecast_reason_text(value: str, fallback: Callable[[str], str]) -> str:
         "gross profit is not available for this quarter": "本季度缺少毛利润",
         "operating income or income tax is not available for this quarter": "本季度缺少营业利润或所得税",
         "operating cash flow or capital expenditure is not available for this quarter": "本季度缺少经营现金流或资本支出",
+        "operating cash flow or capital expenditure is unavailable for this quarter": "本季度缺少经营现金流或资本支出",
         "the specification binds no filed cost-of-revenue concept": "模型规则未绑定已披露的营业成本项目",
         "the specification binds no filed income-tax or net-income concept": "模型规则未绑定已披露的所得税或净利润项目",
         "the specification binds no single filed operating-cash-flow concept": "模型规则未绑定唯一的已披露经营现金流项目",

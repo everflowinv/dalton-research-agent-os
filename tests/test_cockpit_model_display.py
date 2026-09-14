@@ -150,6 +150,7 @@ class ModelDisplayTest(unittest.TestCase):
             'no growth assumption for us-gaap:Revenues in this quarter',
             '2 operating expense lines are not available for this quarter',
             'operating cash flow or capital expenditure is not available for this quarter',
+            'operating cash flow or capital expenditure is unavailable for this quarter',
             'no cash-flow share assumption for us-gaap:OperatingCashFlow in this quarter',
             'the forecast base would make positive-outflow capital expenditure negative',
         ]
@@ -164,6 +165,7 @@ class ModelDisplayTest(unittest.TestCase):
                          '本季度缺少预测基准', '本季度缺少增长假设',
                          '本季度缺少 2 项营业费用', '本季度缺少经营现金流或资本支出'):
             self.assertIn(expected, shown)
+        self.assertEqual(shown.count('本季度缺少经营现金流或资本支出'), 2)
         self.assertIn('本季度缺少现金流占比假设', shown)
         self.assertIn('预测基准会使正向列示的资本支出变为负数，因此未计算', shown)
         for reason in reasons:
