@@ -130,6 +130,7 @@ class WorkspaceServiceSetupTest(unittest.TestCase):
             "mission_defaults": {"source_plan": [
                 {"source_ref": "source:public-web", "status": "connected"},
                 {"source_ref": "source:sec-edgar", "status": "connected"},
+                {"source_ref": "source:guidepoint", "status": "connected"},
             ]},
         }))
         configure_workspace_control(

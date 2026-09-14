@@ -218,7 +218,14 @@ def install_service_template(workspace_manifest: str | Path,
     # Source availability belongs to the new workspace's pinned connection
     # catalog.  Keep the reusable reading limits and access-policy vocabulary,
     # but never inherit a legacy environment's enabled source selection.
-    document_research["enabled_sources"] = connected_sources
+    from .document_research_inventory import DOCUMENT_RESEARCH_SOURCES
+    document_research["enabled_sources"] = [
+        source for source in connected_sources
+        if source in DOCUMENT_RESEARCH_SOURCES
+    ]
+    if not document_research["enabled_sources"]:
+        raise WorkspaceServiceSetupError(
+            "workspace has no connected source supported by document research")
     control = raw.get("control")
     if not isinstance(control, dict) or not isinstance(control.get("config"), dict):
         raise WorkspaceServiceSetupError("configure workspace control before service setup")

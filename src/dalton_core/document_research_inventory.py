@@ -29,9 +29,10 @@ from .store import content_hash
 
 CONFIG_FILENAME = "document-research-config.json"
 CONFIG_SCHEMA = "document-research-config-0.1"
-_SOURCES = frozenset({"source:alphaengine", "source:public-web", "source:web-search",
+DOCUMENT_RESEARCH_SOURCES = frozenset({"source:alphaengine", "source:public-web", "source:web-search",
                       "source:sec-edgar", "source:sales-notes", "source:company-wiki",
                       "source:prior-research"})
+_SOURCES = DOCUMENT_RESEARCH_SOURCES
 _LIMITS = frozenset({"alphaengine_max_document_chars", "public_web_max_source_chars",
                      "public_web_max_pdf_pages", "public_web_max_decompressed_bytes"})
 _DILUTED_EPS_CONCEPT = "us-gaap:EarningsPerShareDiluted"
