@@ -1151,11 +1151,13 @@ function stat(n,l,s){const d=node("div",null,"stat");d.append(node("div",String(
    only where a non-zero number means somebody has to do something. */
 function panel(n,l,s,go,onclick,alarm){const d=stat(n,l,s);d.className="stat link"+(alarm?" alarm":"");
   d.append(node("div",go,"go"));d.onclick=onclick;return d}
+function openLaneDetails(){const lanes=$("lanes"),fold=lanes.closest("details");if(fold)fold.open=true;
+  requestAnimationFrame(()=>lanes.scrollIntoView({behavior:"smooth",block:"center"}))}
 function renderOpsPanels(ops){const box=$("ops-panels");if(!ops){box.replaceChildren();return}
   const L=ops.lanes,G=ops.gaps,F=ops.failures,A=ops.acceptance;
   box.replaceChildren(
     panel(`${L.counts.running}/${L.total}`,"任务运行情况",L.note,"查看各项任务 ↓",
-      ()=>$("lanes").scrollIntoView({behavior:"smooth",block:"center"}),L.waiting_on_you>0),
+      openLaneDetails,L.waiting_on_you>0),
     panel(G.headline,"待补齐资料缺口",G.note,"查看数据源能力 →",openSources,false),
     panel(F.headline,"受阻与停止记录",F.note,"查看系统待办 →",openOps,F.parked_items>0),
     panel(A.available?A.published:"—","上周交付物验收",A.note||"",

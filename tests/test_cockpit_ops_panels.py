@@ -375,6 +375,12 @@ class PageTests(unittest.TestCase):
         self.assertIn('$("open-sources").onclick=openSources;', self.page)
         self.assertIn('$("open-reflection").onclick=openReflection;', self.page)
 
+    def test_task_panel_opens_the_collapsed_lane_details_before_scrolling(self) -> None:
+        self.assertIn('function openLaneDetails()', self.page)
+        self.assertIn('fold.open=true', self.page)
+        self.assertIn('requestAnimationFrame(()=>lanes.scrollIntoView', self.page)
+        self.assertIn('openLaneDetails,L.waiting_on_you>0', self.page)
+
     def test_the_row_speaks_the_owner_s_language(self) -> None:
         for word in ("任务运行情况", "待补齐资料缺口", "受阻与停止记录",
                      "上周交付物验收", "运维待办"):
