@@ -242,7 +242,8 @@ class BudgetGovernanceTests(unittest.TestCase):
                                             "draft", .8, "b" * 64)
             with self.assertRaisesRegex(Exception, "分开保存"):
                 plane.set_call_budget("owner@example.test", {"purpose": "draft",
-                    "budget": {"max_cost_usd": .8, "max_output_tokens": 2}})
+                    "budget": {"max_cost_usd": .8, "max_output_tokens": 2},
+                    "expected_shared_policy_hash": "b" * 64})
         finally:
             fixture.doCleanups()
 

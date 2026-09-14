@@ -159,9 +159,12 @@ def set_shared_call_budget(config_path: Path, login: str, purpose: str,
         raise PermissionError("workspace owner mismatch")
     if purpose not in PURPOSE_LABELS:
         raise WorkspaceError("模型调用用途无效")
-    if isinstance(max_cost_usd, bool) or not isinstance(max_cost_usd, (int, float)) \
-            or not 0 < float(max_cost_usd) <= 1000:
-        raise WorkspaceError("模型单次费用上限无效")
+    from .call_budget import validate_budget_overrides
+    try:
+        max_cost_usd = validate_budget_overrides(
+            {"max_cost_usd": max_cost_usd})["max_cost_usd"]
+    except ValueError as exc:
+        raise WorkspaceError("模型单次费用上限无效") from exc
     target = Path(config.get("shared_call_budget_policy_path", ""))
     if not target.is_absolute():
         raise WorkspaceError("共享模型费用策略尚未配置")

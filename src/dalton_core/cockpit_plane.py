@@ -6132,7 +6132,8 @@ class CockpitPlane:
             budget = (validate_budget_overrides if kind == "call" else validate_run_budget_overrides)(value.get("budget"))
         except ValueError as exc:
             raise CockpitError(str(exc)) from exc
-        if kind == "call" and "max_cost_usd" in budget:
+        if (kind == "call" and "max_cost_usd" in budget
+                and value.get("expected_shared_policy_hash") is not None):
             if set(budget) != {"max_cost_usd"}:
                 raise CockpitError("共享费用上限与本环境 token/超时预算请分开保存")
             manager = self.config.workspace_manager_config_path

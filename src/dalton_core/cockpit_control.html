@@ -1109,16 +1109,22 @@ function renderModels(sheet,r){sheet.replaceChildren(readerClose(),node("h2","�
     if(budget&&budget.editable){
       const section=node("details"),summary=node("summary",kind==="call"?"调用预算":"每轮任务预算");section.append(summary);
       section.append(node("small",kind==="call"&&budget.shared_call_cost?"单次费用上限由所有研究环境共享；token 和超时仅作用于当前环境，请分开保存。":"留空沿用默认值。日预算和预算池仍会限制实际开销。","meta"));
-      const fields=kind==="call"?[["max_cost_usd","单次费用上限（美元）","any"],["max_input_tokens","输入额度（token，系统按文本估算）","1"],
+      let fields=kind==="call"?[["max_cost_usd","单次费用上限（美元）","any"],["max_input_tokens","输入额度（token，系统按文本估算）","1"],
         ["max_output_tokens","输出额度（token）","1"],["timeout_seconds","单次超时（秒）","1"]]:
         [["max_cost_usd","每轮费用上限（美元）","any"],["max_units","每轮处理单元数","1"],
          ["max_events","每轮事件数","1"],["max_events_per_company","每家公司事件数","1"],
          ["max_calls","每轮调用数","1"]].filter(([key])=>(budget.fields||[]).includes(key));
-      const inputs={};fields.forEach(([key,label,step])=>{const wrap=node("label",null),caption=node("span",label,"field-label"),input=document.createElement("input");
+      if(kind==="call"&&budget.shared_call_cost){const wrap=node("label"),caption=node("span","所有研究环境单次费用上限（美元）","field-label"),cost=document.createElement("input");
+        cost.type="number";cost.min="0";cost.step="any";cost.value=budget.effective?.max_cost_usd??"";wrap.append(caption,cost);section.append(wrap);
+        const saveCost=node("button","保存共享费用上限","ghost"),costMessage=node("span","","status");saveCost.onclick=async()=>{saveCost.disabled=true;
+          try{await postJson("/v1/cockpit/model_budget",{purpose:pp.purpose,kind:"call",budget:{max_cost_usd:Number(cost.value)},expected_config_hash:budget.config_hash,expected_shared_policy_hash:budget.shared_call_cost.policy_hash});toast("共享费用上限已保存，所有环境下次调用生效");openModels()}
+          catch(e){costMessage.textContent=readableError(e,"保存共享费用上限").message;costMessage.className="status err";saveCost.disabled=false}};section.append(saveCost,costMessage);fields=fields.filter(([key])=>key!=="max_cost_usd")}
+      const inputs={},initial={};fields.forEach(([key,label,step])=>{const wrap=node("label",null),caption=node("span",label,"field-label"),input=document.createElement("input");
         input.type="number";input.min="0";input.step=step;input.value=budget.overrides[key]??"";
+        initial[key]=input.value;
         input.setAttribute("aria-label",label);input.placeholder=String((budget.effective||budget.general||{})[key]??"沿用运行配置");inputs[key]=input;wrap.append(caption,input);section.append(wrap)});
       const apply=node("button","保存预算","ghost"),message=node("span","","status");
-      apply.onclick=async()=>{const value={};for(const [key,input] of Object.entries(inputs)){if(input.value.trim())value[key]=Number(input.value)}
+      apply.onclick=async()=>{let value={};for(const [key,input] of Object.entries(inputs)){if(input.value.trim())value[key]=Number(input.value)}
         apply.disabled=true;message.textContent="正在保存预算…";
         try{const out=await postJson("/v1/cockpit/model_budget",{purpose:pp.purpose,kind,budget:value,expected_config_hash:budget.config_hash,expected_shared_policy_hash:budget.shared_call_cost?.policy_hash});
           toast(out.requires_restart?"预算已保存，重启相关服务后生效":"预算已保存，下次任务使用新配置");openModels()}
