@@ -216,6 +216,40 @@ class HtmlRenderTests(unittest.TestCase):
         self.assertIn(f'来源说明（保留原文）：{raw}', page)
         self.assertNotIn('成本结构 source wording', page)
 
+    def test_exact_comparison_material_is_readable_and_keeps_raw_in_details(self):
+        mission, lib = self.fixture()
+        section = lib['products'][0]['sections'][0]
+        raws = [
+            'ACN 2026Q1（期末 2026-02-28）revenue 18044066000',
+            'ACN 2026Q1（期末 2026-02-28）revenue_yoy_growth 8.3%',
+            'ACN 2026Q1（期末 2026-02-28）gross_margin 30.3%',
+            'ACN 2026Q1（期末 2026-02-28）operating_margin -1.2%',
+        ]
+        section['numbers'] = [
+            {'period': '2026Q1', 'text': raw,
+             'cell': {'kind': 'statement_accession', 'ref': f'cell:{index}'}}
+            for index, raw in enumerate(raws)
+        ]
+        page = render_research_html(lib, mission=mission)
+        normal, details = page.split('<details class="refs">', 1)
+        for expected in (
+            'ACN 2026年第1季度（期末2026年2月28日）营业收入：18044066000',
+            '营业收入同比增速：8.3%', '毛利率：30.3%', '营业利润率：-1.2%',
+        ):
+            self.assertIn(expected, normal)
+        for raw in raws:
+            self.assertNotIn(raw, normal)
+            self.assertIn(raw, details)
+
+    def test_comparison_material_shape_and_period_must_match_exactly(self):
+        mission, lib = self.fixture()
+        raw = 'ACN 2026Q1（期末 2026-02-28）gross_margin 30.3%'
+        item = lib['products'][0]['sections'][0]['numbers'][0]
+        item.update(period='2026Q2', text=raw)
+        page = render_research_html(lib, mission=mission)
+        self.assertIn(f'来源说明（保留原文）：{raw}', page)
+        self.assertNotIn('毛利率：30.3%', page)
+
     def test_incompatible_units_do_not_make_a_chart(self):
         mission, lib = self.fixture()
         nums = lib["products"][0]["sections"][0]["numbers"]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse, base64, hashlib, html, json, os, re, sqlite3, tempfile
+from datetime import date
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -72,6 +73,39 @@ def _period_label(value: Any) -> str:
     return claim_period_display_label(value) or "期间未注明"
 
 
+_COMPARISON_NUMBER_RE = re.compile(
+    r"(?P<ticker>[A-Z][A-Z0-9.]*) "
+    r"(?P<quarter>(?P<year>\d{4})Q(?P<quarter_number>[1-4]))"
+    r"（期末 (?P<date>\d{4}-\d{2}-\d{2})）"
+    r"(?P<metric>revenue|revenue_yoy_growth|gross_margin|operating_margin) "
+    r"(?P<value>-?(?:0|[1-9]\d*)(?:\.\d+)?%?)"
+)
+
+_COMPARISON_METRIC_LABELS = {
+    "revenue": "营业收入",
+    "revenue_yoy_growth": "营业收入同比增速",
+    "gross_margin": "毛利率",
+    "operating_margin": "营业利润率",
+}
+
+
+def _comparison_number_text(item: Mapping[str, Any], raw: str) -> str | None:
+    """Translate only the frozen industry-comparison material template."""
+    matched = _COMPARISON_NUMBER_RE.fullmatch(raw)
+    if matched is None or item.get("period") != matched.group("quarter"):
+        return None
+    try:
+        ended = date.fromisoformat(matched.group("date"))
+    except ValueError:
+        return None
+    quarter = matched.group("quarter_number")
+    period = f'{matched.group("year")}年第{quarter}季度'
+    period_end = f'{ended.year}年{ended.month}月{ended.day}日'
+    return (f'{matched.group("ticker")} {period}（期末{period_end}）'
+            f'{_COMPARISON_METRIC_LABELS[matched.group("metric")]}：'
+            f'{matched.group("value")}')
+
+
 def _number_text(item: Mapping[str, Any],
                  claims: Mapping[str, Mapping[str, Any]]) -> tuple[str, str | None]:
     """Present the exact SEC auto-template as Chinese structured data.
@@ -79,6 +113,9 @@ def _number_text(item: Mapping[str, Any],
     Other text may be a genuine quotation and remains byte-for-byte visible.
     """
     raw = str(item.get("text") or "")
+    comparison = _comparison_number_text(item, raw)
+    if comparison is not None:
+        return comparison, raw
     claim = claims.get(item.get("claim_version_ref"))
     if not isinstance(claim, Mapping):
         return f"来源说明（保留原文）：{raw}", None
