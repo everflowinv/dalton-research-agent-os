@@ -65,3 +65,30 @@ class OverviewSingleflightTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class ColdInputCacheTests(unittest.TestCase):
+    def test_ticket_cache_reloads_an_actual_changed_file(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        from dalton_core.cockpit_plane import _TicketCache
+        with tempfile.TemporaryDirectory() as root:
+            state = Path(root)
+            item = state / "discoveries" / "one"
+            item.mkdir(parents=True)
+            ticket = item / "ticket.json"
+            ticket.write_text(json.dumps({"status": "running"}))
+            cache = _TicketCache(state)
+            self.assertEqual(cache.tickets()[0]["ticket"]["status"], "running")
+            ticket.write_text(json.dumps({"status": "succeeded", "changed": True}))
+            stat = ticket.stat()
+            ticket.touch()
+            self.assertGreaterEqual(ticket.stat().st_mtime_ns, stat.st_mtime_ns)
+            self.assertEqual(cache.tickets()[0]["ticket"]["status"], "succeeded")
+
+    def test_pool_exhaustion_names_the_actual_pool(self):
+        from dalton_core.cockpit_plane import _ops_waiting_reason
+        reason = ("skipped:pool_exhausted: the event_response pool is spent "
+                  "for 2026-09-14 (14777357 of 15000000 micros)")
+        self.assertEqual(_ops_waiting_reason(reason),
+                         "事件响应模型预算池今天的余额不足")

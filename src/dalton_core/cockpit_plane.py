@@ -354,6 +354,16 @@ def _ops_waiting_reason(reason: Any, *, permission: bool = False) -> str:
     """Describe a parked ledger row without exposing its machine exception."""
 
     text = str(reason or "").casefold()
+    if "pool_exhausted" in text:
+        if "event_response" in text:
+            return "事件响应模型预算池今天的余额不足"
+        if "coverage" in text:
+            return "公司持续研究模型预算池今天的余额不足"
+        if "adhoc" in text:
+            return "专项研究模型预算池今天的余额不足"
+        if "maintenance" in text:
+            return "研究维护模型预算池今天的余额不足"
+        return "本次工作使用的模型预算池今天余额不足"
     if "budget_refused" in text or ("budget" in text and "refus" in text):
         if any(marker in text for marker in ("day_cap", "daily", "mission_budget_exceeded")):
             return "本研究任务今天的模型预算余额不足"
@@ -1926,6 +1936,25 @@ class CockpitPlane:
         self._overview_building = False
         self._overview_generation = 0
         self._overview_result: dict[str, Any] | None = None
+        self._lane_governance_cache: dict[tuple[str, str], str | None] = {}
+        # Prime the two immutable/read-only indexes while the control service
+        # starts.  The first browser request should project current state, not
+        # spend seconds parsing ten thousand historical ticket files and the
+        # already hash-bound localization store.
+        primed_tickets = self.tickets.tickets()
+        try:
+            from .research_localization_store import load_ui_texts
+            load_ui_texts(self.config.core_db)
+        except (ImportError, OSError, sqlite3.Error, ValueError, TypeError):
+            pass
+        if len(primed_tickets) > 1_000:
+            try:
+                from .lane_registry import LaunchAgentContext, registered_lanes
+                context = LaunchAgentContext(state=self.config.state_dir)
+                for spec in registered_lanes():
+                    self._lane_governance_record(spec, context)
+            except (ImportError, OSError, ValueError, TypeError):
+                pass
 
     def close(self) -> None:
         self.journal.close()
@@ -3851,15 +3880,23 @@ class CockpitPlane:
         opinion that goes stale on its own schedule.
         """
 
+        cache_key = (str(spec.driver_key or ""), str(spec.operation))
+        if cache_key in self._lane_governance_cache:
+            return self._lane_governance_cache[cache_key]
         if spec.argv_fragment is None:
+            self._lane_governance_cache[cache_key] = None
             return None
         try:
             argv = spec.argv_fragment(context)
         except Exception:  # noqa: BLE001 - a lane's fragment is not the page's problem
+            self._lane_governance_cache[cache_key] = None
             return None
         for value in argv:
             if isinstance(value, str) and "connector-governance" in value:
-                return Path(value).name
+                result = Path(value).name
+                self._lane_governance_cache[cache_key] = result
+                return result
+        self._lane_governance_cache[cache_key] = None
         return None
 
     def _registry_lane_states(self, planner: Mapping[str, Any]) -> list[dict[str, Any]]:
