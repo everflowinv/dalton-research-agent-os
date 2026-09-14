@@ -3057,6 +3057,21 @@ class WriterServer:
     def _op_create_coverage_mission(self, p: Mapping[str, Any]) -> Any:
         values = dict(p)
         mission_ref = values.pop("mission_ref")
+        prior_ref = values.get("prior_version_ref")
+        if prior_ref:
+            prior = self.coverage_mission.mission(prior_ref)
+            if prior.get("budget") != values.get("budget"):
+                fields = ("max_daily_paid_calls", "max_daily_cost_usd",
+                          "max_alphaengine_calls_24h")
+                requested = {key: values["budget"][key] for key in fields}
+                mandate_ref = values["bindings"]["mandate_version"]["ref"]
+                mandate = self.agenda.mandate_version(mandate_ref)
+                policy = self.store.active_policy_version().to_dict()
+                policy_body = policy.get("policy", policy)
+                if (mandate["constraints"].get("research_budget") != requested
+                        or policy_body.get("research_budget") != requested):
+                    raise ValidationError(
+                        "mission budget must be published through the policy/mandate/constitution cascade")
         return self.coverage_mission.create_mission(mission_ref, **values)
 
     def _op_publish_first_workspace_mission(self, p: Mapping[str, Any]) -> Any:

@@ -11,6 +11,7 @@ from __future__ import annotations
 import ast
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "publish_extraction_authority_chain.py"
 ENTRY_POINTS = ("rehearse", "live", "build_chain")
@@ -54,6 +55,22 @@ class ChainOptionTests(unittest.TestCase):
             self.accepted_by("rehearse") - {"target"},
             self.accepted_by("live"),
         )
+
+    def test_writer_rejects_a_mission_budget_outside_bound_authorities(self):
+        from dalton_core.writer_server import WriterServer, ValidationError
+        server = object.__new__(WriterServer)
+        old = {"max_daily_paid_calls": 1, "max_daily_cost_usd": 1,
+               "max_alphaengine_calls_24h": 1}
+        server._coverage_mission = SimpleNamespace(mission=lambda ref: {"budget": old})
+        server._agenda = SimpleNamespace(mandate_version=lambda ref: {
+            "constraints": {"research_budget": old}})
+        server._store = SimpleNamespace(active_policy_version=lambda: SimpleNamespace(
+            to_dict=lambda: {"policy": {"research_budget": old}}))
+        params = {"mission_ref": "coverage-mission:test", "prior_version_ref": "v1",
+                  "budget": {**old, "max_daily_cost_usd": 2},
+                  "bindings": {"mandate_version": {"ref": "m1"}}}
+        with self.assertRaisesRegex(ValidationError, "policy/mandate/constitution cascade"):
+            server._op_create_coverage_mission(params)
 
 
 if __name__ == "__main__":
