@@ -7,6 +7,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from dalton_core.lane_registry import lane_for_operation, registered_lanes
 from dalton_core.mission_annual_research_lane import (
@@ -44,12 +45,18 @@ class _Store:
             """
         )
 
-    def add(self, ordinal: int) -> dict:
+    def add(self, ordinal: int, *, scope_marker: str = "same") -> dict:
         body = {
             "schema_version": "0.1",
             "id": f"mission-annual-research-admission:{ordinal:032x}",
             "created_at": f"2026-09-11T12:00:0{ordinal}.000000+00:00",
             "identity_hash": content_hash({"ordinal": ordinal}),
+            "company_ref": "company:" + scope_marker,
+            "model_authority": {"version": ordinal},
+            "request": {
+                "review_ref": "review:" + scope_marker,
+                "model_execution": {"max_cost_usd": float(ordinal)},
+            },
         }
         wire = {**body, "content_hash": content_hash(body)}
         self.connection.execute(
@@ -159,6 +166,53 @@ class MissionAnnualResearchLaneTests(unittest.TestCase):
             holds["holds"][original["id"]]["reason"],
             "superseded_by_current_model_authority",
         )
+
+    def test_replanned_foreign_successor_is_rejected_before_old_is_held(self) -> None:
+        original = self.store.add(1)
+        foreign = self.store.add(2, scope_marker="foreign")
+        ticket_ref = "mission-annual-research:" + "b" * 24
+        self.launcher.tickets[ticket_ref] = {
+            "id": ticket_ref,
+            "status": "failed",
+            "summary": {
+                "status": "replanned",
+                "outcomes": [{
+                    "status": "replanned",
+                    "successor_admission_ref": foreign["id"],
+                    "successor_admission_hash": foreign["content_hash"],
+                }],
+            },
+        }
+        _write_latest(self.lane.latest_path, original, ticket_ref)
+
+        with self.assertRaisesRegex(
+            MissionAnnualResearchLaneError, "successor authority drifted"
+        ):
+            self.lane.dispatch_once()
+        self.assertFalse(self.lane.holds_path.exists())
+
+    def test_cli_replanned_summary_is_a_successful_handoff(self) -> None:
+        from dalton_core import mission_annual_research_cli as cli
+
+        summary_dir = self.root / "cli-summary"
+        summary = cli._summary(
+            admission_ref="mission-annual-research-admission:" + "a" * 32,
+            admission_hash="b" * 64,
+            status="replanned",
+            outcomes=[],
+        )
+        args = [
+            "--state-dir", str(self.root), "--staging", str(self.root / "staging"),
+            "--web-fetch-governance", str(self.root / "governance.json"),
+            "--spool-dir", str(self.root / "spool"),
+            "--admission-ref", summary["admission_ref"],
+            "--expected-admission-hash", summary["admission_hash"],
+            "--summary-dir", str(summary_dir), "--stack-dump-seconds", "0", "--quiet",
+        ]
+        with mock.patch.object(cli, "run_admission", return_value=summary):
+            self.assertEqual(cli.main(args), 0)
+        saved = json.loads((summary_dir / "summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(saved["status"], "replanned")
 
     def test_failed_admission_is_held_while_next_admission_runs(self) -> None:
         first = self.store.add(1)

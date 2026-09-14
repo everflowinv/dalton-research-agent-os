@@ -20,6 +20,7 @@ from .lane_child_launcher import (
     write_owner_only,
 )
 from .lane_registry import LaneSpec, register_lane
+from .mission_annual_research import MissionAnnualResearchError, _research_scope
 from .store import canonical_json, content_hash
 
 
@@ -482,8 +483,17 @@ class MissionAnnualResearchCoordinator:
                     if isinstance(successor, Mapping) else None
                 )
                 current = by_ref.get(successor_ref)
+                try:
+                    same_scope = (
+                        current is not None
+                        and _research_scope(current) == _research_scope(admission)
+                    )
+                except MissionAnnualResearchError as exc:
+                    raise MissionAnnualResearchLaneError(
+                        "annual research replan successor scope is invalid"
+                    ) from exc
                 if (
-                    current is None
+                    not same_scope
                     or current["content_hash"] != successor_hash
                     or self._started(admission["id"])
                 ):

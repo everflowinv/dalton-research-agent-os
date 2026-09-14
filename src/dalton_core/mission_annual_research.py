@@ -65,6 +65,24 @@ def _hash(value: Any, name: str) -> str:
     return value
 
 
+def _research_scope(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Return every immutable research binding except model authority/config."""
+    kept = {
+        key: item for key, item in value.items()
+        if key not in {
+            "id", "status", "created_at", "identity_hash", "content_hash",
+            "model_authority",
+        }
+    }
+    request = kept.get("request")
+    if not isinstance(request, Mapping):
+        raise MissionAnnualResearchError("annual research request scope is invalid")
+    request_scope = dict(request)
+    request_scope.pop("model_execution", None)
+    kept["request"] = request_scope
+    return kept
+
+
 def _canonical_record(raw: Any) -> dict[str, Any]:
     try:
         wire = json.loads(raw)
@@ -596,19 +614,7 @@ class MissionAnnualResearchAuthority:
         }
         identity, _request = self._derive(**kwargs)
 
-        def scope(value: Mapping[str, Any]) -> dict[str, Any]:
-            kept = dict(value)
-            kept.pop("model_authority", None)
-            request = dict(kept["request"])
-            request.pop("model_execution", None)
-            kept["request"] = request
-            return kept
-
-        original_identity = {
-            key: value for key, value in wire.items()
-            if key not in {"id", "status", "created_at", "identity_hash", "content_hash"}
-        }
-        if scope(identity) != scope(original_identity):
+        if _research_scope(identity) != _research_scope(wire):
             raise MissionAnnualResearchError(
                 "annual research scope changed; automatic model-budget replan refused"
             )

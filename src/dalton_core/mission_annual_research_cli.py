@@ -145,7 +145,7 @@ def main(argv: list[str] | None = None) -> int:
         from .store import canonical_json
 
         print(canonical_json(summary))
-    return 0 if summary["status"] in {"complete", "blocked"} else 1
+    return 0 if summary["status"] in {"complete", "blocked", "replanned"} else 1
 
 
 if __name__ == "__main__":  # pragma: no cover - subprocess entry
