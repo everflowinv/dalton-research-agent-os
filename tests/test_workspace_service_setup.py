@@ -86,6 +86,29 @@ class WorkspaceServiceSetupTest(unittest.TestCase):
                 }}},
         })
         self.source_config.write_text(json.dumps(raw))
+        (self.source_state / "document-research-config.json").write_text(json.dumps({
+            "schema_version": "document-research-config-0.1",
+            "purpose": "mission_directed_document_research",
+            "inventory_preview_chars": 600,
+            "spool_dir": str(self.source_state / "transcript-spool"),
+            "enabled_sources": ["source:public-web"],
+            "policy": {
+                "schema_version": "document-research-policy-0.1",
+                "policy_ref": "document-research-policy:test:1",
+                "allowed_purposes": ["mission_directed_document_research"],
+                "allowed_access_policy_refs": ["policy:access:public-web"],
+                "max_query_terms": 16, "max_query_term_chars": 240,
+                "max_results": 24, "max_read_chars": 100000,
+                "max_question_chars": 12000, "max_context_before_chars": 2000,
+                "max_context_after_chars": 4000, "content_hash": "a" * 64,
+            },
+            "source_reading_limits": {
+                "alphaengine_max_document_chars": 10000000,
+                "public_web_max_source_chars": 10000000,
+                "public_web_max_pdf_pages": 2000,
+                "public_web_max_decompressed_bytes": 100000000,
+            },
+        }))
         self.template = self.root / "service-template.json"
 
     def tearDown(self):
@@ -139,6 +162,8 @@ class WorkspaceServiceSetupTest(unittest.TestCase):
         self.assertEqual(review["reconcile_interval_seconds"], 73)
         self.assertEqual(review["candidate_staging_path"],
                          str(workspace.state_dir / "research-review/candidate-staging.sqlite"))
+        self.assertEqual(json.loads((workspace.state_dir / "document-research-config.json").read_text())[
+            "spool_dir"], str(workspace.state_dir / "transcript-spool"))
         self.assertEqual(installed["control"]["config"]["cockpit"]["model_config_path"],
                          str(workspace.state_dir / "research-planner-model-config.json"))
         sync = json.loads((workspace.state_dir / "model-catalog-sync.json").read_text())

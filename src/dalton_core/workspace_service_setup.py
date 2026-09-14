@@ -95,6 +95,9 @@ def export_service_template(source_config: str | Path,
                 or intent_key != broker_values["auth_key_path"]):
             raise WorkspaceServiceSetupError("source control does not share one model broker")
         control_extensions["intent_composer"] = intent
+    document_research_path = Path(raw["core_db"]).resolve().parent / "document-research-config.json"
+    document_research = _read(document_research_path)
+    document_research.pop("spool_dir", None)
     operating: dict[str, Any] = {
         "bounded_planner": planner,
         "thesis_impact": thesis,
@@ -111,6 +114,7 @@ def export_service_template(source_config: str | Path,
         "backup": {k: copy.deepcopy(raw["backup"][k])
                    for k in raw["backup"] if k != "root"},
         "control_extensions": control_extensions,
+        "document_research": document_research,
     }
     for name in ("alphaengine_owner_call_cap", "web_search_expected_provider"):
         if name in raw:
@@ -146,7 +150,8 @@ def _validate_template(value: Mapping[str, Any]) -> dict[str, Any]:
                                               broker["openclaw_config_path"]]:
         raise WorkspaceServiceSetupError("service template shared path closure is invalid")
     expected = {"bounded_planner", "thesis_impact", "document_extraction",
-                "agenda", "weekly_brief", "outbox", "backup", "control_extensions"}
+                "agenda", "weekly_brief", "outbox", "backup", "control_extensions",
+                "document_research"}
     operating = value.get("operating")
     if not isinstance(operating, Mapping) or set(operating) - {
             *expected, "alphaengine_owner_call_cap", "web_search_expected_provider"} or not expected.issubset(operating):
@@ -189,6 +194,7 @@ def install_service_template(workspace_manifest: str | Path,
     })
     operating["backup"]["root"] = str(state / "backups")
     extensions = operating.pop("control_extensions")
+    document_research = operating.pop("document_research")
     control = raw.get("control")
     if not isinstance(control, dict) or not isinstance(control.get("config"), dict):
         raise WorkspaceServiceSetupError("configure workspace control before service setup")
@@ -231,6 +237,8 @@ def install_service_template(workspace_manifest: str | Path,
     # refuses work until Core contains a separately admitted research task.
     _seed(state / "mission-document-research-lane.json",
           {"schema_version": "0.1", "enabled": True})
+    _seed(state / "document-research-config.json",
+          {**document_research, "spool_dir": str(state / "transcript-spool")})
     _seed(state / "mission-annual-research-lane.json",
           {"schema_version": "0.1", "enabled": True})
     _seed(state / "research-language-policy.json",
