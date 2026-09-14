@@ -477,6 +477,7 @@ class MissionOwnershipLaneCoordinator:
                     form_type=filing["form"],
                     issuer=None if holder else company["issuer"],
                     holder_cik=holder,
+                    primary_document=filing.get("primary_document"),
                     filed_at=filing["filing_date"],
                 )
             except LaneChildConflict as exc:
@@ -603,6 +604,7 @@ def build_launcher(args: Any) -> Any | None:
     launcher = SecOwnershipLauncher(
         state_dir=_Path(args.db).expanduser().resolve().parent,
         governance_dir=governance,
+        user_agent=getattr(args, "sec_lane_user_agent", None),
     )
     declaration = getattr(args, "ir_page_declaration", None)
     launcher.ir_declaration_path = (

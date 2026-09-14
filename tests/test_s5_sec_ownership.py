@@ -54,6 +54,7 @@ from dalton_core.sec_ownership_core import (
     ownership_output_schema,
     ownership_schema_hash,
     primary_document_url,
+    primary_document_name,
 )
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "sec-ownership"
@@ -205,6 +206,17 @@ class ContractTests(unittest.TestCase):
         )
         with self.assertRaises(SecOwnershipError):
             primary_document_url(ACN_CIK, "https://example.com/evil.xml")
+
+    def test_sec_rendered_primary_document_is_reduced_to_its_xml_source(self) -> None:
+        self.assertEqual(
+            primary_document_name("xslF345X06/primarydocument.xml"),
+            "primarydocument.xml",
+        )
+        self.assertEqual(primary_document_name("wk-form4_1.xml"), "wk-form4_1.xml")
+        for unsafe in ("../outside.xml", "xslF345X06/../outside.xml", "/root.xml",
+                       "other/path/file.xml", "xslF345X06/document.htm"):
+            with self.subTest(unsafe=unsafe), self.assertRaises(SecOwnershipError):
+                primary_document_name(unsafe)
 
     def test_the_invocation_name_moves_when_the_bytes_do(self) -> None:
         kwargs = {

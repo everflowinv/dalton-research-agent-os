@@ -44,6 +44,7 @@ class SecOwnershipLauncher(LaneChildLauncher):
         state_dir: str | Path,
         governance_dir: str | Path | None = None,
         actor_ref: str = "automation:coverage-mission",
+        user_agent: str | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(state_dir=state_dir, **kwargs)
@@ -52,6 +53,7 @@ class SecOwnershipLauncher(LaneChildLauncher):
             else Path(governance_dir).expanduser().resolve()
         )
         self.actor_ref = actor_ref
+        self.user_agent = user_agent
 
     def governance_path(self, operation: str) -> Path | None:
         """The approved record for one operation, if this Core has one."""
@@ -76,6 +78,7 @@ class SecOwnershipLauncher(LaneChildLauncher):
     def _command(
         self, *, ticket_dir: Path, operation: str, company_ref: str, accession: str,
         form_type: str, issuer: str | None, holder_cik: str | None,
+        primary_document: str | None,
         quarter: str | None, filed_at: str | None, company_cusips: str | None,
         cover_file: str | None, prior_file: str | None,
         prior_cover_file: str | None, prior_accession: str | None,
@@ -92,8 +95,11 @@ class SecOwnershipLauncher(LaneChildLauncher):
             "--allow-network",
             "--summary-dir", str(ticket_dir), "--quiet",
         ]
+        if self.user_agent:
+            command.extend(["--user-agent", self.user_agent])
         for flag, value in (
             ("--issuer", issuer), ("--holder-cik", holder_cik),
+            ("--primary-document", primary_document),
             ("--quarter", quarter), ("--filed-at", filed_at),
             ("--company-cusips", company_cusips), ("--cover-file", cover_file),
             ("--prior-file", prior_file), ("--prior-cover-file", prior_cover_file),
@@ -112,6 +118,7 @@ class SecOwnershipLauncher(LaneChildLauncher):
         form_type: str,
         issuer: str | None = None,
         holder_cik: str | None = None,
+        primary_document: str | None = None,
         quarter: str | None = None,
         filed_at: str | None = None,
         company_cusips: str | None = None,
@@ -154,10 +161,12 @@ class SecOwnershipLauncher(LaneChildLauncher):
                 "accession": accession, "form_type": form_type.strip(),
                 "issuer": issuer, "holder_cik": holder_cik, "quarter": quarter,
                 "filed_at": filed_at,
+                "primary_document": primary_document,
                 "governance_configured": self.governance_path(operation) is not None,
             },
             operation=operation, company_ref=company_ref, accession=accession,
             form_type=form_type.strip(), issuer=issuer, holder_cik=holder_cik,
+            primary_document=primary_document,
             quarter=quarter, filed_at=filed_at, company_cusips=company_cusips,
             cover_file=cover_file, prior_file=prior_file,
             prior_cover_file=prior_cover_file, prior_accession=prior_accession,

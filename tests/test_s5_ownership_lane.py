@@ -229,6 +229,7 @@ class CoordinatorTests(unittest.TestCase):
         self.assertEqual(result["accession"], "0001467373-26-000045")
         self.assertEqual(self.launcher.started[0]["operation"], FORM4_OPERATION)
         self.assertEqual(self.launcher.started[0]["issuer"], ACN_CIK)
+        self.assertEqual(self.launcher.started[0]["primary_document"], "primary_doc.xml")
 
     def test_a_second_tick_while_the_child_runs_starts_nothing(self) -> None:
         self.coordinator.dispatch_once()

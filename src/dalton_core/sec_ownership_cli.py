@@ -73,6 +73,7 @@ from .sec_ownership_core import (
     ownership_identity,
     ownership_output_schema,
     primary_document_url,
+    primary_document_name,
 )
 from .store import canonical_json, content_hash
 
@@ -527,7 +528,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:  # noqa: PLR0915 - one line
                 fixture=args.fixture_file,
                 url_path=(
                     None if args.fixture_file
-                    else primary_document_url(args.issuer, args.accession)
+                    else document_url(
+                        args.issuer, args.accession,
+                        primary_document_name(args.primary_document),
+                    )
                 ),
             )
         artifact = _spool(spool, raw)
@@ -666,6 +670,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--form-type", required=True,
                         help="the form as the filings index spelled it")
     parser.add_argument("--issuer", default=None, help="the issuer CIK")
+    parser.add_argument("--primary-document", default=PRIMARY_DOCUMENT,
+                        help="SEC submissions primaryDocument field")
     parser.add_argument("--holder-cik", default=None,
                         help="the filing manager's CIK, for 13F")
     parser.add_argument("--quarter", default=None)

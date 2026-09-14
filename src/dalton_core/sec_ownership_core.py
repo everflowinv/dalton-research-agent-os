@@ -379,6 +379,29 @@ _INFORMATION_TABLE_HINTS = ("infotable", "informationtable", "information_table"
                             "table", "holding")
 
 
+def primary_document_name(value: str) -> str:
+    """Return the source XML basename from SEC's submissions field.
+
+    Some Form 4 rows spell the rendered path as ``xslF.../name.xml``.  The
+    XML source lives at the filing root under that basename.  Accept only that
+    one known wrapper shape; a caller still cannot provide an arbitrary path.
+    """
+
+    if not isinstance(value, str):
+        raise SecOwnershipError("primary document name is not text")
+    parts = value.strip().split("/")
+    if (len(parts) == 2 and parts[0].lower().startswith("xsl")
+            and parts[0].isalnum()):
+        value = parts[1]
+    elif len(parts) == 1:
+        value = parts[0]
+    else:
+        raise SecOwnershipError("primary document path is not an SEC rendered wrapper")
+    if not _DOCUMENT_NAME_RE.fullmatch(value):
+        raise SecOwnershipError("primary document name is unsafe")
+    return value
+
+
 def information_table_name(index_payload: Any) -> str:
     """Which document in this filing is the 13F information table.
 
