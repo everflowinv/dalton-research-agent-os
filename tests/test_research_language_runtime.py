@@ -2,8 +2,9 @@ from __future__ import annotations
 import json, sqlite3, tempfile, unittest
 from pathlib import Path
 from unittest.mock import patch
-from dalton_core.research_language_runtime import run
+from dalton_core.research_language_runtime import FIDELITY_PURPOSE, run
 from dalton_core.store import content_hash
+from dalton_core.cockpit_model import CockpitModel, CockpitModelError
 
 class FakeRouter:
     def __init__(self,path): pass
@@ -23,6 +24,53 @@ class Model:
                 "work_order_ref":"work:x","result_envelope_ref":"result:x","invocation_ref":"invoke:x","cost_micros":1,"replayed":False}
 
 class RuntimeTests(unittest.TestCase):
+    def test_fidelity_purpose_reaches_real_cockpit_model_enqueue_boundary(self):
+        self.assertEqual("research_localization_verifier", FIDELITY_PURPOSE)
+        captured = {}
+
+        class Router:
+            def __init__(self, path): pass
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def get_policy(self, ref):
+                return {"content_hash": "a" * 64,
+                        "fallback_chains": {"tiers": {"verifier": ["profile:v"]}},
+                        "purpose_overrides": {}}
+
+        class Stop(CockpitModelError): pass
+        class SchedulerBoundary:
+            def __init__(self, *args, **kwargs): pass
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def enqueue(self, work):
+                captured["purpose"] = work.metadata["purpose"]
+                captured["capabilities"] = tuple(work.requested_capabilities)
+                raise Stop("enqueue boundary")
+
+        model = object.__new__(CockpitModel)
+        model.config = {"model_router_db": "unused", "routing_policy_ref": "policy:v"}
+        model.scheduler_db = "unused"
+        model.adapter_factory = None
+        model.clock = lambda: __import__('datetime').datetime.now(__import__('datetime').timezone.utc)
+        model.max_input_tokens = 120_000
+        model.max_output_tokens = 12_000
+        model.max_cost_usd = 1.0
+        model.timeout_seconds = 600
+        mission = {"id": "mission:v1", "mission_ref": "mission:x",
+                   "content_hash": "b" * 64, "created_at": "2026-09-10T00:00:00+00:00",
+                   "budget": {"max_daily_paid_calls": 10, "max_daily_cost_usd": 10,
+                              "pool_caps_micros": {"coverage": 10000000}},
+                   "source_scope": {}}
+        with patch('dalton_core.cockpit_model.ModelRouter', Router), \
+             patch('dalton_core.cockpit_model.Scheduler', SchedulerBoundary), \
+             patch('dalton_core.cockpit_model.mission_pool_scope', return_value={"pool": "coverage", "pool_caps_micros": {"coverage": 10000000}, "pool_lane": FIDELITY_PURPOSE}):
+            with self.assertRaisesRegex(Stop, "enqueue boundary"):
+                model.call(purpose=FIDELITY_PURPOSE, request_id="fidelity-test",
+                           prompt="verify", mission=mission,
+                           producer_route_decision_refs=("decision:producer", "decision:brain"))
+        self.assertEqual(FIDELITY_PURPOSE, captured["purpose"])
+        self.assertEqual(("provider-controlled-verify",), captured["capabilities"])
+
     def resumable_args(self, root, factory, *, request_id="resume"):
         paths={}
         for kind in ('checker','brain','fidelity'):

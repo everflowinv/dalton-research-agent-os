@@ -21,7 +21,8 @@ from .store import canonical_json, content_hash
 
 register_purpose_tier(CHECKER_PURPOSE, TIER_CHEAP)
 register_purpose_tier(BRAIN_PURPOSE, TIER_BRAIN)
-FIDELITY_PURPOSE=register_purpose_tier("research_localization_verifier",TIER_VERIFIER)
+register_purpose_tier("research_localization_verifier", TIER_VERIFIER)
+FIDELITY_PURPOSE = "research_localization_verifier"
 
 
 def _hash_bytes(data: bytes) -> str:
