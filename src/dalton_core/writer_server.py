@@ -2006,10 +2006,16 @@ class WriterServer:
             selected_web = _web_discovery_plan(self._workspace.state_dir)
             if selected_alpha.is_file():
                 self._discovery_plan_path = str(selected_alpha)
+                if self._search_launcher is not None:
+                    self._search_launcher.plan_path = selected_alpha
             if selected_web.is_file():
                 self._web_search_plan_path = str(selected_web)
+                if self._web_search_launcher is not None:
+                    self._web_search_launcher.plan_path = selected_web
             if selected_sec.is_file():
                 self._sec_filings_plan_path = str(selected_sec)
+                if self._sec_filings_launcher is not None:
+                    self._sec_filings_launcher.plan_path = selected_sec
         if self._discovery_plan_path is not None:
             # An unusable plan must not keep the writer (and every other lane)
             # from starting; the discovery op reports the reason instead.
@@ -3086,6 +3092,7 @@ class WriterServer:
         alpha_path = _alphaengine_discovery_plan(self._workspace.state_dir)
         if alpha_path.is_file() and self._search_launcher is not None:
             plan = load_discovery_plan(alpha_path)
+            self._search_launcher.plan_path = alpha_path
             self._discovery_plan_path = str(alpha_path)
             self._discovery_plan_error = None
             self._source_discovery = MissionSourceDiscoveryCoordinator(
@@ -3100,6 +3107,7 @@ class WriterServer:
         web_path = _web_discovery_plan(self._workspace.state_dir)
         if web_path.is_file() and self._web_search_launcher is not None:
             plan = load_discovery_plan(web_path)
+            self._web_search_launcher.plan_path = web_path
             self._web_search_plan_path = str(web_path)
             self._web_search_plan_error = None
             self._web_source_discovery = MissionSourceDiscoveryCoordinator(
@@ -3111,6 +3119,7 @@ class WriterServer:
         sec_path = _sec_discovery_plan(self._workspace.state_dir)
         if sec_path.is_file() and self._sec_filings_launcher is not None:
             plan = load_discovery_plan(sec_path)
+            self._sec_filings_launcher.plan_path = sec_path
             self._sec_filings_plan_path = str(sec_path)
             self._sec_filings_plan_error = None
             self._sec_filings_source_discovery = MissionSourceDiscoveryCoordinator(
