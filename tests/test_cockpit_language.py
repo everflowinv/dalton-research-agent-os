@@ -112,7 +112,8 @@ class CockpitLanguageTests(unittest.TestCase):
     def test_approval_business_details_are_visible_and_raw_technical_values_remain_expandable(self) -> None:
         text = HTML.read_text(encoding="utf-8")
         self.assertIn('if(label&&typeof v!=="object")', text)
-        self.assertIn('if(looksTechnical(String(v)))technical[k]=v', text)
+        self.assertIn('summary=approvalDetailSummary(shown)', text)
+        self.assertIn('if(summary.technical||looksTechnical(raw)||summary.display!==raw)technical[k]=v', text)
         self.assertIn('technicalDetails({kind:it.kind,ref:it.ref,hash:it.hash,details:technical})', text)
 
     def test_owner_erratum_uses_its_exact_correction_as_the_visible_summary(self) -> None:
@@ -269,7 +270,8 @@ class CockpitLanguageTests(unittest.TestCase):
         self.assertIn('const fingerprint=JSON.stringify([it,UI_TEXT_REVISION])', text)
         self.assertIn('if(approvalTextChanged&&approvalCards.size)loadApprovals()', text)
         self.assertIn('existing.fingerprint===fingerprint||existing.pending', text)
-        self.assertIn('node("span",displayText(String(v)))', text)
+        self.assertIn('localized=displayText(raw)', text)
+        self.assertIn('summary=approvalDetailSummary(shown)', text)
         self.assertIn('finalResearchText(it.summary):displayText(it.summary),summary=approvalSummary(localized)', text)
 
     def test_final_research_prose_waits_for_exact_reviewed_text(self) -> None:
