@@ -3057,11 +3057,18 @@ class CockpitPlane:
             try:
                 mission = self._mission(core)
             except CockpitMissionMissing:
+                saved = self.journal.rows(
+                    "SELECT draft_id,draft_json,content_hash,created_at FROM cockpit_drafts "
+                    "WHERE kind='goal' AND status='saved' ORDER BY created_at DESC LIMIT 1")
+                initial = None if not saved else {
+                    "draft_id": saved[0]["draft_id"], "draft_hash": saved[0]["content_hash"],
+                    "kind": "goal", "status": "saved", "created_at": saved[0]["created_at"],
+                    "draft": json.loads(saved[0]["draft_json"])}
                 return {"schema_version": SCHEMA_VERSION,
                         "as_of": _iso(self.clock()),
                         "state": "awaiting_mission",
                         "workspace": self.workspace_context,
-                        "goal": None}
+                        "initial_goal": initial, "goal": None}
             members = self._members(mission)
             claims = self._claims(core)
             versions = self._mission_versions(core, mission["mission_ref"])

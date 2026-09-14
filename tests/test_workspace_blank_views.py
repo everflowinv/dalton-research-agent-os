@@ -12,7 +12,7 @@ from dalton_core.store import content_hash
 
 class BlankViewsTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
+        self.tmp = tempfile.TemporaryDirectory(dir="/tmp")
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         release = self.root / 'release'
@@ -67,6 +67,7 @@ class BlankViewsTests(unittest.TestCase):
             two = self.plane._initial_goal_draft('owner@example.com', '研究新的行业', 'test-request')
         self.assertEqual(one['draft_id'], two['draft_id'])
         self.assertEqual(one['cost_usd'], 0)
+        self.assertEqual(self.plane.overview()['initial_goal']['draft']['objective'], '研究新的行业')
         self.assertFalse(one['draft']['research_authorized'])
         self.assertEqual(self.plane.overview()['state'], 'awaiting_mission')
         rows = self.plane.journal.rows('SELECT status FROM cockpit_drafts')
