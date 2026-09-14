@@ -1417,8 +1417,14 @@ class MissionDocumentResearchExecutor:
             envelope = ResultEnvelope.from_dict(formal["result_envelope"]).to_dict()
             route = self.verifier_worker.router.get_decision(
                 record.get("route_decision_ref"))
+            profile = self.verifier_worker.router.get_profile(
+                record.get("profile_version_ref"))
         except Exception:
             return None
+        route_body = dict(route)
+        route_asserted = route_body.pop("content_hash", None)
+        profile_body = dict(profile)
+        profile_asserted = profile_body.pop("content_hash", None)
         metadata = envelope.get("metadata") or {}
         usage = self.verifier_worker.observability.latest_usage(
             envelope.get("invocation_ref"))
@@ -1434,12 +1440,16 @@ class MissionDocumentResearchExecutor:
                 or record.get("result_envelope_hash") != formal["result_envelope_hash"]
                 or record.get("route_decision_ref") != route.get("id")
                 or record.get("route_decision_hash") != route.get("content_hash")
+                or route_asserted != content_hash(route_body)
                 or route.get("work_order_ref") != work["id"]
                 or route.get("work_order_hash") != content_hash(work)
                 or route.get("attempt_number") != formal["attempt_number"]
                 or route.get("policy_version_ref") != record.get("policy_version_ref")
                 or route.get("selected_profile_version_ref")
                 != record.get("profile_version_ref")
+                or profile.get("profile_version_ref")
+                != record.get("profile_version_ref")
+                or profile_asserted != content_hash(profile_body)
                 or metadata.get("broker_response_hash")
                 != record.get("broker_response_hash")
                 or metadata.get("route_decision_ref") != route.get("id")
