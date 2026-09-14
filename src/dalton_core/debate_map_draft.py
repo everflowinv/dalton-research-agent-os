@@ -29,6 +29,8 @@ prove it was independent is not a verification.
 
 from __future__ import annotations
 
+from .call_budget import default_call_budget
+
 from .final_text_contract import final_text_instructions
 
 import hashlib
@@ -77,7 +79,7 @@ MAX_PREVIOUS_DEBATES = 12
 # come first out of a reply that was already not answering the question.
 MAX_DEBATES = 12
 MAX_PROMPT_BYTES = 48_000
-MAX_COST_USD = 0.80
+MAX_COST_USD = default_call_budget("debate_map")["max_cost_usd"]
 MAX_INPUT_TOKENS = 80_000
 MAX_OUTPUT_TOKENS = 4_000
 TIMEOUT_SECONDS = 240

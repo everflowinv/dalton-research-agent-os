@@ -45,7 +45,7 @@ class EarningsSeasonBudgetTests(unittest.TestCase):
             season.PREVIEW_PURPOSE, season.PREVIEW_VERIFIER_PURPOSE,
             season.CALIBRATION_PURPOSE, season.CALIBRATION_VERIFIER_PURPOSE,
         ):
-            self.assertEqual(default_call_budget(purpose)["max_cost_usd"], 0.5)
+            self.assertEqual(default_call_budget(purpose)["max_cost_usd"], 1.0)
 
     def test_packaged_budget_change_changes_request_identity(self):
         base = {

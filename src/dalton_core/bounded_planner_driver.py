@@ -13,6 +13,8 @@ turns the crank.
 
 from __future__ import annotations
 
+from .call_budget import default_call_budget
+
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,7 +44,7 @@ DEFAULT_FILED_WINDOW_DAYS = 400
 # What one loop's planner call is allowed to cost when the deployment does not
 # say.  Named because P14e's ad-hoc pool reserves against exactly this number
 # and a second copy of a price is a price that drifts.
-DEFAULT_PLANNER_MAX_COST_USD = 0.5
+DEFAULT_PLANNER_MAX_COST_USD = default_call_budget("plan")["max_cost_usd"]
 # C2: the two ledgers the tick writes to and reads from, both beside the
 # scheduler in the state directory. Named here rather than in the config
 # because the config is a closed shape every installed service.json matches.

@@ -94,7 +94,7 @@ VERIFIER_MODEL_CONFIG = register_model_config_name(
 # grow into a long answer.
 MAX_INPUT_TOKENS = 60_000
 MAX_OUTPUT_TOKENS = 2_000
-MAX_COST_USD = 0.5
+MAX_COST_USD = default_call_budget("earnings_preview")["max_cost_usd"]
 TIMEOUT_SECONDS = 240
 MAX_OCCURRENCES_PER_RUN = 3
 

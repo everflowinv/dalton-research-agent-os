@@ -1,5 +1,7 @@
 import math
+import json
 import unittest
+from pathlib import Path
 
 from dalton_core.call_budget import (
     CallBudgetError, budget_fingerprint, default_call_budget,
@@ -66,6 +68,16 @@ class CallBudgetTests(unittest.TestCase):
             "max_input_tokens": 60_000, "max_output_tokens": 1_500,
             "max_cost_usd": 1.0, "timeout_seconds": 180,
         })
+
+    def test_every_packaged_single_call_cost_default_is_one_dollar(self):
+        path = Path(__file__).parents[1] / "src" / "dalton_core" / "call_budget_defaults.json"
+        wire = json.loads(path.read_text())
+        self.assertEqual(wire["defaults"]["max_cost_usd"], 1.0)
+        self.assertTrue(wire["purposes"])
+        self.assertEqual(
+            {name: value["max_cost_usd"] for name, value in wire["purposes"].items()},
+            {name: 1.0 for name in wire["purposes"]},
+        )
 
     def test_run_budget_resolves_general_then_purpose(self):
         config = {

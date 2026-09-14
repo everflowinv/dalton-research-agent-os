@@ -30,6 +30,7 @@ from .public_web_extraction_source import verified_public_web_source
 from .research_verification import ResearchVerificationConflict, ResearchVerificationError
 from .store import canonical_json, content_hash
 from .document_reading_limits import resolve_reading_limits
+from .call_budget import default_call_budget
 from .transcript_candidate_staging import TranscriptCoreAuthorityResolver
 from .transcript_polish_model_worker import RoutedTranscriptPolishModelWorker
 
@@ -362,8 +363,10 @@ def build_prompt(context: Mapping[str, Any]) -> str:
 
 
 LEGACY_CALL_BUDGET = {
-    "max_input_tokens": 16000, "max_output_tokens": 3000,
-    "max_cost_usd": 0.05, "timeout_seconds": 60,
+    "max_input_tokens": 16000,
+    "max_output_tokens": 3000,
+    "max_cost_usd": default_call_budget("document_extraction")["max_cost_usd"],
+    "timeout_seconds": 60,
 }
 
 
@@ -605,7 +608,7 @@ def reservation_micros(work, route, profile) -> int:
     persisted result.  What can move -- and is the number that actually decides
     how many windows a day holds -- is what the lane reserves: the served
     profile's published price against the same token bounds the adapter already
-    enforces.  Live, the flat reservation is $0.05 and the settled mean is
+    enforces. The configured reservation is an upper bound and the settled mean is
     $0.000294, so the lane holds a hundred and seventy times the money it
     spends and the ledger counts the hold, not the spend.
 

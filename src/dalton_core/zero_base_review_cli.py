@@ -22,6 +22,8 @@ worth having even on a Core where nobody has granted the proposal yet.
 
 from __future__ import annotations
 
+from .call_budget import default_call_budget
+
 import argparse
 import json
 import os
@@ -63,7 +65,7 @@ VERIFIER_MODEL_CONFIG = register_model_config_name("zero-base-review-verifier-mo
 # dozen events. It has never needed a large window.
 MAX_INPUT_TOKENS = 60_000
 MAX_OUTPUT_TOKENS = 1_800
-MAX_COST_USD = 0.12
+MAX_COST_USD = default_call_budget("zero_base_review")["max_cost_usd"]
 TIMEOUT_SECONDS = 180
 #: A month boundary makes every covered company due on the same tick. Two per
 #: run means the backlog drains over the following few ticks instead of the

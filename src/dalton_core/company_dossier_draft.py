@@ -36,6 +36,8 @@ an independent one.
 
 from __future__ import annotations
 
+from .call_budget import default_call_budget
+
 from .final_text_contract import final_text_instructions
 
 import json
@@ -137,7 +139,7 @@ def legacy_verifier_prompt_contract_fingerprint() -> str:
 # but a refusal.  One unit is one section of one company.
 MAX_INPUT_TOKENS = 120_000
 MAX_OUTPUT_TOKENS = 3_000
-MAX_COST_USD = 0.60
+MAX_COST_USD = default_call_budget("dossier")["max_cost_usd"]
 TIMEOUT_SECONDS = 180
 # What one tick may spend across all its calls, verifier included.  A dossier
 # is ten sections plus two blocks; drafting all twelve in one tick would be a

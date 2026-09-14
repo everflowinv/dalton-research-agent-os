@@ -34,6 +34,8 @@ process we have just established was not doing the task.
 
 from __future__ import annotations
 
+from .call_budget import default_call_budget
+
 import hashlib
 import json
 import re
@@ -81,7 +83,7 @@ MAX_PROMPT_BYTES = 40_000
 
 # The cost bound for one batch, sized like the company-model lane's: a
 # reservation generous enough to be admitted, not a prediction of the price.
-MAX_COST_USD = 0.60
+MAX_COST_USD = default_call_budget("claim_index")["max_cost_usd"]
 MAX_INPUT_TOKENS = 60_000
 MAX_OUTPUT_TOKENS = 2_000
 TIMEOUT_SECONDS = 180

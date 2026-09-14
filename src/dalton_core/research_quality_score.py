@@ -32,6 +32,8 @@ shopping is the failure mode of every quality gate that scores on demand.
 
 from __future__ import annotations
 
+from .call_budget import default_call_budget
+
 import difflib
 import json
 import re
@@ -103,7 +105,7 @@ JUDGE_MODEL_CONFIG_NAME = "initial-screen-model-config.json"
 # but a refusal.  The judge reads one document and answers with a table.
 MAX_INPUT_TOKENS = 120_000
 MAX_OUTPUT_TOKENS = 2_000
-MAX_COST_USD = 0.60
+MAX_COST_USD = default_call_budget("quality")["max_cost_usd"]
 TIMEOUT_SECONDS = 180
 # What the prompt may carry of the artefact and of its evidence.  A screen runs
 # to ~12k characters of body; a dossier will run longer.

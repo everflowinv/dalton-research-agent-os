@@ -27,6 +27,8 @@ it was independent is not a verification.
 
 from __future__ import annotations
 
+from .call_budget import default_call_budget
+
 from .final_text_contract import final_text_instructions
 
 import hashlib
@@ -75,7 +77,7 @@ MAX_METRIC_ROWS = 8
 MAX_CATALYST_ROWS = 8
 MAX_STATEMENT_CHARS = 400
 MAX_PROMPT_BYTES = 40_000
-MAX_COST_USD = 0.60
+MAX_COST_USD = default_call_budget("conviction_call")["max_cost_usd"]
 MAX_INPUT_TOKENS = 60_000
 MAX_OUTPUT_TOKENS = 3_000
 TIMEOUT_SECONDS = 240

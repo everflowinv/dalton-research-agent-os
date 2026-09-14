@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from .contracts import ResultEnvelope, WorkOrder
-from .call_budget import budget_fingerprint, resolve_call_budget
+from .call_budget import budget_fingerprint, default_call_budget, resolve_call_budget
 from .model_transport import (
     broker_frame_execution_binding,
     resolve_broker_max_frame_bytes,
@@ -1210,7 +1210,8 @@ class CockpitModel:
 
     def __init__(self, model_config: Mapping[str, Any], *, scheduler_db: str | Path,
                  adapter_factory: Callable[..., Any] | None = None, clock: Callable[[], datetime] | None = None,
-                 max_input_tokens: int = 120_000, max_output_tokens: int = 3_000, max_cost_usd: float = 0.05,
+                 max_input_tokens: int = 120_000, max_output_tokens: int = 3_000,
+                 max_cost_usd: float | None = None,
                  timeout_seconds: int = 120) -> None:
         self.config = validate_model_config(model_config)
         self.scheduler_db = str(Path(scheduler_db).expanduser().resolve())
@@ -1223,10 +1224,12 @@ class CockpitModel:
 
     def budget_for(self, purpose: str) -> dict[str, Any]:
         """The effective immutable budget for one call purpose."""
+        configured_default = default_call_budget(purpose)
         return resolve_call_budget(self.config, purpose, defaults={
             "max_input_tokens": self.max_input_tokens,
             "max_output_tokens": self.max_output_tokens,
-            "max_cost_usd": self.max_cost_usd,
+            "max_cost_usd": (configured_default["max_cost_usd"]
+                             if self.max_cost_usd is None else self.max_cost_usd),
             "timeout_seconds": self.timeout_seconds,
         })
 

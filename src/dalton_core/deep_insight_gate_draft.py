@@ -31,6 +31,8 @@ route and not about what we asked for -- and it fails closed.
 
 from __future__ import annotations
 
+from .call_budget import default_call_budget
+
 from .final_text_contract import final_text_instructions
 
 from collections.abc import Mapping, Sequence
@@ -84,7 +86,7 @@ MODEL_CONFIG_NAME = "initial-screen-model-config.json"
 # but a refusal.  One call is one group of one company.
 MAX_INPUT_TOKENS = 120_000
 MAX_OUTPUT_TOKENS = 3_000
-MAX_COST_USD = 0.60
+MAX_COST_USD = default_call_budget("deep_insight_gate")["max_cost_usd"]
 TIMEOUT_SECONDS = 180
 # What one run may spend across all its calls, verifier included: four groups
 # and one verification, each at the per-call cap.  A run that cannot afford the
