@@ -689,6 +689,10 @@ class SetSelectionTests(StateDirectoryCase):
             "registered-annual-report-verifier-model-config.json",
             "mission-document-draft-model-config.json",
             "mission-document-verifier-model-config.json",
+            "research-language-check-model-config.json",
+            "research-language-revision-model-config.json",
+            "research-localization-draft-model-config.json",
+            "research-localization-verifier-model-config.json",
         })
 
     def test_quality_verifier_binding_reads_its_actual_optional_config(self) -> None:
