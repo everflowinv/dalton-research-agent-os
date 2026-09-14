@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Any
 
 from .cockpit_model import CockpitModel
-from .call_budget import resolve_call_budget
+from .call_budget import default_call_budget, resolve_call_budget
 from .coverage_mission import CoverageMissionAuthority
 from .earnings_calibration import (
     actualize_for_report,
@@ -94,7 +94,7 @@ VERIFIER_MODEL_CONFIG = register_model_config_name(
 # grow into a long answer.
 MAX_INPUT_TOKENS = 60_000
 MAX_OUTPUT_TOKENS = 2_000
-MAX_COST_USD = 0.12
+MAX_COST_USD = 0.5
 TIMEOUT_SECONDS = 240
 MAX_OCCURRENCES_PER_RUN = 3
 
@@ -159,7 +159,19 @@ def config_fingerprint(*paths: Path | None) -> str:
             material.append(Path(path).expanduser().read_text(encoding="utf-8"))
         except OSError:
             material.append(str(path))
-    return content_hash({"configs": material})[:8]
+    budgets = {
+        purpose: default_call_budget(purpose, defaults={
+            "max_input_tokens": MAX_INPUT_TOKENS,
+            "max_output_tokens": MAX_OUTPUT_TOKENS,
+            "max_cost_usd": MAX_COST_USD,
+            "timeout_seconds": TIMEOUT_SECONDS,
+        })
+        for purpose in (
+            PREVIEW_PURPOSE, PREVIEW_VERIFIER_PURPOSE,
+            CALIBRATION_PURPOSE, CALIBRATION_VERIFIER_PURPOSE,
+        )
+    }
+    return content_hash({"configs": material, "budgets": budgets})[:8]
 
 
 def earnings_window_input_fingerprint(

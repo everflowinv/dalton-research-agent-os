@@ -17,7 +17,8 @@ from unittest import mock
 from dalton_core import earnings_season as season
 from dalton_core import mission_earnings_season_lane as lane
 from dalton_core.earnings_preview import publish_preview
-from dalton_core.earnings_season_cli import run_earnings_season
+from dalton_core.earnings_season_cli import config_fingerprint, run_earnings_season
+from dalton_core.call_budget import default_call_budget
 from dalton_core.mission_deliverable import MissionDeliverableConflict
 from dalton_core.event_judgement import EventJudgementAuthority
 from dalton_core.mission_deliverable import MissionDeliverableAuthority
@@ -38,6 +39,33 @@ from tests.test_model_forecast_driver import (
 from datetime import datetime, timezone
 
 
+class EarningsSeasonBudgetTests(unittest.TestCase):
+    def test_both_season_windows_and_their_verifiers_have_routable_caps(self):
+        for purpose in (
+            season.PREVIEW_PURPOSE, season.PREVIEW_VERIFIER_PURPOSE,
+            season.CALIBRATION_PURPOSE, season.CALIBRATION_VERIFIER_PURPOSE,
+        ):
+            self.assertEqual(default_call_budget(purpose)["max_cost_usd"], 0.5)
+
+    def test_packaged_budget_change_changes_request_identity(self):
+        base = {
+            "max_input_tokens": 60_000, "max_output_tokens": 2_000,
+            "max_cost_usd": 0.12, "timeout_seconds": 240,
+        }
+        raised = {**base, "max_cost_usd": 0.5}
+        with mock.patch(
+            "dalton_core.earnings_season_cli.default_call_budget",
+            side_effect=lambda purpose, defaults: dict(base),
+        ):
+            old = config_fingerprint(None, None)
+        with mock.patch(
+            "dalton_core.earnings_season_cli.default_call_budget",
+            side_effect=lambda purpose, defaults: dict(raised),
+        ):
+            new = config_fingerprint(None, None)
+        self.assertNotEqual(old, new)
+
+
 class FakeModel:
     """One canned answer per purpose, and a route this run can resolve."""
 
@@ -46,6 +74,11 @@ class FakeModel:
         self.family = family
         self.prefix = prefix
         self.calls = []
+
+    def budget_for(self, purpose):
+        # This fixture models a cheap local call; production defaults are
+        # covered separately and must not change the pool semantics under test.
+        return {"max_cost_usd": 0.12}
 
     def call(self, *, purpose, request_id, prompt, mission):
         self.calls.append({"purpose": purpose, "request_id": request_id,

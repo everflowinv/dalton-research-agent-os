@@ -79,25 +79,25 @@
       "timeout_seconds": 180
     },
     "earnings_calibration": {
-      "max_cost_usd": 0.12,
+      "max_cost_usd": 0.5,
       "max_input_tokens": 60000,
       "max_output_tokens": 2000,
       "timeout_seconds": 240
     },
     "earnings_calibration_verifier": {
-      "max_cost_usd": 0.12,
+      "max_cost_usd": 0.5,
       "max_input_tokens": 60000,
       "max_output_tokens": 2000,
       "timeout_seconds": 240
     },
     "earnings_preview": {
-      "max_cost_usd": 0.12,
+      "max_cost_usd": 0.5,
       "max_input_tokens": 60000,
       "max_output_tokens": 2000,
       "timeout_seconds": 240
     },
     "earnings_preview_verifier": {
-      "max_cost_usd": 0.12,
+      "max_cost_usd": 0.5,
       "max_input_tokens": 60000,
       "max_output_tokens": 2000,
       "timeout_seconds": 240
