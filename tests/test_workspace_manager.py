@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import subprocess
 import tempfile
 import unittest
@@ -12,7 +13,8 @@ from unittest.mock import patch
 
 from dalton_core.workspace import WorkspaceError
 from dalton_core.workspace_manager import (
-    _config, _serve, _runtime_templates, _readiness, create_managed_workspace, list_workspaces, request_create,
+    _config, _serve, _runtime_templates, _readiness, _controller_tick_probe,
+    _writer_read_probe, create_managed_workspace, list_workspaces, request_create,
 )
 from dalton_core.cockpit_plane import CockpitConfig
 
@@ -138,13 +140,70 @@ class WorkspaceManagerTests(unittest.TestCase):
         response.__enter__.return_value.read.return_value = json.dumps({
             'state': 'running', 'workspace': {'workspace_id': 'right'}}).encode()
         workspace = SimpleNamespace(cockpit_port=18991, workspace_id='right')
-        with patch('dalton_core.workspace_manager.urllib.request.urlopen', return_value=response):
+        with patch('dalton_core.workspace_manager.urllib.request.urlopen', return_value=response), \
+             patch('dalton_core.workspace_manager._writer_read_probe'), \
+             patch('dalton_core.workspace_manager._controller_tick_probe'):
             _readiness(self.config, workspace, require_blank=False, timeout=.1)
         response.__enter__.return_value.read.return_value = json.dumps({
             'state': 'running', 'workspace': {'workspace_id': 'wrong'}}).encode()
-        with patch('dalton_core.workspace_manager.urllib.request.urlopen', return_value=response):
+        with patch('dalton_core.workspace_manager.urllib.request.urlopen', return_value=response), \
+             patch('dalton_core.workspace_manager._writer_read_probe'), \
+             patch('dalton_core.workspace_manager._controller_tick_probe'):
             with self.assertRaises(WorkspaceError):
                 _readiness(self.config, workspace, require_blank=False, timeout=.01)
+
+    def test_readiness_requires_writer_read_and_live_controller_tick(self):
+        from types import SimpleNamespace
+        response = unittest.mock.MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps({
+            'state': 'awaiting_mission', 'workspace': {'workspace_id': 'right'}}).encode()
+        workspace = SimpleNamespace(cockpit_port=18991, workspace_id='right')
+        with patch('dalton_core.workspace_manager.urllib.request.urlopen', return_value=response), \
+             patch('dalton_core.workspace_manager._writer_read_probe', side_effect=WorkspaceError('writer down')):
+            with self.assertRaises(WorkspaceError):
+                _readiness(self.config, workspace, timeout=.01)
+        with patch('dalton_core.workspace_manager.urllib.request.urlopen', return_value=response), \
+             patch('dalton_core.workspace_manager._writer_read_probe'), \
+             patch('dalton_core.workspace_manager._controller_tick_probe') as controller:
+            _readiness(self.config, workspace, timeout=.1)
+        controller.assert_called_once_with(workspace)
+
+    def test_controller_probe_checks_heartbeat_pid_liveness_and_tick_ledger(self):
+        from types import SimpleNamespace
+        state = self.root / 'state'
+        state.mkdir()
+        heartbeat = state / 'heartbeat.json'
+        heartbeat.write_text(json.dumps({'pid': 42, 'last_tick_at': '2026-09-14T12:00:00Z'}))
+        service = self.root / 'service.json'
+        service.write_text('{}')
+        ledger = state / 'tick-ledger.sqlite'
+        with sqlite3.connect(ledger) as connection:
+            connection.execute('CREATE TABLE tick_ledger_ticks (id TEXT)')
+            connection.execute("INSERT INTO tick_ledger_ticks VALUES ('tick:1')")
+        workspace = SimpleNamespace(config_path=service, state_dir=state)
+        parsed = SimpleNamespace(heartbeat_path=heartbeat)
+        with patch('dalton_core.service.ServiceConfig.from_file', return_value=parsed), \
+             patch('dalton_core.workspace_manager.os.kill') as kill:
+            _controller_tick_probe(workspace)
+        kill.assert_called_once_with(42, 0)
+        heartbeat.write_text(json.dumps({'pid': 43, 'last_tick_at': None}))
+        with patch('dalton_core.service.ServiceConfig.from_file', return_value=parsed), \
+             self.assertRaises(WorkspaceError):
+            _controller_tick_probe(workspace)
+
+    def test_writer_probe_uses_workspace_socket_and_core_read_identity(self):
+        from types import SimpleNamespace
+        state = self.root / 'writer-state'
+        state.mkdir()
+        (state / 'writer-tokens.json').write_text(json.dumps({'principals': [
+            {'principal_id': 'core', 'token': 'workspace-token'}]}))
+        workspace = SimpleNamespace(state_dir=state, writer_socket=state / 'writer.sock')
+        client = unittest.mock.MagicMock()
+        client.call.return_value = {'projection_kind': 'bounded_planner_active_loops'}
+        with patch('dalton_core.writer_client.WriterClient', return_value=client) as factory:
+            _writer_read_probe(workspace)
+        factory.assert_called_once_with(str(workspace.writer_socket), 'workspace-token')
+        client.call.assert_called_once_with('bounded_planner_active_loops', {})
 
     def test_existing_serve_route_is_never_overwritten(self):
         existing = {'TCP':{'18991':{'HTTPS':True}}, 'Web':{

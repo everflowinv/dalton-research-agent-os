@@ -268,7 +268,7 @@ def _serve(config: Mapping[str, Any], port: int) -> None:
 
 def _readiness(config: Mapping[str, Any], workspace: Any, *, timeout: float = 30.0,
                require_blank: bool = True) -> None:
-    """Require the new Cockpit to identify its workspace and blank state."""
+    """Require Cockpit identity plus live writer and controller progress."""
     deadline = time.monotonic() + timeout
     url = f"http://127.0.0.1:{workspace.cockpit_port}/v1/cockpit/overview"
     last_error: Exception | None = None
@@ -281,12 +281,52 @@ def _readiness(config: Mapping[str, Any], workspace: Any, *, timeout: float = 30
                 payload = json.loads(response.read())
             if ((not require_blank or payload.get("state") == "awaiting_mission")
                     and payload.get("workspace", {}).get("workspace_id") == workspace.workspace_id):
+                _writer_read_probe(workspace)
+                _controller_tick_probe(workspace)
                 return
             last_error = WorkspaceError("新研究环境返回了错误的身份或状态")
         except Exception as exc:  # readiness retries transport and incomplete startup
             last_error = exc
         time.sleep(0.1)
     raise WorkspaceError("新研究环境尚未通过空白状态检查") from last_error
+
+
+def _writer_read_probe(workspace: Any) -> None:
+    """Prove this workspace's writer answers an authenticated local read."""
+    from .writer_client import WriterClient
+
+    token_record = json.loads(
+        (workspace.state_dir / "writer-tokens.json").read_text(encoding="utf-8"))
+    tokens = {row["principal_id"]: row["token"]
+              for row in token_record.get("principals", [])}
+    if "core" not in tokens:
+        raise WorkspaceError("新研究环境 writer 缺少本地读取身份")
+    reply = WriterClient(str(workspace.writer_socket), tokens["core"]).call(
+        "bounded_planner_active_loops", {})
+    if reply.get("projection_kind") != "bounded_planner_active_loops":
+        raise WorkspaceError("新研究环境 writer 未返回预期读取结果")
+
+
+def _controller_tick_probe(workspace: Any) -> None:
+    """Prove a live controller PID has written a heartbeat and scheduler tick."""
+    from .service import ServiceConfig
+
+    heartbeat_path = ServiceConfig.from_file(workspace.config_path).heartbeat_path
+    heartbeat = json.loads(heartbeat_path.read_text(encoding="utf-8"))
+    pid = heartbeat.get("pid")
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid < 1 \
+            or not heartbeat.get("last_tick_at"):
+        raise WorkspaceError("新研究环境 controller 心跳尚未就绪")
+    try:
+        os.kill(pid, 0)
+    except OSError as exc:
+        raise WorkspaceError("新研究环境 controller 进程未运行") from exc
+    ledger = workspace.state_dir / "tick-ledger.sqlite"
+    with sqlite3.connect(f"file:{ledger}?mode=ro", uri=True) as connection:
+        count = connection.execute(
+            "SELECT count(*) FROM tick_ledger_ticks").fetchone()[0]
+    if int(count) < 1:
+        raise WorkspaceError("新研究环境 controller 尚未完成调度 tick")
 
 
 def create_managed_workspace(config_path: Path, login: str, name: str, request_id: str) -> dict[str, Any]:
