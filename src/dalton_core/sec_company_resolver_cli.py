@@ -12,6 +12,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--ticker", required=True)
     parser.add_argument("--state-dir", required=True)
+    parser.add_argument("--identity", required=True)
     args = parser.parse_args(argv)
     cache = Path(args.state_dir).expanduser().resolve() / "sec-edgar-cache"
     cache.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -19,10 +20,7 @@ def main(argv: list[str] | None = None) -> int:
     os.environ["EDGAR_DATA_DIR"] = str(cache)
     from edgar import Company, set_identity
 
-    identity = os.environ.get("EDGAR_IDENTITY", "").strip()
-    if not identity:
-        raise RuntimeError("EDGAR_IDENTITY is required for SEC requests")
-    set_identity(identity)
+    set_identity(args.identity)
     company = Company(args.ticker.upper())
     print(json.dumps({"ticker": args.ticker.upper(), "cik": str(company.cik),
                       "name": str(company.name)}, sort_keys=True))

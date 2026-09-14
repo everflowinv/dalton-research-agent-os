@@ -1526,6 +1526,7 @@ class WriterServer:
         alphaengine_owner_call_cap: int | None = None,
         sec_filings_launcher: Any | None = None,
         sec_filings_plan_path: str | Path | None = None,
+        sec_company_resolver_identity: str | None = None,
         discovery_selection_launcher: Any | None = None,
         annual_report_draft_model_config_path: str | Path | None = None,
         annual_report_verifier_model_config_path: str | Path | None = None,
@@ -1595,6 +1596,7 @@ class WriterServer:
         self._sec_filings_plan_path = (
             None if sec_filings_plan_path is None else Path(sec_filings_plan_path)
         )
+        self._sec_company_resolver_identity = sec_company_resolver_identity
         self._document_extraction_launcher = document_extraction_launcher
         if document_extraction_max_windows is not None and not (
             1 <= int(document_extraction_max_windows) <= 50
@@ -3077,6 +3079,7 @@ class WriterServer:
             self.store, workspace, proposal=p["proposal"],
             proposal_hash=p["proposal_hash"], actor_ref=p["actor_ref"],
             method_foundation=local_foundation,
+            sec_resolver_identity=self._sec_company_resolver_identity,
         )
         self._load_first_mission_discovery_plans()
         return mission
@@ -3149,7 +3152,9 @@ class WriterServer:
         if mission is None or mission.get("mission_ref") != status.get("mission_ref"):
             return
         from .workspace_mission_setup import materialize_first_mission_discovery_plans
-        materialize_first_mission_discovery_plans(self._workspace, mission)
+        materialize_first_mission_discovery_plans(
+            self._workspace, mission,
+            sec_resolver_identity=self._sec_company_resolver_identity)
         self._load_first_mission_discovery_plans()
 
     def _op_get_coverage_mission(self, p: Mapping[str, Any]) -> Any:
@@ -5570,6 +5575,11 @@ def main(argv: list[str] | None = None) -> int:
         help="operator-visible SEC User-Agent passed to lane runs",
     )
     parser.add_argument(
+        "--sec-company-resolver-identity",
+        default="Dalton Research Agent OS SEC resolver (contact: operator@localhost)",
+        help="operator-visible SEC identity used by first-mission ticker resolution",
+    )
+    parser.add_argument(
         "--sec-lane-rehearsal-fixture",
         help="rehearsal only: company-facts fixture file served instead of data.sec.gov (tests)",
     )
@@ -5946,6 +5956,7 @@ def main(argv: list[str] | None = None) -> int:
             alphaengine_owner_call_cap=args.alphaengine_owner_call_cap,
             sec_filings_launcher=sec_filings_launcher,
             sec_filings_plan_path=args.sec_filings_discovery_plan,
+            sec_company_resolver_identity=args.sec_company_resolver_identity,
             search_launcher=search_launcher,
             discovery_plan_path=args.alphaengine_discovery_plan,
             web_search_launcher=web_search_launcher,

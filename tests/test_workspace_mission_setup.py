@@ -250,10 +250,16 @@ class WorkspaceFirstMissionTests(unittest.TestCase):
             run.return_value.stdout = json.dumps(
                 {"ticker": "ASML", "cik": "1487729", "name": "ASML Holding NV"})
             run.return_value.stderr = ""
-            issuer = resolve_sec_ticker("ASML", state_dir=self.workspace.state_dir)
+            issuer = resolve_sec_ticker(
+                "ASML", state_dir=self.workspace.state_dir,
+                identity="Dalton test operator test@example.com")
         self.assertEqual(issuer["cik"], "0001487729")
         argv = run.call_args.args[0]
-        self.assertEqual(argv[-1], str(self.workspace.state_dir.resolve()))
+        self.assertEqual(argv[argv.index("--state-dir") + 1],
+                         str(self.workspace.state_dir.resolve()))
+        self.assertIn("--identity", argv)
+        self.assertEqual(argv[argv.index("--identity") + 1],
+                         "Dalton test operator test@example.com")
         self.assertEqual(run.call_args.kwargs["timeout"], 15.0)
 
     def test_writer_refuses_a_self_consistent_foreign_workspace_before_opening_authority(self):

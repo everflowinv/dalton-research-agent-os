@@ -2019,6 +2019,10 @@ class ServiceTests(unittest.TestCase):
                 expected_sec_user_agent,
             )
             self.assertEqual(
+                writer_args[writer_args.index("--sec-company-resolver-identity") + 1],
+                expected_sec_user_agent,
+            )
+            self.assertEqual(
                 writer_args[writer_args.index("--candidate-staging") + 1],
                 str(service.control.research_review.candidate_staging_path),
             )

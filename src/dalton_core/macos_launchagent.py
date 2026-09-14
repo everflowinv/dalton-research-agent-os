@@ -237,6 +237,10 @@ def render(
             "--socket", str(state / "run" / "writer.sock"),
             "--token-config", str(state / "writer-tokens.json"),
             "--transcript-spool-dir", str(state / "transcript-spool"),
+            "--sec-company-resolver-identity",
+            (service_config.bounded_planner.user_agent
+             if service_config is not None and service_config.bounded_planner is not None
+             else SEC_LANE_USER_AGENT),
             "--connector-governance",
             str(state / "connector-governance" / "alphaengine-get-document-v1.json"),
             # P9d-1: search-driven discovery.  The governance record is seeded

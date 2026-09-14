@@ -402,7 +402,7 @@ def prepare_first_mission_bindings(
 def publish_first_mission_to_store(
     store: Any, workspace: WorkspacePaths, *, proposal: Mapping[str, Any],
     proposal_hash: str, actor_ref: str,
-    method_foundation: Mapping[str, Any],
+    method_foundation: Mapping[str, Any], sec_resolver_identity: str | None = None,
 ) -> dict[str, Any]:
     """Production entry point used by the owner-only writer operation."""
     foundation = _foundation(method_foundation, workspace)
@@ -421,7 +421,8 @@ def publish_first_mission_to_store(
     materialize_first_mission_output_policies(
         workspace, mission=mission, constitution=constitution,
         driver_pack=foundation["methods"]["driver_pack_template"]["value"])
-    materialize_first_mission_discovery_plans(workspace, mission)
+    materialize_first_mission_discovery_plans(
+        workspace, mission, sec_resolver_identity=sec_resolver_identity)
     return mission
 
 
@@ -502,6 +503,7 @@ def materialize_first_mission_output_policies(
 def materialize_first_mission_discovery_plans(
     workspace: WorkspacePaths, mission: Mapping[str, Any], *,
     sec_ticker_resolver: Callable[[str], Mapping[str, str]] | None = None,
+    sec_resolver_identity: str | None = None,
 ) -> dict[str, str]:
     """Write the approved, mission-specific search plans selected at restart."""
     from .mission_source_discovery import (
@@ -521,7 +523,9 @@ def materialize_first_mission_discovery_plans(
     paid_calls = int(mission["budget"]["max_daily_paid_calls"])
     if SEC_SOURCE_REF in connected:
         resolver = sec_ticker_resolver or (
-            lambda ticker: resolve_sec_ticker(ticker, state_dir=workspace.state_dir)
+            lambda ticker: resolve_sec_ticker(
+                ticker, state_dir=workspace.state_dir,
+                identity=_text(sec_resolver_identity, "SEC resolver identity"))
         )
         resolved: dict[str, dict[str, str]] = {}
         pending: dict[str, str] = {}
@@ -617,14 +621,16 @@ def materialize_first_mission_discovery_plans(
 
 
 def resolve_sec_ticker(
-    ticker: str, *, state_dir: str | Path, timeout_seconds: float = 15.0,
+    ticker: str, *, state_dir: str | Path, identity: str,
+    timeout_seconds: float = 15.0,
 ) -> dict[str, str]:
     """Resolve through the SEC client in a bounded, workspace-local process."""
     ticker = _text(ticker, "ticker").upper()
     try:
         result = subprocess.run(
             [sys.executable, "-m", "dalton_core.sec_company_resolver_cli",
-             "--ticker", ticker, "--state-dir", str(Path(state_dir).resolve())],
+             "--ticker", ticker, "--state-dir", str(Path(state_dir).resolve()),
+             "--identity", _text(identity, "SEC resolver identity")],
             check=False, capture_output=True, text=True, timeout=timeout_seconds,
         )
     except subprocess.TimeoutExpired as exc:
