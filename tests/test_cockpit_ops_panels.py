@@ -381,6 +381,14 @@ class PageTests(unittest.TestCase):
         self.assertIn('requestAnimationFrame(()=>lanes.scrollIntoView', self.page)
         self.assertIn('openLaneDetails,L.waiting_on_you>0', self.page)
 
+    def test_heavy_reads_are_single_flight_bounded_and_page_scoped(self) -> None:
+        self.assertIn('if(logLoad)return logLoad', self.page)
+        self.assertIn('if(current==="log")loadLog(false)', self.page)
+        self.assertIn('getJson(`/v1/cockpit/log?limit=200`,{timeoutMs:30000})', self.page)
+        self.assertIn('getJson("/v1/cockpit/overview",{timeoutMs:30000})', self.page)
+        self.assertIn('页面保留上次结果', self.page)
+        self.assertIn('b.onclick=()=>loadOverview(true)', self.page)
+
     def test_the_row_speaks_the_owner_s_language(self) -> None:
         for word in ("任务运行情况", "待补齐资料缺口", "受阻与停止记录",
                      "上周交付物验收", "运维待办"):
