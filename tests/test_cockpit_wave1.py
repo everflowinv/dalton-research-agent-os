@@ -651,7 +651,7 @@ class LaneVocabularyTests(Wave1Case):
         # would otherwise put the raw word where the sentence goes.
         from dalton_core.cockpit_plane import LANE_STATUS_NOTES
 
-        statuses = ("launched", "busy", "idle", "held", "rejected", "unconfigured",
+        statuses = ("launched", "busy", "idle", "held", "waiting", "rejected", "unconfigured",
                     "ungranted", "unavailable", "unstarted")
         for status in statuses:
             self.assertIn(status, LANE_STATUS_NOTES)
@@ -666,6 +666,19 @@ class LaneVocabularyTests(Wave1Case):
         }})["lane:mission_market_prices"]
         self.assertEqual(row["note"], "配置正常，本轮没有待办")
         self.assertIn("recently_current", row["detail"])
+
+    def test_weekly_framework_waiting_is_a_known_projected_state(self) -> None:
+        raw = (
+            "the industry framework is a weekly deliverable; "
+            "601773s of its interval remain"
+        )
+        row = self.lanes({"industry_framework": {
+            "status": "waiting", "reason": raw,
+        }})["lane:industry_framework"]
+        self.assertEqual(row["status"], "waiting")
+        self.assertEqual(row["note"], "等待下一次运行条件")
+        self.assertEqual(row["detail"], raw)
+        self.assertNotIn("状态暂不可读", row["note"])
 
     def test_typed_dispatch_and_compound_unavailable_are_readable(self) -> None:
         dispatched = self.lanes({"sales_notes_feed": {

@@ -28,7 +28,9 @@ class CockpitRuntimeTextBoundariesTests(unittest.TestCase):
             self.skipTest("node is unavailable")
         source = HTML.read_text(encoding="utf-8")
         names = (
+            "isWeeklyFrameworkInterval",
             "readableLaneDetail",
+            "laneStatus",
             "readableLogText",
             "readableReflectionAuthority",
             "displayMissionText",
@@ -49,6 +51,8 @@ class CockpitRuntimeTextBoundariesTests(unittest.TestCase):
         functions.append(overview_failure.group(0))
         program = "\n".join([
             "const UI_TEXT={};",
+            'const ENUM_LABELS={waiting:"等待中"};',
+            'const enumLabel=(value,fallback="状态暂不可读")=>ENUM_LABELS[value]||fallback;',
             "const FINAL_RESEARCH_REQUIRED=false;",
             "const displayText=value=>typeof value==='string' && Object.prototype.hasOwnProperty.call(UI_TEXT,value)?UI_TEXT[value]:value;",
             "const finalResearchText=displayText;",
@@ -95,6 +99,12 @@ class CockpitRuntimeTextBoundariesTests(unittest.TestCase):
         result = self._evaluate(f"readableLaneDetail({json.dumps(raw)})")
         self.assertEqual(result["display"], "行业分析框架按周更新，尚未到下一次更新时间。")
         self.assertEqual(result["technical"], raw)
+        row = self._evaluate(
+            f"({{status:laneStatus('waiting',{json.dumps(raw)}),"
+            f"detail:readableLaneDetail({json.dumps(raw)})}})"
+        )
+        self.assertEqual(row["status"], "等待下次更新")
+        self.assertNotIn("状态暂不可读", row["status"] + row["detail"]["display"])
 
         for invalid in (
             "the industry framework is a weekly deliverable; 0s of its interval remain",
@@ -105,6 +115,10 @@ class CockpitRuntimeTextBoundariesTests(unittest.TestCase):
                 result = self._evaluate(f"readableLaneDetail({json.dumps(invalid)})")
                 self.assertEqual(result["display"], "运行说明见技术详情。")
                 self.assertEqual(result["technical"], invalid)
+                self.assertEqual(
+                    self._evaluate(f"laneStatus('waiting',{json.dumps(invalid)})"),
+                    "等待中",
+                )
 
     def test_reviewed_lane_translation_is_matched_before_raw_is_folded(self):
         raw = "no source:prior-research lane on this writer"

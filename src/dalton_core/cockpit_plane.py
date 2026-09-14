@@ -201,6 +201,7 @@ LANE_STATUS_NOTES = {
     "busy": "上一项任务仍在运行",
     "idle": "配置正常，本轮没有待办",
     "held": "上次执行未完成，暂不重复尝试",
+    "waiting": "等待下一次运行条件",
     "rejected": "本次结果未被接受",
     "unconfigured": "当前环境尚未配置该流程",
     "ungranted": "当前研究目标尚未授权该流程写入",
