@@ -11,6 +11,13 @@ HTML = ROOT / "src" / "dalton_core" / "cockpit_control.html"
 
 
 class CockpitRuntimeTextBoundariesTests(unittest.TestCase):
+    def test_lane_terminal_words_have_visible_labels_and_failure_styling(self):
+        source = HTML.read_text(encoding="utf-8")
+        self.assertIn('terminal:"本次任务已结束"', source)
+        self.assertIn('recovery_required:"需要恢复后继续"', source)
+        self.assertIn('duplicate:"已有相同结果"', source)
+        self.assertIn('"terminal","recovery_required"', source)
+
     def _evaluate(self, expression: str):
         if shutil.which("node") is None:
             self.skipTest("node is unavailable")
@@ -20,6 +27,7 @@ class CockpitRuntimeTextBoundariesTests(unittest.TestCase):
             "readableLogText",
             "readableReflectionAuthority",
             "displayMissionText",
+            "readableEventJudgement",
         )
         functions = []
         for name in names:
@@ -32,6 +40,7 @@ class CockpitRuntimeTextBoundariesTests(unittest.TestCase):
             "const UI_TEXT={};",
             "const FINAL_RESEARCH_REQUIRED=false;",
             "const displayText=value=>typeof value==='string' && Object.prototype.hasOwnProperty.call(UI_TEXT,value)?UI_TEXT[value]:value;",
+            "const finalResearchText=displayText;",
             "const looksTechnical=value=>typeof value==='string' && /[a-z_]{4,}/.test(value);",
             *functions,
             f"console.log(JSON.stringify({expression}));",
@@ -154,9 +163,18 @@ class CockpitRuntimeTextBoundariesTests(unittest.TestCase):
         self.assertEqual(result["technical"], short)
 
     def test_mission_terms_are_localized_without_touching_other_text(self):
-        raw = "五家公司初筛（Initial Screen）与投资逻辑（Thesis）"
+        raw = "五家公司初筛（Initial Screen）与投资逻辑（Thesis）；验证 variant view"
         result = self._evaluate(f"displayMissionText({json.dumps(raw)})")
-        self.assertEqual(result, "五家公司初步筛查报告与投资论点")
+        self.assertEqual(result, "五家公司初步筛查报告与投资论点；验证 差异化观点")
+
+    def test_known_event_classifications_are_readable_and_raw_is_retained(self):
+        raw = "该事件是 qualitative、derived 层级的表述。"
+        result = self._evaluate(f"readableEventJudgement({json.dumps(raw)})")
+        self.assertEqual(result["display"], "该事件是 定性、系统推导层级的表述。")
+        self.assertEqual(result["technical"], raw)
+        unknown = "该事件是 vendor-special 层级的表述。"
+        result = self._evaluate(f"readableEventJudgement({json.dumps(unknown)})")
+        self.assertEqual(result, {"display": unknown, "technical": None})
 
 
 if __name__ == "__main__":

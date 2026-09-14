@@ -249,6 +249,24 @@ class FourPanelTests(PanelCase):
         self.assertGreaterEqual(panel["other"], 1)
         self.assertNotIn("something_new", LANE_STATUS_BUCKET_OF)
 
+    def test_terminal_recovery_and_duplicate_have_honest_buckets(self) -> None:
+        self.lanes({
+            "industry_framework": {"status": "terminal", "reason": "content refusal"},
+            "mission_document_research": {"status": "recovery_required", "reason": "recover"},
+            "mission_reflection": {"status": "duplicate", "reason": "same inputs"},
+        })
+        view = self.plane.overview()
+        rows = {row["key"]: row for row in view["activity"]["lanes"]}
+        self.assertEqual(rows["lane:industry_framework"]["note"],
+                         "本次任务已结束，需更新资料或条件后再重新运行")
+        self.assertEqual(rows["lane:mission_document_research"]["note"],
+                         "上次执行留下待恢复事项，本轮未继续处理")
+        self.assertEqual(rows["lane:mission_reflection"]["note"],
+                         "已有相同结果，无需重复生成")
+        self.assertEqual(LANE_STATUS_BUCKET_OF["terminal"], "held")
+        self.assertEqual(LANE_STATUS_BUCKET_OF["recovery_required"], "held")
+        self.assertEqual(LANE_STATUS_BUCKET_OF["duplicate"], "idle")
+
     def test_the_failure_panel_reads_the_same_ledger_as_the_ops_page(self) -> None:
         self.park()
         self.park(lane="mission_ownership", item="company:acn")

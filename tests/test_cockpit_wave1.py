@@ -643,6 +643,17 @@ class LaneVocabularyTests(Wave1Case):
         self.assertEqual(row["note"], "配置正常，本轮没有待办")
         self.assertIn("recently_current", row["detail"])
 
+    def test_guidepoint_mission_refusal_is_not_presented_as_idle(self) -> None:
+        row = self.lanes({"guidepoint_discovery": {
+            "status": "idle",
+            "reason": "all_grants_refused",
+            "skipped": [{"reason": "CoverageMissionConflict: mission marks source:guidepoint as not_connected"}],
+        }})["lane:guidepoint_discovery"]
+        self.assertEqual(row["status"], "ungranted")
+        self.assertEqual(row["note"], "当前研究任务尚未启用专家访谈资料来源")
+        self.assertIn("all_grants_refused", row["detail"])
+        self.assertIn("source:guidepoint", row["detail"])
+
     def test_a_lane_that_never_ran_says_so_rather_than_reading_as_idle(self) -> None:
         row = self.lanes({})["lane:mission_market_prices"]
         self.assertEqual(row["status"], "unstarted")

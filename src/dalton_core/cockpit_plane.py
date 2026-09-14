@@ -206,6 +206,9 @@ LANE_STATUS_NOTES = {
     "unstarted": "当前环境尚无该流程的执行记录",
     "current": "当前结果已是最新版本",
     "failed": "本次执行失败",
+    "terminal": "本次任务已结束，需更新资料或条件后再重新运行",
+    "recovery_required": "上次执行留下待恢复事项，本轮未继续处理",
+    "duplicate": "已有相同结果，无需重复生成",
 }
 # The lanes the registry knows about, named for the owner. A lane with no name
 # here still appears -- silence about a lane is exactly what this panel exists
@@ -279,7 +282,8 @@ LANE_STATUS_BUCKET_OF: dict[str, str] = {
     "idle": "idle", "current": "idle",
     "launched": "running", "busy": "running",
     "held": "held", "failed": "held", "unavailable": "held",
-    "rejected": "held",
+    "rejected": "held", "terminal": "held", "recovery_required": "held",
+    "duplicate": "idle",
 }
 
 # P17d: what a parked work item is waiting on, in the owner's language.  The
@@ -3831,6 +3835,16 @@ class CockpitPlane:
                 if reasons:
                     joined = "跳过原因：" + "；".join(sorted(set(reasons))[:3])
                     detail = f"{detail}；{joined}" if detail else joined
+            if key == "guidepoint_discovery" and (
+                detail == "all_grants_refused；跳过原因：CoverageMissionConflict: mission marks source:guidepoint as not_connected"
+                or detail == "all_grants_refused；跳过原因：CoverageMissionConflict——任务配置将 source:guidepoint 标记为 尚未连接。"
+            ):
+                # The connector can be healthy while this mission grants it no
+                # source authority.  Calling that state idle hides the action
+                # boundary from the owner; retain the driver's exact reason as
+                # detail and project only its known meaning here.
+                status = "ungranted"
+                note = "当前研究任务尚未启用专家访谈资料来源"
             rows.append({"key": f"lane:{key}", "label": label, "status": status,
                          "note": note[:200], "detail": (detail[:300] or None),
                          "company_ref": result.get("company_ref")})
