@@ -196,7 +196,7 @@ def set_shared_call_budget(config_path: Path, login: str, purpose: str,
             receipt.unlink(missing_ok=True)
             raise
         return {"status": "updated", "policy": policy,
-                "receipt": str(receipt)}
+                "receipt_ref": "shared-call-budget-revision:" + policy["content_hash"]}
 
 
 def request_set_shared_call_budget(config_path: Path, login: str,
