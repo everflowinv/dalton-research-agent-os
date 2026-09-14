@@ -41,6 +41,34 @@ from .workspace import WorkspaceError, load_workspace_manifest, path_is_declared
 SCHEMA_VERSION = "dalton-workspace-runtime-foundation-0.1"
 OWNER_ACTOR_PREFIX = "human:"
 
+
+def _awaiting_mission_output_policies(workspace_slug: str) -> dict[str, dict[str, Any]]:
+    """Valid lane-enabling policies that make no mission or method claim."""
+    from .company_dossier import validate_policy as validate_dossier_policy
+    from .industry_framework import validate_policy as validate_framework_policy
+
+    dossier = validate_dossier_policy({
+        "schema_version": "0.1",
+        "policy_ref": f"dossier-policy:{workspace_slug}:awaiting-mission",
+        "causal_chain_maps": [], "output_rubric_bindings": [],
+    })
+    framework = validate_framework_policy({
+        "schema_version": "0.1",
+        "policy_ref": f"industry-framework-policy:{workspace_slug}:awaiting-mission",
+        "causal_chain_titles": [], "driver_horizons": [],
+        "gap_checklist": [{
+            "gap_ref": f"gap:{workspace_slug}:awaiting-mission",
+            "label": "Research mission not configured",
+            "what_is_missing": "A published mission and its constitution are required before industry research can begin.",
+            "content_kind": "mission_authority", "driver_refs": [],
+            "cost_note": "No research or provider call is authorized while the workspace is awaiting its first mission.",
+            "blocks_links": [],
+        }],
+        "output_rubric_bindings": [],
+    })
+    return {"p12a-dossier-policy-v1.json": dossier,
+            "p12e-industry-framework-policy-v1.json": framework}
+
 # These are method defaults.  They contain no issuer, industry, mission or
 # inherited decision.  A mission may version them later without changing the
 # setup contract.
@@ -286,6 +314,7 @@ def install(workspace_manifest: str | Path, *, actor_ref: str) -> dict[str, Any]
     defaults = {
         "market-proxy-mappings.json": {"schema_version": "0.1", "mappings": []},
         "tracking-policy.json": TRACKING_POLICY,
+        **_awaiting_mission_output_policies(workspace.slug),
     }
     files = {name: _atomic_seed(workspace.state_dir / name, value)
              for name, value in defaults.items()}

@@ -3,6 +3,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from dalton_core.connector_governance import YFINANCE_CALENDAR_CAPABILITY_ID
 from dalton_core.coverage_admission import CoverageAdmissionAuthority
@@ -51,8 +52,25 @@ class WorkspaceRuntimeSetupTests(unittest.TestCase):
         result = install(self.manifest, actor_ref="human:owner@example.com")
         self.assertEqual(result["setup_state"], "awaiting_mission")
         for name in ("market-proxy-mappings.json", "tracking-policy.json",
-                     "research-foundation.json"):
+                     "research-foundation.json", "p12a-dossier-policy-v1.json",
+                     "p12e-industry-framework-policy-v1.json"):
             self.assertTrue((self.state / name).is_file())
+        from dalton_core.company_dossier import load_policy as load_dossier_policy
+        from dalton_core.industry_framework import load_policy as load_framework_policy
+        dossier = load_dossier_policy(self.state / "p12a-dossier-policy-v1.json")
+        framework = load_framework_policy(
+            self.state / "p12e-industry-framework-policy-v1.json")
+        self.assertEqual(dossier["causal_chain_maps"], [])
+        self.assertEqual(framework["causal_chain_titles"], [])
+        self.assertIn("awaiting-mission", dossier["policy_ref"])
+        from dalton_core.mission_dossier_lane import argv_fragment as dossier_argv
+        from dalton_core.mission_industry_framework_lane import argv_fragment as framework_argv
+        # Model setup supplies this file before the writer is rendered. The
+        # policy must already exist so both lane factories receive their path.
+        (self.state / "dossier-model-config.json").write_text("{}\n")
+        context = SimpleNamespace(state=self.state)
+        self.assertIn("--company-dossier-policy", dossier_argv(context))
+        self.assertIn("--industry-framework-policy", framework_argv(context))
         governance = json.loads((self.state / "connector-governance"
                                  / "yfinance-calendar-v1.json").read_text())
         self.assertEqual(governance["status"], "approved")
@@ -166,6 +184,12 @@ class WorkspaceRuntimeSetupTests(unittest.TestCase):
                     'draft_hash': first['draft_hash'], 'request_id': 'confirm'})
                 self.assertEqual(result['status'], 'published')
                 self.assertEqual(result['version'], 1)
+                dossier = json.loads((self.state / 'p12a-dossier-policy-v1.json').read_text())
+                framework = json.loads((self.state / 'p12e-industry-framework-policy-v1.json').read_text())
+                self.assertNotIn('awaiting-mission', dossier['policy_ref'])
+                self.assertNotIn('awaiting-mission', framework['policy_ref'])
+                self.assertTrue(dossier['causal_chain_maps'])
+                self.assertTrue(framework['causal_chain_titles'])
                 with sqlite3.connect(self.state / 'core.sqlite') as core:
                     self.assertEqual(core.execute('SELECT count(*) FROM coverage_mission_pointer').fetchone()[0], 1)
             finally:
