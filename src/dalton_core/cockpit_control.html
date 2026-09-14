@@ -1171,20 +1171,20 @@ function openOps(){const sheet=prepareReader("研究详情");
 function renderOps(sheet,r){sheet.replaceChildren(readerClose(),node("h2","运维待办"));
   if(!r.available){sheet.append(node("div",r.reason,"empty"));return}
   sheet.append(node("div",r.note,"meta"));
-  if(!r.dependencies.length)sheet.append(node("div","没有任何工作在等外部依赖。","empty"));
+  if(!r.dependencies.length)sheet.append(node("div","目前没有因外部服务不可用而暂缓的任务。","empty"));
   r.dependencies.forEach(dep=>{const s=node("section");
     s.append(node("h3",`${dep.dependency_label} · ${dep.item_count} 件`));
-    s.append(node("div",`最早 ${fmtDate(dep.first_seen)} 开始等，最近一次 ${fmtDate(dep.last_seen)}；共试了 ${dep.attempts} 次`,"hint"));
+    s.append(node("div",`首次受阻：${fmtDate(dep.first_seen)}；最近尝试：${fmtDate(dep.last_seen)}；累计尝试 ${dep.attempts} 次`,"hint"));
     const ul=node("ul",null,"latest");
     dep.items.forEach(it=>{const li=node("li");li.append(node("span",`${it.lane_label} · ${it.item_label}：${it.display_reason}`));
       const tech=technicalDetails(it.technical_details);if(tech)li.append(tech);ul.append(li)});
     s.append(ul);sheet.append(s)});
   if(r.permission_count){const s=node("section");s.append(node("h3",`待授权 · ${r.permission_count} 件`),
-    node("div","权限或治理配置改变后继续；等待期间不重复调用。","hint"));const ul=node("ul",null,"latest");
+    node("div","批准相应操作后，任务会继续执行。","hint"));const ul=node("ul",null,"latest");
     (r.permission_items||[]).forEach(it=>{const li=node("li");li.append(node("span",`${it.lane_label} · ${it.item_label}：${it.display_reason}`));
       const tech=technicalDetails(it.technical_details);if(tech)li.append(tech);ul.append(li)});s.append(ul);sheet.append(s)}
   if((r.historical_items||[]).length){const s=node("section");s.append(node("h3",`历史记录 · ${r.historical_items.length} 件`),
-    node("div","这些记录对应的配置或任务版本已经更新；保留原始失败内容供追溯，等待新运行给出最新结果。","hint"));const ul=node("ul",null,"latest");
+    node("div","这些任务对应的配置或研究目标已更新。这里保留当时的失败记录，最新结果以任务运行情况为准。","hint"));const ul=node("ul",null,"latest");
     r.historical_items.forEach(it=>{const li=node("li");li.append(node("span",`${it.lane_label||enumLabel(it.lane)} · ${it.item_label||"任务记录"}：${it.history_note}`));
       const tech=technicalDetails(it.technical_details||{item_key:it.item_key,reason:it.reason,lane:it.lane});if(tech)li.append(tech);ul.append(li)});s.append(ul);sheet.append(s)}
   if(r.terminal_count){const s=node("section");

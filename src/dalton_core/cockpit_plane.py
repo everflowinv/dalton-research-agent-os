@@ -3680,9 +3680,8 @@ class CockpitPlane:
             "historical_items": historical_items,
             "historical_count": len(historical_items),
             "class_labels": dict(FAILURE_CLASS_LABELS),
-            "note": ("挂起 = 依赖不可用，等依赖回来自动重试，不消耗重试预算；"
-                     "待授权 = 权限或治理配置改变后再继续；终态 = 这次工作已经结束，"
-                     "不会原样重试"),
+            "note": ("暂缓的任务会在相关服务恢复后自动重试；待授权的任务会在批准后继续。"
+                     "已停止的任务保留具体原因，修复问题后再安排执行。"),
         }
 
     def _panel_lanes(self, lanes: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
