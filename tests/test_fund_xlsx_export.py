@@ -45,6 +45,7 @@ class FundXlsxExportTests(unittest.TestCase):
                                            {"mission_version_ref": old["id"]}, company)
         self.assertEqual(chosen, old)
         self.assertEqual(authority.requested, old["id"])
+        self.assertNotEqual(chosen["id"], active["id"])
         with self.assertRaisesRegex(FundWorkbookExportError, "mission chain"):
             _mission_for_bound_model(authority, active,
                                      {"mission_version_ref": old["id"]}, "company:outside")

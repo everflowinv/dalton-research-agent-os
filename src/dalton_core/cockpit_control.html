@@ -622,7 +622,10 @@ async function downloadResearch(companyRef,format,button,status){
     const url=URL.createObjectURL(new Blob([bytes],{type:r.media_type}));
     const link=document.createElement("a");link.href=url;link.download=r.filename;document.body.append(link);link.click();link.remove();
     setTimeout(()=>URL.revokeObjectURL(url),1000);
-    status.textContent="文件已下载。请查看文件中的来源、预测缺口及审批状态。";
+    const m=r.manifest||{};
+    status.textContent=(format==="xlsx"&&m.model_mission_is_current===false)
+      ?`文件已下载。该模型依据 ${m.model_mission_version_ref}，当前研究任务为 ${m.active_mission_version_ref}；文件内保留完整来源与预测缺口。`
+      :"文件已下载。请查看文件中的来源、预测缺口及审批状态。";
   }catch(e){const p=readableError(e,"导出");status.textContent=p.message;const tech=technicalDetails(p.technical);if(tech)status.after(tech)}finally{button.disabled=false}
 }
 function appendProductState(d,p){

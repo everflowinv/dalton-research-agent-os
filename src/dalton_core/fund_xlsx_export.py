@@ -1734,7 +1734,7 @@ def export_company_workbook(
                     }
                     calendar_binding = {**base, "content_hash": content_hash(base)}
             valuation = ValuationSnapshotAuthority(store).latest_version(company_ref)
-            return export_fund_workbook(
+            exported = export_fund_workbook(
                 output, model=model, spec=spec, inputs=inputs,
                 valuation=valuation, valuation_scenario=valuation_scenario,
                 calendar_binding=calendar_binding,
@@ -1747,6 +1747,14 @@ def export_company_workbook(
                                      latest_annual["entity_name"]
                                      if latest_annual else None
                                  )})
+            return {**exported,
+                    "model_version_ref": model["id"],
+                    "model_version_hash": model["content_hash"],
+                    "model_mission_version_ref": model_mission["id"],
+                    "model_mission_version_hash": model_mission["content_hash"],
+                    "active_mission_version_ref": mission["id"],
+                    "active_mission_version_hash": mission["content_hash"],
+                    "model_mission_is_current": model_mission["id"] == mission["id"]}
 
 
 def main(argv: Sequence[str] | None = None) -> int:
