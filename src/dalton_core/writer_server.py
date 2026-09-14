@@ -3176,8 +3176,9 @@ class WriterServer:
             self.state_dir, service_config_path=service_path,
             cap_usd=float(budget["max_daily_cost_usd"]), dry_run=False)
         policy_ref = day_policy["policy_version_id"]
-        for cached in (self._planner_model_config, self._document_extraction_model_config):
-            if cached is not None:
+        for name, cached in vars(self).items():
+            if (name.endswith("_model_config") and isinstance(cached, dict)
+                    and "budget_policy_ref" in cached):
                 cached["budget_policy_ref"] = policy_ref
         if self._planner_model_config is not None:
             self._reload_planner_model_config()
