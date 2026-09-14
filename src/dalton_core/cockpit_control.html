@@ -456,6 +456,36 @@ function technicalDetails(value,label="技术详情"){
 function readableLaneDetail(value){
   if(typeof value!=="string"||!value)return {display:value,technical:null};
   const shown=displayText(value);
+  const exact=new Map([
+    ["跳过原因：已有四个季度","已有四个季度的数据，无需重复提取。"],
+    ["the catalog has already been read this hour","本小时已检查过模型目录，无需重复读取。"],
+    ["no source:prior-research lane on this writer","当前环境尚未接入既有研究资料来源。"],
+    ["all_grants_refused；跳过原因：CoverageMissionConflict: mission marks source:guidepoint as not_connected","当前研究任务未连接专家访谈资料来源，本轮未获取。"],
+    ["this mission covers no Hong Kong listing; the universe is company:sec-cik: names and admitting a company:hk-secucode: one is an owner decision","当前研究范围不含港股公司；如需加入港股公司，须由你另行决定。"],
+    ["this window has already been scanned","本时间段已检查过，无需重复处理。"],
+    ["every ownership filing in the window has been read；跳过原因：held","本时间段内的持仓变动申报已全部读取，无需重复处理。"],
+    ["every covered company's vendor consensus is current；跳过原因：recently_refreshed","所有覆盖公司的卖方一致预期均为最新，无需重复刷新。"],
+    ["every pending company is durably held","所有待处理公司均已记录为等待状态，本轮未重复处理。"],
+    ["every company has a current driver model","每家公司都有当前有效的驱动模型。"],
+    ["every company's sensitivity table matches its model","每家公司的敏感性分析表均与当前模型一致。"],
+    ["研究状态没有变化，没有必要重新决策","研究状态没有变化，无需重新制定计划。"],
+    ["every claim is indexed","所有研究结论均已建立索引。"],
+    ["上一轮没有可写的内容，账本也没有变化","资料和研究记录均未变化，无需生成新的初步筛查报告。"],
+    ["no covered company has an unwritten preview or calibration window open","当前没有尚未撰写的财报前瞻，也没有仍待处理的业绩对标窗口。"],
+    ["list_notes governance record is not approved; owner approval is required；governance_record=sales-notes-list-notes-v1.json","卖方销售笔记的数据访问尚未获批，需要你批准后才能读取。"],
+    ["no source:company-wiki lane on this writer","当前环境尚未接入公司知识库资料来源。"],
+    ["no reference the current version does not already cite","现有可用资料均已被当前版本引用，没有新的资料可补充。"],
+    ["this draft cites nothing the current version does not; the table has not moved and no source changed status","草稿没有新增引用，表格和资料状态也没有变化，无需生成新版本。"],
+    ["no crowd-source lane on this writer","当前环境尚未接入散户舆情或职场评价资料来源。"],
+    ["market_view_not_supported_by_cited_rows","现有引用不足以支持这项市场判断。"],
+    ["no deterministic model stage is due","当前没有到期的模型阶段任务。"],
+    ["no eligible company memo input changed","符合条件的公司备忘录资料没有变化，无需生成新版本。"],
+    ["current plan has no directed document inquiry","当前研究计划没有指定的文档查询任务。"],
+    ["annual research lane is absent","当前环境尚未配置年报专题研究流程。"],
+    ["no unstarted document research admission","当前没有尚未启动且已获准的原文专题研究任务。"],
+    ["已通过初筛的公司当前没有到期的重审任务，判断跟踪暂无新结果；另有 1 家公司需先完成初筛","已通过初步筛查的公司目前没有到期的复核任务，判断跟踪也没有新结果；另有 1 家公司需先完成初步筛查。"],
+  ]);
+  if(exact.has(value))return {display:exact.get(value),technical:value};
   const rules=[
     [/^该写作者没有source:prior-research通道。$/,"尚未接入既有研究资料来源。"],
     [/^all_grants_refused；跳过原因：CoverageMissionConflict——任务配置将 source:guidepoint 标记为 尚未连接。$/,"专家访谈资料来源尚未连接。"],
@@ -464,6 +494,10 @@ function readableLaneDetail(value){
     [/^company:[^： ]+：(?:未满足 Constitution 的 output_rubric|硬性校验失败（numbers_without_refs）)[\s\S]*$/,"研究报告未通过内容结构或数字来源检查。"],
     [/^market_view_not_supported_by_cited_rows$/,"现有引用不足以支持这项市场判断。"],
     [/^company:[^： ]+：问题一将该分类定为 (?:insufficient_evidence|contract_compounder)，但其草稿所依据的档案将该分类定为 (?:insufficient_evidence|contract_compounder)。$/,"研究草稿与现有公司档案的分类不一致，需要复核。"],
+    [/^covered-company refresh is blocked \(not_permitted=\d+\)；governance_record=(?:yfinance-daily-prices|yfinance-calendar)-v1\.json；跳过原因：not_permitted$/,"当前研究任务尚未授权此次数据刷新。"],
+    [/^company:[^:； ]+(?::[^:； ]+)+: the Constitution's output_rubric was not satisfied;[\s\S]*numbers_without_refs[\s\S]*$/,"研究报告未通过内容结构或数字来源检查。"],
+    [/^company:[^:； ]+(?::[^:； ]+)+: question one classifies this company as (?:insufficient_evidence|contract_compounder), and the dossier it was drafted from says (?:insufficient_evidence|contract_compounder)$/,"研究草稿与现有公司档案的分类不一致，需要复核。"],
+    [/^\d{4}-W\d{2} 已经有一条 reflection，且它的输入没有变$/,"本周复盘已生成，输入资料没有变化，无需重复生成。"],
   ];
   const found=rules.find(([pattern])=>pattern.test(value)||pattern.test(shown));
   if(found)return {display:found[1],technical:value};

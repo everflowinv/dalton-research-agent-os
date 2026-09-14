@@ -63,17 +63,37 @@ class CockpitRuntimeTextBoundariesTests(unittest.TestCase):
             f" readableLaneDetail({json.dumps(raw)}))"
         )
         result = self._evaluate(expression)
-        self.assertEqual(result["display"], "尚未接入既有研究资料来源。")
+        self.assertEqual(result["display"], "当前环境尚未接入既有研究资料来源。")
         self.assertEqual(result["technical"], raw)
 
         reviewed = "配置正常，本轮没有待办。"
+        future_raw = "future_internal_code:alpha"
         expression = (
-            f"(Object.assign(UI_TEXT, {{{json.dumps(raw)}:{json.dumps(reviewed)}}}),"
-            f" readableLaneDetail({json.dumps(raw)}))"
+            f"(Object.assign(UI_TEXT, {{{json.dumps(future_raw)}:{json.dumps(reviewed)}}}),"
+            f" readableLaneDetail({json.dumps(future_raw)}))"
         )
         result = self._evaluate(expression)
         self.assertEqual(result["display"], reviewed)
-        self.assertEqual(result["technical"], raw)
+        self.assertEqual(result["technical"], future_raw)
+
+    def test_all_observed_lane_templates_have_specific_plain_language(self):
+        examples = {
+            "the catalog has already been read this hour": "本小时已检查过模型目录",
+            "this mission covers no Hong Kong listing; the universe is company:sec-cik: names and admitting a company:hk-secucode: one is an owner decision": "当前研究范围不含港股公司",
+            "every ownership filing in the window has been read；跳过原因：held": "持仓变动申报已全部读取",
+            "every pending company is durably held": "已记录为等待状态",
+            "list_notes governance record is not approved; owner approval is required；governance_record=sales-notes-list-notes-v1.json": "数据访问尚未获批",
+            "no source:company-wiki lane on this writer": "尚未接入公司知识库资料来源",
+            "no crowd-source lane on this writer": "尚未接入散户舆情或职场评价资料来源",
+            "annual research lane is absent": "尚未配置年报专题研究流程",
+            "no unstarted document research admission": "尚未启动且已获准的原文专题研究任务",
+        }
+        for raw, phrase in examples.items():
+            with self.subTest(raw=raw):
+                result = self._evaluate(f"readableLaneDetail({json.dumps(raw)})")
+                self.assertIn(phrase, result["display"])
+                self.assertNotEqual(result["display"], "运行说明见技术详情。")
+                self.assertEqual(result["technical"], raw)
 
     def test_deep_insight_log_classification_is_translated_without_guessing_unknown(self):
         known = "深度认知门十二问草稿 v1，分类 turnaround，等待人裁决"
