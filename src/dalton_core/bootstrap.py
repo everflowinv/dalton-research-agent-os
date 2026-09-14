@@ -422,6 +422,7 @@ def bootstrap(
             {
                 "type": "static_dashboard",
                 "enabled": True,
+                "public_publish_enabled": False,
                 "output_path": str(paths["static_output"]),
                 "publisher": {
                     "type": "tencent_cos",

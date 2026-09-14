@@ -267,14 +267,18 @@ class StaticDashboardPlugin:
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> "StaticDashboardPlugin":
         expected = {"type", "enabled", "output_path", "publisher"}
-        if set(raw) != expected or raw.get("type") != "static_dashboard":
+        allowed = expected | {"public_publish_enabled"}
+        if (set(raw) != expected and set(raw) != allowed) or raw.get("type") != "static_dashboard":
             raise StaticDashboardError("static dashboard plugin config has an invalid shape")
         if raw.get("enabled") is not True:
             raise StaticDashboardError("disabled plugins must be omitted from service config")
         output_path = raw.get("output_path")
         if not isinstance(output_path, str) or not Path(output_path).is_absolute():
             raise StaticDashboardError("static dashboard output_path must be absolute")
-        publisher_raw = raw.get("publisher")
+        public_publish_enabled = raw.get("public_publish_enabled", False)
+        if not isinstance(public_publish_enabled, bool):
+            raise StaticDashboardError("public_publish_enabled must be a boolean")
+        publisher_raw = raw.get("publisher") if public_publish_enabled else None
         publisher = None
         if publisher_raw is not None:
             if not isinstance(publisher_raw, Mapping) or publisher_raw.get("type") != "tencent_cos":
