@@ -439,6 +439,12 @@ def legacy_unit_prompt_v04(**kwargs: Any) -> str:
                              _positive_research_purpose=False)
 
 
+def legacy_unit_prompt_v05(**kwargs: Any) -> str:
+    """Rebuild the final-text prompt before its research-purpose wording changed."""
+
+    return build_unit_prompt(**kwargs, _positive_research_purpose=False)
+
+
 # ---------------------------------------------------------------------------
 # the reply
 # ---------------------------------------------------------------------------

@@ -73,6 +73,7 @@ from .company_dossier_draft import (
     legacy_unit_prompt_v02,
     legacy_unit_prompt_v03,
     legacy_unit_prompt_v04,
+    legacy_unit_prompt_v05,
     build_verifier_prompt,
     legacy_verifier_prompt_v02,
     draft_hash,
@@ -1222,6 +1223,7 @@ def validate_formal_unit_provenance(
                         market_view_available=producer_input["parse_input"]["market_view_available"],
                         classification=producer_input["parse_input"]["classification"])
                     expected_prompts = [build_unit_prompt(**prompt_args),
+                                        legacy_unit_prompt_v05(**prompt_args),
                                         legacy_unit_prompt_v04(**prompt_args),
                                         legacy_unit_prompt_v03(**prompt_args)]
                     if unit == VARIANT_UNIT:

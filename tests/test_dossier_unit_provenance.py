@@ -13,6 +13,7 @@ from dalton_core.coverage_mission import CoverageMissionAuthority
 from dalton_core.company_dossier_draft import (
     build_unit_prompt, build_verifier_prompt, draft_hash, legacy_unit_prompt_v02,
     legacy_unit_prompt_v04,
+    legacy_unit_prompt_v05,
     parse_unit_output,
 )
 from dalton_core.store import canonical_json, content_hash
@@ -28,6 +29,38 @@ class DossierUnitProvenanceTests(unittest.TestCase):
             unit=self.unit, structure=STRUCTURE, material=material(),
             company=self.company,
         )
+        scheduler = sqlite3.connect(self.scheduler_path)
+        router = sqlite3.connect(self.router_path)
+        scheduler.execute("DELETE FROM scheduler_result_envelopes")
+        scheduler.execute("DELETE FROM scheduler_work_orders")
+        router.execute("DELETE FROM model_route_decisions")
+        self.producer_prompt = historical
+        self.producer_input["prompt_sha"] = content_hash({"prompt": historical})
+        producer_route = self._call(scheduler, router, "producer", [])
+        self._call(scheduler, router, "verifier", [producer_route])
+        scheduler.commit(); router.commit(); scheduler.close(); router.close()
+        item = self.provenance[self.unit]
+        item["producer_input"] = self.producer_input
+        item["input_fingerprint"] = content_hash(self.producer_input)
+        item["producer"] = self.calls["producer"]
+        item["verifier"] = self.calls["verifier"]
+        validate_formal_unit_provenance(
+            self.provenance, mission_ref="mission:v14", current_prior_ref=None,
+            scheduler_db=self.scheduler_path, router_db=self.router_path,
+        )
+
+    def test_final_text_prompt_before_purpose_rewording_remains_replayable(self):
+        historical = legacy_unit_prompt_v05(
+            unit=self.unit, structure=STRUCTURE, material=material(),
+            company=self.company,
+        )
+        current = build_unit_prompt(
+            unit=self.unit, structure=STRUCTURE, material=material(),
+            company=self.company,
+        )
+        self.assertNotEqual(historical, current)
+        self.assertIn("You are not advising and not recommending", historical)
+        self.assertIn("Write a factual research record", current)
         scheduler = sqlite3.connect(self.scheduler_path)
         router = sqlite3.connect(self.router_path)
         scheduler.execute("DELETE FROM scheduler_result_envelopes")
