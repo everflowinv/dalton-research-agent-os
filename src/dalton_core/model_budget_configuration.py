@@ -58,6 +58,19 @@ def _service_budget_view(directory: Path, purpose: str, binding: Mapping[str, An
         path = directory / "thesis-impact-budget-config.json"
         data = path.read_bytes() if path.exists() else b""
         config = json.loads(data) if data else {}
+        service_path = directory.parents[1] / "config" / "service.json"
+        service = json.loads(service_path.read_text())
+        thesis = service["thesis_impact"]["config"]
+        shared = None
+        if thesis.get("shared_call_budget_policy_path"):
+            from .shared_call_budget_policy import load_shared_call_budget_policy
+            shared_policy = load_shared_call_budget_policy(
+                thesis["shared_call_budget_policy_path"])
+            config = {**config, "shared_call_budget_policy_path":
+                      thesis["shared_call_budget_policy_path"]}
+            shared = {"scope":"all_workspaces",
+                      "policy_hash":shared_policy["content_hash"],
+                      "revision":shared_policy["revision"]}
         legacy = ASSESSMENT_BUDGET if purpose == "thesis_impact_assessment" else VERIFIER_BUDGET
         defaults = {key: legacy[key] for key in ("max_input_tokens", "max_output_tokens", "max_cost_usd")}
         defaults["timeout_seconds"] = legacy["max_seconds"]
@@ -65,7 +78,8 @@ def _service_budget_view(directory: Path, purpose: str, binding: Mapping[str, An
         return {"editable": True, "kind": kind, "source": str(path), "config_path": str(path),
                 "overrides": validate_budget_overrides((config.get("purpose_call_budgets") or {}).get(purpose, {})),
                 "general": validate_budget_overrides(config.get("call_budget", {})),
-                "effective": effective, "config_hash": hashlib.sha256(data).hexdigest(), "requires_restart": False}
+                "effective": effective, "config_hash": hashlib.sha256(data).hexdigest(),
+                "requires_restart": False, "shared_call_cost": shared}
     return {"editable": False, "source": binding.get("source"),
             "reason": "该环节的预算在已版本化的 Agenda policy 中配置"}
 

@@ -467,17 +467,29 @@ class ServiceBudgetTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)
             state = root / "state" / "dalton-core"; state.mkdir(parents=True)
+            from dalton_core.shared_call_budget_policy import SCHEMA_VERSION
+            from dalton_core.store import content_hash
+            shared_path = root / "shared.json"
+            shared_body = {"schema_version":SCHEMA_VERSION,"default_max_cost_usd":1.0,
+                "purpose_max_cost_usd":{},"revision":1,"prior_hash":None,
+                "updated_at":"2026-09-14T00:00:00+00:00","actor_ref":"human:owner"}
+            shared_path.write_text(json.dumps({**shared_body,
+                "content_hash":content_hash(shared_body)}))
             path = root / "config" / "service.json"; path.parent.mkdir()
             path.write_text(json.dumps({"thesis_impact": {"config": {
                 "assessment_routing_policy_ref": "policy:assess", "verifier_routing_policy_ref": "policy:verify",
-                "model_router_db": str(state / "router.sqlite")}}}))
+                "model_router_db": str(state / "router.sqlite"),
+                "shared_call_budget_policy_path":str(shared_path)}}}))
             original = path.read_bytes()
             view = call_budget_view(state, "thesis_impact_assessment")
             self.assertTrue(view["editable"], view)
+            self.assertEqual(view["effective"]["max_cost_usd"],1.0)
+            self.assertEqual(view["shared_call_cost"]["policy_hash"],
+                             json.loads(shared_path.read_text())["content_hash"])
             result = set_model_call_budget(state, purpose="thesis_impact_assessment",
                 budget={"max_cost_usd": 1}, expected_config_hash=view["config_hash"], actor_ref=OWNER)
             self.assertEqual(result["effective"]["max_cost_usd"], 1)
-            self.assertEqual(call_budget_view(state, "thesis_impact_verifier")["effective"]["max_cost_usd"], .25)
+            self.assertEqual(call_budget_view(state, "thesis_impact_verifier")["effective"]["max_cost_usd"], 1.0)
             self.assertEqual(path.read_bytes(), original)
             stored = json.loads((state / "thesis-impact-budget-config.json").read_text())
             self.assertEqual(set(stored), {"purpose_call_budgets"})
