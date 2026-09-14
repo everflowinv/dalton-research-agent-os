@@ -2672,7 +2672,7 @@ class CoverageMissionAuthority:
         return int(self.connection.execute(query, params).fetchone()[0])
 
     def already_held_documents(
-        self, *, source_ref: str | None = None, limit: int = 20
+        self, *, source_ref: str | None = None, limit: int = 100
     ) -> list[dict[str, Any]]:
         """Unsettled active-mission documents that may now be held in authority.
 
@@ -2697,7 +2697,13 @@ class CoverageMissionAuthority:
         if source_ref is not None:
             query += " AND d.source_ref=?"
             params.append(_text(source_ref, "source_ref"))
-        query += " ORDER BY d.created_at,d.record_id LIMIT ?"
+        # Explicit already-held rows are cheapest to settle.  For rows fetched
+        # after discovery, newest-first prevents a large historical candidate
+        # backlog from permanently hiding the just-completed acquisition.
+        query += (
+            " ORDER BY CASE d.status WHEN 'already_in_authority' THEN 0 ELSE 1 END,"
+            "d.updated_at DESC,d.record_id LIMIT ?"
+        )
         params.append(limit)
         return [self._document_row(row) for row in self.connection.execute(query, params).fetchall()]
 

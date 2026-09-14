@@ -79,9 +79,10 @@ def document_in_authority(connection: Any, document_ref: str) -> bool:
         "SELECT 1 FROM connector_source_envelopes e "
         "JOIN connector_invocations i ON i.connector_invocation_id=e.connector_invocation_ref "
         "JOIN connector_call_specs c ON c.call_spec_id=i.call_spec_ref "
-        "WHERE c.operation='get_document' AND c.record_json LIKE ? "
+        "WHERE c.operation='get_document' "
+        "AND json_extract(c.record_json,'$.parameters.document_ref')=? "
         "AND e.status IN ('complete','partial') LIMIT 1",
-        (f'%"{document_ref}"%',),
+        (document_ref,),
     ).fetchone()
     return row is not None
 

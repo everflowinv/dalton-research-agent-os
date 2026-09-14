@@ -252,6 +252,11 @@ ON connector_source_envelopes(
   json_extract(record_json,'$.operation'),
   json_extract(record_json,'$.retrieved_at') DESC
 );
+CREATE INDEX IF NOT EXISTS idx_connector_call_operation_document
+ON connector_call_specs(
+  operation,
+  json_extract(record_json,'$.parameters.document_ref')
+);
 
 -- The UDF is an integrity boundary for the trusted single writer, not a
 -- hostile same-UID sandbox.
