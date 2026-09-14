@@ -123,6 +123,15 @@ class WorkspaceTests(unittest.TestCase):
                     self.host, "analyst-a", 8787, RELEASE_REF, self.release,
                     shared_readonly_paths=[unsafe])
 
+    def test_shared_call_policy_requires_exact_manifest_binding(self):
+        policy = Path(self.temp.name) / "connections" / "call-policy.json"
+        workspace = self.create("shared-budget", 8791, shared_readonly_paths=[policy])
+        validate_service_mapping_paths(
+            {"bounded_planner": {"shared_call_budget_policy_path": str(policy)}}, workspace)
+        with self.assertRaisesRegex(WorkspaceError, "exact read-only"):
+            validate_service_mapping_paths(
+                {"shared_call_budget_policy_path": str(self.release / "unlisted.json")}, workspace)
+
     def test_shared_capacity_is_explicit_host_binding_or_absent_unknown(self):
         plain = self.create("analyst-a", 8787)
         self.assertIsNone(plain.shared_capacity)

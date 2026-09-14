@@ -254,6 +254,7 @@ def validate_service_mapping_paths(
         "broker_socket", "planner_broker_socket", "broker_auth_key",
         "planner_broker_auth_key", "openclaw_config_path", "tailscale_executable",
         "python_executable", "workspace_manager_config_path",
+        "shared_call_budget_policy_path",
     }
 
     def visit(node: Any, key: str = "") -> None:
@@ -267,6 +268,10 @@ def validate_service_mapping_paths(
                 visit(child, key)
         elif isinstance(node, str) and key.endswith(suffixes) and Path(node).is_absolute():
             candidate = Path(node).expanduser().resolve()
+            if key == "shared_call_budget_policy_path":
+                if candidate not in workspace.shared_readonly_paths:
+                    raise WorkspaceError("shared call budget policy requires an exact read-only binding")
+                return
             if candidate == workspace.workspace_root or candidate.is_relative_to(
                     workspace.workspace_root):
                 return
