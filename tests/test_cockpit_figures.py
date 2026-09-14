@@ -95,6 +95,12 @@ class FigureProjectionTests(unittest.TestCase):
             _figure_display_label("metric:adj-ebit-margin", source_label),
             "调整后 EBIT 利润率")
         self.assertEqual(
+            _figure_display_label("metric:cc-revenue-growth", source_label),
+            "按固定汇率计算的营收增长")
+        self.assertEqual(
+            _figure_display_label("metric:book-to-bill-ratio", source_label),
+            "订单收入比（book-to-bill）")
+        self.assertEqual(
             _figure_display_label("metric:unknown", source_label),
             "已核实指标（原始名称见技术详情）")
 

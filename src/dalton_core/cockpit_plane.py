@@ -512,7 +512,7 @@ CONFIDENCE_LABELS = {"high": "高", "medium": "中等", "low": "低"}
 
 FIGURE_METRIC_LABELS = {
     "metric:revenue": "营业收入",
-    "metric:cc-revenue-growth": "营收增长",
+    "metric:cc-revenue-growth": "按固定汇率计算的营收增长",
     "metric:adjusted-operating-margin": "调整后营业利润率",
     "metric:adj-operating-margin": "调整后营业利润率",
     "metric:adj-ebit-margin": "调整后 EBIT 利润率",
@@ -521,7 +521,7 @@ FIGURE_METRIC_LABELS = {
     "metric:adj-eps": "调整后每股收益",
     "metric:adjusted-diluted-eps-growth": "调整后稀释每股收益增长",
     "metric:bookings-growth": "签约额增长",
-    "metric:book-to-bill-ratio": "订单出账比",
+    "metric:book-to-bill-ratio": "订单收入比（book-to-bill）",
 }
 
 
@@ -540,6 +540,17 @@ def claim_period_display_label(value: Any) -> str | None:
     if not isinstance(value, str) or not value.strip():
         return None
     text = value.strip()
+    observed_exact = {
+        "1h26": "2026年上半年",
+        "1h26 to 2h26": "2026年上半年至下半年",
+        "1h26-2h26": "2026年上半年至下半年",
+        "back half of fiscal year": "财年下半年",
+        "dxc second half of fiscal 2026": "DXC 2026财年下半年",
+        "dxc second quarter of fiscal 2026": "DXC 2026财年第二季度",
+        "dxc third quarter of fiscal 2026": "DXC 2026财年第三季度",
+    }
+    if text.casefold() in observed_exact:
+        return observed_exact[text.casefold()]
     # Longer phrases precede their component words. Word boundaries prevent
     # "report date" from corrupting "report dated", or "year" from eating "years".
     phrases = {
@@ -681,6 +692,29 @@ def claim_period_display_label(value: Any) -> str | None:
         lambda m: f"{m[3]}年{month_number(m[2])}月{int(m[1])}日", text, flags=re.IGNORECASE)
     text = re.sub(r"\b(" + month + r")\s+(\d{4})\b",
         lambda m: f"{m[2]}年{month_number(m[1])}月", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"^(\d+) months ending (" + month + r")\s+(\d{1,2})$",
+        lambda m: f"截至{month_number(m[2])}月{int(m[3])}日的 {m[1]} 个月",
+        text, flags=re.IGNORECASE)
+    def half_year(raw_half: str, raw_year: str) -> str:
+        year = int(raw_year)
+        if year < 100:
+            year += 2000
+        return f"{year}年{'\u4e0a' if raw_half == '1' else '\u4e0b'}半年"
+    text = re.sub(
+        r"\b([12])H(\d{2,4})\b",
+        lambda m: half_year(m[1], m[2]), text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"\b(\d{4})\s+(?:through|to)\s+first half of\s+(\d{4})\b",
+        lambda m: f"{m[1]}年至{m[2]}年上半年", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"\b(\d{4})\s+(?:through|to)\s+(\d{4})\b",
+        lambda m: f"{m[1]}年至{m[2]}年", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"\b(DXC) second quarter of fiscal (\d{4})\b",
+        lambda m: f"{m[1]} {m[2]}财年第二季度", text, flags=re.IGNORECASE)
+    text = re.sub(r"^Back half of fiscal year$", "财年下半年", text,
+                  flags=re.IGNORECASE)
     text = re.sub(r"截至下列日期的 52 周期间： (\d{4}年\d{1,2}月\d{1,2}日)",
                   r"截至 \1 的 52 周期间", text)
     text = re.sub(r"白俄罗斯相关限制持续至下列年份年底： (\d{4})",

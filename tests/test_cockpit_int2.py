@@ -570,8 +570,11 @@ class SourcePanelTests(Int2Case):
             "unrecognized proprietary period": "期间说明见技术详情",
             "current proprietary cycle": "期间说明见技术详情",
             "vendor report": "期间说明见技术详情",
-            "12 months ending Aug. 31": "期间说明见技术详情",
-            "1H26 to 2H26": "期间说明见技术详情",
+            "12 months ending Aug. 31": "截至8月31日的 12 个月",
+            "1H26 to 2H26": "2026年上半年至下半年",
+            "2023 through first half of 2024": "2023年至2024年上半年",
+            "Back half of fiscal year": "财年下半年",
+            "DXC second quarter of fiscal 2026": "DXC 2026财年第二季度",
         }
         for raw, expected in cases.items():
             with self.subTest(raw=raw):

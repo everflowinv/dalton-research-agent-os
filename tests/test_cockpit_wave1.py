@@ -838,7 +838,10 @@ class PageVocabularyTests(unittest.TestCase):
         page = self.PAGE.read_text(encoding="utf-8")
         self.assertIn("function approvalSummary(value)", page)
         self.assertIn("thesis_version_ref:match[1]", page)
-        self.assertIn("technicalDetails(summary.technical)", page)
+        self.assertIn("const localized=FINAL_RESEARCH_KINDS", page)
+        self.assertIn("finalResearchText(it.summary):displayText(it.summary)", page)
+        self.assertIn("original_summary:it.summary", page)
+        self.assertIn("technicalDetails(summary.technical?", page)
 
     def test_the_price_block_says_when_it_is_not_a_close(self) -> None:
         self.assertIn("盘中价，当天还没收盘", self.PAGE.read_text(encoding="utf-8"))
