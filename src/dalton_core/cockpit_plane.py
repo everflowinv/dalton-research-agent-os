@@ -510,8 +510,32 @@ SOURCE_OPERATION_LABELS = {
 }
 CONFIDENCE_LABELS = {"high": "高", "medium": "中等", "low": "低"}
 
+FIGURE_METRIC_LABELS = {
+    "metric:revenue": "营业收入",
+    "metric:cc-revenue-growth": "营收增长",
+    "metric:adjusted-operating-margin": "调整后营业利润率",
+    "metric:adj-operating-margin": "调整后营业利润率",
+    "metric:adj-ebit-margin": "调整后 EBIT 利润率",
+    "metric:ebit-margin": "EBIT 利润率",
+    "metric:adjusted-eps": "调整后每股收益",
+    "metric:adj-eps": "调整后每股收益",
+    "metric:adjusted-diluted-eps-growth": "调整后稀释每股收益增长",
+    "metric:bookings-growth": "签约额增长",
+    "metric:book-to-bill-ratio": "订单出账比",
+}
 
-def _claim_period_label(value: Any) -> str | None:
+
+def _figure_display_label(metric_ref: Any, as_reported_label: Any) -> str:
+    """Name a verified figure without translating its value-bearing sentence."""
+    label = FIGURE_METRIC_LABELS.get(metric_ref)
+    if label is not None:
+        return label
+    if isinstance(as_reported_label, str) and not re.search(r"[A-Za-z]", as_reported_label):
+        return as_reported_label
+    return "已核实指标（原始名称见技术详情）"
+
+
+def claim_period_display_label(value: Any) -> str | None:
     """Render period metadata; the original value remains in technical details."""
     if not isinstance(value, str) or not value.strip():
         return None
@@ -667,9 +691,17 @@ def _claim_period_label(value: Any) -> str | None:
     # Keep familiar financial period notation and proper names, but return an
     # unrecognised period verbatim rather than translate only its generic words.
     remaining = re.sub(
-        r"\b(?:Form 10-K|Kyndryl|TTM|NTM|LTM|FY\d*|CY\d*|F?Q[1-4]\d*|F?[1-4]Q\d*)\b",
+        r"\b(?:Form 10-K|Kyndryl|TTM|NTM|LTM|FY\d{4}Q[1-4]|FY\d*|CY\d*|F?Q[1-4]\d*|F?[1-4]Q\d*)\b",
         "", text, flags=re.IGNORECASE)
-    return value.strip() if re.search(r"[A-Za-z]", remaining) else text
+    # A period can be useful even when its source used an unfamiliar phrase,
+    # but partially translating that phrase would invent a meaning.  Keep the
+    # exact source bytes in ``period`` and show this closed Chinese fallback.
+    return "期间说明见技术详情" if re.search(r"[A-Za-z]", remaining) else text
+
+
+# Compatibility for callers/tests written before the display contract was
+# made reusable by other read-only renderers.
+_claim_period_label = claim_period_display_label
 
 
 def _answer_citation_period_labels(result: Any) -> Any:
@@ -1457,7 +1489,11 @@ class CockpitPlane:
             entry["by_grade"][grade] = entry["by_grade"].get(grade, 0) + 1
             entry["latest"].append({
                 "metric_ref": row["metric_ref"], "label": row["as_reported_label"],
-                "period": row["period"], "value": row["value"], "unit": row["unit"],
+                "display_label": _figure_display_label(
+                    row["metric_ref"], row["as_reported_label"]),
+                "period": row["period"],
+                "period_label": _claim_period_label(row["period"]),
+                "value": row["value"], "unit": row["unit"],
                 "currency": row["currency"], "scale": row["scale"],
                 "grade": grade, "grade_label": FIGURE_GRADE_LABELS.get(grade, grade),
                 "document_ref": row["document_ref"], "at": row["created_at"],

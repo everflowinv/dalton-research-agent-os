@@ -83,6 +83,20 @@ class FigureProjectionTests(unittest.TestCase):
         self.assertIn("口述", shown["grade_label"])
         self.assertEqual((shown["value"], shown["currency"], shown["scale"]),
                          ("17.7", "USD", "billion"))
+        self.assertEqual(shown["display_label"], "营业收入")
+        self.assertEqual(shown["period_label"], "FY2026Q3")
+
+    def test_display_label_uses_metric_identity_not_value_bearing_source_prose(self):
+        from dalton_core.cockpit_plane import _figure_display_label
+
+        source_label = ("Adjusted EBIT was $970 million, down 4.8% "
+                        "year-over-year with a corresponding margin of")
+        self.assertEqual(
+            _figure_display_label("metric:adj-ebit-margin", source_label),
+            "调整后 EBIT 利润率")
+        self.assertEqual(
+            _figure_display_label("metric:unknown", source_label),
+            "已核实指标（原始名称见技术详情）")
 
     def test_one_company_does_not_show_another_company_numbers(self):
         self.record(ACN, figure())
@@ -120,6 +134,8 @@ class PageTests(unittest.TestCase):
                 / "cockpit_control.html").read_text(encoding="utf-8")
         self.assertIn("figures(c.figures)", html)
         self.assertIn("GRADE_LABEL", html)
+        self.assertIn('x.display_label||"已核实指标"', html)
+        self.assertIn("original_label:x.label", html)
         # A spoken figure must be visually distinguishable from a filed one, or
         # the grade is stored and never seen.
         self.assertIn("tag.spoken", html)
