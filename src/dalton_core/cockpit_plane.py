@@ -3586,7 +3586,9 @@ class CockpitPlane:
             if not prefix.rsplit(":", 1)[-1].isdigit():
                 return False
             current_scope = current_mission_version.rsplit(":", 1)[0]
-            return prefix.rsplit(":", 1)[0] == current_scope and prefix != current_mission_version
+            return (prefix.rsplit(":", 1)[0] == current_scope
+                    and int(prefix.rsplit(":", 1)[-1])
+                    < int(current_mission_version.rsplit(":", 1)[-1]))
         dependencies = []
         historical_items = []
         for bucket in backlog["dependencies"]:

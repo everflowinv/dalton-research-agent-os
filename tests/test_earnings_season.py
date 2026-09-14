@@ -240,6 +240,12 @@ class GuidanceTests(unittest.TestCase):
         self.assertEqual(answer["refs"], ["claim-version:a1", "claim-version:g1"])
         self.assertEqual(answer["classification"], "beat_and_raise")
 
+    def test_current_guidance_profile_string_classification_is_preserved(self):
+        profile = {**self.profile, "classification": "insufficient_data"}
+        answer = season.guidance_vs_actual(profile, "2026-08-31")
+        self.assertTrue(answer["available"])
+        self.assertEqual(answer["classification"], "insufficient_data")
+
     def test_no_profile_is_available_false_and_a_reason(self):
         answer = season.guidance_vs_actual(None, "2026-08-31")
         self.assertFalse(answer["available"])

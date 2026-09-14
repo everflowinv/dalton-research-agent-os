@@ -657,6 +657,9 @@ def guidance_vs_actual(
                       "statement for this company",
             "period_end": period_end, "rows": [], "classification": None, "refs": [],
         }
+    classification = profile.get("classification")
+    if isinstance(classification, Mapping):
+        classification = classification.get("style")
     events = [
         dict(event) for event in (profile.get("events") or [])
         if period_end is None or str(event.get("period") or "") == str(period_end)
@@ -666,7 +669,7 @@ def guidance_vs_actual(
             "available": False,
             "reason": "the guidance profile has no event for this period",
             "period_end": period_end, "rows": [],
-            "classification": (profile.get("classification") or {}).get("style"),
+            "classification": classification,
             "refs": [],
         }
     rows: list[dict[str, Any]] = []
@@ -697,7 +700,7 @@ def guidance_vs_actual(
         "period_end": period_end,
         "rows": rows,
         "settled": len(settled),
-        "classification": (profile.get("classification") or {}).get("style"),
+        "classification": classification,
         "refs": sorted({ref for row in rows for ref in row["refs"]}),
     }
 

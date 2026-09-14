@@ -193,6 +193,7 @@ class OpsBacklogTests(PanelCase):
         self.park(item=f"coverage-mission-version:us-it-services:{version - 1}|old")
         self.park(item=f"coverage-mission-version:us-it-services:{version}|current")
         self.park(item="coverage-mission-version:other-scope:1|other")
+        self.park(item=f"coverage-mission-version:us-it-services:{version + 1}|future")
         self.park(item="coverage-mission-version:us-it-services:not-a-version|unknown")
         backlog = self.plane.ops_backlog()
         active = {item["item_key"] for bucket in backlog["dependencies"]
@@ -201,6 +202,7 @@ class OpsBacklogTests(PanelCase):
         self.assertEqual(active, {
             f"coverage-mission-version:us-it-services:{version}|current",
             "coverage-mission-version:other-scope:1|other",
+            f"coverage-mission-version:us-it-services:{version + 1}|future",
             "coverage-mission-version:us-it-services:not-a-version|unknown",
         })
         self.assertEqual(historical,
