@@ -52,7 +52,9 @@ def ephemeral_call(token_config: str | Path, socket_path: str | Path, *, actor_r
     os.chmod(lock_path, 0o600)
     try:
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
-        principals = load_principals(config)
+        legacy_control = "DALTON_WORKSPACE_MANIFEST" not in os.environ
+        principals = load_principals(
+            config, allow_managed_operation_subset=legacy_control)
         if any(principal.resolved_actor_ref.startswith("human:") for principal in principals.values()):
             raise GovernanceCliError("another ephemeral human principal is already active")
         token = secrets.token_urlsafe(48)
@@ -76,7 +78,8 @@ def ephemeral_call(token_config: str | Path, socket_path: str | Path, *, actor_r
             timeout = 90 if operation == "generate_document_extraction" else 10
             return WriterClient(str(socket), token, timeout=timeout).call(operation, dict(params))
         finally:
-            current = load_principals(config)
+            current = load_principals(
+                config, allow_managed_operation_subset=legacy_control)
             current.pop(principal_id, None)
             replace_token_config(config, list(current.values()))
             mode = stat.S_IMODE(config.stat().st_mode)

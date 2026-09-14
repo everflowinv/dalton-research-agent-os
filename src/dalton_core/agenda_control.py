@@ -13,6 +13,7 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import re
 import secrets
 import threading
@@ -247,7 +248,14 @@ class AgendaControlPlane:
         self.research_task_grant = research_task_grant
         principals = None
         if dashboard_client is None or timeout_client is None:
-            principals = load_principals(config.token_config)
+            principals = load_principals(
+                config.token_config,
+                # A control-only rolling upgrade on the original Core may read
+                # managed principals created by its older writer.  A workspace
+                # runtime remains exact because its manifest is always bound.
+                allow_managed_operation_subset=(
+                    "DALTON_WORKSPACE_MANIFEST" not in os.environ),
+            )
         if dashboard_client is None:
             principal = (principals or {}).get("dashboard-control")
             if principal is None:
