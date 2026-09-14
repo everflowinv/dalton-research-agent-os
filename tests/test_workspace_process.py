@@ -16,6 +16,7 @@ from dalton_core.macos_launchagent import render
 from dalton_core.workspace import create_workspace_manifest
 from dalton_core.workspace_process import install_workspace, workspace_plan
 from dalton_core.workspace_release import install_release, validate_release
+from dalton_core.store import content_hash
 from dalton_core.bootstrap import bootstrap
 from dalton_core.service import ServiceConfig
 from dalton_core.workspace_control_setup import configure_workspace_control
@@ -116,6 +117,62 @@ class WorkspaceLaunchAgentTests(unittest.TestCase):
                 if path.is_file()
             }
             self.assertEqual(release_before, release_after)
+
+    def test_dependency_lock_creates_distinct_v02_release_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            wheel = root / "dalton-test-py3-none-any.whl"
+            digest = stub_wheel(wheel)
+            wheelhouse = root / "wheelhouse"
+            wheelhouse.mkdir()
+            dependency = wheelhouse / "example_dependency-1.0-py3-none-any.whl"
+            dependency.write_bytes(b"immutable dependency wheel")
+            dependency_hash = __import__("hashlib").sha256(dependency.read_bytes()).hexdigest()
+            lock_body = {
+                "schema_version": "dalton-workspace-dependencies-0.1",
+                "wheels": [{"filename": dependency.name, "sha256": dependency_hash}],
+            }
+            lock = root / "dependencies.lock.json"
+            lock.write_text(json.dumps({**lock_body, "content_hash": content_hash(lock_body)}))
+
+            def install_dependency(venv, wheels):
+                self.assertEqual(wheels, [dependency.resolve()])
+                marker = venv / "lib/python3.14/site-packages/example_dependency.py"
+                marker.parent.mkdir(parents=True, exist_ok=True)
+                marker.write_text("VERSION = '1.0'\n")
+
+            with mock.patch("dalton_core.workspace_release._install_dependencies",
+                            side_effect=install_dependency):
+                result = install_release(
+                    root, wheel, digest, installer=stub_install,
+                    wheelhouse=wheelhouse, dependency_lock=lock)
+            self.assertEqual(result["schema_version"], "0.2")
+            self.assertNotEqual(result["release_ref"], "release:sha256:" + digest)
+            identity = result["release_ref"].removeprefix("release:sha256:")
+            self.assertEqual(validate_release(result["release_path"], identity)["schema_version"],
+                             "0.2")
+            with self.assertRaisesRegex(Exception, "expected identity"):
+                validate_release(result["release_path"], digest)
+
+    def test_dependency_lock_refuses_missing_pair_and_changed_wheel(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            wheel = root / "dalton-test-py3-none-any.whl"
+            digest = stub_wheel(wheel)
+            with self.assertRaisesRegex(Exception, "supplied together"):
+                install_release(root, wheel, digest, installer=stub_install,
+                                wheelhouse=root)
+            wheelhouse = root / "wheelhouse"
+            wheelhouse.mkdir()
+            dependency = wheelhouse / "dep-1-py3-none-any.whl"
+            dependency.write_bytes(b"changed")
+            body = {"schema_version": "dalton-workspace-dependencies-0.1",
+                    "wheels": [{"filename": dependency.name, "sha256": "0" * 64}]}
+            lock = root / "lock.json"
+            lock.write_text(json.dumps({**body, "content_hash": content_hash(body)}))
+            with self.assertRaisesRegex(Exception, "differs from lock"):
+                install_release(root, wheel, digest, installer=stub_install,
+                                wheelhouse=wheelhouse, dependency_lock=lock)
 
     def test_port_collision_is_rejected_before_any_plist_or_log_write(self):
         with tempfile.TemporaryDirectory() as directory:

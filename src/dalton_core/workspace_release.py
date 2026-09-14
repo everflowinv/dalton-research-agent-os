@@ -19,6 +19,7 @@ from .store import canonical_json, content_hash
 from .workspace import WorkspaceError
 
 MARKER = "dalton-release.json"
+DEPENDENCY_LOCK_SCHEMA = "dalton-workspace-dependencies-0.1"
 
 
 def _sha(path: Path) -> str:
@@ -53,17 +54,34 @@ def validate_release(path: str | Path, expected_wheel_sha256: str) -> dict[str, 
         record = json.loads(marker.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise WorkspaceError("release is incomplete or has no integrity manifest") from exc
-    if not isinstance(record, dict) or set(record) != {
-        "schema_version", "release_ref", "wheel_sha256", "files", "content_hash"
-    }:
+    fields_01 = {"schema_version", "release_ref", "wheel_sha256", "files", "content_hash"}
+    fields_02 = fields_01 | {"dependency_lock_hash", "dependency_wheels"}
+    if (not isinstance(record, dict) or record.get("schema_version") not in {"0.1", "0.2"}
+            or set(record) != (fields_01 if record.get("schema_version") == "0.1" else fields_02)):
         raise WorkspaceError("release integrity manifest has an invalid closed shape")
     body = {key: value for key, value in record.items() if key != "content_hash"}
     if record["content_hash"] != content_hash(body):
         raise WorkspaceError("release integrity manifest hash mismatch")
-    if record["schema_version"] != "0.1" or record["wheel_sha256"] != expected_wheel_sha256:
+    expected_ref = f"release:sha256:{expected_wheel_sha256}"
+    if record["release_ref"] != expected_ref:
+        raise WorkspaceError("release ref does not match expected identity")
+    if record["schema_version"] == "0.1" and record["wheel_sha256"] != expected_wheel_sha256:
         raise WorkspaceError("release wheel identity mismatch")
-    if record["release_ref"] != f"release:sha256:{expected_wheel_sha256}":
-        raise WorkspaceError("release ref does not match wheel hash")
+    if record["schema_version"] == "0.2":
+        lock_hash = record["dependency_lock_hash"]
+        wheels = record["dependency_wheels"]
+        combined = content_hash({"wheel_sha256": record["wheel_sha256"],
+                                 "dependency_lock_hash": lock_hash})
+        if combined != expected_wheel_sha256:
+            raise WorkspaceError("release dependency identity mismatch")
+        if (not isinstance(lock_hash, str) or len(lock_hash) != 64
+                or any(char not in "0123456789abcdef" for char in lock_hash)
+                or not isinstance(wheels, list) or not wheels
+                or any(not isinstance(row, dict) or set(row) != {"filename", "sha256"}
+                       for row in wheels)
+                or lock_hash != content_hash({
+                    "schema_version": DEPENDENCY_LOCK_SCHEMA, "wheels": wheels})):
+            raise WorkspaceError("release dependency declaration is invalid")
     if record["files"] != _inventory(venv):
         raise WorkspaceError("release files are incomplete or corrupt")
     return record
@@ -89,6 +107,51 @@ def _default_installer(wheel: Path, venv: Path) -> None:
         ],
         check=True, env=environment,
     )
+
+
+def _dependency_lock(path: Path, wheelhouse: Path) -> tuple[dict[str, Any], list[Path]]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise WorkspaceError("dependency lock is unavailable or invalid") from exc
+    if (not isinstance(value, dict) or set(value) != {
+            "schema_version", "wheels", "content_hash"}):
+        raise WorkspaceError("dependency lock has an invalid closed shape")
+    body = {"schema_version": value["schema_version"], "wheels": value["wheels"]}
+    if (value["schema_version"] != DEPENDENCY_LOCK_SCHEMA
+            or value["content_hash"] != content_hash(body)
+            or not isinstance(value["wheels"], list) or not value["wheels"]):
+        raise WorkspaceError("dependency lock identity or hash is invalid")
+    if not wheelhouse.is_dir():
+        raise WorkspaceError("dependency wheelhouse is unavailable")
+    resolved: list[Path] = []
+    seen: set[str] = set()
+    for row in value["wheels"]:
+        if (not isinstance(row, dict) or set(row) != {"filename", "sha256"}
+                or not isinstance(row["filename"], str)
+                or Path(row["filename"]).name != row["filename"]
+                or not row["filename"].endswith(".whl") or row["filename"] in seen
+                or not isinstance(row["sha256"], str) or len(row["sha256"]) != 64):
+            raise WorkspaceError("dependency lock wheel entry is invalid")
+        candidate = wheelhouse / row["filename"]
+        if not candidate.is_file() or candidate.is_symlink() or _sha(candidate) != row["sha256"]:
+            raise WorkspaceError(f"dependency wheel differs from lock: {row['filename']}")
+        seen.add(row["filename"])
+        resolved.append(candidate)
+    if [row["filename"] for row in value["wheels"]] != sorted(seen):
+        raise WorkspaceError("dependency lock wheels must be sorted by filename")
+    return value, resolved
+
+
+def _install_dependencies(venv: Path, wheels: list[Path]) -> None:
+    environment = dict(os.environ)
+    for key in ("PYTHONPATH", "PYTHONHOME", "DALTON_WORKSPACE_MANIFEST"):
+        environment.pop(key, None)
+    subprocess.run([
+        str(venv / "bin" / "python"), "-m", "pip", "install",
+        "--disable-pip-version-check", "--no-index", "--no-deps",
+        *(str(path) for path in wheels),
+    ], check=True, env=environment)
 
 
 def _relocate(staging: Path, final: Path) -> None:
@@ -129,6 +192,8 @@ def install_release(
     wheel_sha256: str,
     *,
     installer: Callable[[Path, Path], None] = _default_installer,
+    wheelhouse: str | Path | None = None,
+    dependency_lock: str | Path | None = None,
 ) -> dict[str, Any]:
     host = Path(host_root).expanduser().resolve()
     wheel = Path(wheel_path).expanduser().resolve()
@@ -138,20 +203,34 @@ def install_release(
         raise WorkspaceError("wheel_sha256 must be lowercase SHA-256")
     if _sha(wheel) != wheel_sha256:
         raise WorkspaceError("wheel hash mismatch")
+    if (wheelhouse is None) != (dependency_lock is None):
+        raise WorkspaceError("wheelhouse and dependency_lock must be supplied together")
+    dependency_manifest = None
+    dependency_wheels: list[Path] = []
+    identity = wheel_sha256
+    if dependency_lock is not None:
+        dependency_manifest, dependency_wheels = _dependency_lock(
+            Path(dependency_lock).expanduser().resolve(),
+            Path(wheelhouse).expanduser().resolve())
+        identity = content_hash({"wheel_sha256": wheel_sha256,
+                                 "dependency_lock_hash": dependency_manifest["content_hash"]})
     releases = host / "runtime" / "releases"
     releases.mkdir(mode=0o700, parents=True, exist_ok=True)
     lock_path = releases / ".install.lock"
     descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
     with os.fdopen(descriptor, "r+") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        target = releases / wheel_sha256 / "venv"
+        target = releases / identity / "venv"
         if target.exists() or target.is_symlink():
-            record = validate_release(target, wheel_sha256)
-            return {"status": "existing", "release_path": str(target), **record}
+            record = validate_release(target, identity)
+            return {"status": "existing", "release_path": str(target),
+                    "release_hash": identity, **record}
         staging_root = Path(tempfile.mkdtemp(prefix=f".{wheel_sha256}.", dir=releases))
         try:
             staging = staging_root / "venv"
             installer(wheel, staging)
+            if dependency_wheels:
+                _install_dependencies(staging, dependency_wheels)
             _relocate(staging, target)
             _verify_wheel_payload(wheel, staging)
             files = _inventory(staging)
@@ -164,20 +243,24 @@ def install_release(
                 for path in executables
             ):
                 raise WorkspaceError("installed release is incomplete")
-            body = {
-                "schema_version": "0.1",
-                "release_ref": f"release:sha256:{wheel_sha256}",
+            body: dict[str, Any] = {
+                "schema_version": "0.2" if dependency_manifest is not None else "0.1",
+                "release_ref": f"release:sha256:{identity}",
                 "wheel_sha256": wheel_sha256,
                 "files": files,
             }
+            if dependency_manifest is not None:
+                body["dependency_lock_hash"] = dependency_manifest["content_hash"]
+                body["dependency_wheels"] = list(dependency_manifest["wheels"])
             record = {**body, "content_hash": content_hash(body)}
             (staging / MARKER).write_text(canonical_json(record) + "\n", encoding="utf-8")
             os.chmod(staging / MARKER, 0o600)
             destination = target.parent
             destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             os.replace(staging_root, destination)
-            validate_release(target, wheel_sha256)
-            return {"status": "installed", "release_path": str(target), **record}
+            validate_release(target, identity)
+            return {"status": "installed", "release_path": str(target),
+                    "release_hash": identity, **record}
         except BaseException:
             shutil.rmtree(staging_root, ignore_errors=True)
             raise
@@ -188,8 +271,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--host-root", type=Path, required=True)
     parser.add_argument("--wheel", type=Path, required=True)
     parser.add_argument("--wheel-sha256", required=True)
+    parser.add_argument("--wheelhouse", type=Path)
+    parser.add_argument("--dependency-lock", type=Path)
     args = parser.parse_args(argv)
-    print(json.dumps(install_release(args.host_root, args.wheel, args.wheel_sha256), sort_keys=True))
+    print(json.dumps(install_release(
+        args.host_root, args.wheel, args.wheel_sha256,
+        wheelhouse=args.wheelhouse, dependency_lock=args.dependency_lock), sort_keys=True))
     return 0
 
 
