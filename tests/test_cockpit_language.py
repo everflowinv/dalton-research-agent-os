@@ -270,7 +270,7 @@ class CockpitLanguageTests(unittest.TestCase):
         self.assertIn('if(approvalTextChanged&&approvalCards.size)loadApprovals()', text)
         self.assertIn('existing.fingerprint===fingerprint||existing.pending', text)
         self.assertIn('node("span",displayText(String(v)))', text)
-        self.assertIn('finalResearchText(summary.display):displayText(summary.display)', text)
+        self.assertIn('finalResearchText(it.summary):displayText(it.summary),summary=approvalSummary(localized)', text)
 
     def test_final_research_prose_waits_for_exact_reviewed_text(self) -> None:
         text = HTML.read_text(encoding="utf-8")

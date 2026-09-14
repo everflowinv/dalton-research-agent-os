@@ -109,7 +109,7 @@ class CockpitRuntimeTextBoundariesTests(unittest.TestCase):
             "governance_record=yfinance-daily-prices-v1.json；跳过原因：not_permitted"
         )
         result = self._evaluate(f"readableLaneDetail({json.dumps(daily_prices)})")
-        self.assertEqual(result["display"], "每日行情数据源已配置，但治理记录尚未正式批准。")
+        self.assertEqual(result["display"], "每日行情数据源已配置，等待批准使用。")
         self.assertEqual(result["technical"], daily_prices)
 
         calendar = (
@@ -117,7 +117,7 @@ class CockpitRuntimeTextBoundariesTests(unittest.TestCase):
             "治理记录：yfinance-calendar-v1.json；跳过原因：not_permitted。"
         )
         result = self._evaluate(f"readableLaneDetail({json.dumps(calendar)})")
-        self.assertEqual(result["display"], "行情日历数据源已配置，但治理记录尚未正式批准。")
+        self.assertEqual(result["display"], "财报与分红日程的数据源已配置，等待批准使用。")
         self.assertEqual(result["technical"], calendar)
 
     def test_deep_insight_log_classification_is_translated_without_guessing_unknown(self):

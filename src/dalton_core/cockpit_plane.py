@@ -358,7 +358,7 @@ def _ops_waiting_reason(reason: Any, *, permission: bool = False) -> str:
         return "可用模型链均未成功完成本次请求"
     if permission or "governance" in text and "not approved" in text:
         if "yfinance-calendar" in text:
-            return "行情日历数据源尚未获得使用批准"
+            return "财报与分红日程的数据源尚未获得使用批准"
         if "analyst-estimates" in text:
             return "卖方一致预期数据源尚未获得使用批准"
         if "daily-prices" in text:
@@ -552,7 +552,7 @@ REVIEWED_CLAIM_PERIOD_LABELS = {'1990 to April 2020 onward': '1990年至2020年4
  '2030 time frame': '以2030年为时间范围',
  '2H and fiscal 2026': '下半年及2026财年',
  '2H2026 to early 2027': '2026年下半年至2027年初',
- '2Q and second half, exit rate into next year': '第二季度及下半年，期末水平延续至下一年度',
+ '2Q and second half, exit rate into next year': '第二季度及下半年，以及进入下一年度时的期末水平',
  '2Q results update': '第二季度业绩更新期',
  '3-6 years (unspecified horizon)': '3至6年（具体起止时间未说明）',
  '3Q peak': '第三季度峰值',

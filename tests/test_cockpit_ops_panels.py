@@ -173,7 +173,7 @@ class OpsBacklogTests(PanelCase):
                   reason=raw)
         item = self.plane.ops_backlog()["permission_items"][0]
         self.assertEqual(item["item_label"], "ACN · Accenture")
-        self.assertEqual(item["display_reason"], "行情日历数据源尚未获得使用批准")
+        self.assertEqual(item["display_reason"], "财报与分红日程的数据源尚未获得使用批准")
         self.assertEqual(item["technical_details"]["reason"], raw)
 
     def test_ops_renderer_uses_display_fields_and_folds_raw_values(self) -> None:

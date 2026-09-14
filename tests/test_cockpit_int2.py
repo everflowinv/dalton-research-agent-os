@@ -591,7 +591,7 @@ class SourcePanelTests(Int2Case):
                 self.assertNotEqual(display, "期间说明见技术详情")
         expected = {
             "2Q and second half, exit rate into next year":
-                "第二季度及下半年，期末水平延续至下一年度",
+                "第二季度及下半年，以及进入下一年度时的期末水平",
             "around 08-26": "约在 08-26 前后（日期格式未注明）",
             "current (FY2024 exit)": "当前（2024财年末水平）",
             "the period of the realignment": "业务调整期间",
