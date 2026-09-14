@@ -9,6 +9,12 @@ from dalton_core.cockpit_model import unwrap_json_object
 from dalton_core.ask_answer import parse_answer
 from dalton_core.store import canonical_json
 
+def shown_from_prompt(prompt):
+ import re
+ blocks={'C':'claims','D':'dossier','B':'debates','F':'forecast','V':'valuation','P':'price','S':'street','K':'calendar','E':'events','G':'judgements','R':'reflections','T':'thesis','N':'feedback'}
+ return [{'tag':tag,'statement':statement,'ref':None,'period':period or None,'company':'','at':'','block':blocks[tag[0]],'recovered_prompt_detail':detail or None}
+         for tag,period,detail,statement in re.findall(r'^([CDBFVPSKEGRTN]\d+)(?: \[([^]]+)\])?(?: （([^）]*)）)? (.*)$',prompt,re.M)]
+
 def load(p):return json.loads(p.read_text())
 def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
 def main():
@@ -37,10 +43,7 @@ def main():
  # Reconstruct only fields that the immutable prompt actually proves.  Tags and
  # their displayed text are authority; historical refs/counts/policy state were
  # never persisted and are deliberately marked unavailable.
- import re
- shown=[]
- for tag,period,statement in re.findall(r'^([A-Z]\d+)(?: \[([^\]]+)\])?(?: \([^\n]*\))? (.+)$',prompt,re.M):
-  shown.append({'tag':tag,'statement':statement,'ref':None,'period':period or None,'company':'','at':'','block':'recovered_prompt'})
+ shown=shown_from_prompt(prompt)
  context={'shown':shown,'wants_market_vs_us':'「看法」类' in prompt}
  parsed=parse_answer(raw_answer,context=context)
  budget_db=a.scheduler_db.with_name('thesis-impact-budget.sqlite'); bc=sqlite3.connect(f'file:{budget_db.resolve()}?mode=ro',uri=True); cost=bc.execute('SELECT s.actual_micros FROM thesis_impact_day_settlements s JOIN thesis_impact_day_admissions a ON a.admission_id=s.admission_id WHERE a.work_order_ref=?',(formal[3],)).fetchall();bc.close()
@@ -59,11 +62,13 @@ def main():
   if existing not in (plan,{**plan,'status':'complete'}):raise SystemExit('recovery output is occupied by different bytes')
   if existing.get('status')=='complete': print(canonical_json(existing));return
  if not a.execute:return
- if row_is_recovered:
+ def finalized(row_json):
   if not a.receipt.is_file() or a.receipt.is_symlink():raise SystemExit('recovered job has no exact durable recovery receipt')
-  receipt=load(a.receipt); result_sha=hashlib.sha256(row['result_json'].encode()).hexdigest()
+  receipt=load(a.receipt); result_sha=hashlib.sha256(row_json.encode()).hexdigest()
   if receipt.get('job_id')!=a.job_id or receipt.get('failed_job_hash')!=a.expected_failed_hash or receipt.get('result_sha256')!=result_sha:raise SystemExit('recovered job differs from recovery receipt')
-  complete={**plan,'status':'complete','result_sha256':result_sha,'recovery_receipt_sha256':sha(a.receipt)};tmp=a.output.with_suffix(a.output.suffix+'.tmp');tmp.write_text(canonical_json(complete)+'\n');osmod.chmod(tmp,0o600);osmod.replace(tmp,a.output);parent=osmod.open(a.output.parent,osmod.O_RDONLY);osmod.fsync(parent);osmod.close(parent);print(canonical_json(complete));return
+  complete={**plan,'status':'complete','result_sha256':result_sha,'recovery_receipt_sha256':sha(a.receipt)};tmp=a.output.with_suffix(a.output.suffix+'.tmp');tmp.write_text(canonical_json(complete)+'\n');osmod.chmod(tmp,0o600);osmod.replace(tmp,a.output);parent=osmod.open(a.output.parent,osmod.O_RDONLY);osmod.fsync(parent);osmod.close(parent);print(canonical_json(complete))
+ if row_is_recovered:
+  finalized(row['result_json']);return
  mission=load(a.mission)
  review=run(product,mission=mission,request_id=json.loads(row['request_json'])['request_id'],checker_config=a.checker_config,brain_config=a.brain_config,verifier_config=a.verifier_config,scheduler_db=a.scheduler_db,producer_route_decision_ref=a.producer_route_decision_ref,artifact_dir=a.artifact_dir,brain_recovery={'result_envelope_ref':a.brain_result_envelope_ref,'raw_sha256':a.brain_raw_sha256})
  if review.get('status')!='ready_for_publication':raise SystemExit('recovered language review is not publishable')
@@ -74,6 +79,6 @@ def main():
  except Exception:
   done=rw.execute("select result_json from cockpit_jobs where job_id=? and status='done'",(a.job_id,)).fetchone()
   if not done or not a.receipt.exists(): rw.close();raise
-  out={'status':'done','job_id':a.job_id,'result_sha256':hashlib.sha256(done[0].encode()).hexdigest(),'recovery_receipt_sha256':sha(a.receipt)}
+  finalized(done[0]);rw.close();return
  rw.close();complete={**plan,**out,'status':'complete'};tmp=a.output.with_suffix(a.output.suffix+'.tmp');tmp.write_text(canonical_json(complete)+'\n');osmod.chmod(tmp,0o600);osmod.replace(tmp,a.output);parent=osmod.open(a.output.parent,osmod.O_RDONLY);osmod.fsync(parent);osmod.close(parent);print(canonical_json(complete))
 if __name__=='__main__':main()
