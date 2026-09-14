@@ -132,7 +132,10 @@ class WorkspaceManagerTests(unittest.TestCase):
                                         policy["content_hash"])
         self.assertEqual(result["policy"]["purpose_max_cost_usd"], {"draft": .8})
         self.assertEqual(result["policy"]["revision"], 2)
-        self.assertTrue(Path(result["receipt"]).is_file())
+        self.assertEqual(result["receipt_ref"],
+                         "shared-call-budget-revision:" + result["policy"]["content_hash"])
+        self.assertTrue((self.root / "fleet" / "shared-call-budget-revisions" /
+                         (result["policy"]["content_hash"] + ".json")).is_file())
         with self.assertRaises(WorkspaceError):
             set_shared_call_budget(self.path, "owner@example.com", "draft", .7,
                                    policy["content_hash"])

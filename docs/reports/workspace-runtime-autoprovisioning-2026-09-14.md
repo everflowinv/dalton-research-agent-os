@@ -22,18 +22,18 @@ Switching environments navigates to another Cockpit URL. It does not send a stop
 
 The owner-authorized creation workflow registers local use of already connected sources. It does not enable unrelated external integrations or copy outbound message destinations. Mission publication remains an explicit confirmation in the new environment. Ambiguous goals remain reviewable drafts and identify the missing scope.
 
-Budget usage stays local. Shared provider rate limits still apply. Existing shared capacity policy bindings can be configured by the host operator and are propagated into new manifests; automatic creation does not create unlimited quotas or promise fair scheduling across provider accounts.
+Budget usage stays local. Model call-cost ceilings use one host-owned `shared_call_budget_policy_path`, with a default of USD 1 and optional per-purpose overrides. Existing workspaces read the policy on every call, and templates pin the same policy path for future workspaces. An owner edit from Cockpit uses the host manager with compare-and-swap and a revision receipt; research writers only read the shared file. Token, timeout and per-run settings remain local. Shared provider rate limits still apply. Existing shared capacity policy bindings can be configured by the host operator and are propagated into new manifests; automatic creation does not create unlimited quotas or promise fair scheduling across provider accounts.
 
 ## Automatic setup chain
 
 `workspace_manager` validates the owner-only manager configuration and exact template hashes, reserves a unique UUID/port, then runs:
 
 1. `workspace_creation.create_blank_workspace`: local schema, token and namespace initialization.
-2. `workspace_model_setup.install_runtime_template`: the 21 existing model role configurations, local router declarations and budget policy declarations; broker socket/key remain shared references.
-3. `workspace_runtime_setup.install`: generic research playbook, method foundation, tracking defaults and local connector governance.
-4. `workspace_control_setup.configure_workspace_control`: owner identity and Cockpit model binding.
-5. `workspace_service_setup.install_service_template`: existing planner and extraction runtime settings, local paths, research review, document reading and automatic model catalog refresh.
-6. Namespaced LaunchAgent installation, startup, workspace identity/blank-state checks, and a private Tailscale Serve route.
+2. `workspace_control_setup.configure_workspace_control`: base owner identity, local control configuration and bootstrap.
+3. `workspace_model_setup.install_runtime_template`: the 21 existing model role configurations, local router declarations and budget policy declarations; broker socket/key remain shared references.
+4. `workspace_runtime_setup.install`: generic research playbook, method foundation, tracking defaults, output policy placeholders and local connector governance.
+5. `workspace_service_setup.install_service_template`: planner policy bound to the installed local model configuration, extraction settings, research review and document reading; incremental bootstrap adds the required managed principals while preserving existing token values.
+6. Namespaced LaunchAgent installation, startup, Cockpit identity/blank-state checks, authenticated writer read RPC, controller heartbeat/tick checks, and a private Tailscale Serve route.
 
 Initial goal planning uses a separately bounded workspace setup context. Confirmation travels through the normal writer governance operation `publish_first_workspace_mission`, which checks its own workspace and local foundation before creating the mandate, driver pack, constitution and coverage mission. Publication also binds local discovery selectors and dossier/framework policies to the new mission. SEC issuer resolution receives the configured operator identity explicitly. Subsequent execution uses the existing controller and research lanes.
 
@@ -57,3 +57,9 @@ Use a short fleet root on macOS, such as `~/.dalton`, because Unix socket paths 
 `scripts/run_workspace_runtime_acceptance.py` starts two real writer/controller process sets with independent state and the same test ticker. It uses the production LaunchAgent renderer and verifies research stage records, successful discovery tickets and discovered source documents in both databases, continuing A ticks while B is created/running, and rejection of cross-environment tokens, child paths and mission publication. Source discovery uses a local rehearsal subprocess with no external provider calls; deployment checks installed configurations, catalog synchronization and live processes. Provider connectivity is observed through governed mission runs.
 
 Focused regressions cover template tampering, path escape, namespace mismatches, first-goal planning/publication/replay, blank-state behavior, release inventory and frontend JavaScript. Browser and installed-release results are recorded in the deployment receipt, separately from this source-level procedure.
+
+## Retrieval and progress diagnostics
+
+A discovered document is a candidate, not an acquired or fully read document. Check company/type/period relevance before spending retrieval calls; paginate provider bodies completely before marking acquisition complete. Use the OpenClaw scripts AlphaEngine MCP, with the company query and provider category (for example `Accenture` and `meeting_minutes`), rather than the retired CLI. Expired provider cursors require a fresh first-page request.
+
+A scheduler tick alone does not prove forward progress. Inspect acquisition tickets, extraction failure reasons and read-completion proofs against the actual company checklist. Long connector work must yield the single writer thread within the caller budget and settle durable child tickets on later ticks. Budget changes must validate the complete mandate/constitution/mission authority chain as well as the paid-call ledger.
