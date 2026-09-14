@@ -6132,6 +6132,20 @@ class CockpitPlane:
             budget = (validate_budget_overrides if kind == "call" else validate_run_budget_overrides)(value.get("budget"))
         except ValueError as exc:
             raise CockpitError(str(exc)) from exc
+        if kind == "call" and "max_cost_usd" in budget:
+            if set(budget) != {"max_cost_usd"}:
+                raise CockpitError("共享费用上限与本环境 token/超时预算请分开保存")
+            manager = self.config.workspace_manager_config_path
+            if manager is None:
+                raise CockpitError("共享模型费用管理尚未配置")
+            from .workspace_manager import request_set_shared_call_budget
+            result = request_set_shared_call_budget(
+                manager, login, purpose, budget["max_cost_usd"],
+                _text(value.get("expected_shared_policy_hash"), "共享策略版本", maximum=64))
+            self.journal.record_event(kind="model_budget", title=f"已调整所有环境「{purpose}」的单次费用上限",
+                detail=json.dumps(budget, ensure_ascii=False), login=login,
+                refs={"purpose": purpose, "revision": result["policy"]["revision"]})
+            return result
         result = self._governance(login, "set_model_call_budget", {
             "purpose": purpose, "budget": budget, "kind": kind,
             "expected_config_hash": _text(value.get("expected_config_hash"), "配置版本", maximum=64),

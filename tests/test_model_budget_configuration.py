@@ -218,9 +218,31 @@ class BudgetGovernanceTests(unittest.TestCase):
         try:
             plane = fixture.plane(with_model_config=False)
             plane.set_call_budget("owner@example.test", {"purpose": "event_judgement",
-                "budget": {"max_cost_usd": 1}, "expected_config_hash": "a" * 64})
+                "budget": {"max_output_tokens": 1000}, "expected_config_hash": "a" * 64})
             self.assertEqual(fixture.calls[-1][0], "set_model_call_budget")
-            self.assertEqual(fixture.calls[-1][1]["budget"], {"max_cost_usd": 1})
+            self.assertEqual(fixture.calls[-1][1]["budget"], {"max_output_tokens": 1000})
+        finally:
+            fixture.doCleanups()
+
+    def test_cockpit_routes_cost_only_to_shared_manager(self):
+        from dataclasses import replace
+        fixture = fixtures.CockpitModelPageTests(); fixture.setUp()
+        try:
+            plane = fixture.plane(with_model_config=False)
+            plane.config = replace(plane.config, workspace_manager_config_path=Path("/tmp/manager.json"))
+            shared = {"status": "updated", "policy": {"revision": 2}}
+            with patch("dalton_core.workspace_manager.request_set_shared_call_budget",
+                       return_value=shared) as request:
+                result = plane.set_call_budget("owner@example.test", {
+                    "purpose": "draft", "budget": {"max_cost_usd": .8},
+                    "expected_config_hash": "a" * 64,
+                    "expected_shared_policy_hash": "b" * 64})
+            self.assertEqual(result, shared)
+            request.assert_called_once_with(Path("/tmp/manager.json"), "owner@example.test",
+                                            "draft", .8, "b" * 64)
+            with self.assertRaisesRegex(Exception, "分开保存"):
+                plane.set_call_budget("owner@example.test", {"purpose": "draft",
+                    "budget": {"max_cost_usd": .8, "max_output_tokens": 2}})
         finally:
             fixture.doCleanups()
 

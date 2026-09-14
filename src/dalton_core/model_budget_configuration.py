@@ -42,11 +42,17 @@ def _service_budget_view(directory: Path, purpose: str, binding: Mapping[str, An
         config = json.loads(data)
         nested = config["bounded_planner"]["config"]
         effective = dict(BoundedPlannerDriverConfig.from_mapping(nested).planner_call_budget)
+        shared = None
+        if nested.get("shared_call_budget_policy_path"):
+            from .shared_call_budget_policy import load_shared_call_budget_policy
+            policy = load_shared_call_budget_policy(nested["shared_call_budget_policy_path"])
+            shared = {"scope": "all_workspaces", "policy_hash": policy["content_hash"],
+                      "revision": policy["revision"]}
         return {"editable": True, "kind": kind, "source": str(path) + "#bounded_planner.config.planner_call_budget",
                 "config_path": str(path), "direct_budget_path": ["bounded_planner", "config", "planner_call_budget"],
                 "overrides": validate_budget_overrides(nested.get("planner_call_budget", {})),
                 "general": {}, "effective": effective, "config_hash": hashlib.sha256(data).hexdigest(),
-                "requires_restart": True}
+                "requires_restart": True, "shared_call_cost": shared}
     if purpose in {"thesis_impact_assessment", "thesis_impact_verifier"}:
         from .thesis_impact_control import ASSESSMENT_BUDGET, VERIFIER_BUDGET
         path = directory / "thesis-impact-budget-config.json"
@@ -93,6 +99,10 @@ def _call_budget_view(state_dir: str | Path, purpose: str, *,
         return {"editable": False, "source": source, "reason": "外部配置仅可查看"}
     data = path.read_bytes()
     config = json.loads(data)
+    shared_policy = None
+    if config.get("shared_call_budget_policy_path"):
+        from .shared_call_budget_policy import load_shared_call_budget_policy
+        shared_policy = load_shared_call_budget_policy(config["shared_call_budget_policy_path"])
     defaults_wire = json.loads(Path(__file__).with_name(f"{kind}_budget_defaults.json").read_text())
     has_defaults = purpose in defaults_wire["purposes"]
     if kind == "run" and not has_defaults:
@@ -112,6 +122,9 @@ def _call_budget_view(state_dir: str | Path, purpose: str, *,
             "fields": list(defaults_wire["purposes"][purpose]) if kind == "run" else None,
             "config_hash": hashlib.sha256(data).hexdigest(),
             "requires_restart": False,
+            "shared_call_cost": (None if shared_policy is None else {
+                "scope": "all_workspaces", "policy_hash": shared_policy["content_hash"],
+                "revision": shared_policy["revision"]}),
             "note": "修改后用于下一次任务；mission 日预算与各预算池继续约束实际调用"}
 
 

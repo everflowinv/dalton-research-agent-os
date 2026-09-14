@@ -15,6 +15,7 @@ from dalton_core.workspace import WorkspaceError
 from dalton_core.workspace_manager import (
     _config, _serve, _runtime_templates, _readiness, _controller_tick_probe,
     _writer_read_probe, create_managed_workspace, list_workspaces, request_create,
+    request_set_shared_call_budget, set_shared_call_budget,
 )
 from dalton_core.cockpit_plane import CockpitConfig
 
@@ -116,6 +117,33 @@ class WorkspaceManagerTests(unittest.TestCase):
         self.save()
         with self.assertRaises(WorkspaceError):
             _config(self.path)
+
+    def test_shared_call_budget_is_owner_cas_and_receipted(self):
+        from dalton_core.shared_call_budget_policy import SCHEMA_VERSION
+        from dalton_core.store import content_hash
+        policy_path = self.root / "shared-budget.json"
+        body = {"schema_version": SCHEMA_VERSION, "default_max_cost_usd": 1.0,
+                "purpose_max_cost_usd": {}, "revision": 1, "prior_hash": None,
+                "updated_at": "2026-09-14T00:00:00+00:00", "actor_ref": "human:owner"}
+        policy = {**body, "content_hash": content_hash(body)}
+        policy_path.write_text(json.dumps(policy)); policy_path.chmod(0o600)
+        self.config["shared_call_budget_policy_path"] = str(policy_path); self.save()
+        result = set_shared_call_budget(self.path, "owner@example.com", "draft", .8,
+                                        policy["content_hash"])
+        self.assertEqual(result["policy"]["purpose_max_cost_usd"], {"draft": .8})
+        self.assertEqual(result["policy"]["revision"], 2)
+        self.assertTrue(Path(result["receipt"]).is_file())
+        with self.assertRaises(WorkspaceError):
+            set_shared_call_budget(self.path, "owner@example.com", "draft", .7,
+                                   policy["content_hash"])
+
+    def test_shared_budget_request_drops_workspace_namespace(self):
+        self.config["shared_call_budget_policy_path"] = str(self.root / "policy.json"); self.save()
+        response = subprocess.CompletedProcess([], 0, '{"status":"updated"}\n', '')
+        with patch.dict(os.environ, {"DALTON_WORKSPACE_MANIFEST": "/foreign"}), \
+             patch("dalton_core.workspace_manager.subprocess.run", return_value=response) as run:
+            request_set_shared_call_budget(self.path, "owner@example.com", "draft", 1, "a" * 64)
+        self.assertNotIn("DALTON_WORKSPACE_MANIFEST", run.call_args.kwargs["env"])
 
     def test_runtime_templates_are_closed_and_hash_pinned(self):
         template = self.root / 'runtime.json'

@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from datetime import datetime, timezone
 import urllib.request
 from pathlib import Path
 from typing import Any, Mapping
@@ -52,7 +53,8 @@ def _config(path: Path) -> dict[str, Any]:
     required = {"host_root", "release_path", "release_ref", "owner_login", "tailscale_host",
                 "tailscale_executable", "launch_agents_dir", "ports"}
     optional = {"shared_readonly_paths", "shared_model_capacity_bindings", "shared_connector_capacity",
-                "legacy_workspace", "connections_path", "runtime_templates"}
+                "legacy_workspace", "connections_path", "runtime_templates",
+                "shared_call_budget_policy_path"}
     if not isinstance(raw, dict) or not required <= raw.keys() or raw.keys() - required - optional:
         raise WorkspaceError("研究环境管理配置格式无效")
     for key in ("host_root", "release_path", "tailscale_executable", "launch_agents_dir"):
@@ -71,6 +73,10 @@ def _config(path: Path) -> dict[str, Any]:
         connection_path = raw["connections_path"]
         if not isinstance(connection_path, str) or not Path(connection_path).is_absolute():
             raise WorkspaceError("共享连接目录路径无效")
+    if raw.get("shared_call_budget_policy_path") is not None:
+        value = raw["shared_call_budget_policy_path"]
+        if not isinstance(value, str) or not Path(value).is_absolute():
+            raise WorkspaceError("共享模型费用策略路径无效")
     templates = raw.get("runtime_templates")
     if templates is not None:
         if not isinstance(templates, dict) or set(templates) != {"model", "service"}:
@@ -134,10 +140,78 @@ def _runtime_shared_paths(templates: Mapping[str, Path]) -> list[str]:
     if any(model["broker"][key] != service["broker"][key]
            for key in ("socket_path", "auth_key_path")):
         raise WorkspaceError("模型与研究引擎连接不一致")
-    shared = service["shared_readonly_paths"]
+    shared = list(dict.fromkeys([*service["shared_readonly_paths"],
+                                *model.get("shared_readonly_paths", [])]))
     if any(not isinstance(path, str) or not Path(path).is_absolute() for path in shared):
         raise WorkspaceError("研究运行模板共享路径无效")
     return [str(Path(path).resolve()) for path in shared]
+
+
+def set_shared_call_budget(config_path: Path, login: str, purpose: str,
+                           max_cost_usd: float, expected_hash: str) -> dict[str, Any]:
+    """CAS one host-owned purpose ceiling; callable only by the manager child."""
+    from .model_selection import PURPOSE_LABELS
+    from .shared_call_budget_policy import (SCHEMA_VERSION,
+        load_shared_call_budget_policy)
+    from .store import content_hash
+    config = _config(config_path)
+    if login != config["owner_login"]:
+        raise PermissionError("workspace owner mismatch")
+    if purpose not in PURPOSE_LABELS:
+        raise WorkspaceError("模型调用用途无效")
+    if isinstance(max_cost_usd, bool) or not isinstance(max_cost_usd, (int, float)) \
+            or not 0 < float(max_cost_usd) <= 1000:
+        raise WorkspaceError("模型单次费用上限无效")
+    target = Path(config.get("shared_call_budget_policy_path", ""))
+    if not target.is_absolute():
+        raise WorkspaceError("共享模型费用策略尚未配置")
+    if (target.is_symlink() or not target.is_file() or target.stat().st_uid != os.getuid()
+            or target.stat().st_mode & 0o022):
+        raise WorkspaceError("共享模型费用策略必须由当前用户独占管理")
+    lock = target.with_name("." + target.name + ".lock")
+    fd = os.open(lock, os.O_CREAT | os.O_RDWR, 0o600)
+    with os.fdopen(fd, "a+") as stream:
+        fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+        current = load_shared_call_budget_policy(target)
+        if current["content_hash"] != expected_hash:
+            raise WorkspaceError("共享模型费用策略已更新，请刷新后重试")
+        purposes = dict(current["purpose_max_cost_usd"])
+        if purposes.get(purpose) == float(max_cost_usd):
+            return {"status": "unchanged", "policy": current}
+        purposes[purpose] = float(max_cost_usd)
+        body = {"schema_version": SCHEMA_VERSION,
+                "default_max_cost_usd": current["default_max_cost_usd"],
+                "purpose_max_cost_usd": purposes,
+                "revision": current["revision"] + 1,
+                "prior_hash": current["content_hash"],
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "actor_ref": "human:" + hashlib.sha256(login.encode()).hexdigest()[:32]}
+        policy = {**body, "content_hash": content_hash(body)}
+        receipt_dir = Path(config["host_root"]) / "shared-call-budget-revisions"
+        receipt_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        receipt = receipt_dir / (policy["content_hash"] + ".json")
+        _write(receipt, policy)
+        try: _write(target, policy)
+        except Exception:
+            receipt.unlink(missing_ok=True)
+            raise
+        return {"status": "updated", "policy": policy,
+                "receipt": str(receipt)}
+
+
+def request_set_shared_call_budget(config_path: Path, login: str,
+        purpose: str, max_cost_usd: float, expected_hash: str) -> dict[str, Any]:
+    config = _config(config_path)
+    if login != config["owner_login"]:
+        raise PermissionError("workspace owner mismatch")
+    environment = dict(os.environ); environment.pop("DALTON_WORKSPACE_MANIFEST", None)
+    result = subprocess.run([sys.executable, "-m", "dalton_core.workspace_manager",
+        "--config", str(config_path), "--login", login, "--set-shared-purpose", purpose,
+        "--max-cost-usd", str(max_cost_usd), "--expected-hash", expected_hash],
+        env=environment, capture_output=True, text=True, timeout=20, check=False)
+    if result.returncode:
+        raise WorkspaceError("共享模型费用没有保存，请刷新后重试")
+    return json.loads(result.stdout.splitlines()[-1])
 
 
 def _catalog(config: Mapping[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
@@ -394,6 +468,8 @@ def create_managed_workspace(config_path: Path, login: str, name: str, request_i
             templates = _runtime_templates(config)
             catalog, catalog_paths = _catalog(config)
             shared_paths = list(config.get("shared_readonly_paths", ()))
+            if config.get("shared_call_budget_policy_path"):
+                shared_paths.append(str(Path(config["shared_call_budget_policy_path"]).resolve()))
             shared_paths.extend([
                 str(config_path.resolve()), str(Path(config["tailscale_executable"]).resolve()),
                 *catalog_paths,
@@ -468,10 +544,20 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--login", required=True)
-    parser.add_argument("--name", required=True)
-    parser.add_argument("--request-id", required=True)
+    parser.add_argument("--name")
+    parser.add_argument("--request-id")
+    parser.add_argument("--set-shared-purpose")
+    parser.add_argument("--max-cost-usd", type=float)
+    parser.add_argument("--expected-hash")
     args = parser.parse_args()
-    print(json.dumps(create_managed_workspace(args.config, args.login, args.name, args.request_id), ensure_ascii=False))
+    if args.set_shared_purpose is not None:
+        result = set_shared_call_budget(args.config, args.login, args.set_shared_purpose,
+                                        args.max_cost_usd, args.expected_hash)
+    else:
+        if args.name is None or args.request_id is None:
+            parser.error("--name and --request-id are required")
+        result = create_managed_workspace(args.config, args.login, args.name, args.request_id)
+    print(json.dumps(result, ensure_ascii=False))
     return 0
 
 
