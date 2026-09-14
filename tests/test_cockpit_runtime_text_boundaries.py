@@ -39,12 +39,16 @@ class CockpitRuntimeTextBoundariesTests(unittest.TestCase):
             )
             self.assertIsNotNone(match, name)
             functions.append(match.group(0))
+        overview_failure = re.search(r"function overviewFailureCopy\([^\n]+", source)
+        self.assertIsNotNone(overview_failure)
+        functions.append(overview_failure.group(0))
         program = "\n".join([
             "const UI_TEXT={};",
             "const FINAL_RESEARCH_REQUIRED=false;",
             "const displayText=value=>typeof value==='string' && Object.prototype.hasOwnProperty.call(UI_TEXT,value)?UI_TEXT[value]:value;",
             "const finalResearchText=displayText;",
             "const looksTechnical=value=>typeof value==='string' && /[a-z_]{4,}/.test(value);",
+            "const readableError=(value,context)=>({message:`${context}暂时未完成，请稍后重试。`});",
             *functions,
             f"console.log(JSON.stringify({expression}));",
         ])
@@ -52,6 +56,17 @@ class CockpitRuntimeTextBoundariesTests(unittest.TestCase):
             ["node", "-e", program], text=True, capture_output=True, check=True
         )
         return json.loads(result.stdout)
+
+    def test_overview_failure_copy_distinguishes_timeout_and_preserves_loaded_state(self):
+        timeout = self._evaluate("overviewFailureCopy({name:'AbortError'},false)")
+        self.assertEqual(timeout["title"], "研究目标暂时还没读完")
+        self.assertIn("超过 30 秒", timeout["message"])
+        server = self._evaluate("overviewFailureCopy({name:'Error',message:'HTTP 500'},false)")
+        self.assertEqual(server["title"], "暂时无法读取研究目标")
+        self.assertNotIn("超过 30 秒", server["message"])
+        loaded = self._evaluate("overviewFailureCopy({name:'AbortError'},true)")
+        self.assertTrue(loaded["preserve"])
+        self.assertIsNone(loaded["title"])
 
     def test_plan_machine_reasons_are_readable_and_raw_value_is_retained(self):
         raw = (
