@@ -3058,11 +3058,11 @@ class CockpitPlane:
                 mission = self._mission(core)
             except CockpitMissionMissing:
                 saved = self.journal.rows(
-                    "SELECT draft_id,draft_json,content_hash,created_at FROM cockpit_drafts "
-                    "WHERE kind='goal' AND status='saved' ORDER BY created_at DESC LIMIT 1")
+                    "SELECT draft_id,draft_json,content_hash,created_at,status FROM cockpit_drafts "
+                    "WHERE kind='goal' AND status IN ('saved','open') ORDER BY created_at DESC LIMIT 1")
                 initial = None if not saved else {
                     "draft_id": saved[0]["draft_id"], "draft_hash": saved[0]["content_hash"],
-                    "kind": "goal", "status": "saved", "created_at": saved[0]["created_at"],
+                    "kind": "goal", "status": saved[0]["status"], "created_at": saved[0]["created_at"],
                     "draft": json.loads(saved[0]["draft_json"])}
                 return {"schema_version": SCHEMA_VERSION,
                         "as_of": _iso(self.clock()),
@@ -6660,20 +6660,49 @@ class CockpitPlane:
                 pass
             else:
                 raise CockpitConflict("研究目标已建立，请刷新后再编辑")
-        draft = initial_goal_draft(workspace, title=text.splitlines()[0][:200], objective=text)
-        digest = content_hash(draft)
         draft_id = "cockpit-draft:initial-goal:" + hashlib.sha256(
             (workspace.workspace_id + "\0" + login + "\0" + request_id).encode()).hexdigest()[:32]
+        existing = self.journal.rows("SELECT * FROM cockpit_drafts WHERE draft_id=?", (draft_id,))
+        if existing:
+            row = existing[0]
+            if row["input_text"] != text:
+                raise CockpitConflict("这次保存请求已用于另一份目标草稿")
+            return {"status": row["status"], "draft_id": draft_id,
+                    "draft_hash": row["content_hash"], "kind": "goal",
+                    "draft": json.loads(row["draft_json"]), "input_text": text,
+                    "cost_usd": 0, "replayed": True, "created_at": row["created_at"]}
+        foundation_path = workspace.state_dir / "research-foundation.json"
+        call_result: dict[str, Any] = {}
+        status = "saved"
+        if foundation_path.is_file():
+            from .workspace_mission_setup import plan_first_mission_goal
+            model = self._model_instance()
+            class SetupModel:
+                def call_setup(self, **kwargs: Any) -> dict[str, Any]:
+                    result = model.call_setup(**kwargs)
+                    call_result.update(result)
+                    return result
+            draft = plan_first_mission_goal(
+                SetupModel(), workspace, goal=text,
+                method_foundation=json.loads(foundation_path.read_text()),
+                request_id=request_id,
+                created_at=datetime.fromtimestamp(foundation_path.stat().st_mtime, timezone.utc).isoformat())
+            status = "open"
+        else:
+            draft = initial_goal_draft(workspace, title=text.splitlines()[0][:200], objective=text)
+        digest = content_hash(draft)
         now = _iso(self.clock())
         self.journal.write(
             "INSERT OR IGNORE INTO cockpit_drafts(draft_id,kind,login,input_text,draft_json,content_hash,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
             (draft_id, "goal", login, text, json.dumps(draft, ensure_ascii=False, sort_keys=True),
-             digest, "saved", now, now))
+             digest, status, now, now))
         rows = self.journal.rows("SELECT content_hash,created_at FROM cockpit_drafts WHERE draft_id=?", (draft_id,))
         if rows[0]["content_hash"] != digest:
             raise CockpitConflict("这次保存请求已用于另一份目标草稿")
-        return {"status": "saved", "draft_id": draft_id, "draft_hash": digest, "kind": "goal",
-                "draft": draft, "input_text": text, "cost_usd": 0,
+        return {"status": status, "draft_id": draft_id, "draft_hash": digest, "kind": "goal",
+                "draft": draft, "input_text": text,
+                "cost_usd": round(call_result.get("cost_micros", 0) / 1_000_000, 4),
+                "replayed": call_result.get("replayed", False),
                 "created_at": rows[0]["created_at"]}
 
     def _draft(self, model: CockpitModel, login: str, kind: str, text: str, request_id: str) -> dict[str, Any]:
@@ -6811,6 +6840,8 @@ class CockpitPlane:
         if row["status"] != "open":
             raise CockpitConflict("this draft was already " + ("published" if row["status"] == "published" else "discarded"))
         draft = json.loads(row["draft_json"])
+        if draft.get("schema_version") == "workspace-first-mission-draft-0.1":
+            return self._publish_first_mission(login, draft_id, draft)
         with self._core() as core:
             mission = self._mission(core)
         if draft["based_on"]["mission_version_ref"] != mission["id"] or draft["based_on"]["mission_version_hash"] != mission["content_hash"]:
@@ -6843,6 +6874,32 @@ class CockpitPlane:
                                   detail=draft.get("summary"), login=login,
                                   refs={"draft_id": draft_id, "mission_version_ref": published})
         return {"status": "published", "draft_id": draft_id, "mission_version_ref": published, "version": version}
+
+    def _publish_first_mission(self, login: str, draft_id: str, draft: Mapping[str, Any]) -> dict[str, Any]:
+        from .workspace import load_workspace_manifest
+        workspace = load_workspace_manifest(os.environ["DALTON_WORKSPACE_MANIFEST"])
+        foundation = json.loads((workspace.state_dir / "research-foundation.json").read_text())
+        if draft.get("setup_state") != "ready_for_confirmation":
+            raise CockpitConflict("请补充研究范围后重新整理目标")
+        try:
+            result = self.governance_call(
+                self.token_config, self.writer_socket, actor_ref=_subject_for_login(login),
+                operation="publish_first_workspace_mission", params={
+                    "workspace_manifest": json.loads(workspace.manifest_path.read_text()),
+                    "method_foundation": foundation, "proposal": dict(draft),
+                    "proposal_hash": draft["content_hash"], "actor_ref": _subject_for_login(login),
+                })
+        except (GovernanceCliError, RemoteError) as exc:
+            raise CockpitConflict(f"发布没有被接受：{_reason(exc)}") from exc
+        published = result["id"]
+        self.journal.write("UPDATE cockpit_drafts SET status='published', published_ref=?, updated_at=? WHERE draft_id=?",
+                           (published, _iso(self.clock()), draft_id))
+        self.journal.record_event(
+            kind="goal", title="开始研究：" + draft["mission_body"]["title"],
+            detail="已确认研究范围、资料来源和预算，后台将开始执行。", login=login,
+            refs={"draft_id": draft_id, "mission_version_ref": published})
+        return {"status": "published", "draft_id": draft_id,
+                "mission_version_ref": published, "version": result.get("version", 1)}
 
 
 def _reason(exc: BaseException) -> str:

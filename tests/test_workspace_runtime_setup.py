@@ -97,6 +97,64 @@ class WorkspaceRuntimeSetupTests(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "workspace owner"):
             install(self.manifest, actor_ref="automation:setup")
 
+    def test_operation_specific_host_connectors_share_their_registered_source_identity(self):
+        from dalton_core.workspace_runtime_setup import _source_ref
+        for vendor, operations in (("company-wiki", ("get_document", "list_documents")),
+                                   ("sales-notes", ("get_note", "list_notes"))):
+            for operation in operations:
+                self.assertEqual(_source_ref({"connector_ref": f"connector:host-tool:{vendor}:{operation}"}),
+                                 f"source:{vendor}")
+
+    def test_cockpit_first_goal_plans_once_and_publishes_existing_authorities(self):
+        import os
+        from unittest.mock import patch
+        from dalton_core.cockpit_plane import CockpitConfig, CockpitPlane, CockpitConflict
+        from dalton_core.workspace import load_workspace_manifest
+        from dalton_core.workspace_mission_setup import publish_first_mission_to_store
+        install(self.manifest, actor_ref="human:owner@example.com")
+        workspace = load_workspace_manifest(self.manifest)
+        model_calls = []
+        class Model:
+            def call_setup(self, **kwargs):
+                model_calls.append(kwargs)
+                return {"text": json.dumps({"industry": {"name": "semiconductors"},
+                    "suggested_companies": [{"ticker": "ASML"}],
+                    "research_questions": ["How durable is pricing power?"],
+                    "title": "ASML pricing", "objective": "Understand pricing power"}),
+                    "cost_micros": 2500, "replayed": False}
+        def governance(_tokens, _socket, *, actor_ref, operation, params):
+            self.assertEqual(operation, "publish_first_workspace_mission")
+            self.assertEqual(params["workspace_manifest"]["workspace_id"], workspace.workspace_id)
+            with DaltonStore(self.state / "core.sqlite") as store:
+                return publish_first_mission_to_store(store, workspace,
+                    proposal=params["proposal"], proposal_hash=params["proposal_hash"],
+                    actor_ref=actor_ref, method_foundation=params["method_foundation"])
+        config = CockpitConfig(core_db=self.state / 'core.sqlite', state_dir=self.state,
+            heartbeat_path=self.state / 'run/heartbeat.json', scheduler_db=self.state / 'scheduler.sqlite',
+            journal_path=self.state / 'cockpit/journal.sqlite')
+        with patch.dict(os.environ, DALTON_WORKSPACE_MANIFEST=str(self.manifest)):
+            plane = CockpitPlane(config, writer_socket=workspace.writer_socket,
+                token_config=self.state / 'writer-tokens.json', governance_call=governance)
+            try:
+                with patch.object(plane, '_model_instance', return_value=Model()):
+                    first = plane._initial_goal_draft('owner@example.com', 'Research ASML', 'first-goal')
+                    repeated = plane._initial_goal_draft('owner@example.com', 'Research ASML', 'first-goal')
+                self.assertEqual(len(model_calls), 1)
+                self.assertTrue(repeated['replayed'])
+                self.assertEqual(first['cost_usd'], .0025)
+                self.assertEqual(plane.overview()['initial_goal']['status'], 'open')
+                with self.assertRaises(CockpitConflict):
+                    plane.publish_draft('owner@example.com', {'draft_id': first['draft_id'],
+                        'draft_hash': '0' * 64, 'request_id': 'confirm'})
+                result = plane.publish_draft('owner@example.com', {'draft_id': first['draft_id'],
+                    'draft_hash': first['draft_hash'], 'request_id': 'confirm'})
+                self.assertEqual(result['status'], 'published')
+                self.assertEqual(result['version'], 1)
+                with sqlite3.connect(self.state / 'core.sqlite') as core:
+                    self.assertEqual(core.execute('SELECT count(*) FROM coverage_mission_pointer').fetchone()[0], 1)
+            finally:
+                plane.close()
+
 
 if __name__ == "__main__":
     unittest.main()

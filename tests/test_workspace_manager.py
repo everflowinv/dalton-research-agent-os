@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from dalton_core.workspace import WorkspaceError
 from dalton_core.workspace_manager import (
-    _config, _serve, create_managed_workspace, list_workspaces, request_create,
+    _config, _serve, _runtime_templates, _readiness, create_managed_workspace, list_workspaces, request_create,
 )
 from dalton_core.cockpit_plane import CockpitConfig
 
@@ -114,6 +114,37 @@ class WorkspaceManagerTests(unittest.TestCase):
         self.save()
         with self.assertRaises(WorkspaceError):
             _config(self.path)
+
+    def test_runtime_templates_are_closed_and_hash_pinned(self):
+        template = self.root / 'runtime.json'
+        template.write_text('{}')
+        template.chmod(0o600)
+        binding = {'path': str(template), 'sha256': hashlib.sha256(template.read_bytes()).hexdigest()}
+        self.config['runtime_templates'] = {'model': binding, 'service': binding}
+        self.save()
+        self.assertEqual(set(_runtime_templates(_config(self.path))), {'model', 'service'})
+        template.write_text('{"changed":true}')
+        with self.assertRaises(WorkspaceError):
+            _runtime_templates(_config(self.path))
+        self.config['runtime_templates']['source_workspace'] = binding
+        self.save()
+        with self.assertRaises(WorkspaceError):
+            _config(self.path)
+
+    def test_running_workspace_retry_accepts_active_research_without_reprovision(self):
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps({
+            'state': 'running', 'workspace': {'workspace_id': 'right'}}).encode()
+        workspace = SimpleNamespace(cockpit_port=18991, workspace_id='right')
+        with patch('dalton_core.workspace_manager.urllib.request.urlopen', return_value=response):
+            _readiness(self.config, workspace, require_blank=False, timeout=.1)
+        response.__enter__.return_value.read.return_value = json.dumps({
+            'state': 'running', 'workspace': {'workspace_id': 'wrong'}}).encode()
+        with patch('dalton_core.workspace_manager.urllib.request.urlopen', return_value=response):
+            with self.assertRaises(WorkspaceError):
+                _readiness(self.config, workspace, require_blank=False, timeout=.01)
 
     def test_existing_serve_route_is_never_overwritten(self):
         existing = {'TCP':{'18991':{'HTTPS':True}}, 'Web':{

@@ -215,6 +215,12 @@ def _connector_records(workspace: Any, actor_ref: str) -> tuple[list[str], list[
 def _source_ref(source: Mapping[str, Any]) -> str:
     """Resolve a catalog profile to the packaged connector's source identity."""
     connector_ref = source.get("connector_ref")
+    connector_ref = {
+        "connector:host-tool:company-wiki:get_document": "connector:company-wiki",
+        "connector:host-tool:company-wiki:list_documents": "connector:company-wiki",
+        "connector:host-tool:sales-notes:get_note": "connector:sales-notes",
+        "connector:host-tool:sales-notes:list_notes": "connector:sales-notes",
+    }.get(connector_ref, connector_ref)
     inventory = load_packaged_connector_inventory()["templates"]
     matches = [template["source_identity"]["source_ref"]
                for template in inventory.values()

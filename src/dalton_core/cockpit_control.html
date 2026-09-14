@@ -720,8 +720,8 @@ let workspaceLoad=null,workspaceCreateId=null,workspaceLastName="",workspaceCanC
 const workspaceStatusLabel=value=>({ready:"可以进入",running:"可以进入",starting:"正在准备",creating:"正在准备",stopped:"暂未运行",degraded:"部分功能暂不可用",failed:"创建未完成"}[value]||"状态正在更新");
 function workspaceConnectionText(shared={}){
   const models=Boolean(shared.models),sources=Boolean(shared.sources),modelCount=typeof shared.models==="number"?shared.models:0,sourceCount=typeof shared.sources==="number"?shared.sources:0;
-  if(modelCount>0&&sourceCount>0)return `已登记 ${modelCount} 个模型和 ${sourceCount} 个资料来源的连接配置；实际研究调用需在本环境中配置并确认。`;
-  if(models&&sources)return "模型和资料来源的连接配置已登记；实际研究调用需在本环境中配置并确认。";
+  if(modelCount>0&&sourceCount>0)return `共用 ${modelCount} 个已连接模型和 ${sourceCount} 项资料来源配置；新环境自动准备研究运行配置。`;
+  if(models&&sources)return "共用已连接的模型和资料来源；新环境自动准备研究运行配置。";
   if(models)return "模型连接配置已登记；资料来源连接配置尚未登记。";
   if(sources)return "资料来源连接配置已登记；模型连接配置尚未登记。";
   return "模型与资料来源的连接配置尚未登记。";
@@ -786,12 +786,12 @@ function renderOverview(o){
   });
   if(awaiting){
     $("goal-title").textContent="设定研究目标";
-    $("goal-objective").textContent="这是一个空白研究环境。先写下要研究的行业、公司和关键问题；系统整理后会请你确认，再开始搜集和分析。";
+    $("goal-objective").textContent="这是一个空白研究环境，模型、资料来源和研究流程已自动准备。写下研究目标，确认系统整理的范围后即可开始。";
     $("goal-tags").replaceChildren(node("span","等待第一个研究目标","tag"));
     $("page-sub").textContent="空白研究环境 · 等待研究目标";
     $("svc-text").textContent="研究环境已就绪";$("svc-dot").className="dot";
-    $("goal-submit").textContent="保存目标草稿";
-    if(o.initial_goal?.status==="saved"&&!$("goal-draft").childNodes.length&&!$("goal-input").value.trim()){
+    $("goal-submit").textContent="整理并准备开始研究";
+    if(["saved","open"].includes(o.initial_goal?.status)&&!$("goal-draft").childNodes.length&&!$("goal-input").value.trim()){
       renderGoalDraft(o.initial_goal);
       $("goal-status").className="status ok";
       $("goal-status").textContent="已恢复上次保存的目标草稿。";
@@ -1323,7 +1323,25 @@ async function waitJob(id,onTick){for(;;){await new Promise(r=>setTimeout(r,1800
 
 // ---------- goal draft
 $("goal-submit").onclick=async()=>{const text=$("goal-input").value.trim();if(!text){$("goal-status").textContent="请先写下研究目标";return}const b=$("goal-submit"),s=$("goal-status");b.disabled=true;s.className="status";s.textContent="正在整理，通常需要 20–60 秒…";$("goal-draft").replaceChildren();try{const job=await postJson("/v1/cockpit/goal",{text,request_id:rid()});const r=await waitJob(job.job_id),initial=r.draft?.schema_version==="workspace-initial-goal-draft-0.1";s.className="status ok";s.textContent=initial?"目标草稿已保存。":"已整理完成"+(r.replayed?"（沿用上次结果）":`（本次费用 US$${r.cost_usd}）`)+"，请确认。";renderGoalDraft(r)}catch(e){s.className="status err";s.textContent=readableError(e,"整理研究目标").message}finally{b.disabled=false}};
-function renderGoalDraft(r){const d=r.draft,box=node("div",null,"draft");if(d.schema_version==="workspace-initial-goal-draft-0.1"){box.append(node("p","目标草稿已保存","summary"),node("h4","标题"),node("div",d.title),node("h4","目标"),node("div",d.objective));const list=node("ul");["研究公司","资料范围","研究预算","研究规则"].forEach(label=>list.append(node("li",label)));box.append(node("h4","启动前还需设置"),list,node("div","保存草稿不会启动研究。补齐公司、资料范围、预算和研究规则后，系统才会请你确认并开始执行。","hint"));$("goal-draft").replaceChildren(box);return}box.append(node("p",d.summary||"系统整理出了下面的目标。","summary"));box.append(node("h4","标题"),node("div",d.title));box.append(node("h4","目标"),node("div",d.objective));const ul=node("ul");d.research_questions.forEach(q=>ul.append(node("li",q)));box.append(node("h4","研究问题"),ul);if(d.subtasks.length){const s=node("ul");d.subtasks.forEach(x=>s.append(node("li",typeof x==="string"?x:JSON.stringify(x))));box.append(node("h4","系统会做的事"),s)}if(d.suggested_companies.length){const c=node("ul");d.suggested_companies.forEach(x=>c.append(node("li",`${x.ticker}${x.already_covered?"（已在覆盖范围）":"（尚未覆盖，需要另行接入）"}${x.reason?" — "+x.reason:""}`)));box.append(node("h4","提到的公司"),c)}box.append(node("div","确认后会发布为新一版研究目标，系统从下一轮开始按新目标搜集和阅读；已有的结论保留。覆盖的公司名单不会在这里改变。","hint"));draftActions(box,r,"goal");$("goal-draft").replaceChildren(box)}
+function renderFirstMissionDraft(r){
+  const d=r.draft,m=d.mission_body,box=node("div",null,"draft");
+  box.append(node("p","研究环境已准备好，请确认这次研究的范围。","summary"),node("h4","研究目标"),node("div",m.title),node("div",m.objective));
+  const companies=node("ul");m.universe.forEach(c=>companies.append(node("li",c.ticker)));
+  const questions=node("ul");m.research_questions.forEach(q=>questions.append(node("li",q)));
+  const sources=node("ul");m.source_plan.forEach(s=>sources.append(node("li",({"source:sec-edgar":"SEC 公司申报","source:public-web":"公开网页与网页搜索","source:alphaengine":"AlphaEngine 研报与纪要","source:guidepoint":"Guidepoint 专家访谈","source:company-wiki":"公司知识库","source:sales-notes":"销售纪要","source:yahoo-finance":"Yahoo Finance 行情"})[s.source_ref]||sourceLabel(s.source_ref))));
+  box.append(node("h4","研究公司"),companies,node("h4","研究问题"),questions,node("h4","资料来源"),sources);
+  box.append(node("h4","每日预算上限"),node("div",`模型调用 ${m.budget.max_daily_paid_calls} 次，费用 US$${m.budget.max_daily_cost_usd}；AlphaEngine ${m.budget.max_alphaengine_calls_24h} 次。`));
+  if(d.setup_state==="ready_for_confirmation"){
+    box.append(node("div","确认后开始搜集、阅读和分析。审批和成果保存在本环境；切换页面或关闭浏览器后，后台任务会继续执行。","hint"));
+    draftActions(box,r,"goal");
+  }else{
+    const issueLabels={"industry requires review":"请补充研究的行业或领域","at least one company and ticker require review":"请补充至少一家研究公司或股票代码","source plan requires review":"资料来源尚未准备好","bounded budget defaults require review":"研究预算尚未准备好"};
+    const issues=node("ul");(d.review_issues||[]).forEach(x=>issues.append(node("li",issueLabels[x]||"请补充目标中的研究范围")));
+    box.append(node("h4","目标还需补充"),issues,node("div","在上方补充目标后重新整理。","hint"));
+  }
+  $("goal-draft").replaceChildren(box);
+}
+function renderGoalDraft(r){const d=r.draft;if(d.schema_version==="workspace-first-mission-draft-0.1"){renderFirstMissionDraft(r);return}const box=node("div",null,"draft");if(d.schema_version==="workspace-initial-goal-draft-0.1"){box.append(node("p","目标草稿已保存","summary"),node("h4","标题"),node("div",d.title),node("h4","目标"),node("div",d.objective));const list=node("ul");["研究公司","资料范围","研究预算","研究规则"].forEach(label=>list.append(node("li",label)));box.append(node("h4","启动前还需设置"),list,node("div","保存草稿不会启动研究。补齐公司、资料范围、预算和研究规则后，系统才会请你确认并开始执行。","hint"));$("goal-draft").replaceChildren(box);return}box.append(node("p",d.summary||"系统整理出了下面的目标。","summary"));box.append(node("h4","标题"),node("div",d.title));box.append(node("h4","目标"),node("div",d.objective));const ul=node("ul");d.research_questions.forEach(q=>ul.append(node("li",q)));box.append(node("h4","研究问题"),ul);if(d.subtasks.length){const s=node("ul");d.subtasks.forEach(x=>s.append(node("li",typeof x==="string"?x:JSON.stringify(x))));box.append(node("h4","系统会做的事"),s)}if(d.suggested_companies.length){const c=node("ul");d.suggested_companies.forEach(x=>c.append(node("li",`${x.ticker}${x.already_covered?"（已在覆盖范围）":"（尚未覆盖，需要另行接入）"}${x.reason?" — "+x.reason:""}`)));box.append(node("h4","提到的公司"),c)}box.append(node("div","确认后会发布为新一版研究目标，系统从下一轮开始按新目标搜集和阅读；已有的结论保留。覆盖的公司名单不会在这里改变。","hint"));draftActions(box,r,"goal");$("goal-draft").replaceChildren(box)}
 function draftActions(box,r,kind){const a=node("div",null,"actions"),ok=node("button",kind==="goal"?"确认发布目标":"确认调整","primary"),no=node("button","放弃","ghost"),st=node("span","","status");ok.onclick=async()=>{ok.disabled=no.disabled=true;st.textContent="正在发布…";try{const out=await postJson("/v1/cockpit/publish",{draft_id:r.draft_id,draft_hash:r.draft_hash,request_id:rid()});st.className="status ok";st.textContent=`已发布为第 ${out.version} 版`;toast("新目标已生效");loadOverview(true);if(kind==="steer")loadSteerHistory()}catch(e){st.className="status err";st.textContent=readableError(e,"发布").message;ok.disabled=no.disabled=false}};no.onclick=async()=>{ok.disabled=no.disabled=true;try{await postJson("/v1/cockpit/decide",{kind:`draft:${kind}`,ref:r.draft_id,hash:r.draft_hash,decision:"discard",request_id:rid()});box.remove();toast("已放弃")}catch(e){st.textContent=readableError(e,"放弃草稿").message;ok.disabled=no.disabled=false}};a.append(ok,no,st);box.append(a)}
 
 // ---------- steer

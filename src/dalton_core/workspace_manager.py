@@ -51,7 +51,7 @@ def _config(path: Path) -> dict[str, Any]:
     required = {"host_root", "release_path", "release_ref", "owner_login", "tailscale_host",
                 "tailscale_executable", "launch_agents_dir", "ports"}
     optional = {"shared_readonly_paths", "shared_model_capacity_bindings", "shared_connector_capacity",
-                "legacy_workspace", "connections_path"}
+                "legacy_workspace", "connections_path", "runtime_templates"}
     if not isinstance(raw, dict) or not required <= raw.keys() or raw.keys() - required - optional:
         raise WorkspaceError("研究环境管理配置格式无效")
     for key in ("host_root", "release_path", "tailscale_executable", "launch_agents_dir"):
@@ -70,7 +70,67 @@ def _config(path: Path) -> dict[str, Any]:
         connection_path = raw["connections_path"]
         if not isinstance(connection_path, str) or not Path(connection_path).is_absolute():
             raise WorkspaceError("共享连接目录路径无效")
+    templates = raw.get("runtime_templates")
+    if templates is not None:
+        if not isinstance(templates, dict) or set(templates) != {"model", "service"}:
+            raise WorkspaceError("研究运行模板配置无效")
+        for binding in templates.values():
+            if (not isinstance(binding, dict) or set(binding) != {"path", "sha256"}
+                    or not isinstance(binding["path"], str)
+                    or not Path(binding["path"]).is_absolute()
+                    or not isinstance(binding["sha256"], str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", binding["sha256"])):
+                raise WorkspaceError("研究运行模板绑定无效")
     return raw
+
+
+def _runtime_templates(config: Mapping[str, Any]) -> dict[str, Path]:
+    """Check the operator-pinned immutable templates before provisioning."""
+    result = {}
+    for name, binding in config.get("runtime_templates", {}).items():
+        path = Path(binding["path"])
+        if (path.is_symlink() or not path.is_file()
+                or path.stat().st_uid != os.getuid() or path.stat().st_mode & 0o022
+                or hashlib.sha256(path.read_bytes()).hexdigest() != binding["sha256"]):
+            raise WorkspaceError("研究运行模板校验失败")
+        result[name] = path.resolve()
+    return result
+
+
+def provision_runtime(config: Mapping[str, Any], manifest: Path, *, login: str) -> dict[str, Any] | None:
+    """Reuse the installed OS before starting this workspace's processes."""
+    templates = _runtime_templates(config)
+    if not templates:
+        return None  # Backward compatible low-level blank-state installation.
+    from .workspace_model_setup import install_runtime_template
+    from .workspace_service_setup import install_service_template
+    from .workspace_runtime_setup import install
+    model = install_runtime_template(manifest, templates["model"])
+    runtime = install(manifest, actor_ref="human:tailscale-" + hashlib.sha256(login.encode()).hexdigest()[:32])
+    service = install_service_template(manifest, templates["service"])
+    workspace = load_workspace_manifest(manifest)
+    receipt = {"schema_version": "dalton-workspace-runtime-ready-0.1",
+               "workspace_id": workspace.workspace_id,
+               "model": model, "runtime": runtime, "service": service,
+               "template_sha256": {key: value["sha256"] for key, value in config["runtime_templates"].items()}}
+    _write(workspace.state_dir / "runtime-ready.json", receipt)
+    return receipt
+
+
+def _runtime_shared_paths(templates: Mapping[str, Path]) -> list[str]:
+    if not templates:
+        return []
+    from .workspace_model_setup import _validate_bundle
+    from .workspace_service_setup import _validate_template
+    model = _validate_bundle(json.loads(templates["model"].read_text()))
+    service = _validate_template(json.loads(templates["service"].read_text()))
+    if any(model["broker"][key] != service["broker"][key]
+           for key in ("socket_path", "auth_key_path")):
+        raise WorkspaceError("模型与研究引擎连接不一致")
+    shared = service["shared_readonly_paths"]
+    if any(not isinstance(path, str) or not Path(path).is_absolute() for path in shared):
+        raise WorkspaceError("研究运行模板共享路径无效")
+    return [str(Path(path).resolve()) for path in shared]
 
 
 def _catalog(config: Mapping[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
@@ -202,7 +262,8 @@ def _serve(config: Mapping[str, Any], port: int) -> None:
             raise WorkspaceError("已有访问地址发生变化，需要检查")
 
 
-def _readiness(config: Mapping[str, Any], workspace: Any, *, timeout: float = 30.0) -> None:
+def _readiness(config: Mapping[str, Any], workspace: Any, *, timeout: float = 30.0,
+               require_blank: bool = True) -> None:
     """Require the new Cockpit to identify its workspace and blank state."""
     deadline = time.monotonic() + timeout
     url = f"http://127.0.0.1:{workspace.cockpit_port}/v1/cockpit/overview"
@@ -214,7 +275,7 @@ def _readiness(config: Mapping[str, Any], workspace: Any, *, timeout: float = 30
         try:
             with urllib.request.urlopen(request, timeout=1.0) as response:  # noqa: S310
                 payload = json.loads(response.read())
-            if (payload.get("state") == "awaiting_mission"
+            if ((not require_blank or payload.get("state") == "awaiting_mission")
                     and payload.get("workspace", {}).get("workspace_id") == workspace.workspace_id):
                 return
             last_error = WorkspaceError("新研究环境返回了错误的身份或状态")
@@ -247,7 +308,7 @@ def create_managed_workspace(config_path: Path, login: str, name: str, request_i
                 try:
                     held = load_workspace_manifest(
                         root / "workspaces" / record["slug"] / "workspace.json")
-                    _readiness(config, held, timeout=2.0)
+                    _readiness(config, held, timeout=2.0, require_blank=False)
                     return {"status": "running", "workspace": _public(record, None)}
                 except (OSError, ValueError, WorkspaceError):
                     record.update(status="failed", retryable=True, url=None)
@@ -260,11 +321,14 @@ def create_managed_workspace(config_path: Path, login: str, name: str, request_i
             _write(target, record)
         manifest = root / "workspaces" / record["slug"] / "workspace.json"
         try:
+            templates = _runtime_templates(config)
             catalog, catalog_paths = _catalog(config)
             shared_paths = list(config.get("shared_readonly_paths", ()))
             shared_paths.extend([
                 str(config_path.resolve()), str(Path(config["tailscale_executable"]).resolve()),
                 *catalog_paths,
+                *(str(path) for path in templates.values()),
+                *_runtime_shared_paths(templates),
             ])
             # Always call creation: this resumes a manifest-only/bootstrap-only
             # attempt and preserves the workspace UUID and token bytes.
@@ -281,6 +345,7 @@ def create_managed_workspace(config_path: Path, login: str, name: str, request_i
             record["status"] = "creating"
             record.pop("retryable", None)
             _write(target, record)
+            provision_runtime(config, manifest, login=login)
             configure_workspace_control(
                 manifest, owner_login=login, tailscale_host=config["tailscale_host"],
                 tailscale_executable=config["tailscale_executable"])

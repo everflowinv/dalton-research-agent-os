@@ -27,7 +27,7 @@ class CockpitWorkspaceUiTests(unittest.TestCase):
 
     def test_workspace_explains_shared_connections_and_isolated_research(self):
         for phrase in (
-            "模型和资料来源的连接配置已登记；实际研究调用需在本环境中配置并确认",
+            "共用已连接的模型和资料来源；新环境自动准备研究运行配置",
             "研究目标、公司、任务、资料和审批只属于各自的环境",
             "这是一个空白研究环境",
         ):
@@ -48,7 +48,7 @@ class CockpitWorkspaceUiTests(unittest.TestCase):
             text=True, capture_output=True, check=True,
         )
         self.assertEqual(
-            "已登记 24 个模型和 9 个资料来源的连接配置；实际研究调用需在本环境中配置并确认。",
+            "共用 24 个已连接模型和 9 项资料来源配置；新环境自动准备研究运行配置。",
             result.stdout.strip(),
         )
 
@@ -73,7 +73,7 @@ class CockpitWorkspaceUiTests(unittest.TestCase):
             self.source,
         )
         self.assertIn("空白研究环境 · 等待研究目标", self.source)
-        self.assertIn('$("goal-submit").textContent="保存目标草稿"', self.source)
+        self.assertIn('$("goal-submit").textContent="整理并准备开始研究"', self.source)
 
     def test_initial_goal_is_saved_without_a_false_publish_action(self):
         marker = 'if(d.schema_version==="workspace-initial-goal-draft-0.1")'
@@ -86,13 +86,18 @@ class CockpitWorkspaceUiTests(unittest.TestCase):
 
     def test_saved_initial_goal_returns_without_overwriting_user_edits(self):
         guard = (
-            'o.initial_goal?.status==="saved"'
+            '["saved","open"].includes(o.initial_goal?.status)'
             '&&!$("goal-draft").childNodes.length'
             '&&!$("goal-input").value.trim()'
         )
         self.assertIn(guard, self.source)
         self.assertIn("renderGoalDraft(o.initial_goal)", self.source)
         self.assertIn("已恢复上次保存的目标草稿。", self.source)
+
+    def test_first_mission_has_reviewable_scope_budget_and_confirmation(self):
+        branch = self.source.split("function renderFirstMissionDraft", 1)[1].split("function renderGoalDraft", 1)[0]
+        for phrase in ("研究公司", "研究问题", "资料来源", "每日预算上限", "ready_for_confirmation", "draftActions", "后台任务会继续执行"):
+            self.assertIn(phrase, branch)
 
     def test_creation_requires_a_name_and_only_enters_a_real_url(self):
         self.assertIn("if(!name){status.className=\"status err\"", self.source)
