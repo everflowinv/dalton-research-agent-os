@@ -5103,6 +5103,41 @@ class CockpitPlane:
         return {"status": "decided", "kind": kind, "ref": ref, "decision": decision,
                 "result": result if isinstance(result, (dict, list)) else None}
 
+    def decision_status(self, query: Mapping[str, Any]) -> dict[str, Any]:
+        """Confirm one exact human decision after a lost HTTP response."""
+        kind = _text(query.get("kind"), "kind", maximum=64)
+        ref = _text(query.get("ref"), "ref", maximum=512)
+        digest = _sha(query.get("hash"), "hash")
+        decision = _text(query.get("decision"), "decision", maximum=32)
+        if kind != "thesis_revision_candidate" or decision not in {
+            "accept", "reject", "defer",
+        }:
+            return {"status": "not_confirmed", "decided": False}
+        try:
+            with self._core() as core:
+                row = core.execute(
+                    "SELECT decision_id,candidate_hash,verdict,terminal,"
+                    "resulting_thesis_version_ref,content_hash "
+                    "FROM thesis_revision_decisions WHERE candidate_ref=?", (ref,),
+                ).fetchone()
+        except sqlite3.OperationalError as exc:
+            if "no such table" not in str(exc):
+                raise
+            row = None
+        if not row:
+            return {"status": "not_confirmed", "decided": False}
+        exact = (row["candidate_hash"] == digest
+                 and row["verdict"] == decision
+                 and int(row["terminal"] or 0) == 1)
+        if not exact:
+            return {"status": "different_decision", "decided": False}
+        return {
+            "status": "decided", "decided": True, "kind": kind, "ref": ref,
+            "decision": decision, "decision_ref": row["decision_id"],
+            "decision_hash": row["content_hash"],
+            "resulting_version_ref": row["resulting_thesis_version_ref"],
+        }
+
     # -- claims, models and feedback -----------------------------------------
 
     def claims(self, *, company_ref: str | None = None, index_aspect: str | None = None,

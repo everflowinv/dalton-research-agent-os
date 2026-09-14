@@ -362,6 +362,13 @@ class CockpitLanguageTests(unittest.TestCase):
         self.assertIn('summary=approvalDetailSummary(shown)', text)
         self.assertIn('finalResearchText(it.summary):displayText(it.summary),summary=approvalSummary(localized)', text)
 
+    def test_lost_approval_response_uses_exact_readback_without_resubmitting(self) -> None:
+        text = HTML.read_text(encoding="utf-8")
+        self.assertIn('/v1/cockpit/decision-status?', text)
+        self.assertIn('kind:it.kind,ref:it.ref,hash:it.hash,decision:ac.decision', text)
+        self.assertIn('决定已保存，新版本已生成。', text)
+        self.assertEqual(text.count('postJson("/v1/cockpit/decide"'), 2)
+
     def test_final_research_prose_waits_for_exact_reviewed_text(self) -> None:
         text = HTML.read_text(encoding="utf-8")
         self.assertIn('FINAL_RESEARCH_REQUIRED&&!Object.prototype.hasOwnProperty.call(UI_TEXT,value)', text)

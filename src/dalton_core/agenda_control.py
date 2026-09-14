@@ -832,6 +832,8 @@ class AgendaControlApplication:
             return {**plane.log(since=query.get("since") or None, limit=int(limit) if limit.isdigit() else 150), "enabled": True}
         if path == "/v1/cockpit/approvals":
             return {**plane.approvals(), "enabled": True}
+        if path == "/v1/cockpit/decision-status":
+            return {**plane.decision_status(query), "enabled": True}
         if path == "/v1/cockpit/job":
             return {**plane.job(login, query.get("id", "")), "enabled": True}
         if path == "/v1/cockpit/deliverable":

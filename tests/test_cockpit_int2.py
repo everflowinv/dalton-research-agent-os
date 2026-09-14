@@ -70,6 +70,31 @@ class Int2Case(unittest.TestCase):
         view = self.plane.overview()
         return next(c for c in view["companies"] if c["company_ref"] == company_ref)
 
+    def test_lost_decision_response_is_confirmed_only_by_exact_terminal_record(self) -> None:
+        connection = self.store.connection
+        connection.execute(
+            "CREATE TABLE thesis_revision_decisions("
+            "decision_id TEXT PRIMARY KEY,candidate_ref TEXT,candidate_hash TEXT,"
+            "verdict TEXT,terminal INTEGER,resulting_thesis_version_ref TEXT,"
+            "content_hash TEXT)"
+        )
+        connection.execute(
+            "INSERT INTO thesis_revision_decisions VALUES(?,?,?,?,?,?,?)",
+            ("decision:1", "candidate:1", "a" * 64, "accept", 1,
+             "thesis-version:2", "b" * 64),
+        )
+        exact = self.plane.decision_status({
+            "kind": "thesis_revision_candidate", "ref": "candidate:1",
+            "hash": "a" * 64, "decision": "accept",
+        })
+        self.assertTrue(exact["decided"])
+        self.assertEqual(exact["resulting_version_ref"], "thesis-version:2")
+        for changed in ({"hash": "c" * 64}, {"decision": "reject"},
+                        {"kind": "claim"}, {"ref": "candidate:missing"}):
+            query = {"kind": "thesis_revision_candidate", "ref": "candidate:1",
+                     "hash": "a" * 64, "decision": "accept", **changed}
+            self.assertFalse(self.plane.decision_status(query)["decided"])
+
     # -- fixtures ----------------------------------------------------------
 
     def events(self) -> ResearchEventAuthority:
