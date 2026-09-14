@@ -63,3 +63,15 @@ Focused regressions cover template tampering, path escape, namespace mismatches,
 A discovered document is a candidate, not an acquired or fully read document. Check company/type/period relevance before spending retrieval calls; paginate provider bodies completely before marking acquisition complete. Use the OpenClaw scripts AlphaEngine MCP, with the company query and provider category (for example `Accenture` and `meeting_minutes`), rather than the retired CLI. Expired provider cursors require a fresh first-page request.
 
 A scheduler tick alone does not prove forward progress. Inspect acquisition tickets, extraction failure reasons and read-completion proofs against the actual company checklist. Long connector work must yield the single writer thread within the caller budget and settle durable child tickets on later ticks. Budget changes must validate the complete mandate/constitution/mission authority chain as well as the paid-call ledger.
+
+## Budget updates and recovery
+
+A Cockpit research-budget save calls `set_research_budget_authority_chain`. It validates the expected mission hash and pool totals before updating the policy, mandate, constitution, mission, paid ledger policy and registered model/service bindings. Already spent amounts remain chargeable after the policy transition. These are recoverable, idempotent updates across stores, not a single database transaction; a retry reuses matching authority versions and requires the current mission hash. The file-binding helper restores prior bindings if a file write fails.
+
+The shared single-call cost policy has a different scope: one host policy feeds every existing environment and future template. Per-environment daily budgets and expenditure remain independent. Local model cost fields are compatibility fallbacks; the shared resolver determines the effective per-call ceiling.
+
+## Observed research progress on 2026-09-14
+
+The active IT-services mission is version 19. Governed OpenClaw AlphaEngine retrieval and automatic authority reconciliation brought the earnings-call checklist to 4/4 for ACN, CTSH, EPAM and IBM. IBM's missing three quarters were fetched as complete two-page bodies; the normal controller subsequently registered the acquired mission rows and their review records without a manual tick or database edit. A provider search hit alone is not counted as acquired.
+
+At this checkpoint, the current mission's newly acquired annual reports and transcripts still awaited complete reading proofs; the autonomous extraction lane was running. Historical mission-family proofs (for example IBM's 11 broker documents) are distinct from the active mission's newly completed readings. The `awaiting_human_extraction` storage state is also consumed by the automatic extraction lane; it does not by itself mean an operator must click to start reading.
