@@ -379,6 +379,52 @@ class MissionAnnualResearchTests(unittest.TestCase):
                 "UPDATE mission_annual_research_admissions SET company_ref='company:other'"
             )
 
+    def test_unstarted_config_budget_drift_replans_append_only_but_started_stays_frozen(self):
+        fixture = MissionAnnualFixture(self)
+        original = fixture.authority.admit(**fixture.args())
+        self.assertEqual(
+            original["request"]["model_execution"]["draft"]["max_cost_usd"], 1.0
+        )
+        original_wire = fixture.authority.admission(original["id"])
+
+        for name in (DRAFT_MODEL_CONFIG_NAME, VERIFIER_MODEL_CONFIG_NAME):
+            path = fixture.state / name
+            config = json.loads(path.read_text(encoding="utf-8"))
+            config["call_budget"]["max_cost_usd"] = 2.0
+            path.write_text(canonical_json(config) + "\n", encoding="utf-8")
+            os.chmod(path, 0o600)
+
+        with self.assertRaisesRegex(
+            MissionAnnualResearchError, "no longer executable"
+        ):
+            fixture.authority.resolve_for_execution(original["id"])
+        successor = fixture.authority.replan_unstarted(original["id"])
+        self.assertNotEqual(successor["id"], original["id"])
+        self.assertEqual(
+            successor["request"]["model_execution"]["draft"]["max_cost_usd"], 2.0
+        )
+        self.assertEqual(fixture.authority.admission(original["id"]), original_wire)
+        fixture.authority.resolve_for_execution(successor["id"])
+
+        fixture.store.connection.execute(
+            "CREATE TABLE mission_annual_research_starts ("
+            "start_id TEXT PRIMARY KEY,admission_ref TEXT UNIQUE,admission_hash TEXT,"
+            "run_id TEXT,root_work_order_ref TEXT,root_work_order_hash TEXT,"
+            "record_json TEXT,content_hash TEXT,created_at TEXT)"
+        )
+        fixture.store.connection.execute(
+            "INSERT INTO mission_annual_research_starts VALUES(?,?,?,?,?,?,?,?,?)",
+            ("start:test-frozen", successor["id"], successor["content_hash"],
+             "run:test-frozen", "work:test-frozen", "0" * 64,
+             canonical_json({"frozen": True}), "1" * 64,
+             "2026-09-11T13:00:00+00:00"),
+        )
+        fixture.store.connection.commit()
+        with self.assertRaisesRegex(
+            MissionAnnualResearchError, "retains its signed model budget"
+        ):
+            fixture.authority.replan_unstarted(successor["id"])
+
     def test_foreign_scope_stale_authority_unsupported_workflow_and_actor_are_refused(self):
         fixture = MissionAnnualFixture(self)
         cases = (

@@ -129,6 +129,37 @@ class MissionAnnualResearchLaneTests(unittest.TestCase):
         asserted = pointer.pop("content_hash")
         self.assertEqual(asserted, content_hash(pointer))
 
+    def test_replanned_unstarted_admission_holds_old_and_launches_successor(self) -> None:
+        original = self.store.add(1)
+        successor = self.store.add(2)
+        ticket_ref = "mission-annual-research:" + "a" * 24
+        self.launcher.tickets[ticket_ref] = {
+            "id": ticket_ref,
+            "status": "failed",
+            "summary": {
+                "status": "replanned",
+                "outcomes": [{
+                    "status": "replanned",
+                    "successor_admission_ref": successor["id"],
+                    "successor_admission_hash": successor["content_hash"],
+                }],
+            },
+        }
+        _write_latest(self.lane.latest_path, original, ticket_ref)
+
+        result = self.lane.dispatch_once()
+
+        self.assertEqual(result["status"], "launched")
+        self.assertEqual(result["admission_ref"], successor["id"])
+        self.assertEqual(self.launcher.started, [
+            (successor["id"], successor["content_hash"])
+        ])
+        holds = json.loads(self.lane.holds_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            holds["holds"][original["id"]]["reason"],
+            "superseded_by_current_model_authority",
+        )
+
     def test_failed_admission_is_held_while_next_admission_runs(self) -> None:
         first = self.store.add(1)
         second = self.store.add(2)

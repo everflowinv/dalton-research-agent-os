@@ -470,7 +470,32 @@ class MissionAnnualResearchCoordinator:
                 "admission_ref": admission["id"],
                 "status": child_status or ticket["status"],
             }
-            if child_status != "complete":
+            if child_status == "replanned":
+                outcomes = summary.get("outcomes") if isinstance(summary, Mapping) else None
+                successor = outcomes[0] if isinstance(outcomes, list) and len(outcomes) == 1 else None
+                successor_ref = (
+                    successor.get("successor_admission_ref")
+                    if isinstance(successor, Mapping) else None
+                )
+                successor_hash = (
+                    successor.get("successor_admission_hash")
+                    if isinstance(successor, Mapping) else None
+                )
+                current = by_ref.get(successor_ref)
+                if (
+                    current is None
+                    or current["content_hash"] != successor_hash
+                    or self._started(admission["id"])
+                ):
+                    raise MissionAnnualResearchLaneError(
+                        "annual research replan successor authority drifted"
+                    )
+                self._hold(
+                    holds, admission, reason="superseded_by_current_model_authority",
+                    ticket_ref=ticket["id"], disposition="terminal_hold",
+                )
+                settled["successor_admission_ref"] = successor_ref
+            elif child_status != "complete":
                 recovery = (
                     self._execution_state(admission)
                     if self._started(admission["id"]) else {

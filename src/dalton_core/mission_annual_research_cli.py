@@ -65,9 +65,26 @@ def run_admission(
         draft_config_path=draft_model_config,
         verifier_config_path=verifier_model_config,
     ) as runtime:
-        admission = runtime.authority.resolve_for_execution(admission_ref)
-        if admission["content_hash"] != expected_admission_hash:
+        stored_admission = runtime.authority.admission(admission_ref)
+        if stored_admission["content_hash"] != expected_admission_hash:
             raise ValueError("mission annual admission hash drifted before execution")
+        try:
+            admission = runtime.authority.resolve_for_execution(admission_ref)
+        except Exception as original_error:
+            try:
+                successor = runtime.authority.replan_unstarted(admission_ref)
+            except Exception:
+                raise original_error
+            return _summary(
+                admission_ref=admission_ref,
+                admission_hash=expected_admission_hash,
+                status="replanned",
+                outcomes=[{
+                    "status": "replanned",
+                    "successor_admission_ref": successor["id"],
+                    "successor_admission_hash": successor["content_hash"],
+                }],
+            )
         maximum = runtime.transition_budget(admission)
         for _transition in range(maximum):
             outcome = runtime.executor.run_once(admission_ref)

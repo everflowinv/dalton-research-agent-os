@@ -548,6 +548,79 @@ class MissionAnnualResearchAuthority:
             raise MissionAnnualResearchError("annual research admission is unavailable")
         return self._read_row(row)
 
+    def replan_unstarted(self, admission_ref: str) -> dict[str, Any]:
+        """Append a current-config successor without altering signed/started work.
+
+        Only model execution and its model authority may change.  Mission,
+        source, inquiry, repair target, and every other research-scope binding
+        remain byte-equivalent to the original admission.
+        """
+        wire = self.admission(admission_ref)
+        def exists(table: str) -> bool:
+            try:
+                return self.connection.execute(
+                    f"SELECT 1 FROM {table} WHERE admission_ref=?", (wire["id"],)
+                ).fetchone() is not None
+            except sqlite3.OperationalError as exc:
+                if "no such table" in str(exc):
+                    return False
+                raise
+
+        if exists("mission_annual_research_starts"):
+            raise MissionAnnualResearchError(
+                "started annual research admission retains its signed model budget"
+            )
+        if exists("mission_annual_research_outcomes"):
+            raise MissionAnnualResearchError(
+                "completed annual research admission cannot be replanned"
+            )
+        kwargs = {
+            "operation": wire["operation"],
+            "workflow_contract_ref": wire["workflow_contract_ref"],
+            "mission_version_ref": wire["mission_version_ref"],
+            "mission_version_hash": wire["mission_version_hash"],
+            "company_ref": wire["company_ref"],
+            "actor_ref": wire["actor_ref"],
+            "repair_feedback_ref": wire["repair_feedback_ref"],
+            "repair_feedback_hash": wire["repair_feedback_hash"],
+            "repair_target_ref": wire["repair_target_ref"],
+            "repair_target_hash": wire["repair_target_hash"],
+            "inquiry": wire["planner_inquiry"],
+            "query_rationale": wire["query_rationale"],
+            "review_ref": wire["request"]["review_ref"],
+            "issuer_cik": wire["request"]["issuer_cik"],
+            "accession": wire["request"]["accession"],
+            "query_terms": list(wire["request"]["query_terms"]),
+            "limits": dict(wire["request"]["limits"]),
+            "document_read_proof_ref": wire["request"]["document_read_proof_ref"],
+        }
+        identity, _request = self._derive(**kwargs)
+
+        def scope(value: Mapping[str, Any]) -> dict[str, Any]:
+            kept = dict(value)
+            kept.pop("model_authority", None)
+            request = dict(kept["request"])
+            request.pop("model_execution", None)
+            kept["request"] = request
+            return kept
+
+        original_identity = {
+            key: value for key, value in wire.items()
+            if key not in {"id", "status", "created_at", "identity_hash", "content_hash"}
+        }
+        if scope(identity) != scope(original_identity):
+            raise MissionAnnualResearchError(
+                "annual research scope changed; automatic model-budget replan refused"
+            )
+        if content_hash(identity) == wire["identity_hash"]:
+            raise MissionAnnualResearchError(
+                "annual research admission is already bound to current model authority"
+            )
+        successor = self.admit(**kwargs)
+        if successor["id"] == wire["id"]:
+            raise MissionAnnualResearchError("annual research replan did not create a successor")
+        return successor
+
     def resolve_for_execution(self, admission_ref: str) -> dict[str, Any]:
         """Fail closed unless every mutable authority still matches admission."""
 
