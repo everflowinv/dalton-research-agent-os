@@ -226,6 +226,23 @@ class FetchExecutorTests(unittest.TestCase):
         # The failed attempt is still an invocation against the shared window.
         self.assertEqual(count_recent_public_web_fetch_calls(h.core.connection, as_of=h.clock()), 1)
 
+    def test_empty_success_response_is_terminal_before_manifest_publication(self) -> None:
+        h = FetchHarness(self.root, transport=transport_for(b"", status=200))
+        self.addCleanup(h.close)
+        discovery = h.discover()
+        fetched = h.fetch.fetch(h.fetch.build_request(h.authority(discovery, URL_A)))
+        self.assertEqual(fetched["outcome"], "failed")
+        self.assertIsNone(fetched["document_ref"])
+        self.assertEqual(fetched["error"], {
+            "code": "empty_body",
+            "message": "public web fetch returned an empty response body",
+            "retryable": False,
+        })
+        self.assertIsNone(fetched["source_envelope_ref"])
+        with self.assertRaises(PublicWebCoreFetchError):
+            h.fetch.manifest(fetched)
+        self.assertEqual(public_web_urls_in_authority(h.core.connection, [URL_A]), [])
+
     def test_blocked_host_receipt_names_the_status_not_just_the_outcome(self) -> None:
         """P9d-9: a 403 from a host that refuses automated clients must say so.
 

@@ -1154,6 +1154,26 @@ class PublicWebFetchAdapter:
                     "retryable": response.status in {408, 429, 500, 502, 503, 504},
                 },
             )
+        if method == "GET" and not response.body:
+            # A successful HTTP status is not a fetched document when the
+            # server supplied no bytes.  Treat this as a terminal source
+            # outcome before a source envelope is published; otherwise the
+            # empty SHA is recorded as complete, manifest validation fails one
+            # layer later, and the mission retries the same unusable URL.
+            return _observation(
+                wire["content_hash"],
+                outcome="failed",
+                provider_request_id=provider_request_id,
+                provider_status=response.status,
+                structured_output=None,
+                source_record_refs=[],
+                provider_usage={"raw_media_type": media_type},
+                error={
+                    "code": "empty_body",
+                    "message": "public web fetch returned an empty response body",
+                    "retryable": False,
+                },
+            )
         final_url = canonical_public_web_url(response.final_url)
         record_ref = self._successful_source_record_ref(
             wire,
