@@ -25,7 +25,7 @@ class CockpitWorkspaceUiTests(unittest.TestCase):
 
     def test_workspace_explains_shared_connections_and_isolated_research(self):
         for phrase in (
-            "已连接的模型和资料来源可在新环境中继续使用",
+            "模型和资料来源的连接配置已登记；实际研究调用需在本环境中配置并确认",
             "研究目标、公司、任务、资料和审批只属于各自的环境",
             "这是一个空白研究环境",
         ):
@@ -37,7 +37,8 @@ class CockpitWorkspaceUiTests(unittest.TestCase):
         self.assertIn('id="workspace-open-sources"', self.source)
         self.assertIn('$("workspace-open-models").onclick=openModels', self.source)
         self.assertIn('$("workspace-open-sources").onclick=openSources', self.source)
-        self.assertIn("共用连接 · 本环境尚未配置研究调用", self.source)
+        self.assertIn("连接配置已登记；研究调用需在本环境配置", self.source)
+        self.assertIn('row.append(node("span",null,"st wait"))', self.source)
         shared_before_unavailable = self.source.index("const sharedModels=r.shared_catalog")
         unavailable = self.source.index("if(!r.available)", shared_before_unavailable)
         self.assertLess(shared_before_unavailable, unavailable)

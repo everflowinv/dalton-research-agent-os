@@ -291,7 +291,7 @@ pre.table{background:#f6f8fb;color:#28364b;border-color:var(--line)}table{color:
     <div class="workspace-intro">
       <div class="card hero">
         <p class="title">为一项新研究建立独立环境</p>
-        <p class="sub">新环境从空白开始。你可以继续使用已经连接的模型和资料来源，同时把每项研究的内容清楚分开。</p>
+        <p class="sub">新环境从空白开始。它可以共用已有模型和资料来源的连接配置，同时把每项研究的内容清楚分开。</p>
         <div class="workspace-promises">
           <div class="workspace-promise"><b>继续使用现有连接</b><span id="workspace-shared">正在检查模型与资料来源…</span></div>
           <div class="workspace-promise"><b>研究内容彼此独立</b><span>研究目标、公司、任务、资料和审批只属于各自的环境。</span></div>
@@ -719,10 +719,10 @@ let workspaceLoad=null,workspaceCreateId=null,workspaceLastName="",workspaceCanC
 const workspaceStatusLabel=value=>({ready:"可以进入",running:"可以进入",starting:"正在准备",creating:"正在准备",stopped:"暂未运行",degraded:"部分功能暂不可用",failed:"创建未完成"}[value]||"状态正在更新");
 function workspaceConnectionText(shared={}){
   const models=shared.models===true,sources=shared.sources===true;
-  if(models&&sources)return "已连接的模型和资料来源可在新环境中继续使用。";
-  if(models)return "已连接的模型可以继续使用；资料来源连接尚未就绪。";
-  if(sources)return "已连接的资料来源可以继续使用；模型连接尚未就绪。";
-  return "模型与资料来源的连接状态尚未确认。";
+  if(models&&sources)return "模型和资料来源的连接配置已登记；实际研究调用需在本环境中配置并确认。";
+  if(models)return "模型连接配置已登记；资料来源连接配置尚未登记。";
+  if(sources)return "资料来源连接配置已登记；模型连接配置尚未登记。";
+  return "模型与资料来源的连接配置尚未登记。";
 }
 function renderWorkspaces(result){
   const enabled=!(result.enabled===false),canCreate=enabled&&result.can_create!==false;
@@ -1010,7 +1010,7 @@ function renderSources(sheet,r){sheet.replaceChildren(readerClose(),node("h2","�
   if(r.policy_note)sheet.append(node("div",r.policy_note,"gap"));
   const list=node("section");list.append(node("h3","来源"));
   r.sources.forEach(s=>{const d=node("div",null,"lane");
-    const connector=s.connector||{},mission=s.mission||{};d.append(node("span",null,`st ${connector.status==="connected"||s.status==="connected"?"on":"wait"}`));
+    const connector=s.connector||{},mission=s.mission||{},missionPending=["unconfigured","ungranted","unapproved"].includes(mission.status),connectionReady=(connector.status==="connected"||s.status==="connected")&&!missionPending;d.append(node("span",null,`st ${connectionReady?"on":"wait"}`));
     const c=node("div");c.append(node("b",`${s.label}${s.generic?"（通用）":""}`));
     c.append(node("small",`可获取内容：${s.content.join("、")||"—"}`));
     if(s.connector)c.append(node("small",`连接：${connector.status_label||enumLabel(connector.status)} · 研究权限：${mission.status_label||enumLabel(mission.status)}`));
@@ -1050,7 +1050,7 @@ async function openModels(){const sheet=prepareReader("研究详情");
 function renderModels(sheet,r){sheet.replaceChildren(readerClose(),node("h2","每个环节用哪个模型"),
   node("div","每个环节会说明当前使用的是模型顺序还是候选集。多数修改会在下一次调用生效；需要重启的环节会单独提示。如需恢复原配置，请重新选择原方案。","meta"));
   const sharedModels=r.shared_catalog&&Array.isArray(r.shared_catalog.models)?r.shared_catalog.models:[];
-  if(sharedModels.length){const shared=node("section");shared.append(node("h3","已连接的模型"));sharedModels.forEach(model=>{const row=node("div",null,"lane");row.append(node("span",null,"st on"));const copy=node("div");copy.append(node("b",model.display_name||"已连接模型"),node("small",[model.provider,model.family_label].filter(Boolean).join(" · ")||"模型信息已登记"),node("small",`能力：${(model.capability_labels||[]).join("、")||"尚未标明"}`,"raw"),node("small","共用连接 · 本环境尚未配置研究调用","raw"));row.append(copy);shared.append(row)});sheet.append(shared)}
+  if(sharedModels.length){const shared=node("section");shared.append(node("h3","已有模型连接配置"));sharedModels.forEach(model=>{const row=node("div",null,"lane");row.append(node("span",null,"st wait"));const copy=node("div");copy.append(node("b",model.display_name||"已登记模型"),node("small",[model.provider,model.family_label].filter(Boolean).join(" · ")||"模型信息已登记"),node("small",`能力：${(model.capability_labels||[]).join("、")||"尚未标明"}`,"raw"),node("small","连接配置已登记；研究调用需在本环境配置","raw"));row.append(copy);shared.append(row)});sheet.append(shared)}
   if(!r.available){sheet.append(node("div",r.reason,"empty"));return}
   (r.notices||[]).filter(n=>!n.acknowledged).forEach(n=>{
     const d=node("div",null,"gap");d.append(node("b","模型变动"),node("div",n.message,"raw"));
