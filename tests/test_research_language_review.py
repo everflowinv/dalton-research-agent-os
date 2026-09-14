@@ -259,3 +259,11 @@ class EofContainerClosureTests(unittest.TestCase):
         for raw in values:
             with self.subTest(raw=raw), self.assertRaisesRegex(ValueError, "no unique complete"):
                 parse_stage_output_with_proof(raw, stage="brain")
+
+class RestartedStreamCompatibilityTests(unittest.TestCase):
+    def test_unique_complete_object_after_incomplete_prefix_still_parses(self):
+        from dalton_core.research_language_review import parse_stage_output_with_proof
+        complete='{"decisions":[],"sections":[]}'
+        value, proof=parse_stage_output_with_proof('{"decisions":['+complete,stage='brain')
+        self.assertEqual(value,{"decisions":[],"sections":[]})
+        self.assertEqual(proof['mode'],'exact')

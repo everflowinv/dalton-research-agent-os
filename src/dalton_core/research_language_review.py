@@ -75,7 +75,21 @@ def parse_stage_output_with_proof(text: str, *, stage: str) -> tuple[dict[str, A
                  "suffix": suffix, "raw_sha256": sha256(text.encode()).hexdigest(),
                  "fixed_sha256": sha256(raw.encode()).hexdigest()}
         candidates[_hash(value)] = (value, proof)
-    add(text, suffix="")
+    # Preserve the pre-existing restarted-stream behavior: a unique complete
+    # stage object may follow an incomplete prefix.  Its scalar bytes are not
+    # normalized or repaired.
+    for index, char in enumerate(text):
+        if char != "{":
+            continue
+        try:
+            value, _ = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict) and set(value) == keys[stage]:
+            proof = {"mode": "exact", "suffix": "",
+                     "raw_sha256": sha256(text.encode()).hexdigest(),
+                     "fixed_sha256": sha256(text[index:].encode()).hexdigest()}
+            candidates[_hash(value)] = (value, proof)
     if not candidates:
         try:
             fixed, suffix = _eof_container_closure(text)
