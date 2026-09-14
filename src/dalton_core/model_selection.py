@@ -573,6 +573,7 @@ def set_model_selection(
             f"{purpose} is not a calling stage this Core knows about"
         )
     published: dict[tuple[str, str], dict[str, Any]] = {}
+    prepared: list[tuple[dict[str, Any], str, str, str]] = []
     repointed: list[str] = []
     unchanged: list[str] = []
     # Validate every router and pinned policy before appending any immutable
@@ -586,27 +587,29 @@ def set_model_selection(
                 f"{item['name']} names a model router database that is not here"
             )
         with ModelRouter(router_db, read_only=True) as router:
-            router.get_policy(policy_ref)
+            pinned = router.get_policy(policy_ref)
+            latest = _latest_policy(router, pinned["id"])
             try:
                 validate_selection(
                     router, purpose=purpose, mode=mode, chain=chain)
             except FallbackChainError as exc:
                 raise ModelSelectionError(str(exc)) from exc
-    for item in configs:
+        prepared.append((item, router_db, pinned["id"], latest["policy_version_ref"]))
+    # A logical policy may be pinned at several historical versions by lanes
+    # which have not yet reloaded a prior owner change. Publish once from its
+    # current immutable head, then repoint every registered pin in that
+    # lineage. Grouping by the stale version ref both appended repeatedly and
+    # failed midway through the config set.
+    for item, router_db, policy_id, latest_ref in prepared:
         config = item.get("runtime_config", item["config"])
         policy_ref = config[item.get("field", "routing_policy_ref")]
-        router_db = item.get("router_db", config.get("model_router_db"))
-        if not isinstance(router_db, str) or not Path(router_db).is_file():
-            raise ModelSelectionError(
-                f"{item['name']} names a model router database that is not here"
-            )
-        key = (router_db, policy_ref)
+        key = (router_db, policy_id)
         if key not in published:
             with ModelRouter(router_db) as router:
                 try:
                     published[key] = publish_selection(
                         router,
-                        policy_version_ref=policy_ref,
+                        policy_version_ref=latest_ref,
                         purpose=purpose, mode=mode, chain=chain,
                         actor_ref=actor_ref, now=now,
                     )

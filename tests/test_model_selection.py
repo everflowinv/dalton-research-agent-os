@@ -716,6 +716,39 @@ class SetSelectionTests(StateDirectoryCase):
             {"mode": "tier"},
         )
 
+    def test_mixed_pins_publish_once_from_logical_policy_head(self) -> None:
+        verifier = self.root / "event-verifier-model-config.json"
+        verifier.write_text(json.dumps(self.model_config), encoding="utf-8")
+        prior = publish_selection(
+            self.router, policy_version_ref=self.policies["brain"],
+            purpose=CHEAP_PURPOSE, mode="explicit",
+            chain=["profile:zai-glm-5-3-flash"], now=NOW,
+        )
+        # One lane observed the prior change while another still pins the old
+        # version of the same logical policy.
+        current = self.stored()
+        current["routing_policy_ref"] = prior["policy_version_ref"]
+        self.config_path.write_text(json.dumps(current), encoding="utf-8")
+
+        result = set_model_selection(
+            self.root, purpose=BRAIN_PURPOSE, mode="explicit",
+            chain=["profile:claude-fable-5-1"], now=NOW,
+        )
+        first = self.stored()["routing_policy_ref"]
+        second = json.loads(verifier.read_text("utf-8"))["routing_policy_ref"]
+        self.assertEqual(first, second)
+        self.assertEqual(len(result["policy_versions"]), 1)
+        policy = self.router.get_policy(first)
+        self.assertEqual(policy["prior_version_ref"], prior["policy_version_ref"])
+        self.assertEqual(
+            policy["purpose_overrides"][CHEAP_PURPOSE]["chain"],
+            ["profile:zai-glm-5-3-flash"],
+        )
+        self.assertEqual(
+            policy["purpose_overrides"][BRAIN_PURPOSE]["chain"],
+            ["profile:claude-fable-5-1"],
+        )
+
     def test_a_config_replace_failure_restores_every_role_pin(self) -> None:
         verifier = self.root / "event-verifier-model-config.json"
         verifier.write_text(json.dumps(self.model_config), encoding="utf-8")
