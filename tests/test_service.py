@@ -10,10 +10,12 @@ import tempfile
 import threading
 import time
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
 from dalton_core.dashboard import ProjectionWriter
+from dalton_core.backup import DatabaseBackupManager
 from dalton_core.bootstrap import bootstrap
 from dalton_core.plugins.static_dashboard import (
     StaticDashboardPlugin,
@@ -1261,6 +1263,60 @@ class ServiceTests(unittest.TestCase):
             prune.assert_called_once_with(keep_latest=3)
             self.assertEqual(service._backup_state["last_retention"], retention)
             self.assertEqual(service._backup_state["state"], "ready")
+            service.close()
+
+    def test_restart_restores_verified_backup_interval_before_launching(self) -> None:
+        def configured(root: Path, *, created_at: datetime) -> DaltonService:
+            core = root / "core.sqlite"
+            scheduler_path = root / "scheduler.sqlite"
+            with DaltonStore(core) as store:
+                ObservabilityStore(store)
+            Scheduler(scheduler_path).close()
+            backups = root / "backups"
+            manager = DatabaseBackupManager(
+                backups, {"core": core, "scheduler": scheduler_path},
+            )
+            manifest = manager.snapshot()
+            manifest_path = backups / manifest["snapshot_id"] / "manifest.json"
+            wire = json.loads(manifest_path.read_text(encoding="utf-8"))
+            wire["created_at"] = created_at.isoformat(timespec="microseconds")
+            manifest_path.write_text(
+                json.dumps(wire, sort_keys=True, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+            )
+            return DaltonService(ServiceConfig.from_mapping({
+                "schema_version": "0.1", "core_db": str(core),
+                "scheduler_db": str(scheduler_path),
+                "projection_db": str(root / "projection.sqlite"),
+                "model_router_db": None, "capability_catalog_db": None,
+                "heartbeat_path": str(root / "heartbeat.json"),
+                "writer_socket": str(root / "writer.sock"), "tick_seconds": 1,
+                "projection_min_interval_seconds": 1, "plugin_retry_seconds": 1,
+                "plugins": [], "backup": {"enabled": True,
+                    "root": str(backups), "interval_seconds": 86400},
+            }))
+
+        now = datetime.now(timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            service = configured(Path(directory), created_at=now - timedelta(hours=1))
+            with mock.patch.object(service._backup, "snapshot") as snapshot:
+                service.start()
+                service._poll_backup()
+                self.assertIsNone(service._backup_future)
+                snapshot.assert_not_called()
+            self.assertNotEqual(service._last_backup_monotonic, 0.0)
+            self.assertEqual(service._backup_state["state"], "ready")
+            service.close()
+
+        with tempfile.TemporaryDirectory() as directory:
+            service = configured(Path(directory), created_at=now - timedelta(days=2))
+            with mock.patch.object(
+                service._backup, "snapshot", return_value={"snapshot_id": "new"},
+            ) as snapshot:
+                service.start()
+                service._poll_backup()
+                service._backup_future.result(timeout=2)
+                snapshot.assert_called_once_with()
             service.close()
 
     def test_persistent_tick_keeps_heartbeating_with_one_backup_in_flight(self) -> None:

@@ -625,6 +625,29 @@ class DaltonService:
             "last_success_at": None, "last_snapshot_id": None,
             "last_retention": None, "last_error": None,
         }
+        self._restore_backup_cadence()
+
+    def _restore_backup_cadence(self) -> None:
+        """Anchor the monotonic interval to the newest verified snapshot."""
+
+        if self._backup is None or self.config.backup_interval_seconds is None:
+            return
+        manifest = self._backup.latest_verified_manifest()
+        if manifest is None:
+            return
+        try:
+            created = datetime.fromisoformat(
+                manifest["created_at"].replace("Z", "+00:00"))
+            age = max(0.0, (datetime.now(timezone.utc) - created).total_seconds())
+        except (KeyError, TypeError, ValueError):
+            return
+        if age >= self.config.backup_interval_seconds:
+            return
+        self._last_backup_monotonic = time.monotonic() - age
+        self._backup_state.update(
+            state="ready", last_success_at=manifest["created_at"],
+            last_snapshot_id=manifest["snapshot_id"], last_error=None,
+        )
 
     def _sources(self) -> tuple[Any, ...]:
         return (

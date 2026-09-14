@@ -360,6 +360,33 @@ class DatabaseBackupManager:
             "deleted_bytes": deleted_bytes, "skipped": skipped,
         }
 
+    def latest_verified_manifest(self) -> dict[str, Any] | None:
+        """Return the newest completed snapshot whose manifest and files verify.
+
+        Temporary directories and corrupt/incomplete snapshots are ignored.
+        This read-only probe lets a restarted controller preserve backup
+        cadence without trusting directory names or an unverified timestamp.
+        """
+
+        if not self.backup_root.is_dir():
+            return None
+        verified: list[tuple[datetime, str, dict[str, Any]]] = []
+        for path in sorted(self.backup_root.iterdir()):
+            if path.name.startswith("."):
+                continue
+            try:
+                with _manifest_lock(path, exclusive=False, nonblocking=True):
+                    manifest, _, _ = _read_completed_snapshot(path)
+                created = datetime.fromisoformat(
+                    manifest["created_at"].replace("Z", "+00:00"))
+            except (BlockingIOError, BackupError, OSError, ValueError):
+                continue
+            verified.append((created, path.name, manifest))
+        if not verified:
+            return None
+        verified.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        return dict(verified[0][2])
+
     def verify_restore(self, snapshot_id: str, restore_root: str | Path) -> dict[str, Any]:
         snapshot = self.backup_root / _snapshot_id(snapshot_id)
         restore = Path(restore_root).expanduser().resolve()
