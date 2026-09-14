@@ -1206,7 +1206,13 @@ class MissionSourceDiscoveryCoordinator:
             return [{"status": "error", "reason": f"{type(exc).__name__}: {exc}"}]
 
     def settle_already_held(self) -> list[dict[str, Any]]:
-        """Documents search found already in authority owe a review, not a fetch."""
+        """Reconcile every unsettled row whose bytes are now in authority.
+
+        This deliberately runs before selection.  A direct governed fetch can
+        complete after search registered a row as ``discovered``; requiring a
+        selector to choose that row again would strand complete bytes and may
+        suppress the exact missing-period document forever.
+        """
 
         settled: list[dict[str, Any]] = []
         for document in self.missions.already_held_documents(source_ref=self.source_ref):

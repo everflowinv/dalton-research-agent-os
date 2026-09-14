@@ -2674,12 +2674,16 @@ class CoverageMissionAuthority:
     def already_held_documents(
         self, *, source_ref: str | None = None, limit: int = 20
     ) -> list[dict[str, Any]]:
-        """Documents recorded ``already_in_authority`` under active missions.
+        """Unsettled active-mission documents that may now be held in authority.
 
-        P9d-12: search marks a citation this way when Core already holds its
-        bytes (a human fetched it first).  Nothing needs fetching, but the
-        document still owes the human queue a review; the coordinator settles
-        these to ``acquired`` and registers that review.
+        Search can mark a citation ``already_in_authority`` when Core held its
+        bytes first.  A separately requested acquisition can also finish after
+        discovery (or after an automated failure), leaving the mission row in
+        its older state.  The coordinator checks source authority before it
+        settles any returned row, so include every state that can legally move
+        through ``settle_document_already_held``.  This reconciliation runs
+        before candidate selection and prevents a selector from hiding bytes
+        that are already paid for and complete.
         """
 
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
@@ -2687,7 +2691,7 @@ class CoverageMissionAuthority:
         query = (
             "SELECT d.* FROM coverage_mission_discovered_documents d "
             "JOIN coverage_mission_pointer p ON p.mission_version_id=d.mission_version_ref "
-            "WHERE d.status='already_in_authority'"
+            "WHERE d.status IN ('discovered','already_in_authority','acquisition_failed')"
         )
         params: list[Any] = []
         if source_ref is not None:

@@ -1123,6 +1123,24 @@ class CoordinatorTests(unittest.TestCase):
         )
         self.assertEqual(failed, [])
 
+    def test_direct_acquisition_after_discovery_reconciles_before_selection(self) -> None:
+        """A paid manual fetch must not wait for the selector to choose it again."""
+
+        v1 = self.create_mission()
+        self.mission_v2(v1)
+        self.coordinator.dispatch_once()  # launch discovery
+        self.coordinator.settle_dispatches()  # register NEW_DOC as discovered
+        seed_known_document(self.h, NEW_DOC)  # independent governed fetch completes
+
+        calls_before = len(self.acquisition_launcher.calls)
+        settled = self.coordinator.settle_already_held()
+        target = next(item for item in settled if item["document_ref"] == NEW_DOC)
+        self.assertEqual((target["status"], target["review_status"]), ("acquired", "fresh"))
+        self.assertEqual(len(self.acquisition_launcher.calls), calls_before)
+        mission = self.missions.active_mission("coverage-mission:us-it-services")
+        acquired = self.missions.discovered_documents(mission["id"], status="acquired")
+        self.assertIn(NEW_DOC, [item["document_ref"] for item in acquired])
+
 
 class SearchChildTests(unittest.TestCase):
     """The real launcher spawns the real child in fake-search mode."""
