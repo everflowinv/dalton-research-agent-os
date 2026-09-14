@@ -12,7 +12,7 @@ from datetime import timedelta
 from pathlib import Path
 
 from dalton_core.document_extraction import DocumentExtractionService
-from dalton_core.document_extraction_cli import run_extraction
+from dalton_core.document_extraction_cli import _secondary_sweep, run_extraction
 from dalton_core.research_verification import ResearchVerificationError
 from dalton_core.research_auto_commit import DOCUMENT_QUALITATIVE_RULE_REF
 from dalton_core.store import content_hash
@@ -284,23 +284,49 @@ class AutomationAdmissionTests(AutomationDraftingTests):
 
     def test_failed_qualitative_windows_never_dismiss_the_review(self) -> None:
         summary = self._run_with_generation_results([
-            {"status": "failed", "suggestions": [], "error_code": "BUSY",
+            {"status": "failed", "suggestions": [], "error_code": "TIMEOUT",
              "work_order_ref": "work:document-extraction:failed-0"},
-            {"status": "failed", "suggestions": [], "error_code": "MODEL_CHAIN_EXHAUSTED",
-             "work_order_ref": "work:document-extraction:failed-1"},
         ])
         self.assertEqual(summary["reviews_complete"], 0)
         self.assertEqual(
             (summary["status"], summary["stop_reason"], summary["blocked"]["code"]),
-            ("failed", "model_execution_pending_or_failed", "all_model_windows_unavailable"),
+            ("failed", "systemic_model_failure", "systemic_model_failure"),
         )
         self.assertEqual(summary["resolved_reviews"], [])
         self.assertEqual(
             [(item["status"], item["error_code"], item["work_order_ref"])
              for item in summary["drafted"]],
-            [("failed", "BUSY", "work:document-extraction:failed-0"),
-             ("failed", "MODEL_CHAIN_EXHAUSTED", "work:document-extraction:failed-1")],
+            [("failed", "TIMEOUT", "work:document-extraction:failed-0")],
         )
+        self.assertEqual(summary["blocked"]["pass"], "qualitative")
+
+    def test_fresh_secondary_failure_stops_before_another_provider_call(self) -> None:
+        class Service:
+            calls = 0
+
+            def view(self, **kwargs):
+                return {"context": {"content_hash": "0" * 64, "next_offset": 10}}
+
+            def generate_numeric(self, **kwargs):
+                self.calls += 1
+                return {"status": "no_result", "replayed": False,
+                        "error_code": "INVALID_HOST_RESULT",
+                        "work_order_ref": "work:document-numeric:failed"}
+
+        service = Service()
+        reviews = [{"review_id": f"review:{index}", "source_ref": "source:test",
+                    "document_ref": f"document:{index}"} for index in range(2)]
+        summary = {"numeric": [], "figures": 0, "numeric_fresh": 0}
+        failure = _secondary_sweep(
+            service, [("automation:test", reviews, {})], summary,
+            limit=10, entries="numeric", wanted=lambda *_: True,
+            call="generate_numeric", counts={"verified": "verified"},
+            total=("figures", "recorded"), spent_key="numeric_fresh",
+        )
+        self.assertEqual(service.calls, 1)
+        self.assertEqual(summary["numeric_fresh"], 1)
+        self.assertEqual(failure["pass"], "numeric")
+        self.assertEqual(failure["error_code"], "INVALID_HOST_RESULT")
         review = self.h.missions.document_reviews(
             self.h.missions.active_mission("coverage-mission:us-it-services")["id"]
         )[0]

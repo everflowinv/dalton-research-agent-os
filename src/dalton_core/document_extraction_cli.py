@@ -462,6 +462,16 @@ def run_extraction(
                             stop_reason = f"gated:{result.get('reason')}"
                             complete = False
                             break
+                        if result.get("status") == "failed":
+                            # The Scheduler has already persisted and settled this
+                            # attempt.  Do not turn one provider-wide failure into
+                            # another 49 sequential calls in the same child.  A
+                            # later run replays this terminal window for free and
+                            # proceeds to unrelated/new windows; it never retries
+                            # an unknown-send call under a new identity.
+                            stop_reason = "systemic_model_failure"
+                            complete = False
+                            break
                         if result.get("status") != "succeeded":
                             # A terminal model failure is a statement about the
                             # execution, not about the source window.  Keep the
@@ -505,32 +515,50 @@ def run_extraction(
         # pages, so three consecutive live runs read 30 news windows and never
         # reached a single filing or transcript.  Both passes therefore sweep
         # the reviews they want, before admission closes any of them.
-        _secondary_sweep(
-            service, held_lanes, summary,
-            limit=max_numeric_windows, entries="numeric",
-            wanted=lambda review, spec: numeric_worthy(spec),
-            call="generate_numeric",
-            counts={"verified": "verified", "refused": "refused",
-                    "recorded": "recorded"},
-            total=("figures", "recorded"),
-            spent_key="numeric_fresh",
-            require_open=False,
-        )
-        _secondary_sweep(
-            service, held_lanes, summary,
-            limit=max_discovery_windows, entries="discovery",
-            wanted=lambda review, spec: discovery_worthy(spec),
-            call="generate_metric_discovery",
-            counts={"proposals": "proposals", "refused": "refused", "recorded": "recorded"},
-            total=("metrics_observed", "recorded"),
-            spent_key="discovery_fresh",
-            require_open=False,
-        )
+        secondary_failure = None
+        if stop_reason != "systemic_model_failure":
+            secondary_failure = _secondary_sweep(
+                service, held_lanes, summary,
+                limit=max_numeric_windows, entries="numeric",
+                wanted=lambda review, spec: numeric_worthy(spec),
+                call="generate_numeric",
+                counts={"verified": "verified", "refused": "refused",
+                        "recorded": "recorded"},
+                total=("figures", "recorded"),
+                spent_key="numeric_fresh",
+                require_open=False,
+            )
+        if stop_reason != "systemic_model_failure" and secondary_failure is None:
+            secondary_failure = _secondary_sweep(
+                service, held_lanes, summary,
+                limit=max_discovery_windows, entries="discovery",
+                wanted=lambda review, spec: discovery_worthy(spec),
+                call="generate_metric_discovery",
+                counts={"proposals": "proposals", "refused": "refused", "recorded": "recorded"},
+                total=("metrics_observed", "recorded"),
+                spent_key="discovery_fresh",
+                require_open=False,
+            )
         # ADR-0005 / P9d-17b: every fully drafted review is staged and
         # policy-admitted, then closed.  Idempotent: a re-run reports
         # duplicates and writes nothing new.
         if candidate_staging is not None:
             _admit_complete_reviews(host, service, complete_reviews, summary)
+        if stop_reason == "systemic_model_failure" or secondary_failure is not None:
+            failed = (summary["qualitative_failures"][-1]
+                      if stop_reason == "systemic_model_failure"
+                      else secondary_failure)
+            summary["blocked"] = {
+                "code": "systemic_model_failure",
+                "pass": "qualitative" if stop_reason == "systemic_model_failure" else failed["pass"],
+                "error_code": failed.get("error_code"),
+                "work_order_ref": failed.get("work_order_ref"),
+            }
+            summary["stop_reason"] = "systemic_model_failure"
+            summary["failure_reason"] = (
+                "a terminal model execution failed; remaining windows were not launched")
+            summary["status"] = "failed"
+            return summary
         if (summary["reviews_scanned"] > 0 and summary["reviews_complete"] == 0
                 and drafted == 0 and len(summary["skipped"]) == summary["reviews_scanned"]):
             reasons: dict[str, int] = {}
@@ -665,7 +693,7 @@ def _secondary_sweep(
     total: tuple[str, str],
     spent_key: str,
     require_open: bool = True,
-) -> None:
+) -> dict[str, Any] | None:
     """Spend one secondary allowance on the documents that pass its own gate.
 
     Reads windows in the mission's order, skipping the reviews this pass has no
@@ -676,7 +704,7 @@ def _secondary_sweep(
     """
 
     if limit <= 0:
-        return
+        return None
     spent = 0
 
     def done() -> None:
@@ -688,7 +716,8 @@ def _secondary_sweep(
     for actor, reviews, specs in lanes:
         for review in reviews:
             if spent >= limit:
-                return done()
+                done()
+                return None
             if not wanted(review, specs.get(review["document_ref"])):
                 continue
             review_hash = content_hash(review)
@@ -713,7 +742,8 @@ def _secondary_sweep(
                 status = result.get("status")
                 if status == "gated":
                     # No model is configured; every other window is gated too.
-                    return done()
+                    done()
+                    return None
                 # A window that was never asked anything costs no allowance:
                 # nothing was owed, or its document kind is not one a figure
                 # may be taken from at all.
@@ -731,10 +761,18 @@ def _secondary_sweep(
                     entry["requirements_error"] = result["requirements_error"]
                 summary[entries].append(entry)
                 summary[total[0]] += len(result.get(total[1], []))
+                if status in {"failed", "no_result"} and not result.get("replayed"):
+                    done()
+                    return {
+                        **entry, "pass": entries,
+                        "error_code": result.get("error_code"),
+                        "work_order_ref": result.get("work_order_ref"),
+                    }
                 if context["next_offset"] is None:
                     break
                 offset = context["next_offset"]
     done()
+    return None
 
 
 def _admit_complete_reviews(host: ExtractionHost, service: DocumentExtractionService,

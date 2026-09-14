@@ -1638,7 +1638,8 @@ class DocumentExtractionService:
             work, context, actor_ref, config, factory, "numeric")
         if text is None:
             return {"status": "no_result", "verified": [], "refused": [],
-                    "recorded": [], "replayed": replayed, "formal_authority_writes": 0}
+                    "recorded": [], "replayed": replayed, "work_order_ref": work.id,
+                    "formal_authority_writes": 0}
         result = extract_from_window(work.metadata["request"], text)
         journal = {"recorded": [], "duplicates": []}
         if result["verified"]:
@@ -1701,7 +1702,8 @@ class DocumentExtractionService:
             work, context, actor_ref, config, factory, "metric discovery")
         if text is None:
             return {"status": "no_result", "proposals": [], "refused": [],
-                    "recorded": [], "replayed": replayed, "formal_authority_writes": 0}
+                    "recorded": [], "replayed": replayed, "work_order_ref": work.id,
+                    "formal_authority_writes": 0}
         result = proposals_from_window(work.metadata["request"], text)
         journal = {"recorded": [], "duplicates": []}
         if result["proposals"]:
