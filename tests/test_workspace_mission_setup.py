@@ -197,8 +197,13 @@ class WorkspaceFirstMissionTests(unittest.TestCase):
         from dalton_core.coverage_mission import CoverageMissionAuthority
         authority = CoverageMissionAuthority(store)
         self.assertEqual(authority.active_mission(mission["mission_ref"])["id"], mission["id"])
+        from dalton_core.mission_stage import MissionStageDriver
+        first_tick = MissionStageDriver(authority).run_once()
+        self.assertEqual(first_tick["status"], "entered")
+        self.assertEqual(first_tick["entered"][0]["company_ref"], "company:ticker:asml")
         progress = authority.mission_progress(mission["mission_ref"])
         self.assertEqual(progress["mission_version_ref"], mission["id"])
+        self.assertEqual(progress["companies"][0]["current_stage"], "initial_screen")
 
     def test_writer_refuses_a_self_consistent_foreign_workspace_before_opening_authority(self):
         from dalton_core.writer_server import (
