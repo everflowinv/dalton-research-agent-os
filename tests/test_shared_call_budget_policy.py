@@ -49,5 +49,17 @@ class SharedCallBudgetPolicyTests(unittest.TestCase):
             with self.assertRaises(SharedCallBudgetPolicyError):
                 load_shared_call_budget_policy(link)
 
+    def test_bounded_planner_reads_the_same_shared_policy(self):
+        from dataclasses import asdict
+        from dalton_core.bounded_planner_driver import BoundedPlannerDriverConfig
+        from tests.test_bounded_planner_driver import StalledLoopTests
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name); path = root / "policy.json"
+            path.write_text(json.dumps(self.policy(purpose_max_cost_usd={"plan": 0.7})))
+            raw = json.loads(json.dumps(asdict(StalledLoopTests()._config(root)), default=str))
+            raw["shared_call_budget_policy_path"] = str(path)
+            configured = BoundedPlannerDriverConfig.from_mapping(raw)
+            self.assertEqual(configured.planner_call_budget["max_cost_usd"], 0.7)
+
 
 if __name__ == "__main__": unittest.main()

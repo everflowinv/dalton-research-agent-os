@@ -94,7 +94,7 @@ class BoundedPlannerDriverConfig:
             "planner_broker_auth_key", "planner_broker_client_id",
             "planner_expected_agent_id", "planner_max_cost_usd",
         }
-        optional = {"planner_call_budget"}
+        optional = {"planner_call_budget", "shared_call_budget_policy_path"}
         if set(raw) - optional != expected:
             raise BoundedPlannerDriverError(
                 "bounded planner driver config has an invalid closed shape"
@@ -213,6 +213,10 @@ class BoundedPlannerDriverConfig:
         }}
         if "planner_call_budget" in raw:
             budget_config["call_budget"].update(raw["planner_call_budget"])
+        if raw.get("shared_call_budget_policy_path") is not None:
+            budget_config["shared_call_budget_policy_path"] = raw[
+                "shared_call_budget_policy_path"
+            ]
         try:
             planner_call_budget = resolve_call_budget(
                 budget_config, "plan", defaults=budget_config["call_budget"]
