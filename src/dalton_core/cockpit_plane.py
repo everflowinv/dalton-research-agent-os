@@ -672,6 +672,28 @@ def _claim_period_label(value: Any) -> str | None:
     return value.strip() if re.search(r"[A-Za-z]", remaining) else text
 
 
+def _answer_citation_period_labels(result: Any) -> Any:
+    """Add display-only period labels without mutating a stored answer."""
+    if not isinstance(result, Mapping):
+        return result
+    public = dict(result)
+    citations = result.get("citations")
+    if not isinstance(citations, list):
+        return public
+    shown: list[Any] = []
+    for citation in citations:
+        if not isinstance(citation, Mapping):
+            shown.append(citation)
+            continue
+        row = dict(citation)
+        label = _claim_period_label(row.get("period"))
+        if label is not None:
+            row["period_label"] = label
+        shown.append(row)
+    public["citations"] = shown
+    return public
+
+
 CONNECTION_STATUS_LABELS = {
     "connected": "已连接", "not_connected": "尚未连接",
     "probe_only": "仅允许试读", "undeclared": "研究目标尚未声明该来源",
@@ -5037,7 +5059,10 @@ class CockpitPlane:
 
     @staticmethod
     def _public_job(job: Mapping[str, Any]) -> dict[str, Any]:
-        return {k: v for k, v in job.items() if not k.startswith("_")}
+        public = {k: v for k, v in job.items() if not k.startswith("_")}
+        if public.get("kind") == "ask":
+            public["result"] = _answer_citation_period_labels(public.get("result"))
+        return public
 
     def job(self, login: str, job_id: str) -> dict[str, Any]:
         with self._jobs_lock:
@@ -5050,15 +5075,18 @@ class CockpitPlane:
         if not rows:
             raise CockpitError("job not found")
         row = rows[0]
+        result = None if row["result_json"] is None else json.loads(row["result_json"])
+        if row["kind"] == "ask":
+            result = _answer_citation_period_labels(result)
         return {"job_id": row["job_id"], "kind": row["kind"], "login": row["login"], "status": row["status"],
-                "request": json.loads(row["request_json"]), "result": None if row["result_json"] is None else json.loads(row["result_json"]),
+                "request": json.loads(row["request_json"]), "result": result,
                 "error": row["error"], "created_at": row["created_at"], "updated_at": row["updated_at"]}
 
     def history(self, login: str, kind: str, limit: int = 20) -> list[dict[str, Any]]:
         rows = self.journal.rows("SELECT * FROM cockpit_jobs WHERE kind=? AND login=? ORDER BY created_at DESC LIMIT ?",
                                  (kind, login, max(1, min(int(limit), 100))))
         return [{"job_id": r["job_id"], "status": r["status"], "request": json.loads(r["request_json"]),
-                 "result": None if r["result_json"] is None else json.loads(r["result_json"]), "error": r["error"],
+                 "result": _answer_citation_period_labels(None if r["result_json"] is None else json.loads(r["result_json"])) if kind == "ask" else (None if r["result_json"] is None else json.loads(r["result_json"])), "error": r["error"],
                  "created_at": r["created_at"]} for r in rows]
 
     # -- ask -----------------------------------------------------------------------------------
@@ -5248,7 +5276,8 @@ class CockpitPlane:
             # it say which kind of thing was cited.
             "citations": [{
                 "tag": row["tag"], "statement": row["statement"], "ref": row["ref"],
-                "period": row["period"], "company": row.get("company") or "",
+                "period": row["period"], "period_label": _claim_period_label(row["period"]),
+                "company": row.get("company") or "",
                 "at": row.get("at") or "", "block": row["block"],
                 "block_label": ask_context.BLOCK_LABELS[row["block"]],
             } for row in answer["citations"]],

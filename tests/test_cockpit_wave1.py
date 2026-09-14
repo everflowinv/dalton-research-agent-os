@@ -829,6 +829,11 @@ class PageVocabularyTests(unittest.TestCase):
         self.assertIn("technicalDetails(detail.technical)", page)
         self.assertIn(".lane small.raw", page)
 
+    def test_ask_citations_prefer_the_period_label_and_retain_the_raw_period(self) -> None:
+        page = self.PAGE.read_text(encoding="utf-8")
+        self.assertIn('period=x.period_label||x.period||"期间未注明"', page)
+        self.assertIn("technicalDetails({original_period:x.period})", page)
+
     def test_the_price_block_says_when_it_is_not_a_close(self) -> None:
         self.assertIn("盘中价，当天还没收盘", self.PAGE.read_text(encoding="utf-8"))
 

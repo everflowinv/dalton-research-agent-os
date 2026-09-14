@@ -14,7 +14,8 @@ from unittest.mock import patch
 
 from dalton_core.cockpit_model import CockpitModel, CockpitModelError, unwrap_json_object
 from dalton_core.cockpit_plane import (CockpitConfig, CockpitConflict, CockpitError,
-                                       CockpitPlane, _terminal_display_reason)
+                                       CockpitPlane, _answer_citation_period_labels,
+                                       _terminal_display_reason)
 from dalton_core.cockpit_setup import install as install_cockpit
 from dalton_core.document_extraction import HermeticExtractionAdapter, build_prompt
 from dalton_core.store import content_hash
@@ -333,6 +334,38 @@ class CockpitPlaneTests(unittest.TestCase):
         # Another owner cannot read this job.
         with self.assertRaises(CockpitError):
             self.c.plane.job("someone@example.com", job["job_id"])
+
+    def test_old_ask_citation_periods_are_projected_without_rewriting_history(self) -> None:
+        result = {"answer": "已有回答。", "citations": [
+            {"statement": "已有结论。", "period": "current quarter"},
+            {"statement": "没有注明期间。", "period": None},
+        ]}
+        wire = json.dumps(result, ensure_ascii=False)
+        self.c.plane.journal.write(
+            "INSERT INTO cockpit_jobs(job_id,kind,login,status,request_json,result_json,error,created_at,updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?)",
+            ("cockpit-job:old-answer", "ask", self.login, "done", "{}", wire, None,
+             "2026-09-01T00:00:00+00:00", "2026-09-01T00:00:00+00:00"),
+        )
+        before = self.c.plane.journal.rows(
+            "SELECT result_json FROM cockpit_jobs WHERE job_id=?", ("cockpit-job:old-answer",))[0]["result_json"]
+
+        direct = self.c.plane.job(self.login, "cockpit-job:old-answer")["result"]
+        historic = self.c.plane.history(self.login, "ask")[0]["result"]
+
+        self.assertEqual(direct["citations"][0]["period"], "current quarter")
+        self.assertEqual(direct["citations"][0]["period_label"], "当前季度")
+        self.assertNotIn("period_label", direct["citations"][1])
+        self.assertEqual(historic, direct)
+        after = self.c.plane.journal.rows(
+            "SELECT result_json FROM cockpit_jobs WHERE job_id=?", ("cockpit-job:old-answer",))[0]["result_json"]
+        self.assertEqual(after, before)
+
+        projected_result = _answer_citation_period_labels(result)
+        self.assertEqual(projected_result["citations"][0]["period_label"], "当前季度")
+        in_memory = self.c.plane._public_job({"kind": "ask", "result": result})
+        self.assertEqual(in_memory["result"], projected_result)
+        self.assertNotIn("period_label", result["citations"][0])
 
     def test_goal_draft_publishes_a_new_mission_version_only_on_confirmation(self) -> None:
         before = self.c.h.missions.active_mission("coverage-mission:us-it-services")
