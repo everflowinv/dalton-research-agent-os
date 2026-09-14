@@ -291,6 +291,8 @@ def build_unit_prompt(
     classification: Any = None,
     _variant_conclusion_rule: bool = True,
     _analytical_contract: bool = True,
+    _final_text_contract: bool = True,
+    _positive_research_purpose: bool = True,
 ) -> str:
     """One unit's prompt: the slots, the rules, the material, the last version.
 
@@ -307,9 +309,15 @@ def build_unit_prompt(
     lines = [
         "You are writing one part of a company file for a fundamental, long-biased fund.",
         "The file is read by a portfolio manager who knows the sector. Write in Chinese.",
-        *(final_text_instructions() if _analytical_contract else ()),
-        "You are not advising and not recommending: a file says what is true about a",
-        "company; the decision about what to do with it is made elsewhere by a person.",
+        *(final_text_instructions()
+          if _analytical_contract and _final_text_contract else ()),
+        *(
+            ["Write a factual research record for investment analysis. Separate supported",
+             "evidence, analytical inference, and remaining unknowns."]
+            if _positive_research_purpose else
+            ["You are not advising and not recommending: a file says what is true about a",
+             "company; the decision about what to do with it is made elsewhere by a person."]
+        ),
         "",
         f"Company: {company.get('ticker') or ''} ({company.get('company_ref')})",
         f"Part: {unit} -- {_unit_purpose(unit)}",
@@ -412,13 +420,23 @@ def build_unit_prompt(
 def legacy_unit_prompt_v02(**kwargs: Any) -> str:
     """Rebuild an immutable v0.2 producer question for formal replay only."""
 
-    return build_unit_prompt(**kwargs, _variant_conclusion_rule=False, _analytical_contract=False)
+    return build_unit_prompt(**kwargs, _variant_conclusion_rule=False,
+                             _analytical_contract=False,
+                             _positive_research_purpose=False)
 
 
 def legacy_unit_prompt_v03(**kwargs: Any) -> str:
     """Rebuild an immutable v0.3 producer question for formal replay only."""
 
-    return build_unit_prompt(**kwargs, _analytical_contract=False)
+    return build_unit_prompt(**kwargs, _analytical_contract=False,
+                             _positive_research_purpose=False)
+
+
+def legacy_unit_prompt_v04(**kwargs: Any) -> str:
+    """Rebuild the analytical prompt before final-text rules were appended."""
+
+    return build_unit_prompt(**kwargs, _final_text_contract=False,
+                             _positive_research_purpose=False)
 
 
 # ---------------------------------------------------------------------------
