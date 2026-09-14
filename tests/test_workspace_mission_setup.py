@@ -9,7 +9,8 @@ from dalton_core.store import content_hash
 from dalton_core.workspace import create_workspace_manifest
 from dalton_core.workspace_mission_setup import (
     WorkspaceMissionSetupError, draft_first_mission, plan_first_mission_goal,
-    publish_first_mission, publish_first_mission_to_store,
+    materialize_first_mission_discovery_plans, publish_first_mission,
+    publish_first_mission_to_store,
 )
 
 
@@ -199,6 +200,13 @@ class WorkspaceFirstMissionTests(unittest.TestCase):
         selected_plan = load_discovery_plan(_web_discovery_plan(self.workspace.state_dir))
         self.assertEqual(selected_plan["mission_ref"], mission["mission_ref"])
         self.assertEqual(set(selected_plan["companies"]), {"company:ticker:asml"})
+        materialize_first_mission_discovery_plans(
+            self.workspace, mission,
+            sec_ticker_resolver=lambda ticker: {
+                "ticker": ticker, "cik": "1487729", "name": "ASML Holding NV"})
+        from dalton_core.macos_launchagent import _sec_discovery_plan
+        sec_plan = load_discovery_plan(_sec_discovery_plan(self.workspace.state_dir))
+        self.assertEqual(sec_plan["companies"]["company:ticker:asml"]["cik"], "0001487729")
         from dalton_core.coverage_mission import CoverageMissionAuthority
         authority = CoverageMissionAuthority(store)
         self.assertEqual(authority.active_mission(mission["mission_ref"])["id"], mission["id"])

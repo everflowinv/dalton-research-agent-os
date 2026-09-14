@@ -432,13 +432,17 @@ def _atomic_json(path: Any, value: Mapping[str, Any]) -> None:
 
 
 def materialize_first_mission_discovery_plans(
-    workspace: WorkspacePaths, mission: Mapping[str, Any],
+    workspace: WorkspacePaths, mission: Mapping[str, Any], *,
+    sec_ticker_resolver: Callable[[str], Mapping[str, str]] | None = None,
 ) -> dict[str, str]:
     """Write the approved, mission-specific search plans selected at restart."""
     from .mission_source_discovery import (
-        ALPHAENGINE_SOURCE_REF, WEB_SEARCH_SOURCE_REF, build_discovery_plan,
+        ALPHAENGINE_SOURCE_REF, SEC_SOURCE_REF, WEB_SEARCH_SOURCE_REF,
+        build_discovery_plan, validate_discovery_plan,
     )
-    from .macos_launchagent import ALPHAENGINE_PLAN_SELECTOR, WEB_PLAN_SELECTOR
+    from .macos_launchagent import (
+        ALPHAENGINE_PLAN_SELECTOR, SEC_PLAN_SELECTOR, WEB_PLAN_SELECTOR,
+    )
 
     connected = {item["source_ref"] for item in mission["source_plan"]
                  if item["status"] == "connected"}
@@ -446,6 +450,38 @@ def materialize_first_mission_discovery_plans(
     created_at = "1970-01-01T00:00:00.000000+00:00"
     directory = workspace.state_dir / "discovery-plans"
     plans: list[tuple[str, str, str, dict[str, Any]]] = []
+    paid_calls = int(mission["budget"]["max_daily_paid_calls"])
+    if SEC_SOURCE_REF in connected:
+        resolver = sec_ticker_resolver or resolve_sec_ticker
+        resolved: dict[str, dict[str, str]] = {}
+        for company_ref, ticker in companies.items():
+            try:
+                issuer = dict(resolver(ticker))
+                cik = str(issuer["cik"]).zfill(10)
+            except (KeyError, TypeError, ValueError, WorkspaceMissionSetupError):
+                continue
+            if re.fullmatch(r"[0-9]{10}", cik):
+                resolved[company_ref] = {"cik": cik}
+        if resolved:
+            sec_base = {
+                "schema_version": "0.4",
+                "id": f"discovery-plan:{workspace.slug}:sec-filings:1",
+                "created_at": created_at, "mission_ref": mission["mission_ref"],
+                "source_ref": SEC_SOURCE_REF, "companies": resolved,
+                "specs": [
+                    {"spec_ref": "annual-report-10k", "form": "10-K",
+                     "lookback_days": 500, "rediscovery_interval_days": 30,
+                     "retry_interval_days": 2},
+                    {"spec_ref": "current-report-8k", "form": "8-K",
+                     "lookback_days": 90, "rediscovery_interval_days": 2,
+                     "retry_interval_days": 1},
+                ],
+                "budget": {"max_calls_24h": max(1, min(paid_calls, 50))},
+            }
+            sec_plan = validate_discovery_plan(
+                {**sec_base, "content_hash": content_hash(sec_base)})
+            plans.append((SEC_SOURCE_REF, SEC_PLAN_SELECTOR,
+                          "sec-discovery-plan-selection-0.1", sec_plan))
     alpha_calls = int(mission["budget"]["max_alphaengine_calls_24h"])
     if ALPHAENGINE_SOURCE_REF in connected and alpha_calls > 0:
         alpha_companies = {ref: {"name": ticker, "ticker": ticker, "aliases": []}
@@ -465,7 +501,6 @@ def materialize_first_mission_discovery_plans(
             ])
         plans.append((ALPHAENGINE_SOURCE_REF, ALPHAENGINE_PLAN_SELECTOR,
                       "alphaengine-discovery-plan-selection-0.1", plan))
-    paid_calls = int(mission["budget"]["max_daily_paid_calls"])
     if WEB_SEARCH_SOURCE_REF in connected and paid_calls > 0:
         terms = {ref: ticker for ref, ticker in companies.items()}
         plan = build_discovery_plan(
@@ -498,3 +533,21 @@ def materialize_first_mission_discovery_plans(
                      {**selector_body, "content_hash": content_hash(selector_body)})
         written[source_ref] = str(directory / filename)
     return written
+
+
+def resolve_sec_ticker(ticker: str) -> dict[str, str]:
+    """Resolve a ticker through the installed SEC client, never by guessing."""
+    ticker = _text(ticker, "ticker").upper()
+    try:
+        from edgar import Company
+    except ImportError as exc:
+        raise WorkspaceMissionSetupError("SEC company resolver is not installed") from exc
+    try:
+        company = Company(ticker)
+        cik = str(company.cik)
+        name = str(company.name)
+    except Exception as exc:  # the client gives provider-specific failures
+        raise WorkspaceMissionSetupError(f"SEC could not resolve ticker {ticker}") from exc
+    if not cik.isdigit():
+        raise WorkspaceMissionSetupError(f"SEC returned an invalid CIK for {ticker}")
+    return {"ticker": ticker, "cik": cik.zfill(10), "name": name}

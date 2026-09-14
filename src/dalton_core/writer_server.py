@@ -1992,6 +1992,24 @@ class WriterServer:
         # their schemas.
         self._research_playbook = ResearchPlaybookAuthority(self._store)
         self._coverage_mission = CoverageMissionAuthority(self._store)
+        # A blank workspace's plist predates its first mission and therefore
+        # may carry the old default plan filename. Resolve the approved local
+        # selector again on every writer start so mission confirmation survives
+        # a restart without regenerating process definitions.
+        if self._workspace is not None:
+            from .macos_launchagent import (
+                _alphaengine_discovery_plan, _sec_discovery_plan,
+                _web_discovery_plan,
+            )
+            selected_alpha = _alphaengine_discovery_plan(self._workspace.state_dir)
+            selected_sec = _sec_discovery_plan(self._workspace.state_dir)
+            selected_web = _web_discovery_plan(self._workspace.state_dir)
+            if selected_alpha.is_file():
+                self._discovery_plan_path = str(selected_alpha)
+            if selected_web.is_file():
+                self._web_search_plan_path = str(selected_web)
+            if selected_sec.is_file():
+                self._sec_filings_plan_path = str(selected_sec)
         if self._discovery_plan_path is not None:
             # An unusable plan must not keep the writer (and every other lane)
             # from starting; the discovery op reports the reason instead.
@@ -3060,7 +3078,10 @@ class WriterServer:
         """Hot-load confirmed plans so a new workspace need not restart."""
         if self._workspace is None:
             return
-        from .macos_launchagent import _alphaengine_discovery_plan, _web_discovery_plan
+        from .macos_launchagent import (
+            _alphaengine_discovery_plan, _sec_discovery_plan,
+            _web_discovery_plan,
+        )
 
         alpha_path = _alphaengine_discovery_plan(self._workspace.state_dir)
         if alpha_path.is_file() and self._search_launcher is not None:
@@ -3084,6 +3105,17 @@ class WriterServer:
             self._web_source_discovery = MissionSourceDiscoveryCoordinator(
                 store=self.store, missions=self.coverage_mission, plan=plan,
                 search_launcher=self._web_search_launcher,
+                acquisition_launcher=self._web_fetch_launcher,
+                spool_dir=self._transcript_spool_dir,
+            )
+        sec_path = _sec_discovery_plan(self._workspace.state_dir)
+        if sec_path.is_file() and self._sec_filings_launcher is not None:
+            plan = load_discovery_plan(sec_path)
+            self._sec_filings_plan_path = str(sec_path)
+            self._sec_filings_plan_error = None
+            self._sec_filings_source_discovery = MissionSourceDiscoveryCoordinator(
+                store=self.store, missions=self.coverage_mission, plan=plan,
+                search_launcher=self._sec_filings_launcher,
                 acquisition_launcher=self._web_fetch_launcher,
                 spool_dir=self._transcript_spool_dir,
             )
