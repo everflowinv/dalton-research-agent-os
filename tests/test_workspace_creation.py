@@ -18,6 +18,9 @@ from dalton_core.workspace_runtime import ENVIRONMENT_KEY
 
 class BlankWorkspaceCreationTests(unittest.TestCase):
     def setUp(self) -> None:
+        platform = patch("dalton_core.workspace_creation.sys.platform", "test")
+        platform.start()
+        self.addCleanup(platform.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.host = Path(self.temp.name) / "Dalton"
@@ -124,3 +127,15 @@ class BlankWorkspaceCreationTests(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "invalid closed shape"):
             from dalton_core.workspace_creation import create_from_request
             create_from_request({"schema_version": SCHEMA_VERSION, "approvals": []})
+
+    def test_darwin_writer_socket_limit_fails_before_workspace_write(self):
+        long_host = Path(self.temp.name) / ("long-host-name-" * 7)
+        release = long_host / "runtime/releases" / ("a" * 64)
+        release.mkdir(parents=True)
+        with patch("dalton_core.workspace_creation.sys.platform", "darwin"):
+            with self.assertRaisesRegex(Exception, "writer socket"):
+                create_blank_workspace(
+                    long_host, "blank", 18885, "release:sha256:" + "a" * 64, release,
+                    request_id="workspace-request:long", display_name="Long",
+                )
+        self.assertFalse((long_host / "workspaces/blank").exists())

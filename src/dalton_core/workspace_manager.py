@@ -103,7 +103,9 @@ def _catalog(config: Mapping[str, Any]) -> tuple[dict[str, Any] | None, list[str
 
 
 def _public(record: Mapping[str, Any], current_id: str | None) -> dict[str, Any]:
-    return {key: record.get(key) for key in ("workspace_id", "name", "url", "status")} | {
+    return {key: record.get(key) for key in (
+        "workspace_id", "name", "url", "status", "retryable", "failure_reason"
+    )} | {
         "current": record.get("workspace_id") == current_id,
     }
 
@@ -260,7 +262,10 @@ def create_managed_workspace(config_path: Path, login: str, name: str, request_i
         try:
             catalog, catalog_paths = _catalog(config)
             shared_paths = list(config.get("shared_readonly_paths", ()))
-            shared_paths.extend([str(config_path.resolve()), *catalog_paths])
+            shared_paths.extend([
+                str(config_path.resolve()), str(Path(config["tailscale_executable"]).resolve()),
+                *catalog_paths,
+            ])
             # Always call creation: this resumes a manifest-only/bootstrap-only
             # attempt and preserves the workspace UUID and token bytes.
             create_blank_workspace(
@@ -276,7 +281,6 @@ def create_managed_workspace(config_path: Path, login: str, name: str, request_i
             record["status"] = "creating"
             record.pop("retryable", None)
             _write(target, record)
-            os.environ["DALTON_WORKSPACE_MANIFEST"] = str(manifest)
             configure_workspace_control(
                 manifest, owner_login=login, tailscale_host=config["tailscale_host"],
                 tailscale_executable=config["tailscale_executable"])
@@ -284,14 +288,19 @@ def create_managed_workspace(config_path: Path, login: str, name: str, request_i
             service["control"]["config"]["cockpit"]["workspace_manager_config_path"] = str(
                 config_path.resolve())
             from .service import ServiceConfig
-            ServiceConfig.from_mapping(service)
+            parsed_service = ServiceConfig.from_mapping(service)
             _write(workspace.config_path, service)
             if not record.get("installed"):
                 install_workspace(manifest, config["launch_agents_dir"])
                 record["installed"] = True
                 _write(target, record)
+            configured_roles = ["writer", "controller"]
+            if parsed_service.control is not None:
+                configured_roles.append("control")
+            if parsed_service.thesis_impact is not None:
+                configured_roles.append("thesis-impact")
             namespace = label_namespace(workspace.slug)
-            for role in ("writer", "controller", "control", "thesis-impact"):
+            for role in configured_roles:
                 label = f"{namespace}.{role}"
                 plist = Path(config["launch_agents_dir"]) / f"{label}.plist"
                 if not plist.is_file():
@@ -307,10 +316,12 @@ def create_managed_workspace(config_path: Path, login: str, name: str, request_i
             _serve(config, record["port"])
             record.update(status="running", retryable=False,
                           url=f"https://{config['tailscale_host']}:{record['port']}/")
+            record.pop("failure_reason", None)
             _write(target, record)
             return {"status": "running", "workspace": _public(record, None)}
         except Exception:
-            record.update(status="failed", retryable=True, url=None)
+            record.update(status="failed", retryable=True, url=None,
+                          failure_reason="研究环境尚未准备完成，可以安全重试。")
             _write(target, record)
             raise
 

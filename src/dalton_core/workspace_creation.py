@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -116,6 +117,18 @@ def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
         Path(temporary).unlink(missing_ok=True)
 
 
+def _validate_writer_socket_length(path: Path) -> None:
+    """Reject an AF_UNIX address the selected host cannot bind."""
+    maximum = 104 if sys.platform == "darwin" else 108 if sys.platform.startswith("linux") else None
+    if maximum is None:
+        return
+    length = len(os.fsencode(path))
+    if length >= maximum:
+        raise WorkspaceError(
+            f"研究环境目录过长，writer socket 地址为 {length} 字节，"
+            f"当前平台必须小于 {maximum} 字节")
+
+
 def create_blank_workspace(
     host_root: str | Path,
     slug: str,
@@ -139,6 +152,7 @@ def create_blank_workspace(
     manifest_path = Path(host_root).expanduser().resolve() / "workspaces" / slug / "workspace.json"
     if manifest_path.is_file():
         workspace = load_workspace_manifest(manifest_path)
+        _validate_writer_socket_length(workspace.writer_socket)
         if (workspace.cockpit_port != cockpit_port or workspace.release_ref != release_ref
                 or workspace.release_path != Path(release_path).expanduser().resolve()):
             raise WorkspaceError("existing workspace differs from blank creation request")
@@ -158,6 +172,7 @@ def create_blank_workspace(
         candidate_root = Path(candidate_wire["workspace_root"])
         candidate = WorkspacePaths.from_manifest(
             candidate_wire, manifest_path=candidate_root / "workspace.json")
+        _validate_writer_socket_length(candidate.writer_socket)
         catalog = load_shared_connection_catalog(connection_catalog, workspace=candidate)
         workspace = create_workspace_manifest(
             host_root, slug, cockpit_port, release_ref, release_path,
