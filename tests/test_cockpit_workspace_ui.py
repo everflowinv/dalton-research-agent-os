@@ -123,6 +123,11 @@ class CockpitWorkspaceUiTests(unittest.TestCase):
     def test_workspace_display_name_is_used_in_the_cockpit_header(self):
         self.assertIn("workspace&&(workspace.name||workspace.slug)", self.source)
 
+    def test_active_mission_clears_blank_workspace_copy_and_draft(self):
+        active = self.source.split('$("goal-submit").textContent="整理成研究目标"', 1)[1]
+        self.assertIn('$("page-sub").textContent=titles.goal[1]', active)
+        self.assertIn('$("goal-draft").replaceChildren()', active)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -75,7 +75,8 @@ def ephemeral_call(token_config: str | Path, socket_path: str | Path, *, actor_r
             # Keep the ephemeral human principal valid through the bounded
             # broker round-trip. Other governance operations retain their
             # existing timeout; no retry or second model call is introduced.
-            timeout = 90 if operation == "generate_document_extraction" else 10
+            timeout = (90 if operation == "generate_document_extraction" else
+                       45 if operation == "publish_first_workspace_mission" else 10)
             return WriterClient(str(socket), token, timeout=timeout).call(operation, dict(params))
         finally:
             current = load_principals(

@@ -799,6 +799,9 @@ function renderOverview(o){
     return;
   }
   $("goal-submit").textContent="整理成研究目标";
+  $("page-sub").textContent=titles.goal[1];
+  $("goal-draft").replaceChildren();
+  $("goal-status").replaceChildren();
   const g=o.goal;
   $("goal-title").textContent=displayMissionText(g.title);$("goal-objective").textContent=displayMissionText(g.objective);
   const tags=$("goal-tags");tags.replaceChildren(node("span",`第 ${g.version} 版 · ${fmtDate(g.published_at)} 发布`,"tag"),node("span",`${o.companies.length} 家公司`,"tag"),node("span",`${o.totals.theses} 条研究论点`,"tag"));

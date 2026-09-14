@@ -17,6 +17,28 @@ from dalton_core.writer_server import (
 
 
 class GovernanceCliTests(unittest.TestCase):
+    def test_first_mission_publish_allows_for_bounded_materialization(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            tokens = root / "tokens.json"
+            write_token_config(tokens, [
+                Principal("core", "core-secret-token", CORE_OPERATIONS, unrestricted=True),
+            ])
+            observed = {}
+
+            class InspectingClient:
+                def __init__(self, socket_path, token, timeout):
+                    observed["timeout"] = timeout
+
+                def call(self, operation, params):
+                    return {"status": "ok"}
+
+            with patch("dalton_core.governance_cli.WriterClient", InspectingClient):
+                ephemeral_call(
+                    tokens, root / "writer.sock", actor_ref="human:owner",
+                    operation="publish_first_workspace_mission", params={})
+            self.assertEqual(observed["timeout"], 45)
+
     def test_ephemeral_principal_contains_only_selected_operation_and_restores_file(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

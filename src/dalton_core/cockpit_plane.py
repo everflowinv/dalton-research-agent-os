@@ -3205,7 +3205,9 @@ class CockpitPlane:
                     },
                 }
             companies.append({
-                "company_ref": company_ref, "ticker": member.get("ticker"), "name": COMPANY_NAMES.get(member.get("ticker", ""), ""),
+                "company_ref": company_ref, "ticker": member.get("ticker"),
+                "name": (member.get("name") or COMPANY_NAMES.get(member.get("ticker", ""), "")
+                         or member.get("ticker") or company_ref.rsplit(":", 1)[-1]),
                 "priority": member.get("bootstrap_priority"), "tier": member.get("coverage_tier"),
                 "stage": entry["stage_label"], "stage_ref": entry["stage"],
                 "stage_status": entry["stage_status_label"], "note": note,
@@ -6961,16 +6963,40 @@ class CockpitPlane:
         foundation = json.loads((workspace.state_dir / "research-foundation.json").read_text())
         if draft.get("setup_state") != "ready_for_confirmation":
             raise CockpitConflict("请补充研究范围后重新整理目标")
-        try:
-            result = self.governance_call(
-                self.token_config, self.writer_socket, actor_ref=_subject_for_login(login),
-                operation="publish_first_workspace_mission", params={
-                    "workspace_manifest": json.loads(workspace.manifest_path.read_text()),
-                    "method_foundation": foundation, "proposal": dict(draft),
-                    "proposal_hash": draft["content_hash"], "actor_ref": _subject_for_login(login),
-                })
-        except (GovernanceCliError, RemoteError) as exc:
-            raise CockpitConflict(f"发布没有被接受：{_reason(exc)}") from exc
+        expected = f"coverage-mission-version:{workspace.slug}:{draft['content_hash'][:24]}"
+        result = None
+        with self._core() as core:
+            try:
+                committed = self._mission(core)
+            except CockpitMissionMissing:
+                committed = None
+        if isinstance(committed, Mapping) and committed.get("id") == expected:
+            result = committed
+        elif committed is not None:
+            raise CockpitConflict("这个研究环境已经发布了另一份研究目标")
+        else:
+            try:
+                result = self.governance_call(
+                    self.token_config, self.writer_socket, actor_ref=_subject_for_login(login),
+                    operation="publish_first_workspace_mission", params={
+                        "workspace_manifest": json.loads(workspace.manifest_path.read_text()),
+                        "method_foundation": foundation, "proposal": dict(draft),
+                        "proposal_hash": draft["content_hash"], "actor_ref": _subject_for_login(login),
+                    })
+            except RemoteError as exc:
+                # Publication commits immutable authorities before it writes
+                # local source plans. Recover only this draft's deterministic
+                # mission version if that bounded follow-up outlives the RPC.
+                with self._core() as core:
+                    try:
+                        committed = self._mission(core)
+                    except CockpitMissionMissing:
+                        committed = None
+                if not isinstance(committed, Mapping) or committed.get("id") != expected:
+                    raise CockpitConflict(f"发布没有被接受：{_reason(exc)}") from exc
+                result = committed
+            except GovernanceCliError as exc:
+                raise CockpitConflict(f"发布没有被接受：{_reason(exc)}") from exc
         published = result["id"]
         self.journal.write("UPDATE cockpit_drafts SET status='published', published_ref=?, updated_at=? WHERE draft_id=?",
                            (published, _iso(self.clock()), draft_id))
