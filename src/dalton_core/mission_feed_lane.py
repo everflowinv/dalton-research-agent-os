@@ -53,6 +53,7 @@ from .prior_research_core import (
     SOURCE_REF as PRIOR_RESEARCH_SOURCE_REF,
 )
 from .lane_registry import LaneSpec, register_lane
+from .connector import ConnectorQuotaExceeded
 from .store import canonical_json, content_hash
 
 # The two rows `coverage_mission.DISCOVERY_SOURCES` needs before either feed
@@ -144,6 +145,11 @@ _PLAN_FIELDS = frozenset({
     "body_reads_per_tick", "content_hash",
 })
 MAX_BODY_READS_PER_TICK = 200
+# The company-wiki host read is about 0.85 s per document on the deployed
+# corpus. Fifty sequential reads exceeded the Writer's 30 s RPC boundary even
+# though every child succeeded. Twelve leaves room for enumeration, recording
+# and a slow local read; unread documents remain in the next enumeration.
+COMPANY_WIKI_BODY_READS_PER_TICK = 12
 
 
 def validate_feed_discovery_plan(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -885,14 +891,21 @@ class FeedDiscoveryCoordinator:
         pending = [ref for ref in queue if ref not in held]
         outcomes: list[dict[str, Any]] = []
         for document_ref in pending[: max(0, bound)]:
-            outcomes.append(self._resolve_one(
+            outcome = self._resolve_one(
                 document_ref=document_ref,
                 universe=universe,
                 header=headers.get(document_ref) or {},
                 header_companies=header_by_document.get(document_ref, ()),
                 since=since,
                 requested_by=requested_by,
-            ))
+            )
+            outcomes.append(outcome)
+            # A connector quota is shared by every remaining document. Once
+            # the connector proves it exhausted, another 49 calls can only
+            # create 49 identical failure receipts. Keep the remaining refs
+            # pending for the next quota window.
+            if outcome.get("reason_code") == "connector_quota_exhausted":
+                break
         return {
             "source_ref": self.source_ref,
             "read": len(outcomes),
@@ -931,6 +944,14 @@ class FeedDiscoveryCoordinator:
                 work_ref=f"work:{self.source_ref}:{digest}",
                 output_dir=ticket_dir,
             )
+        except ConnectorQuotaExceeded as exc:
+            self.launcher.settle_run(
+                ticket_id, status="failed", exit_code=1,
+                failure_reason=f"{type(exc).__name__}: {exc}"[:500],
+            )
+            return {"document_ref": document_ref, "outcome": "failed",
+                    "reason_code": "connector_quota_exhausted",
+                    "reason": f"{type(exc).__name__}: {exc}"[:500]}
         except Exception as exc:  # noqa: BLE001 - one document, reported not raised
             self.launcher.settle_run(
                 ticket_id, status="failed", exit_code=1,
@@ -1416,9 +1437,21 @@ def _dispatch(server: Any, source_ref: str, launcher_kwarg: str) -> dict[str, An
     }
     coordinator = FeedDiscoveryCoordinator(
         missions=server.coverage_mission, launcher=launcher, source_ref=source_ref,
-        plan=plan, **runners,
+        plan=plan,
+        body_reads_per_tick=_feed_body_read_limit(source_ref, plan),
+        **runners,
     )
     return coordinator.dispatch_once(universe=_mission_universe(server))
+
+
+def _feed_body_read_limit(
+    source_ref: str, plan: Mapping[str, Any]
+) -> int | None:
+    """Return a transport bound without changing the signed discovery plan."""
+
+    if source_ref == COMPANY_WIKI_SOURCE_REF:
+        return min(plan["body_reads_per_tick"], COMPANY_WIKI_BODY_READS_PER_TICK)
+    return None
 
 
 def dispatch_sales_notes(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:

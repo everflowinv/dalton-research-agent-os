@@ -41,7 +41,7 @@ from dalton_core.connector_governance import (
     ConnectorGovernance,
     build_governance_record,
 )
-from dalton_core.connector import ConnectorStore
+from dalton_core.connector import ConnectorQuotaExceeded, ConnectorStore
 from dalton_core.connector_authority_port import ConnectorCompletionReceiptReader
 from dalton_core.connector_inventory import load_packaged_connector_inventory
 from dalton_core.observability import ObservabilityStore
@@ -77,6 +77,8 @@ from dalton_core.mission_feed_lane import (
     triage_notes,
     validate_feed_discovery_plan,
     wiki_spec_ref,
+    COMPANY_WIKI_BODY_READS_PER_TICK,
+    _feed_body_read_limit,
 )
 from dalton_core.raw_spool import RawSpool
 from dalton_core.sales_notes_core import (
@@ -1155,6 +1157,31 @@ class FeedEndToEndTests(unittest.TestCase):
         self.assertEqual(
             self.missions.discovered_documents(self.mission["id"], limit=100), []
         )
+
+    def test_connector_quota_exhaustion_stops_the_remaining_body_reads(self) -> None:
+        coordinator = self.coordinator()
+        calls = []
+
+        class ExhaustedRunner:
+            def run(inner, **kwargs):
+                calls.append(kwargs["parameters"])
+                raise ConnectorQuotaExceeded("connector calls quota exceeded")
+
+        coordinator.runner = ExhaustedRunner()
+        result = coordinator.resolve_documents(
+            queue=[ACN_NOTE, EPAM_NOTE, CTSH_NOTE], universe=UNIVERSE,
+            headers={}, header_company={}, since="2026-08-01",
+        )
+        self.assertEqual((result["read"], result["failed"], len(calls)), (1, 1, 1))
+        self.assertEqual(result["outcomes"][0]["reason_code"],
+                         "connector_quota_exhausted")
+
+    def test_company_wiki_rpc_batch_is_below_the_authorized_plan_bound(self) -> None:
+        plan = load_feed_discovery_plan(PLAN_PATH)
+        self.assertEqual(plan["body_reads_per_tick"], 50)
+        self.assertEqual(COMPANY_WIKI_BODY_READS_PER_TICK, 12)
+        self.assertEqual(_feed_body_read_limit(COMPANY_WIKI, plan), 12)
+        self.assertIsNone(_feed_body_read_limit(SALES_NOTES, plan))
 
 
 def synthetic_digests(root: Path, *, days: int, per_day: int) -> Path:
