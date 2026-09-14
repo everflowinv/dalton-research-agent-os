@@ -61,6 +61,16 @@ class CockpitWorkspaceUiTests(unittest.TestCase):
             self.assertIn(phrase, branch)
         self.assertNotIn("draftActions", branch)
 
+    def test_saved_initial_goal_returns_without_overwriting_user_edits(self):
+        guard = (
+            'o.initial_goal?.status==="saved"'
+            '&&!$("goal-draft").childNodes.length'
+            '&&!$("goal-input").value.trim()'
+        )
+        self.assertIn(guard, self.source)
+        self.assertIn("renderGoalDraft(o.initial_goal)", self.source)
+        self.assertIn("已恢复上次保存的目标草稿。", self.source)
+
     def test_creation_requires_a_name_and_only_enters_a_real_url(self):
         self.assertIn("if(!name){status.className=\"status err\"", self.source)
         self.assertIn("enter.disabled=item.current||!item.url", self.source)

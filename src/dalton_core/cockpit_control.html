@@ -789,6 +789,11 @@ function renderOverview(o){
     $("page-sub").textContent="空白研究环境 · 等待研究目标";
     $("svc-text").textContent="研究环境已就绪";$("svc-dot").className="dot";
     $("goal-submit").textContent="保存目标草稿";
+    if(o.initial_goal?.status==="saved"&&!$("goal-draft").childNodes.length&&!$("goal-input").value.trim()){
+      renderGoalDraft(o.initial_goal);
+      $("goal-status").className="status ok";
+      $("goal-status").textContent="已恢复上次保存的目标草稿。";
+    }
     return;
   }
   $("goal-submit").textContent="整理成研究目标";
