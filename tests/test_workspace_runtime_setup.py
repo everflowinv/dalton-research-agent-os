@@ -107,6 +107,20 @@ class WorkspaceRuntimeSetupTests(unittest.TestCase):
                 self.assertEqual(_source_ref({"connector_ref": f"connector:host-tool:{vendor}:{operation}"}),
                                  f"source:{vendor}")
 
+    def test_connected_source_can_read_discovered_results_without_unrelated_permissions(self):
+        from unittest.mock import patch
+        from dalton_core.workspace_runtime_setup import _connector_records
+        from dalton_core.workspace import load_workspace_manifest
+        from dalton_core.connector_governance import ALPHAENGINE_SEARCH_CAPABILITY_ID, SEC_CAPABILITY_ID
+        sources = [{"connector_ref": "connector:alphaengine-library", "capability_id": ALPHAENGINE_SEARCH_CAPABILITY_ID},
+                   {"connector_ref": "connector:sec-edgar", "capability_id": SEC_CAPABILITY_ID}]
+        with patch('dalton_core.workspace_runtime_setup._catalog', return_value={"sources": sources}):
+            records, unsupported = _connector_records(load_workspace_manifest(self.manifest), 'human:workspace-owner')
+        self.assertEqual(unsupported, [])
+        self.assertEqual(set(records), {'alphaengine-search-library-v1.json', 'alphaengine-get-document-v1.json',
+            'sec-filings-index-v1.json', 'sec-company-facts-v3.json', 'sec-financial-statements-v3.json'})
+        self.assertFalse((self.state / 'connector-governance/yfinance-daily-prices-v1.json').exists())
+
     def test_cockpit_first_goal_plans_once_and_publishes_existing_authorities(self):
         import os
         from unittest.mock import patch

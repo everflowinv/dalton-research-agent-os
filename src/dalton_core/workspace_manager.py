@@ -106,8 +106,11 @@ def provision_runtime(config: Mapping[str, Any], manifest: Path, *, login: str) 
     from .workspace_model_setup import install_runtime_template
     from .workspace_service_setup import install_service_template
     from .workspace_runtime_setup import install
+    from .workspace_control_setup import configure_workspace_control
     model = install_runtime_template(manifest, templates["model"])
     runtime = install(manifest, actor_ref="human:tailscale-" + hashlib.sha256(login.encode()).hexdigest()[:32])
+    configure_workspace_control(manifest, owner_login=login,
+        tailscale_host=config["tailscale_host"], tailscale_executable=config["tailscale_executable"])
     service = install_service_template(manifest, templates["service"])
     workspace = load_workspace_manifest(manifest)
     receipt = {"schema_version": "dalton-workspace-runtime-ready-0.1",
@@ -369,10 +372,10 @@ def create_managed_workspace(config_path: Path, login: str, name: str, request_i
             record["status"] = "creating"
             record.pop("retryable", None)
             _write(target, record)
-            provision_runtime(config, manifest, login=login)
-            configure_workspace_control(
-                manifest, owner_login=login, tailscale_host=config["tailscale_host"],
-                tailscale_executable=config["tailscale_executable"])
+            if provision_runtime(config, manifest, login=login) is None:
+                configure_workspace_control(
+                    manifest, owner_login=login, tailscale_host=config["tailscale_host"],
+                    tailscale_executable=config["tailscale_executable"])
             service = json.loads(workspace.config_path.read_text())
             service["control"]["config"]["cockpit"]["workspace_manager_config_path"] = str(
                 config_path.resolve())
