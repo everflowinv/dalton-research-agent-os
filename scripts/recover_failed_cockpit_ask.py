@@ -25,7 +25,10 @@ def main():
  if not isinstance(raw_answer,dict):raise SystemExit('producer formal output is not an answer object')
  if (envelope.get('metadata') or {}).get('route_decision_ref')!=a.producer_route_decision_ref:raise SystemExit('producer route differs from formal envelope')
  ro=sqlite3.connect(f'file:{a.journal_db.resolve()}?mode=ro',uri=True);ro.row_factory=sqlite3.Row;ro.execute('pragma query_only=on');ro.execute('begin');row=ro.execute('select * from cockpit_jobs where job_id=?',(a.job_id,)).fetchone();ro.rollback();ro.close()
- if row is None or failed_job_hash(dict(row))!=a.expected_failed_hash:raise SystemExit('failed job identity mismatch')
+ if row is None:raise SystemExit('failed job is missing')
+ row_is_failed=(row['status']=='failed' and failed_job_hash(dict(row))==a.expected_failed_hash)
+ row_is_recovered=(row['status']=='done' and row['result_json'] is not None)
+ if not row_is_failed and not row_is_recovered:raise SystemExit('failed job identity mismatch')
  request=json.loads(row['request_json']); work_db=sqlite3.connect(f'file:{a.scheduler_db.resolve()}?mode=ro',uri=True); wr=work_db.execute('select work_order_hash,work_order_json from scheduler_work_orders where work_order_id=?',(formal[3],)).fetchone();work_db.close()
  if wr is None or hashlib.sha256(wr[1].encode()).hexdigest()!=wr[0]:raise SystemExit('producer work order is missing or invalid')
  work=json.loads(wr[1]); prompt=work.get('question')
@@ -47,7 +50,7 @@ def main():
  product={'kind':'ask_answer','version_ref':'cockpit-ask:'+request['request_id'],'sections':[{'title':'回答','body':producer['answer'],'gaps':producer['gaps']}]}
  product_source_hash=hashlib.sha256((canonical_json(product)+'\n').encode()).hexdigest()
  if product_source_hash!=a.expected_checker_source_hash:raise SystemExit('reconstructed product does not match the completed checker source')
- plan={'schema_version':'cockpit-ask-language-recovery-plan:0.2','status':'reserved','job_id':a.job_id,'failed_job_hash':a.expected_failed_hash,'producer_result_sha256':producer_sha,'product_source_hash':product_source_hash,'producer_result_envelope_ref':a.producer_result_envelope_ref,'producer_work_order_ref':formal[3],'producer_work_order_sha256':wr[0],'brain_result_envelope_ref':a.brain_result_envelope_ref,'brain_raw_sha256':a.brain_raw_sha256,'original_source_commit':a.original_source_commit,'successor_source_commit':a.successor_source_commit,'model_calls':{'ask':0,'checker':0,'brain':0,'fidelity':0 if not a.execute else 1}}
+ plan={'schema_version':'cockpit-ask-language-recovery-plan:0.2','status':'reserved','job_id':a.job_id,'failed_job_hash':a.expected_failed_hash,'producer_result_sha256':producer_sha,'product_source_hash':product_source_hash,'producer_result_envelope_ref':a.producer_result_envelope_ref,'producer_work_order_ref':formal[3],'producer_work_order_sha256':wr[0],'brain_result_envelope_ref':a.brain_result_envelope_ref,'brain_raw_sha256':a.brain_raw_sha256,'original_source_commit':a.original_source_commit,'successor_source_commit':a.successor_source_commit,'planned_model_calls':{'ask':0,'checker':0,'brain':0,'fidelity':1},'executed_model_calls':{'ask':0,'checker':0,'brain':0,'fidelity':0}}
  data=(canonical_json(plan)+'\n').encode();osmod=__import__('os');a.output.parent.mkdir(parents=True,exist_ok=True)
  try:
   fd=osmod.open(a.output,osmod.O_WRONLY|osmod.O_CREAT|osmod.O_EXCL|osmod.O_NOFOLLOW,0o600);osmod.write(fd,data);osmod.fsync(fd);osmod.close(fd);parent=osmod.open(a.output.parent,osmod.O_RDONLY);osmod.fsync(parent);osmod.close(parent)
@@ -56,6 +59,11 @@ def main():
   if existing not in (plan,{**plan,'status':'complete'}):raise SystemExit('recovery output is occupied by different bytes')
   if existing.get('status')=='complete': print(canonical_json(existing));return
  if not a.execute:return
+ if row_is_recovered:
+  if not a.receipt.is_file() or a.receipt.is_symlink():raise SystemExit('recovered job has no exact durable recovery receipt')
+  receipt=load(a.receipt); result_sha=hashlib.sha256(row['result_json'].encode()).hexdigest()
+  if receipt.get('job_id')!=a.job_id or receipt.get('failed_job_hash')!=a.expected_failed_hash or receipt.get('result_sha256')!=result_sha:raise SystemExit('recovered job differs from recovery receipt')
+  complete={**plan,'status':'complete','result_sha256':result_sha,'recovery_receipt_sha256':sha(a.receipt)};tmp=a.output.with_suffix(a.output.suffix+'.tmp');tmp.write_text(canonical_json(complete)+'\n');osmod.chmod(tmp,0o600);osmod.replace(tmp,a.output);parent=osmod.open(a.output.parent,osmod.O_RDONLY);osmod.fsync(parent);osmod.close(parent);print(canonical_json(complete));return
  mission=load(a.mission)
  review=run(product,mission=mission,request_id=json.loads(row['request_json'])['request_id'],checker_config=a.checker_config,brain_config=a.brain_config,verifier_config=a.verifier_config,scheduler_db=a.scheduler_db,producer_route_decision_ref=a.producer_route_decision_ref,artifact_dir=a.artifact_dir,brain_recovery={'result_envelope_ref':a.brain_result_envelope_ref,'raw_sha256':a.brain_raw_sha256})
  if review.get('status')!='ready_for_publication':raise SystemExit('recovered language review is not publishable')

@@ -10,8 +10,9 @@ class T(unittest.TestCase):
   self.p={'question':'q','answer':'a','gaps':[],'replayed':True};self.pf=self.r/'p.json';self.pf.write_text(canonical_json(self.p));self.ps=hashlib.sha256(canonical_json(self.p).encode()).hexdigest()
   c=sqlite3.connect(self.r/'thesis-impact-budget.sqlite');c.execute('create table thesis_impact_day_admissions(admission_id text,work_order_ref text)');c.execute('create table thesis_impact_day_settlements(admission_id text,actual_micros integer)');c.execute('insert into thesis_impact_day_admissions values(?,?)',('a','work:p'));c.execute('insert into thesis_impact_day_settlements values(?,?)',('a',10));c.commit();c.close()
   for n in ('m','c','b','v'): (self.r/f'{n}.json').write_text('{}')
- def cmd(self,ref='result:p',out='out.json'):
+ def cmd(self,ref='result:p',out='out.json',execute=False):
   args=[sys.executable,'scripts/recover_failed_cockpit_ask.py','--journal-db',str(self.j),'--scheduler-db',str(self.s),'--mission',str(self.r/'m.json'),'--checker-config',str(self.r/'c.json'),'--brain-config',str(self.r/'b.json'),'--verifier-config',str(self.r/'v.json'),'--artifact-dir',str(self.r/'art'),'--receipt',str(self.r/'receipt'),'--output',str(self.r/out),'--job-id','job:1','--expected-failed-hash',self.h,'--expected-checker-source-hash',hashlib.sha256((canonical_json({'kind':'ask_answer','version_ref':'cockpit-ask:rid','sections':[{'title':'回答','body':'a','gaps':[]}]})+'\n').encode()).hexdigest(),'--producer-result-envelope-ref',ref,'--producer-route-decision-ref','route:p','--brain-result-envelope-ref','result:b','--brain-raw-sha256','a'*64,'--original-source-commit','a'*40,'--successor-source-commit','b'*40,'--recovered-at','t2']
+  if execute:args.append('--execute')
   return subprocess.run(args,cwd=Path(__file__).parents[1],env={**__import__('os').environ,'PYTHONPATH':'src'},capture_output=True,text=True)
  def test_plan_binds_formal_envelope_and_preoccupied_output_refuses_before_mutation(self):
   self.assertEqual(self.cmd().returncode,0);self.assertTrue((self.r/'out.json').exists())
@@ -19,4 +20,9 @@ class T(unittest.TestCase):
   self.assertEqual(self.cmd().returncode,0);self.assertEqual(sqlite3.connect(self.j).execute('select status from cockpit_jobs').fetchone()[0],before)
  def test_wrong_formal_envelope_ref_refuses(self):
   self.assertNotEqual(self.cmd(ref='result:wrong').returncode,0);self.assertFalse((self.r/'out.json').exists())
+ def test_reserved_output_finishes_after_cas_without_model_call(self):
+  self.assertEqual(self.cmd(out='resume.json').returncode,0)
+  c=sqlite3.connect(self.j);result=canonical_json({'question':'q'});c.execute("update cockpit_jobs set status='done',result_json=?,error=null",(result,));c.commit();c.close()
+  receipt={'job_id':'job:1','failed_job_hash':self.h,'result_sha256':hashlib.sha256(result.encode()).hexdigest()};(self.r/'receipt').write_text(canonical_json(receipt))
+  got=self.cmd(out='resume.json',execute=True);self.assertEqual(got.returncode,0,got.stderr);self.assertEqual(json.loads((self.r/'resume.json').read_text())['status'],'complete')
 if __name__=='__main__':unittest.main()
