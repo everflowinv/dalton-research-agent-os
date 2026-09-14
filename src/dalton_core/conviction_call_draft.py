@@ -112,7 +112,10 @@ TASK_HASH = content_hash({
     "policy_ref": POLICY_REF,
     "policy_hash": POLICY_HASH,
     "output": "one JSON object in the closed conviction-call draft shape",
-    "authority": "cites_only_shown_row_ids; dates come from the calendar rows",
+    "authority": (
+        "cites_only_shown_row_ids; verifier_sees_every_citable_row; "
+        "dates come from the calendar rows"
+    ),
     "output_limits": {"signal_chars": MAX_SIGNAL_CHARS,
                       "statement_chars": MAX_STATEMENT_OUT_CHARS,
                       "signals": MAX_SIGNALS, "falsifiers": MAX_FALSIFIERS},
@@ -707,6 +710,19 @@ def build_verifier_prompt(
         lines += [
             f"  {row['row_id']}\t{row['expected_date']}\t{row['event_kind']}"
             for row in table["catalysts"]
+        ]
+    if table["variant_slots"]:
+        lines += ["", "HELD DOSSIER VARIANT-VIEW EVIDENCE:"]
+        lines += [
+            f"  {row['row_id']}\t{row['slot_id']}\t{row['text']}"
+            for row in table["variant_slots"]
+        ]
+    if table["valuation"]:
+        lines += ["", "HELD VALUATION EVIDENCE:"]
+        lines += [
+            f"  {row['row_id']}\tas of {row['as_of']}\t"
+            f"{json.dumps(row['metrics'], ensure_ascii=False, sort_keys=True)}"
+            for row in table["valuation"]
         ]
     lines += [
         "",

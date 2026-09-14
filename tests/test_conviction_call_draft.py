@@ -380,6 +380,15 @@ class VerifierTests(unittest.TestCase):
         self.assertIn("[T1]", prompt)
         self.assertLessEqual(len(prompt.encode("utf-8")), MAX_PROMPT_BYTES)
 
+    def test_the_verifier_sees_every_citable_variant_and_valuation_row(self):
+        prompt = build_verifier_prompt(self.table, self.call)
+        for row in self.table["variant_slots"]:
+            self.assertIn(
+                f"{row['row_id']}\t{row['slot_id']}\t{row['text']}", prompt
+            )
+        for row in self.table["valuation"]:
+            self.assertIn(f"{row['row_id']}\tas of {row['as_of']}\t", prompt)
+
     def test_a_pass_with_findings_is_refused(self):
         with self.assertRaises(ConvictionDraftRefused):
             parse_verdict(json.dumps({"verdict": "pass", "findings": [
