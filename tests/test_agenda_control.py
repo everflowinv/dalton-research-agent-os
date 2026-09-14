@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
 import sys
 import tempfile
 import threading
@@ -9,6 +10,7 @@ import unittest
 from datetime import timedelta
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from unittest.mock import patch
 
 from dalton_core import agenda_control
 from dalton_core.agenda import AgendaStore
@@ -26,6 +28,10 @@ from dalton_core.agenda_control import (
 from dalton_core.observability import ObservabilityStore
 from dalton_core.store import DaltonStore
 from tests.agenda_fixtures import register_perception
+from dalton_core.writer_server import (
+    CORE_OPERATIONS, DASHBOARD_CONTROL_OPERATIONS, FEEDBACK_BRIDGE_OPERATIONS,
+    Principal, WriterServerError, load_principals, write_token_config,
+)
 
 
 NOW = "2026-08-14T10:00:00.000000+00:00"
@@ -231,6 +237,28 @@ class AgendaControlTests(unittest.TestCase):
     def tearDown(self):
         self.store.close()
         self.temp.cleanup()
+
+    def test_legacy_dashboard_subset_starts_control_but_workspace_is_strict(self):
+        tokens = self.config.token_config
+        legacy_dashboard = DASHBOARD_CONTROL_OPERATIONS - {
+            "publish_first_workspace_mission"}
+        self.assertEqual(len(legacy_dashboard), 10)
+        write_token_config(tokens, [
+            Principal("core", "core-token", CORE_OPERATIONS, unrestricted=True),
+            Principal("dashboard-control", "dashboard-token", legacy_dashboard,
+                      actor_ref="bridge:tailscale-dashboard"),
+            Principal("agenda-timeout", "timeout-token", FEEDBACK_BRIDGE_OPERATIONS,
+                      actor_ref="automation:agenda-timeout"),
+        ])
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("DALTON_WORKSPACE_MANIFEST", None)
+            plane = AgendaControlPlane(self.config)
+            self.assertIsNotNone(plane.dashboard)
+            self.assertIsNotNone(plane.timeout)
+        with patch.dict(
+                os.environ, {"DALTON_WORKSPACE_MANIFEST": "/tmp/workspace.json"}):
+            with self.assertRaises(WriterServerError):
+                AgendaControlPlane(self.config)
 
     def test_dashboard_feedback_uses_hashed_subject_and_csrf(self):
         app = AgendaControlApplication(self.config, self.plane)

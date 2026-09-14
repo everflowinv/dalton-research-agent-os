@@ -10,7 +10,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 from dalton_core.governance_cli import ephemeral_call
-from dalton_core.writer_server import CORE_OPERATIONS, Principal, load_principals, write_token_config
+from dalton_core.writer_server import (
+    CORE_OPERATIONS, DASHBOARD_CONTROL_OPERATIONS, FEEDBACK_BRIDGE_OPERATIONS,
+    Principal, load_principals, write_token_config,
+)
 
 
 class GovernanceCliTests(unittest.TestCase):
@@ -20,6 +23,14 @@ class GovernanceCliTests(unittest.TestCase):
             tokens = root / "tokens.json"
             write_token_config(tokens, [
                 Principal("core", "core-secret-token", CORE_OPERATIONS, unrestricted=True),
+                Principal(
+                    "dashboard-control", "legacy-dashboard-token",
+                    DASHBOARD_CONTROL_OPERATIONS - {"publish_first_workspace_mission"},
+                    actor_ref="bridge:tailscale-dashboard"),
+                Principal(
+                    "agenda-timeout", "legacy-timeout-token",
+                    FEEDBACK_BRIDGE_OPERATIONS,
+                    actor_ref="automation:agenda-timeout"),
             ])
             original = tokens.read_bytes()
 
@@ -28,7 +39,8 @@ class GovernanceCliTests(unittest.TestCase):
                     self.token = token
 
                 def call(self, operation, params):
-                    principals = load_principals(tokens)
+                    principals = load_principals(
+                        tokens, allow_managed_operation_subset=True)
                     human = [p for p in principals.values()
                              if p.resolved_actor_ref == "human:owner"]
                     self_test.assertEqual(len(human), 1)
@@ -43,7 +55,9 @@ class GovernanceCliTests(unittest.TestCase):
                     operation="create_agenda_policy", params={})
             self.assertEqual(result, {"status": "ok"})
             self.assertEqual(tokens.read_bytes(), original)
-            self.assertEqual(set(load_principals(tokens)), {"core"})
+            restored = load_principals(
+                tokens, allow_managed_operation_subset=True)
+            self.assertEqual(set(restored), {"core", "dashboard-control", "agenda-timeout"})
 
     def test_ephemeral_human_token_is_removed_after_one_operation(self):
         with tempfile.TemporaryDirectory() as directory:

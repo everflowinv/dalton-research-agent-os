@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from dalton_core.alphaengine_document_acquisition import (
     AlphaEngineDocumentAcquisitionCoordinator,
@@ -22,6 +24,10 @@ from dalton_core.transcript_review_inbox import stage_transcript_review_bundle
 from tests.test_alphaengine_document_acquisition import (
     FakeAuthorityReader,
     FakePagePort,
+)
+from dalton_core.writer_server import (
+    CORE_OPERATIONS, RESEARCH_REVIEW_CONTROL_OPERATIONS, Principal,
+    WriterServerError, write_token_config,
 )
 
 
@@ -183,6 +189,27 @@ class ResearchReviewControlTests(unittest.TestCase):
             governance_call=kwargs.pop("governance_call", FakeGovernance()),
             **kwargs,
         )
+
+    def test_legacy_review_subset_starts_but_workspace_is_strict(self):
+        legacy = frozenset(sorted(RESEARCH_REVIEW_CONTROL_OPERATIONS)[:-1])
+        self.assertTrue(legacy)
+        write_token_config(self.root / "tokens.json", [
+            Principal("core", "core-token", CORE_OPERATIONS, unrestricted=True),
+            Principal("research-review-control", "review-token", legacy,
+                      actor_ref="bridge:tailscale-review"),
+        ])
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("DALTON_WORKSPACE_MANIFEST", None)
+            plane = ResearchReviewControlPlane(
+                self.config, writer_socket=self.root / "writer.sock",
+                token_config=self.root / "tokens.json", authority=FakeAuthority())
+            self.assertIsNotNone(plane.writer)
+        with patch.dict(
+                os.environ, {"DALTON_WORKSPACE_MANIFEST": "/tmp/workspace.json"}):
+            with self.assertRaises(WriterServerError):
+                ResearchReviewControlPlane(
+                    self.config, writer_socket=self.root / "writer.sock",
+                    token_config=self.root / "tokens.json", authority=FakeAuthority())
 
     def write_transcript_packet(self):
         original = "New bookings decreased 3% in local currency. r ight"
