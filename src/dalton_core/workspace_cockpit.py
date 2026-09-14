@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -37,8 +38,12 @@ def cockpit_workspace_context(
             raise WorkspaceError(f"Cockpit {label} escapes its workspace")
     if Path(writer_socket).resolve() != workspace.writer_socket:
         raise WorkspaceError("Cockpit writer socket differs from its workspace")
+    try:
+        name = json.loads((workspace.workspace_root / "display.json").read_text()).get("name")
+    except (OSError, ValueError):
+        name = None
     return {
-        "mode": "isolated", "slug": workspace.slug,
+        "mode": "isolated", "slug": workspace.slug, "name": name or workspace.slug,
         "workspace_id": workspace.workspace_id,
         "manifest_hash": workspace.content_hash,
         "release_ref": workspace.release_ref,

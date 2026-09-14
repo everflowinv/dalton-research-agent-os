@@ -74,6 +74,8 @@ def install(config_path: str | Path) -> dict[str, Any]:
         wire["mission_ref"] = existing["mission_ref"]
     if isinstance(existing, dict) and "openclaw_config_path" in existing:
         wire["openclaw_config_path"] = existing["openclaw_config_path"]
+    if isinstance(existing, dict) and "workspace_manager_config_path" in existing:
+        wire["workspace_manager_config_path"] = existing["workspace_manager_config_path"]
     CockpitConfig.from_mapping(wire)  # closed-shape check before anything is written
     (state_dir / JOURNAL_DIR).mkdir(mode=0o700, parents=True, exist_ok=True)
     changed = existing != wire

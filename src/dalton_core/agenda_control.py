@@ -787,6 +787,8 @@ class AgendaControlApplication:
         if not isinstance(value, Mapping):
             raise CockpitError("request body must be an object")
         plane = self.cockpit_plane
+        if action == "workspace_create":
+            return plane.create_workspace(login, value)
         if action == "ask":
             return plane.ask(login, value)
         if action == "goal":
@@ -821,6 +823,8 @@ class AgendaControlApplication:
         if self.cockpit_plane is None:
             return {"enabled": False, "reason": "the cockpit is not configured on this host"}
         plane = self.cockpit_plane
+        if path == "/v1/cockpit/workspaces":
+            return plane.workspaces(login)
         if path == "/v1/cockpit/overview":
             return {**plane.overview(), "enabled": True}
         if path == "/v1/cockpit/log":

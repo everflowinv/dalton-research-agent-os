@@ -253,7 +253,7 @@ def validate_service_mapping_paths(
     external_readonly_keys = {
         "broker_socket", "planner_broker_socket", "broker_auth_key",
         "planner_broker_auth_key", "openclaw_config_path", "tailscale_executable",
-        "python_executable",
+        "python_executable", "workspace_manager_config_path",
     }
 
     def visit(node: Any, key: str = "") -> None:

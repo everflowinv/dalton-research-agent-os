@@ -1850,11 +1850,12 @@ class CockpitConfig:
     # configuration on its own, and a Core installed without the gateway has
     # no catalog to compare against and says so.
     openclaw_config_path: Path | None = None
+    workspace_manager_config_path: Path | None = None
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> "CockpitConfig":
         fields = {"core_db", "state_dir", "heartbeat_path", "scheduler_db", "journal_path",
-                  "model_config_path", "mission_ref", "openclaw_config_path"}
+                  "model_config_path", "mission_ref", "openclaw_config_path", "workspace_manager_config_path"}
         if not isinstance(raw, Mapping) or set(raw) - fields or not {"core_db", "state_dir", "heartbeat_path",
                                                                        "scheduler_db", "journal_path"} <= set(raw):
             raise CockpitError("cockpit config has an invalid shape")
@@ -1871,6 +1872,8 @@ class CockpitConfig:
             model_config_path=None if model is None else _path(model, "model_config_path"),
             openclaw_config_path=(None if broker is None
                                   else _path(broker, "openclaw_config_path")),
+            workspace_manager_config_path=(None if raw.get("workspace_manager_config_path") is None
+                else _path(raw["workspace_manager_config_path"], "workspace_manager_config_path")),
             mission_ref=mission,
         )
 
@@ -4745,6 +4748,29 @@ class CockpitPlane:
                 }
         items.sort(key=lambda i: i["at"])
         return {"schema_version": SCHEMA_VERSION, "as_of": _iso(self.clock()), "items": items, "count": len(items)}
+
+    def workspaces(self, login: str) -> dict[str, Any]:
+        from .workspace import WorkspaceError
+        from .workspace_manager import list_workspaces
+        try:
+            return list_workspaces(getattr(self.config, "workspace_manager_config_path", None),
+                                   login, self.workspace_context.get("workspace_id"))
+        except (WorkspaceError, OSError, ValueError) as exc:
+            raise CockpitError("研究环境列表暂时不可用") from exc
+
+    def create_workspace(self, login: str, value: Mapping[str, Any]) -> dict[str, Any]:
+        from .workspace import WorkspaceError
+        from .workspace_manager import request_create
+        import subprocess
+        path = getattr(self.config, "workspace_manager_config_path", None)
+        if path is None:
+            raise CockpitError("研究环境管理尚未配置")
+        try:
+            return request_create(path, login, value)
+        except WorkspaceError as exc:
+            raise CockpitError(str(exc)) from exc
+        except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+            raise CockpitError("研究环境尚未准备完成，可以重试同一次创建请求") from exc
 
     def _model_router_db(self) -> str | None:
         """The model catalog this Core reads, named by its model configuration."""
