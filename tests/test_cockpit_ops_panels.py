@@ -258,6 +258,25 @@ class OpsBacklogTests(PanelCase):
             "state_hash": "c" * 64, "last_seen": "2026-09-13T10:00:00+00:00"}}),
                          "newer_input")
 
+    def test_newer_terminal_model_input_moves_old_budget_wait_to_history(self) -> None:
+        company = "company:sec-cik:0000051143"
+        old = company + "|" + "a" * 64
+        newer = company + "|" + "b" * 64
+        for day, key, event, failure, dependency, reason in (
+            (10, old, "parked", "dependency_unavailable", "model_budget", "BUDGET_REFUSED"),
+            (11, newer, "terminal", "content_refused", None, "continuing-income does not tie to filed history"),
+        ):
+            moment = datetime(2026, 9, day, 9, tzinfo=timezone.utc)
+            with LaneFailureLedger(default_path(self.root), clock=lambda: moment) as ledger:
+                ledger.append_event(lane="mission_model_spec", item_key=key,
+                                    event=event, failure_class=failure, dependency=dependency,
+                                    reason=reason, rule=failure, status=None)
+        backlog = self.plane.ops_backlog()
+        self.assertEqual(backlog["parked_items"], 0)
+        self.assertIn(old, {x["item_key"] for x in backlog["historical_items"]})
+        self.assertIn(newer, {x["item_key"] for x in backlog["terminal_items"]})
+        self.assertIn("输入已经更新", backlog["historical_items"][0]["history_note"])
+
     def test_the_page_carries_no_machine_words_for_a_dependency_it_knows(self) -> None:
         self.park()
         bucket = self.plane.ops_backlog()["dependencies"][0]
@@ -389,9 +408,18 @@ class FourPanelTests(PanelCase):
         self.assertTrue(panel["available"])
         self.assertEqual(panel["parked_items"], backlog["parked_items"])
         self.assertEqual(panel["headline"],
-                         backlog["parked_items"] + backlog["terminal_count"])
+                         backlog["parked_items"] + backlog["permission_count"])
         self.assertEqual(panel["dependencies"][0]["dependency"], "alphaengine_desktop")
         self.assertEqual(panel["link"], "ops")
+
+    def test_stopped_attempt_history_does_not_inflate_current_work_count(self) -> None:
+        self.park(item="doc:old", reason="the scan is unreadable")
+        panel = self.plane.overview()["ops"]["failures"]
+        self.assertEqual(panel["headline"], 0)
+        self.assertEqual(panel["terminal_count"], 1)
+        self.assertEqual(self.plane.ops_backlog()["terminal_items"][0]["item_key"], "doc:old")
+        self.park(item="doc:permission", reason="gated:mission does not grant document_extraction writes")
+        self.assertEqual(self.plane.overview()["ops"]["failures"]["headline"], 1)
 
     def test_the_failure_panel_is_honest_about_a_core_with_no_ledger(self) -> None:
         panel = self.plane.overview()["ops"]["failures"]
@@ -503,15 +531,15 @@ class PageTests(unittest.TestCase):
         self.assertIn('b.onclick=()=>loadOverview(true)', self.page)
 
     def test_the_row_speaks_the_owner_s_language(self) -> None:
-        for word in ("任务运行情况", "待补齐资料缺口", "受阻与停止记录",
+        for word in ("任务运行情况", "待补齐资料缺口", "当前受阻任务",
                      "上周交付物验收", "运维待办"):
             with self.subTest(word=word):
                 self.assertIn(word, self.page)
 
     def test_terminal_copy_does_not_claim_every_failure_is_unreadable_bytes(self) -> None:
-        self.assertIn("已经结束且不会自动重试", self.page)
+        self.assertIn('node("summary","查看已停止的研究尝试")', self.page)
         self.assertIn("任务已经结束，具体原因暂未记录", self.page)
-        self.assertIn("每项具体原因见下方分类", self.page)
+        self.assertIn("历史尝试次数不计入当前受阻任务", self.page)
         self.assertNotIn("内容本身读不出来，再试一次读到的还是同样的字节", self.page)
         self.assertIn("const grouped=new Map()", self.page)
         self.assertIn("it.count>1", self.page)

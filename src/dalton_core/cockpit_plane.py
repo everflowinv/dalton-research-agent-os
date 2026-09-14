@@ -3693,22 +3693,24 @@ class CockpitPlane:
         except (sqlite3.Error, ValueError, TypeError):
             pass
         latest_model_inputs: dict[str, dict[str, Any]] = {}
-        for bucket in backlog["dependencies"]:
-            for item in bucket["items"]:
-                if item.get("lane") != "mission_model_spec":
-                    continue
-                key = item.get("item_key")
-                seen_at = item.get("last_seen")
-                if not isinstance(key, str) or not isinstance(seen_at, str):
-                    continue
-                parts = key.split("|")
-                if (len(parts) < 2 or not parts[0].startswith("company:")
-                        or re.fullmatch(r"[0-9a-f]{64}", parts[1]) is None):
-                    continue
-                prior = latest_model_inputs.get(parts[0])
-                if prior is None or seen_at > prior["last_seen"]:
-                    latest_model_inputs[parts[0]] = {
-                        "state_hash": parts[1], "last_seen": seen_at}
+        model_attempts = [item for bucket in backlog["dependencies"]
+                          for item in bucket["items"]]
+        model_attempts.extend(backlog["terminal_items"])
+        for item in model_attempts:
+            if item.get("lane") != "mission_model_spec":
+                continue
+            key = item.get("item_key")
+            seen_at = item.get("last_seen") or item.get("first_seen")
+            if not isinstance(key, str) or not isinstance(seen_at, str):
+                continue
+            parts = key.split("|")
+            if (len(parts) < 2 or not parts[0].startswith("company:")
+                    or re.fullmatch(r"[0-9a-f]{64}", parts[1]) is None):
+                continue
+            prior = latest_model_inputs.get(parts[0])
+            if prior is None or seen_at > prior["last_seen"]:
+                latest_model_inputs[parts[0]] = {
+                    "state_hash": parts[1], "last_seen": seen_at}
         governance = self._governance_records()
         permission_records = {
             "mission_catalyst_calendar": "yfinance-calendar-v1.json",
@@ -3967,7 +3969,7 @@ class CockpitPlane:
         }
 
     def _panel_failures(self) -> dict[str, Any]:
-        """Panel 3: parked and terminal work items, from the P17d ledger."""
+        """Count current recovery/authorization work; retain stopped attempts as history."""
 
         backlog = self.ops_backlog()
         if not backlog["available"]:
@@ -3987,13 +3989,14 @@ class CockpitPlane:
         if top:
             note = "，".join(
                 f"{row['dependency_label']}：{row['item_count']} 项等待处理" for row in top)
-        elif backlog["terminal_count"]:
-            note = f"没有等待依赖的任务；{backlog['terminal_count']} 项已终止"
+        elif backlog["permission_count"]:
+            note = f"{backlog['permission_count']} 项等待授权"
         else:
-            note = "没有等待依赖的任务"
+            note = "目前没有待恢复或待授权的任务，已停止的尝试保留在历史记录中"
         return {
             "available": True,
-            "headline": backlog["parked_items"] + backlog["terminal_count"],
+            "headline": backlog["parked_items"] + backlog["permission_count"],
+            "permission_count": backlog["permission_count"],
             "parked_items": backlog["parked_items"],
             "terminal_count": backlog["terminal_count"],
             "dependencies": top, "note": note, "link": "ops",
