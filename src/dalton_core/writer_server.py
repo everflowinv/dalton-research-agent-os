@@ -410,7 +410,7 @@ HUMAN_GOVERNANCE_OPERATIONS = frozenset({
     "publish_forecast_line", "get_forecast_line", "extend_growth_forecast",
     "publish_research_playbook", "get_research_playbook",
     "get_active_research_playbook", "research_playbook_report",
-    "create_coverage_mission", "publish_first_workspace_mission", "get_coverage_mission",
+    "create_coverage_mission", "set_research_budget_authority_chain", "publish_first_workspace_mission", "get_coverage_mission",
     "get_active_coverage_mission", "record_mission_stage",
     "coverage_mission_progress", "coverage_mission_stage_records",
     "reconcile_forecasts", "forecast_reconciliations",
@@ -587,7 +587,8 @@ CORE_OPERATION_LITERALS = frozenset({
     "publish_forecast_line", "get_forecast_line", "extend_growth_forecast",
     "publish_research_playbook", "get_research_playbook",
     "get_active_research_playbook", "research_playbook_report",
-    "create_coverage_mission", "publish_first_workspace_mission", "get_coverage_mission",
+    "create_coverage_mission", "set_research_budget_authority_chain",
+    "publish_first_workspace_mission", "get_coverage_mission",
     "get_active_coverage_mission", "record_mission_stage",
     "coverage_mission_progress", "coverage_mission_stage_records",
     "propose_model_input", "get_model_input_candidate",
@@ -777,6 +778,7 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     # a page that sent both would be told which one it meant.
     "set_model_selection": frozenset({"purpose", "mode", "chain", "actor_ref"}),
     "set_model_call_budget": frozenset({"purpose", "kind", "budget", "expected_config_hash", "actor_ref"}),
+    "set_research_budget_authority_chain": frozenset({"mission_ref", "budget", "expected_mission_hash", "actor_ref"}),
     # No path parameter. The file this writes is named by the writer's own
     # ``--model-catalog-config``, not by the caller: an operation that took the
     # path to write would be an operation that writes anywhere.
@@ -1068,6 +1070,7 @@ OPERATION_ACTOR_FIELDS: dict[str, str] = {
     "publish_doctrine_pack": "actor_ref",
     "publish_research_playbook": "actor_ref",
     "create_coverage_mission": "actor_ref",
+    "set_research_budget_authority_chain": "actor_ref",
     "publish_first_workspace_mission": "actor_ref",
     "resolve_mission_document_review": "actor_ref",
     "reopen_mission_document_review": "actor_ref",
@@ -3073,6 +3076,67 @@ class WriterServer:
                     raise ValidationError(
                         "mission budget must be published through the policy/mandate/constitution cascade")
         return self.coverage_mission.create_mission(mission_ref, **values)
+
+    def _op_set_research_budget_authority_chain(self, p: Mapping[str, Any]) -> Any:
+        mission = self.coverage_mission.active_mission(p["mission_ref"])
+        if mission["content_hash"] != p["expected_mission_hash"]:
+            raise IdempotencyConflict("mission changed; reload before saving budget")
+        fields = {"max_daily_paid_calls", "max_daily_cost_usd", "max_alphaengine_calls_24h"}
+        budget = p["budget"]
+        if not isinstance(budget, Mapping) or set(budget) != fields:
+            raise ValidationError("research budget has an invalid closed shape")
+        # Reuse mission validation before publishing any authority.
+        prospective = {**mission["budget"], **budget}
+        if (isinstance(budget["max_daily_paid_calls"], bool)
+                or not isinstance(budget["max_daily_paid_calls"], int)
+                or budget["max_daily_paid_calls"] < 0
+                or isinstance(budget["max_alphaengine_calls_24h"], bool)
+                or not isinstance(budget["max_alphaengine_calls_24h"], int)
+                or budget["max_alphaengine_calls_24h"] < 0
+                or isinstance(budget["max_daily_cost_usd"], bool)
+                or not isinstance(budget["max_daily_cost_usd"], (int, float))
+                or budget["max_daily_cost_usd"] < 0):
+            raise ValidationError("research budget values are invalid")
+        from .budget_pools import pool_caps
+        pool_caps(prospective)
+        actor = p["actor_ref"]
+        now = datetime.now(timezone.utc).isoformat()
+        current_policy = self.store.active_policy_version().to_dict()
+        policy_body = dict(current_policy["policy"]); policy_body["research_budget"] = dict(budget)
+        policy_version = int(current_policy["version"]) + 1
+        policy = self.store.create_policy(policy_body, policy_version_id=f"policy-{policy_version}",
+            version_number=policy_version, activate=True, policy_ref=current_policy["policy_ref"],
+            effective_from=now, actor_ref=actor, prior_version_ref=current_policy["id"],
+            change_reason="owner updated the canonical research budget authority chain")
+        policy_record = policy.get("policy_version", policy)
+        old_mandate = self.agenda.mandate_version(mission["bindings"]["mandate_version"]["ref"])
+        mandate_version = int(old_mandate["version"]) + 1
+        mandate = self.agenda.create_mandate(old_mandate["mandate_ref"], objective=old_mandate["objective"],
+            scope_refs=old_mandate["scope_refs"], constraints={**old_mandate["constraints"], "research_budget": dict(budget)},
+            success_criteria=old_mandate["success_criteria"], effective_from=now, effective_until=None,
+            actor_ref=actor, activate=True, version_id=f"{old_mandate['mandate_ref'].replace('mandate:', 'mandate-version:')}:{mandate_version}",
+            idempotency_key=f"{old_mandate['mandate_ref']}:{mandate_version}:research-budget")
+        old_constitution = self.research_constitution.constitution(mission["bindings"]["constitution_version"]["ref"])
+        constitution_version = int(old_constitution["version"]) + 1
+        bindings = dict(old_constitution["bindings"])
+        bindings["governance_policy_version"] = {"ref": policy_record["id"], "hash": policy_record["content_hash"]}
+        bindings["mandate_version"] = {"ref": mandate["id"], "hash": mandate["content_hash"]}
+        constitution = self.research_constitution.publish_constitution(old_constitution["constitution_ref"],
+            industry_ref=old_constitution["industry_ref"], title=old_constitution["title"], bindings=bindings,
+            method=old_constitution["method"], actor_ref=actor,
+            version_id=f"constitution-version:{old_constitution['constitution_ref'].split(':',1)[1]}:{constitution_version}",
+            prior_version_ref=old_constitution["id"], idempotency_key=f"{old_constitution['constitution_ref']}:{constitution_version}:research-budget")
+        version = int(mission["version"]) + 1
+        values = {key: json.loads(json.dumps(mission[key])) for key in (
+            "title", "objective", "industry_ref", "universe", "research_questions", "deliverables", "source_plan", "autonomy")}
+        values.update(budget=prospective, bindings={**mission["bindings"],
+            "mandate_version": {"ref": mandate["id"], "hash": mandate["content_hash"]},
+            "constitution_version": {"ref": constitution["id"], "hash": constitution["content_hash"]}},
+            actor_ref=actor, version_id=f"coverage-mission-version:{mission['mission_ref'].split(':',1)[1]}:{version}",
+            prior_version_ref=mission["id"], idempotency_key=f"{mission['mission_ref']}:{version}:research-budget")
+        published = self.coverage_mission.create_mission(mission["mission_ref"], **values)
+        return {"status": "updated", "policy": policy_record["id"], "mandate": mandate["id"],
+                "constitution": constitution["id"], "mission": published["id"]}
 
     def _op_publish_first_workspace_mission(self, p: Mapping[str, Any]) -> Any:
         if self._workspace is None:

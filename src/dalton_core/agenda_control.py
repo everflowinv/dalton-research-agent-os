@@ -819,6 +819,8 @@ class AgendaControlApplication:
             return plane.select_model(login, value)
         if action == "model_budget":
             return plane.set_call_budget(login, value)
+        if action == "research_budget":
+            return plane.set_research_budget(login, value)
         if action == "model_allow":
             return plane.allow_model(login, value)
         if action == "model_metadata":

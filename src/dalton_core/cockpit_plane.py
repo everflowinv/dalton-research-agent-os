@@ -3295,6 +3295,7 @@ class CockpitPlane:
             "goal": {
                 "mission_ref": mission["mission_ref"], "version": mission["version"], "id": mission["id"],
                 "hash": mission["content_hash"], "title": mission["title"], "objective": mission["objective"],
+                "budget": dict(mission["budget"]),
                 "research_questions": list(mission["research_questions"]),
                 "deliverables": [STAGE_LABELS.get(d, d) for d in mission["deliverables"]],
                 "industry_ref": mission["industry_ref"], "published_at": mission["created_at"],
@@ -6154,6 +6155,23 @@ class CockpitPlane:
         self.journal.record_event(kind="model_budget", title=f"已调整「{purpose}」的调用预算",
                                   detail=json.dumps(budget, ensure_ascii=False), login=login,
                                   refs={"purpose": purpose, "revision": result.get("revision")})
+        return result
+
+    def set_research_budget(self, login: str, value: Mapping[str, Any]) -> dict[str, Any]:
+        if not isinstance(value, Mapping):
+            raise CockpitError("研究预算必须是一个对象")
+        budget = value.get("budget")
+        fields = {"max_daily_paid_calls", "max_daily_cost_usd", "max_alphaengine_calls_24h"}
+        if not isinstance(budget, Mapping) or set(budget) != fields:
+            raise CockpitError("研究预算字段不完整")
+        result = self._governance(login, "set_research_budget_authority_chain", {
+            "mission_ref": _text(value.get("mission_ref"), "mission_ref", maximum=160),
+            "budget": dict(budget),
+            "expected_mission_hash": _sha(value.get("expected_mission_hash"), "mission hash"),
+        }, failure="研究预算没有保存")
+        self.journal.record_event(kind="model_budget", title="已同步更新完整研究预算授权链",
+            detail=json.dumps(budget, ensure_ascii=False), login=login,
+            refs={"mission_version_ref": result.get("mission")})
         return result
 
     def select_model(self, login: str, value: Mapping[str, Any]) -> dict[str, Any]:

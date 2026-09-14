@@ -72,6 +72,64 @@ class ChainOptionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValidationError, "policy/mandate/constitution cascade"):
             server._op_create_coverage_mission(params)
 
+    def test_owner_budget_operation_publishes_the_complete_chain(self):
+        from dalton_core.writer_server import WriterServer
+        server = object.__new__(WriterServer)
+        old_budget = {"max_daily_paid_calls": 1, "max_daily_cost_usd": 1,
+                      "max_alphaengine_calls_24h": 1, "pools": {
+                          "coverage": .7, "event_response": .15,
+                          "adhoc": .1, "maintenance": .05}}
+        mission = {"mission_ref": "coverage-mission:test", "id": "coverage-mission-version:test:1",
+            "version": 1, "content_hash": "a"*64, "budget": old_budget,
+            "bindings": {"mandate_version": {"ref":"mandate-version:test:1"},
+                         "constitution_version": {"ref":"constitution-version:test:1"}},
+            **{k: [] for k in ("universe","research_questions","deliverables","source_plan")},
+            "title":"t","objective":"o","industry_ref":"industry:test","autonomy":{}}
+        made = {}
+        server._coverage_mission = SimpleNamespace(active_mission=lambda ref: mission,
+            create_mission=lambda ref, **kw: made.setdefault("mission", {"id":"coverage-mission-version:test:2", **kw}))
+        server._agenda = SimpleNamespace(mandate_version=lambda ref: {"id":ref,"version":1,"mandate_ref":"mandate:test",
+            "objective":"o","scope_refs":["scope:test"],"constraints":{"research_budget":old_budget},"success_criteria":{}},
+            create_mandate=lambda ref, **kw: made.setdefault("mandate", {"id":"mandate-version:test:2","content_hash":"b"*64}))
+        server._research_constitution = SimpleNamespace(constitution=lambda ref: {"id":ref,"version":1,
+            "constitution_ref":"constitution:test","industry_ref":"industry:test","title":"t","bindings":{
+                "mandate_version":{},"driver_pack_version":{},"governance_policy_version":{},"doctrine_pack_version":None,"weekly_brief_plan":None},"method":{}},
+            publish_constitution=lambda ref, **kw: made.setdefault("constitution", {"id":"constitution-version:test:2","content_hash":"c"*64}))
+        server._store = SimpleNamespace(active_policy_version=lambda: SimpleNamespace(to_dict=lambda: {
+            "id":"policy-1","version":1,"policy_ref":"commit-gate","policy":{"allowed_verdicts":["pass"],"required_verification":True,"research_budget":old_budget}}),
+            create_policy=lambda *a, **k: made.setdefault("policy", {"id":"policy-2","content_hash":"d"*64}))
+        new = {"max_daily_paid_calls":2,"max_daily_cost_usd":2,"max_alphaengine_calls_24h":2}
+        result = server._op_set_research_budget_authority_chain({"mission_ref":"coverage-mission:test",
+            "budget":new,"expected_mission_hash":"a"*64,"actor_ref":"human:owner"})
+        self.assertEqual(set(made), {"policy","mandate","constitution","mission"})
+        self.assertEqual(made["mission"]["budget"], {**old_budget, **new})
+        self.assertEqual(result["mission"], "coverage-mission-version:test:2")
+        made.clear()
+        with self.assertRaisesRegex(Exception, "mission changed"):
+            server._op_set_research_budget_authority_chain({"mission_ref":"coverage-mission:test",
+                "budget":new,"expected_mission_hash":"e"*64,"actor_ref":"human:owner"})
+        self.assertEqual(made, {})
+
+    def test_cockpit_budget_update_is_one_governance_request(self):
+        from dalton_core.cockpit_plane import CockpitPlane
+        plane = object.__new__(CockpitPlane)
+        calls = []
+        plane._governance = lambda login, operation, params, failure: (
+            calls.append((login, operation, params, failure)) or
+            {"status": "updated", "mission": "coverage-mission-version:test:2"})
+        plane.journal = SimpleNamespace(record_event=lambda **kw: None)
+        budget = {"max_daily_paid_calls": 9000, "max_daily_cost_usd": 180,
+                  "max_alphaengine_calls_24h": 130}
+        result = plane.set_research_budget("owner", {
+            "mission_ref": "coverage-mission:test", "budget": budget,
+            "expected_mission_hash": "a" * 64})
+        self.assertEqual(result["mission"], "coverage-mission-version:test:2")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][1], "set_research_budget_authority_chain")
+        self.assertEqual(calls[0][2], {
+            "mission_ref": "coverage-mission:test", "budget": budget,
+            "expected_mission_hash": "a" * 64})
+
 
 if __name__ == "__main__":
     unittest.main()
