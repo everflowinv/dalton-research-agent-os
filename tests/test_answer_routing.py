@@ -6,6 +6,7 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -92,6 +93,12 @@ def invocation(identifier: str) -> dict:
 
 class AnswerRoutingTests(unittest.TestCase):
     def setUp(self) -> None:
+        # The refresh authority requires route and dispatch to occur on the
+        # same UTC day. Freeze its clock so this historical fixture does not
+        # expire against the wall clock.
+        clock = patch("dalton_core.answer_routing._now", return_value=SIX_DAYS_LATER)
+        clock.start()
+        self.addCleanup(clock.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.store = DaltonStore(Path(self.tmp.name) / "core.sqlite")
         self.observability = ObservabilityStore(self.store)
