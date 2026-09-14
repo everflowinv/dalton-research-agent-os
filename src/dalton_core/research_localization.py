@@ -471,6 +471,10 @@ def build_verifier_prompt(product: Mapping[str, Any], localized: Mapping[str, An
         "and absence of new "
         "facts, sources, approvals or actions. Proper nouns and verbatim quotations may remain in "
         "their source language.",
+        "A normalized_statement, generated evidence sentence, structured summary or metric label "
+        "is system-authored prose rather than a verbatim quotation. Reject a localization that "
+        "leaves it untranslated or labels it as an original quotation unless the source structure "
+        "explicitly marks a direct quotation.",
         "Return raw JSON only: "
         '{"verdict":"pass|reject","faithful":true,"no_new_facts":true,'
         '"meaning_preserved":true,"findings":["具体问题"]}',

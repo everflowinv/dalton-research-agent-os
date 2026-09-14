@@ -89,8 +89,11 @@ class ResearchLocalizationTests(unittest.TestCase):
     self.assertIn("fluent Simplified Chinese", producer)
     self.assertIn("not new research", producer)
     self.assertIn("Preserve every authoritative value", producer)
+    self.assertIn("normalized_statement", producer)
+    self.assertIn("not a verbatim source quotation", producer)
     self.assertIn("no_new_facts", review)
     self.assertIn("meaning_preserved", review)
+    self.assertIn("normalized_statement", review)
 
  def test_preflight_sees_numbers_adjacent_to_chinese_and_ignores_opaque_refs(self):
     source = product()

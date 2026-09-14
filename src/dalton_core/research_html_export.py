@@ -103,8 +103,11 @@ def _comparison_number_text(item: Mapping[str, Any], raw: str) -> str | None:
         return None
     metric = matched.group("metric")
     ticker = matched.group("ticker")
+    subject_ref = _COMPARISON_TICKER_SUBJECTS.get(ticker)
+    if subject_ref is None:
+        return None
     cell = item.get("cell")
-    expected_ref = (f'comparison-cell:{_COMPARISON_TICKER_SUBJECTS.get(ticker, "")}:'
+    expected_ref = (f'comparison-cell:{subject_ref}:'
                     f'{metric}:{matched.group("quarter")}')
     if (not isinstance(cell, Mapping)
             or cell.get("kind") != "statement_accession"

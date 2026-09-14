@@ -12,6 +12,10 @@ def final_text_instructions() -> tuple[str, ...]:
         "Human-facing prose fields must use fluent Simplified Chinese. Keep real company names, "
         "tickers, public model names and verbatim source quotations in their source language when "
         "translating them would reduce precision. Internal system vocabulary is not a proper noun.",
+        "A normalized_statement, generated evidence sentence, structured summary or metric label "
+        "is system-authored prose, not a verbatim source quotation. Translate it into fluent Chinese "
+        "and never label it as 'verbatim', 'original English' or equivalent unless the source "
+        "structure explicitly marks a direct quotation. Preserve genuinely marked quotations.",
         "In normal prose use these Chinese terms: Claim/Claims→已核实结论, thesis→投资论点, "
         "ThesisRevisionCandidate→论点修订建议, debate→争议分析, dossier→深度研究档案, "
         "lane→研究环节. Translate equivalent inflections and plurals too. Keep raw enum keys, "

@@ -4,7 +4,8 @@ import unittest
 
 from dalton_core.research_localization import source_content_hash
 from dalton_core.research_language_review import (
-    build_brain_prompt, publish_language_attachment, run_language_review, validate_checker_output,
+    build_brain_prompt, build_checker_prompt, publish_language_attachment, run_language_review,
+    validate_checker_output,
 )
 
 IDENTITY = {"provider": "antigravity-cli-gateway",
@@ -25,6 +26,11 @@ def review():
 
 
 class ResearchLanguageReviewTests(unittest.TestCase):
+    def test_checker_treats_generated_statements_as_prose_not_quotes(self):
+        prompt = build_checker_prompt(product())
+        self.assertIn("normalized_statement", prompt)
+        self.assertIn("not a verbatim source quotation", prompt)
+
     def test_original_numeric_source_allows_restoring_exact_precision(self):
         source = {"kind": "ui_text", "version_ref": "ui:1", "sections": [{
             "title": "收入", "body": "Revenue was 1535000000 USD.", "gaps": [],

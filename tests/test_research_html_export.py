@@ -258,6 +258,7 @@ class HtmlRenderTests(unittest.TestCase):
         cases = [
             ('ACN 2026Q1（期末 2026-02-28）revenue 30%', 'revenue'),
             ('ACN 2026Q1（期末 2026-02-28）gross_margin 30', 'gross_margin'),
+            ('ZZZ 2026Q1（期末 2026-02-28）gross_margin 30.0%', 'gross_margin'),
         ]
         section = lib['products'][0]['sections'][0]
         section['numbers'] = []
@@ -265,7 +266,8 @@ class HtmlRenderTests(unittest.TestCase):
             section['numbers'].append({
                 'period': '2026Q1', 'text': raw,
                 'cell': {'kind': 'statement_accession',
-                         'ref': f'comparison-cell:company-sec-cik-0001467373:{metric}:2026Q1',
+                         'ref': (f'comparison-cell::{metric}:2026Q1' if raw.startswith('ZZZ ')
+                                 else f'comparison-cell:company-sec-cik-0001467373:{metric}:2026Q1'),
                          'accession': f'0001467373-26-0000{index + 1}'},
             })
         page = render_research_html(lib, mission=mission)
