@@ -33,6 +33,13 @@ class WorkspaceModelSetupTest(unittest.TestCase):
             day_cap_micros=5_000_000)
         self.socket = self.root / "host-model.sock"
         self.key = self.root / "host-model.key"
+        self.shared_policy = self.root / "shared-call-budget-policy.json"
+        policy = {"schema_version": "dalton-shared-call-budget-policy-0.1",
+                  "default_max_cost_usd": 1.0, "purpose_max_cost_usd": {},
+                  "revision": 1, "prior_hash": None,
+                  "updated_at": "2026-09-14T00:00:00+00:00",
+                  "actor_ref": "human:owner"}
+        self.shared_policy.write_text(json.dumps({**policy, "content_hash": content_hash(policy)}))
         base = {
             "routing_policy_ref": POLICY_REF,
             "credential_slot_refs": ["credential-slot:openclaw:openai"],
@@ -41,6 +48,7 @@ class WorkspaceModelSetupTest(unittest.TestCase):
             "broker_client_id": "client:workspace-test", "expected_agent_id": "main",
             "budget_db": str(self.source / "thesis-impact-budget.sqlite"),
             "budget_policy_ref": "budget-policy:workspace-default:1",
+            "shared_call_budget_policy_path": str(self.shared_policy),
         }
         for name in EXPECTED_CONFIG_NAMES:
             (self.source / name).write_text(
@@ -56,7 +64,7 @@ class WorkspaceModelSetupTest(unittest.TestCase):
         host = self.root / "fleet"
         release = self.root / "release"
         release.mkdir(exist_ok=True)
-        shared = [release]
+        shared = [release, self.shared_policy]
         if exact_broker_paths:
             shared += [self.socket, self.key]
         return create_workspace_manifest(
@@ -77,6 +85,8 @@ class WorkspaceModelSetupTest(unittest.TestCase):
         self.assertEqual(config["model_router_db"], str(workspace.state_dir / "model-router.sqlite"))
         self.assertEqual(config["budget_db"], str(workspace.state_dir / "thesis-impact-budget.sqlite"))
         self.assertEqual(config["broker_socket"], str(self.socket.resolve()))
+        self.assertEqual(config["shared_call_budget_policy_path"],
+                         str(self.shared_policy.resolve()))
         import sqlite3
         with sqlite3.connect(workspace.state_dir / "thesis-impact-budget.sqlite") as budget:
             self.assertEqual(budget.execute(

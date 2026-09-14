@@ -39,7 +39,8 @@ EXPECTED_CONFIG_NAMES = frozenset({
     "zero-base-review-model-config.json", "zero-base-review-verifier-model-config.json",
 })
 _FIELDS = {"schema_version", "kind", "source", "broker", "configs",
-           "profiles", "policies", "budget_policies", "content_hash"}
+           "profiles", "policies", "budget_policies",
+           "shared_call_budget_policy_path", "shared_readonly_paths", "content_hash"}
 _LOCAL_ROUTER = "model-router.sqlite"
 _LOCAL_BUDGET = "thesis-impact-budget.sqlite"
 
@@ -102,6 +103,12 @@ def export_runtime_template(source_state: str | Path,
     budget_paths = {Path(v["budget_db"]).resolve() for v in configs.values()}
     sockets = {str(Path(v["broker_socket"]).resolve()) for v in configs.values()}
     keys = {str(Path(v["broker_auth_key"]).resolve()) for v in configs.values()}
+    shared_policies = {v.get("shared_call_budget_policy_path") for v in configs.values()}
+    if len(shared_policies) != 1:
+        raise WorkspaceModelSetupError("source model configs do not share one call budget policy")
+    shared_policy = next(iter(shared_policies))
+    if shared_policy is not None:
+        shared_policy = str(Path(shared_policy).resolve())
     if (any(Path(v["model_router_db"]).resolve().parent != state
             or Path(v["budget_db"]).resolve().parent != state for v in configs.values())):
         raise WorkspaceModelSetupError("source router and budget paths must be inside source state")
@@ -163,6 +170,9 @@ def export_runtime_template(source_state: str | Path,
                    "sharing": "exact-shared-readonly-reference"},
         "configs": templates, "profiles": profiles, "policies": policies,
         "budget_policies": budget_policies,
+        "shared_call_budget_policy_path": shared_policy,
+        "shared_readonly_paths": [next(iter(sockets)), next(iter(keys))]
+        + ([shared_policy] if shared_policy is not None else []),
     }
     bundle = {**body, "content_hash": content_hash(body)}
     _owner_write(Path(output_path).expanduser().resolve(), bundle)
@@ -177,6 +187,10 @@ def _validate_bundle(value: Mapping[str, Any]) -> dict[str, Any]:
             or value["content_hash"] != content_hash(body)):
         raise WorkspaceModelSetupError("runtime template identity or hash is invalid")
     configs = value["configs"]
+    shared_policy = value["shared_call_budget_policy_path"]
+    if shared_policy is not None and (not isinstance(shared_policy, str)
+                                      or not Path(shared_policy).is_absolute()):
+        raise WorkspaceModelSetupError("shared call budget policy path is invalid")
     if (not isinstance(configs, Mapping) or set(configs) != EXPECTED_CONFIG_NAMES
             or value["source"] != {"config_count": EXPECTED_CONFIG_COUNT}):
         raise WorkspaceModelSetupError("runtime template must contain the exact 21 configs")
@@ -184,6 +198,11 @@ def _validate_bundle(value: Mapping[str, Any]) -> dict[str, Any]:
     if (not isinstance(broker, Mapping) or set(broker) != {"socket_path", "auth_key_path", "sharing"}
             or broker["sharing"] != "exact-shared-readonly-reference"):
         raise WorkspaceModelSetupError("runtime template broker binding is invalid")
+    expected_shared = [broker["socket_path"], broker["auth_key_path"]]
+    if shared_policy is not None:
+        expected_shared.append(shared_policy)
+    if value["shared_readonly_paths"] != expected_shared:
+        raise WorkspaceModelSetupError("runtime template shared path closure is invalid")
     return dict(value)
 
 
@@ -195,6 +214,8 @@ def _require_local(path: Path, workspace: WorkspacePaths, name: str) -> None:
 def _validate_config_paths(config: Mapping[str, Any], workspace: WorkspacePaths,
                            broker: Mapping[str, Any]) -> None:
     allowed_external = {broker["socket_path"], broker["auth_key_path"]}
+    if config.get("shared_call_budget_policy_path"):
+        allowed_external.add(config["shared_call_budget_policy_path"])
 
     def visit(value: Any) -> None:
         if isinstance(value, Mapping):
@@ -218,8 +239,12 @@ def install_runtime_template(workspace_manifest: str | Path,
     workspace = load_workspace_manifest(workspace_manifest)
     bundle = _validate_bundle(_read_json(Path(template_path).expanduser().resolve()))
     broker = bundle["broker"]
+    shared_policy = bundle["shared_call_budget_policy_path"]
     shared_exact = {str(path) for path in workspace.shared_readonly_paths}
-    if {broker["socket_path"], broker["auth_key_path"]} - shared_exact:
+    required_shared = {broker["socket_path"], broker["auth_key_path"]}
+    if shared_policy is not None:
+        required_shared.add(shared_policy)
+    if required_shared - shared_exact:
         raise WorkspaceModelSetupError(
             "broker socket and auth key must be exact shared_readonly_paths")
     router_path = (workspace.state_dir / _LOCAL_ROUTER).resolve()
@@ -232,7 +257,9 @@ def install_runtime_template(workspace_manifest: str | Path,
                 or not name.endswith("model-config.json")):
             raise WorkspaceModelSetupError("unsafe model config file name")
         config = validate_model_config({**template, "model_router_db": str(router_path),
-                                        "budget_db": str(budget_path)})
+                                        "budget_db": str(budget_path),
+                                        **({"shared_call_budget_policy_path": shared_policy}
+                                           if shared_policy is not None else {})})
         if (config["broker_socket"] != broker["socket_path"]
                 or config["broker_auth_key"] != broker["auth_key_path"]):
             raise WorkspaceModelSetupError("config broker binding differs from template manifest")

@@ -200,6 +200,9 @@ def install_service_template(workspace_manifest: str | Path,
         "planner_broker_client_id": planner_model["broker_client_id"],
         "planner_expected_agent_id": planner_model["expected_agent_id"],
     })
+    shared_policy = planner_model.get("shared_call_budget_policy_path")
+    if shared_policy is not None:
+        planner["shared_call_budget_policy_path"] = shared_policy
     thesis = operating["thesis_impact"]["config"]
     thesis.update({
         "scheduler_db": str(state / "scheduler.sqlite"),
@@ -210,6 +213,8 @@ def install_service_template(workspace_manifest: str | Path,
         "broker_socket": broker["socket_path"], "broker_auth_key": broker["auth_key_path"],
         "company_thesis_refs": {},
     })
+    if shared_policy is not None:
+        thesis["shared_call_budget_policy_path"] = shared_policy
     operating["backup"]["root"] = str(state / "backups")
     extensions = operating.pop("control_extensions")
     document_research = operating.pop("document_research")

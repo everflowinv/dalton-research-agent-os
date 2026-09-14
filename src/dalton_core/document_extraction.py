@@ -111,7 +111,7 @@ def validate_model_config(value):
     optional = {"call_budget", "purpose_call_budgets", "run_budget", "purpose_run_budgets",
                 "capacity_retry", "reading_limits", "transport_retry", "provider_retry",
                 "structured_output_repair", "broker_max_frame_bytes",
-                "model_spec_numeric_context"}
+                "model_spec_numeric_context", "shared_call_budget_policy_path"}
     if not isinstance(value, Mapping):
         raise ResearchVerificationError("invalid document extraction model configuration")
     config = dict(value)
@@ -125,6 +125,9 @@ def validate_model_config(value):
         raise ResearchVerificationError("invalid broker client or dedicated agent identity syntax")
     if any(not Path(config[k]).is_absolute() for k in ("model_router_db", "budget_db", "broker_socket", "broker_auth_key")):
         raise ResearchVerificationError("document extraction authority and broker paths must be absolute")
+    if ("shared_call_budget_policy_path" in config
+            and not Path(config["shared_call_budget_policy_path"]).is_absolute()):
+        raise ResearchVerificationError("shared call budget policy path must be absolute")
     try:
         resolve_broker_max_frame_bytes(config)
     except Exception as exc:

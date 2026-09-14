@@ -183,6 +183,12 @@ def resolve_call_budget(config: Mapping[str, Any], purpose: str, *,
         _checked(value, f"purpose_call_budgets.{key}")
     resolved.update(_checked(per_purpose.get(purpose, {}),
                              f"purpose_call_budgets.{purpose}"))
+    shared_path = config.get("shared_call_budget_policy_path")
+    if shared_path is not None:
+        from .shared_call_budget_policy import (effective_shared_max_cost,
+                                                load_shared_call_budget_policy)
+        resolved["max_cost_usd"] = effective_shared_max_cost(
+            load_shared_call_budget_policy(shared_path), purpose)
     return {field: resolved[field] for field in FIELDS}
 
 
