@@ -449,7 +449,7 @@ def _ops_superseded_model_spec(
     later_input = (isinstance(current_input, Mapping)
                    and isinstance(current_input.get("state_hash"), str)
                    and re.fullmatch(r"[0-9a-f]{64}", current_input["state_hash"]) is not None
-                   and current_input["state_hash"] != state_hash
+                   and current_input["state_hash"] != parts[1]
                    and isinstance(current_input.get("last_seen"), str)
                    and isinstance(last_seen, str)
                    and current_input["last_seen"] > last_seen)
