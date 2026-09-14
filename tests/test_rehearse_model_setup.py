@@ -6,6 +6,7 @@ import copy
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from dalton_core.annual_report_setup import DEFAULT_PROVIDER_RETRY
 from dalton_core.provider_retry import DEFAULT_RETURNED_PROVIDER_RETRY
@@ -126,7 +127,12 @@ class ReviewedModelSetupTransitionTests(unittest.TestCase):
             ):
                 setattr(rehearsal, attribute, operation(attribute))
             rehearsal.stop_writer = lambda: None
-            self.assertEqual(rehearsal.run(), 0)
+            # This unit verifies step ordering, not host capacity.  The full
+            # suite can legitimately consume the deployment reserve while
+            # other copied-state fixtures are alive; keep the production disk
+            # gate intact and isolate it only in this synthetic no-copy run.
+            with patch("scripts.rehearse_deploy.check_rehearsal_space"):
+                self.assertEqual(rehearsal.run(), 0)
             self.assertLess(
                 order.index("run_catalog_sync"), order.index("run_reviewed_model_setup")
             )
