@@ -196,6 +196,24 @@ class ExtractionPreflightTests(unittest.TestCase):
         self.assertIn('source_to_model_permission', result['unverified'])
         self.assertFalse(Path(h.writer._document_extraction_model_config['broker_auth_key']).exists())
 
+    def test_shared_cost_preview_tracks_execution_without_reserving(self):
+        from tests.test_shared_call_budget_policy import SharedCallBudgetPolicyTests
+        path = self.h.root / 'shared-policy.json'
+        config = self.h.writer._document_extraction_model_config
+        config['shared_call_budget_policy_path'] = str(path)
+        for revision, cost in enumerate((0.4, 0.8), 1):
+            path.write_text(json.dumps(SharedCallBudgetPolicyTests().policy(
+                default_max_cost_usd=cost, purpose_max_cost_usd={}, revision=revision)))
+            before = disk_state(self.h.root)
+            result = self.check()
+            self.assertTrue(result['local_checks_passed'], result)
+            work = build_work(self.h.context(), model_config=config)
+            self.assertEqual(result['work_budget'], dict(work.budget))
+            self.assertEqual(result['admission_preview']['required_reservation_micros'],
+                             int(cost * 1000000))
+            self.assertFalse(result['reservation_created'])
+            self.assertEqual(disk_state(self.h.root), before)
+
     def test_canonical_route_and_admit_used_only_on_memory_copies(self):
         original_route, original_admit = ModelRouter.route, ThesisImpactBudgetStore.admit
         calls = []
@@ -377,7 +395,7 @@ class ExtractionPreflightTests(unittest.TestCase):
         from dataclasses import replace
         import dalton_core.document_extraction_preflight as module
         work_builder = module.build_work
-        with patch.object(module, 'build_work', side_effect=lambda c: replace(work_builder(c), question='中' * (int(work_builder(c).budget['max_input_tokens']) // 3 + 1))):
+        with patch.object(module, 'build_work', side_effect=lambda c, **kw: replace(work_builder(c, **kw), question='中' * (int(work_builder(c, **kw).budget['max_input_tokens']) // 3 + 1))):
             r = self.check()
         self.assert_blocked(r, 'model_route_rejected')
         self.assertIn('work_order_budget_input_exceeded', r['route_preview']['rejection_reasons'])

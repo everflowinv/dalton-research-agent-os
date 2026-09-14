@@ -126,7 +126,7 @@ def preflight(service, *, review_id, expected_review_hash, offset, actor_ref,
         if expected_context_hash is not None and expected_context_hash != context["content_hash"]:
             blocked("context", "source_context_changed_reload")
             return report
-        work = build_work(context)
+        work = build_work(context, model_config=config)
         report["work_budget"] = dict(work.budget)
         # Do not replay a persisted admission and mistake it for fresh headroom.
         def new_work_check():
@@ -193,7 +193,8 @@ def preflight(service, *, review_id, expected_review_hash, offset, actor_ref,
         else:
             report["checks"].append({"check": "admission", "status": "passed"})
             report["admission_preview"] = {"preview_only": True, "would_admit_new_call": True,
-                                            "required_reservation_micros": 50000}
+                                            "required_reservation_micros": int(
+                                                Decimal(str(work.budget["max_cost_usd"])) * 1000000)}
         # Recheck the source/config and exact outer authority after the backups.
         # This catches observed drift, but cannot guarantee atomic cross-store freshness.
         current = checked("final_context_recheck", lambda: service.context(
