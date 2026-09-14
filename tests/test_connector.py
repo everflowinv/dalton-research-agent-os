@@ -1681,5 +1681,25 @@ class ConnectorStoreTests(unittest.TestCase):
             )
 
 
+class ConnectorEnvelopeReplayIndexTests(unittest.TestCase):
+    def test_newest_search_envelopes_use_the_json_replay_index(self) -> None:
+        core = DaltonStore(":memory:")
+        try:
+            ConnectorStore(core)
+            plan = core.connection.execute(
+                "EXPLAIN QUERY PLAN SELECT e.record_json "
+                "FROM connector_source_envelopes e INDEXED BY idx_connector_source_envelope_search_replay "
+                "WHERE json_extract(e.record_json,'$.source')=? "
+                "AND json_extract(e.record_json,'$.operation')='search_library' "
+                "ORDER BY json_extract(e.record_json,'$.retrieved_at') DESC LIMIT ?",
+                ("source:alphaengine", 200),
+            ).fetchall()
+            detail = " ".join(str(row[3]) for row in plan)
+            self.assertIn("idx_connector_source_envelope_search_replay", detail)
+            self.assertNotIn("USE TEMP B-TREE", detail)
+        finally:
+            core.close()
+
+
 if __name__ == "__main__":
     unittest.main()

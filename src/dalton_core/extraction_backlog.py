@@ -224,7 +224,7 @@ def backfill_provenance(
     try:
         rows = connection.execute(
             "SELECT e.record_json AS envelope, a.artifact_content_hash AS object_hash "
-            "FROM connector_source_envelopes e "
+            "FROM connector_source_envelopes e INDEXED BY idx_connector_source_envelope_search_replay "
             "JOIN observability_artifact_versions_v2 a "
             "  ON a.version_id=json_extract(e.record_json,'$.raw_artifact_version_ref') "
             "WHERE json_extract(e.record_json,'$.source')=? "

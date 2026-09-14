@@ -246,7 +246,7 @@ def _document_counts(
 
     def bucket(company: str, spec: str) -> dict[str, int]:
         return counts.setdefault(
-            (company, spec), {"acquired": 0, "pending": 0, "failed": 0,
+            (company, spec), {"acquired": 0, "pending": 0, "candidates": 0, "failed": 0,
                               "read": 0, "legacy_extracted": 0, "periods": [], "required_periods": [],
                               "missing_periods": [], "unclassified": 0,
                               "not_attributed": 0}
@@ -409,7 +409,10 @@ def _document_counts(
                     entry_counts["periods"] = sorted(periods)
             else:
                 entry_counts["acquired"] += 1
-        elif status in ("discovered", "acquisition_launched"):
+        elif status == "discovered":
+            entry_counts["candidates"] += 1
+        elif status == "acquisition_launched":
+            entry_counts["candidates"] += 1
             entry_counts["pending"] += 1
         elif status == "acquisition_failed":
             entry_counts["failed"] += 1
@@ -598,9 +601,9 @@ def evaluate_mission(
             if item["counted_by"] == "quantitative_claim_periods":
                 have = len(periods.get(company_ref, set()))
                 read = have
-                pending = failed = legacy_extracted = 0
+                pending = candidates = failed = legacy_extracted = 0
             else:
-                have = read = pending = failed = legacy_extracted = unclassified = not_attributed = 0
+                have = read = pending = candidates = failed = legacy_extracted = unclassified = not_attributed = 0
                 classified_periods: set[str] = set()
                 required_periods: set[str] = set()
                 missing_periods: set[str] = set()
@@ -612,6 +615,7 @@ def evaluate_mission(
                     read += entry["read"]
                     legacy_extracted += entry.get("legacy_extracted", 0)
                     pending += entry["pending"]
+                    candidates += entry.get("candidates", 0)
                     failed += entry["failed"]
                     unclassified += int(entry.get("unclassified") or 0)
                     not_attributed += int(entry.get("not_attributed") or 0)
@@ -629,6 +633,7 @@ def evaluate_mission(
             items.append({
                 "item_ref": item["item_ref"], "label": item["label"], "reading": item["reading"],
                 "required": int(item["required"]), "have": have, "read": read, "pending": pending,
+                "candidate_count": candidates,
                 "legacy_extracted": legacy_extracted,
                 "failed": failed, "status": item_status, "note": note,
                 "source_ref": item["source_ref"], "spec_refs": list(item["spec_refs"]),
@@ -728,7 +733,7 @@ def acquisition_needs(
                 continue
             if source_ref is not None and item["source_ref"] != source_ref:
                 continue
-            if not item["pending"]:
+            if not item.get("candidate_count", item["pending"]):
                 continue  # nothing discovered to acquire; discovery must find it first
             for spec in item["spec_refs"]:
                 needs.append({

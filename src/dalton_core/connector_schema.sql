@@ -244,6 +244,14 @@ CREATE INDEX IF NOT EXISTS idx_connector_incident_latest
 ON connector_incident_events(incident_ref,created_at,event_id);
 CREATE INDEX IF NOT EXISTS idx_connector_health_latest
 ON connector_source_health_events(connector_profile_ref,created_at,event_id);
+-- Extraction startup replays only the newest bounded search envelopes.  Keep
+-- that lookup off the append-only envelope table and its JSON sort temp tree.
+CREATE INDEX IF NOT EXISTS idx_connector_source_envelope_search_replay
+ON connector_source_envelopes(
+  json_extract(record_json,'$.source'),
+  json_extract(record_json,'$.operation'),
+  json_extract(record_json,'$.retrieved_at') DESC
+);
 
 -- The UDF is an integrity boundary for the trusted single writer, not a
 -- hostile same-UID sandbox.
