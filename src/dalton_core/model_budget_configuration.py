@@ -143,7 +143,14 @@ def _set_model_call_budget_locked(state_dir: str | Path, *, purpose: str,
     budget_key = f"purpose_{kind}_budgets"
     direct_path = view.get("direct_budget_path")
     overrides = dict(config.get(budget_key) or {})
-    if view["overrides"] == checked:
+    planner_work_ceiling_matches = not (
+        purpose == "plan"
+        and "max_cost_usd" in checked
+        and view.get("direct_budget_path")
+        and config["bounded_planner"]["config"].get("planner_max_cost_usd")
+        != checked["max_cost_usd"]
+    )
+    if view["overrides"] == checked and planner_work_ceiling_matches:
         return {"status": "unchanged", "purpose": purpose, **view}
     if expected_config_hash != view["config_hash"]:
         raise BudgetConfigurationConflict("model configuration changed; reload before saving the budget")
@@ -158,6 +165,11 @@ def _set_model_call_budget_locked(state_dir: str | Path, *, purpose: str,
         for part in direct_path[:-1]:
             nested = nested[part]
         nested[direct_path[-1]] = checked
+        # The planner also supplies this per-work ceiling to the writer. Keep
+        # it aligned with the owner-editable installed call ceiling so a
+        # stale service value cannot silently tighten the configured budget.
+        if purpose == "plan" and "max_cost_usd" in checked:
+            updated["bounded_planner"]["config"]["planner_max_cost_usd"] = checked["max_cost_usd"]
     else:
         updated = {**config, budget_key: overrides}
     # Validate the complete map before writing a file consumed by workers.

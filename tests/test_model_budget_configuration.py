@@ -161,6 +161,33 @@ class BudgetConfigurationTests(fixtures.StateDirectoryCase):
                                     "max_output_tokens": 4096,
                                     "max_cost_usd": 0.42, "timeout_seconds": 600})
 
+    def test_language_and_localization_configs_are_budget_editable(self):
+        base = self.root / "installed-language"
+        state = base / "state" / "dalton-core"
+        state.mkdir(parents=True)
+        (base / "config").mkdir()
+        (base / "config" / "service.json").write_text("{}")
+        cases = {
+            "research_language_check": "research-language-check-model-config.json",
+            "research_language_revision": "research-language-revision-model-config.json",
+            "research_localization": "research-localization-draft-model-config.json",
+            "research_localization_verifier": "research-localization-verifier-model-config.json",
+        }
+        for purpose, name in cases.items():
+            path = state / name
+            path.write_text(json.dumps(self.model_config))
+            view = call_budget_view(state, purpose)
+            self.assertTrue(view["editable"], (purpose, view))
+            result = set_model_call_budget(
+                state, purpose=purpose, budget={"max_cost_usd": 1.0},
+                expected_config_hash=view["config_hash"], actor_ref=OWNER,
+            )
+            self.assertEqual(result["status"], "updated")
+            self.assertEqual(
+                json.loads(path.read_text())["purpose_call_budgets"][purpose]["max_cost_usd"],
+                1.0,
+            )
+
 
 class BudgetGovernanceTests(unittest.TestCase):
     def test_invalid_direct_writer_budget_maps_to_contract_rejection(self):
@@ -227,6 +254,7 @@ class ServiceBudgetTests(unittest.TestCase):
             actual = BoundedPlannerDriverConfig.from_mapping(stored["bounded_planner"]["config"])
             self.assertEqual(actual.planner_call_budget["max_cost_usd"], 0.9)
             self.assertEqual(actual.planner_call_budget["max_output_tokens"], 1800)
+            self.assertEqual(actual.planner_max_cost_usd, 0.9)
 
     def test_resident_writer_reloads_plan_selection_and_budget_for_next_call(self):
         from dalton_core.model_router import ModelRouter

@@ -102,6 +102,10 @@ PURPOSE_MODEL_CONFIGS: dict[str, tuple[str, ...]] = {
     "earnings_calibration": ("earnings-season-model-config.json",),
     "earnings_preview_verifier": ("earnings-season-verifier-model-config.json",),
     "earnings_calibration_verifier": ("earnings-season-verifier-model-config.json",),
+    "research_language_check": ("research-language-check-model-config.json",),
+    "research_language_revision": ("research-language-revision-model-config.json",),
+    "research_localization": ("research-localization-draft-model-config.json",),
+    "research_localization_verifier": ("research-localization-verifier-model-config.json",),
 }
 _SERVICE_PURPOSE_PINS = {
     "plan": ("bounded_planner", "planner_routing_policy_ref", "planner_model_router_db"),
