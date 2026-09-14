@@ -540,9 +540,9 @@ function readableEventJudgement(value){
   const shown=finalResearchText(value);
   if(typeof shown!=="string")return {display:shown,technical:null};
   const display=shown
-    .replaceAll("qualitative、derived 层级","定性、系统推导层级")
-    .replaceAll("derived 层级","系统推导层级")
-    .replaceAll("qualitative 层级","定性信息层级");
+    .replaceAll("该事件是 derived 层级的定性转述","该事件是基于已有材料推导的定性转述")
+    .replaceAll("属于 qualitative、derived 层级的表述","属于基于已有材料推导的定性表述")
+    .replace(/（claim-version:[0-9a-f]{6}…(?:、[0-9a-f]{6}…)*）/g,"");
   return {display,technical:display!==shown?value:null};
 }
 function readableError(value,context="操作"){

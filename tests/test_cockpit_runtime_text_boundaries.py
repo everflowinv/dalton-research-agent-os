@@ -168,10 +168,14 @@ class CockpitRuntimeTextBoundariesTests(unittest.TestCase):
         self.assertEqual(result, "五家公司初步筛查报告与投资论点；验证 差异化观点")
 
     def test_known_event_classifications_are_readable_and_raw_is_retained(self):
-        raw = "该事件是 qualitative、derived 层级的表述。"
+        raw = "该事件属于 qualitative、derived 层级的表述（claim-version:19d177…、f427bc…）。"
         result = self._evaluate(f"readableEventJudgement({json.dumps(raw)})")
-        self.assertEqual(result["display"], "该事件是 定性、系统推导层级的表述。")
+        self.assertEqual(result["display"], "该事件属于基于已有材料推导的定性表述。")
         self.assertEqual(result["technical"], raw)
+        first = "该事件是 derived 层级的定性转述。"
+        result = self._evaluate(f"readableEventJudgement({json.dumps(first)})")
+        self.assertEqual(result["display"], "该事件是基于已有材料推导的定性转述。")
+        self.assertEqual(result["technical"], first)
         unknown = "该事件是 vendor-special 层级的表述。"
         result = self._evaluate(f"readableEventJudgement({json.dumps(unknown)})")
         self.assertEqual(result, {"display": unknown, "technical": None})
