@@ -39,7 +39,7 @@ def cockpit_workspace_context(
     if Path(writer_socket).resolve() != workspace.writer_socket:
         raise WorkspaceError("Cockpit writer socket differs from its workspace")
     try:
-        name = json.loads((workspace.workspace_root / "display.json").read_text()).get("name")
+        name = json.loads((workspace.workspace_root / "display.json").read_text()).get("display_name")
     except (OSError, ValueError):
         name = None
     return {

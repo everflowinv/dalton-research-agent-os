@@ -5338,7 +5338,24 @@ class CockpitPlane:
 
         policy = self._tracking_policy()
         with self._core() as core:
-            mission = self._mission(core)
+            try:
+                mission = self._mission(core)
+            except CockpitMissionMissing:
+                catalog = self._shared_connections() or {"sources": []}
+                rows = []
+                for item in catalog["sources"]:
+                    slug = item["connector_ref"].split(":", 1)[-1]
+                    rows.append({"slug": slug, "source_ref": item["connector_ref"],
+                                 "label": SOURCE_SLUG_LABELS.get(slug, SOURCE_LABELS.get(
+                                     item["connector_ref"], "已连接资料来源")),
+                                 "content": [SOURCE_OPERATION_LABELS.get(op, "资料读取")
+                                             for op in item["allowed_operations"]],
+                                 "connector": {"status": "installed", "status_label": "共用连接已登记"},
+                                 "mission": {"status": "undeclared", "status_label": "本环境尚未授权"},
+                                 "quotas": [], "cadence_label": "待设置研究目标"})
+                return {"sources": rows, "routing": {"available": False,
+                            "reason": "本环境尚未配置研究调用"},
+                        "policy_note": "这里只共用资料来源的连接，资料和研究审批保存在各自的研究环境。"}
         projection = build_map(
             mission=mission,
             cadences=None if policy is None else baseline_cadences(policy),
@@ -5466,6 +5483,28 @@ class CockpitPlane:
         return [labels.get(str(value), "能力说明待补充")
                 for value in (values or [])]
 
+    def _shared_connections(self) -> dict[str, Any] | None:
+        manifest = os.environ.get("DALTON_WORKSPACE_MANIFEST")
+        if not manifest:
+            return None
+        from .workspace_creation import connection_catalog_projection
+        from .workspace import WorkspaceError
+        try:
+            return connection_catalog_projection(manifest)
+        except (WorkspaceError, OSError, ValueError):
+            return None
+
+    def _shared_model_view(self) -> dict[str, Any] | None:
+        catalog = self._shared_connections()
+        if catalog is None or not catalog.get("available"):
+            return None
+        return {"models": [{"display_name": self._model_display_name(item["id"], {item["id"]: item}),
+                            "provider": item["provider"],
+                            "family_label": self._model_family_label(item["family"]),
+                            "capability_labels": self._model_capability_labels(item["capabilities"])}
+                           for item in catalog["models"]],
+                "workspace_authorized": False}
+
     def models(self) -> dict[str, Any]:
         """Per calling stage: the tier, the chain it will really use, and a choice.
 
@@ -5485,8 +5524,10 @@ class CockpitPlane:
 
         path = self._model_router_db()
         if path is None:
-            return {"available": False,
-                    "reason": "这台机器上还没有模型路由库，所以没有可选的模型"}
+            shared = self._shared_model_view()
+            return {"available": False, "shared_catalog": shared,
+                    "reason": ("已登记共用模型连接；请先为本环境配置研究目标和调用权限。" if shared else
+                               "这台机器上还没有模型路由库，所以没有可选的模型")}
         try:
             bindings = purpose_policy_bindings(
                 self.config.state_dir,
@@ -6564,9 +6605,43 @@ class CockpitPlane:
             raise CockpitError("unknown draft kind")
         text = _text(value.get("text"), "text", maximum=4000)
         request_id = _text(value.get("request_id"), "request_id", maximum=128)
+        if kind == "goal" and self.workspace_context.get("mode") == "isolated":
+            with self._core() as core:
+                try:
+                    self._mission(core)
+                except CockpitMissionMissing:
+                    return self._start_job(kind, login, {"text": text, "request_id": request_id},
+                        lambda: self._initial_goal_draft(login, text, request_id))
         model = self._model_instance()
         return self._start_job(kind, login, {"text": text, "request_id": request_id},
                                lambda: self._draft(model, login, kind, text, request_id))
+
+    def _initial_goal_draft(self, login: str, text: str, request_id: str) -> dict[str, Any]:
+        from .workspace import load_workspace_manifest
+        from .workspace_onboarding import initial_goal_draft
+        workspace = load_workspace_manifest(os.environ["DALTON_WORKSPACE_MANIFEST"])
+        with self._core() as core:
+            try:
+                self._mission(core)
+            except CockpitMissionMissing:
+                pass
+            else:
+                raise CockpitConflict("研究目标已建立，请刷新后再编辑")
+        draft = initial_goal_draft(workspace, title=text.splitlines()[0][:200], objective=text)
+        digest = content_hash(draft)
+        draft_id = "cockpit-draft:initial-goal:" + hashlib.sha256(
+            (workspace.workspace_id + "\0" + login + "\0" + request_id).encode()).hexdigest()[:32]
+        now = _iso(self.clock())
+        self.journal.write(
+            "INSERT OR IGNORE INTO cockpit_drafts(draft_id,kind,login,input_text,draft_json,content_hash,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+            (draft_id, "goal", login, text, json.dumps(draft, ensure_ascii=False, sort_keys=True),
+             digest, "saved", now, now))
+        rows = self.journal.rows("SELECT content_hash,created_at FROM cockpit_drafts WHERE draft_id=?", (draft_id,))
+        if rows[0]["content_hash"] != digest:
+            raise CockpitConflict("这次保存请求已用于另一份目标草稿")
+        return {"status": "saved", "draft_id": draft_id, "draft_hash": digest, "kind": "goal",
+                "draft": draft, "input_text": text, "cost_usd": 0,
+                "created_at": rows[0]["created_at"]}
 
     def _draft(self, model: CockpitModel, login: str, kind: str, text: str, request_id: str) -> dict[str, Any]:
         with self._core() as core:
