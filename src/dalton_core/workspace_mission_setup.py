@@ -206,7 +206,12 @@ def setup_planning_context(
             "max_daily_cost_usd": cost,
             "max_alphaengine_calls_24h": 0,
         },
-        "created_at": _text(created_at, "created_at"),
+        # Stable across a retried request. Scheduler records its actual insert
+        # time separately; this timestamp is part of immutable work identity.
+        "created_at": _text(
+            foundation.get("created_at", foundation.get(
+                "generated_at", "1970-01-01T00:00:00.000000+00:00")),
+            "created_at"),
     }
     return validate_setup_planning_context({**body, "content_hash": content_hash(body)})
 

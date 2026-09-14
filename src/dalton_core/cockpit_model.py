@@ -1457,6 +1457,20 @@ class CockpitModel:
         the distinct authority kind.
         """
         context = validate_setup_planning_context(planning_context)
+        from .workspace_runtime import validate_runtime_context
+        workspace = validate_runtime_context(
+            state_dir=Path(self.scheduler_db).parent)
+        if workspace is not None:
+            if context["workspace_id"] != workspace.workspace_id:
+                raise CockpitModelError("setup planning context belongs to another workspace")
+            foundation_path = workspace.state_dir / "research-foundation.json"
+            try:
+                foundation = json.loads(foundation_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+                raise CockpitModelError("workspace research foundation is unavailable") from exc
+            if (not isinstance(foundation, Mapping)
+                    or foundation.get("content_hash") != context["foundation_hash"]):
+                raise CockpitModelError("setup planning foundation differs from workspace authority")
         scope = {
             "id": context["setup_ref"],
             "mission_ref": f"workspace-setup:{context['workspace_id']}",

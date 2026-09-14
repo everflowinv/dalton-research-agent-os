@@ -524,6 +524,7 @@ DASHBOARD_CONTROL_OPERATIONS = (
     | INTENT_CONTEXT_OPERATIONS
     | ANSWER_ROUTING_OPERATIONS
     | WEEKLY_BRIEF_DASHBOARD_OPERATIONS
+    | frozenset({"publish_first_workspace_mission"})
 )
 RESEARCH_REVIEW_CONTROL_OPERATIONS = frozenset({
     "commit_reviewed_candidate", "transcript_correction_review_state",
@@ -1530,7 +1531,7 @@ class WriterServer:
         **lane_launchers: Any,
     ):
         try:
-            validate_runtime_context(
+            self._workspace = validate_runtime_context(
                 state_dir=Path(db_path).expanduser().resolve().parent,
                 core_db=db_path, writer_socket=socket_path)
         except WorkspaceRuntimeError as exc:
@@ -2473,7 +2474,17 @@ class WriterServer:
         """Bind actor and invocation provenance to the authenticated principal."""
         result = dict(params)
         actor_field = OPERATION_ACTOR_FIELDS.get(operation)
-        if actor_field is not None:
+        scoped_first_mission = (
+            principal.principal_id == "dashboard-control"
+            and operation == "publish_first_workspace_mission"
+            and principal.operations == DASHBOARD_CONTROL_OPERATIONS
+        )
+        if actor_field is not None and scoped_first_mission:
+            supplied_actor = result.get(actor_field)
+            if (not isinstance(supplied_actor, str)
+                    or not supplied_actor.startswith("human:tailscale-")):
+                raise PermissionError("first mission requires the authenticated Tailscale subject")
+        elif actor_field is not None:
             actor = principal.resolved_actor_ref
             supplied_actor = result.get(actor_field)
             if supplied_actor is not None and supplied_actor != actor:
@@ -2511,6 +2522,7 @@ class WriterServer:
                 )
                 or is_mission_automation
                 or is_core_reconciliation
+                or scoped_first_mission
             ):
                 raise PermissionError("governance changes require an authenticated human principal")
         if operation == "record_agenda_feedback" and is_scoped_feedback:
@@ -3018,14 +3030,28 @@ class WriterServer:
         return self.coverage_mission.create_mission(mission_ref, **values)
 
     def _op_publish_first_workspace_mission(self, p: Mapping[str, Any]) -> Any:
+        if self._workspace is None:
+            raise WriterServerError("first workspace mission requires a workspace-bound writer")
         from .workspace import WorkspacePaths
         from .workspace_mission_setup import publish_first_mission_to_store
 
         workspace = WorkspacePaths.from_manifest(p["workspace_manifest"])
+        if (workspace.workspace_id != self._workspace.workspace_id
+                or workspace.content_hash != self._workspace.content_hash
+                or workspace.state_dir != self._workspace.state_dir):
+            raise PermissionError("first mission workspace differs from writer workspace")
+        foundation_path = self._workspace.state_dir / "research-foundation.json"
+        try:
+            local_foundation = json.loads(foundation_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise WriterServerError("workspace research foundation is unavailable") from exc
+        if (not isinstance(local_foundation, Mapping)
+                or dict(p["method_foundation"]) != dict(local_foundation)):
+            raise PermissionError("first mission foundation differs from workspace authority")
         return publish_first_mission_to_store(
             self.store, workspace, proposal=p["proposal"],
             proposal_hash=p["proposal_hash"], actor_ref=p["actor_ref"],
-            method_foundation=p["method_foundation"],
+            method_foundation=local_foundation,
         )
 
     def _op_get_coverage_mission(self, p: Mapping[str, Any]) -> Any:

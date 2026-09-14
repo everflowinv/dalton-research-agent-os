@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import json
 from pathlib import Path
 
 from dalton_core.store import content_hash
@@ -198,6 +199,36 @@ class WorkspaceFirstMissionTests(unittest.TestCase):
         self.assertEqual(authority.active_mission(mission["mission_ref"])["id"], mission["id"])
         progress = authority.mission_progress(mission["mission_ref"])
         self.assertEqual(progress["mission_version_ref"], mission["id"])
+
+    def test_writer_refuses_a_self_consistent_foreign_workspace_before_opening_authority(self):
+        from dalton_core.writer_server import (
+            DASHBOARD_CONTROL_OPERATIONS, Principal, WriterServer,
+        )
+        release = Path(self.temp.name) / "release"
+        foreign = create_workspace_manifest(
+            Path(self.temp.name) / "other-fleet", "foreign", 18821,
+            "release:sha256:" + "a" * 64, release,
+            shared_readonly_paths=[release])
+        self.workspace.state_dir.mkdir(parents=True, exist_ok=True)
+        (self.workspace.state_dir / "research-foundation.json").write_text(
+            json.dumps(self.foundation), encoding="utf-8")
+        principal = Principal(
+            "dashboard-control", "token", DASHBOARD_CONTROL_OPERATIONS,
+            actor_ref="bridge:tailscale-dashboard")
+        server = object.__new__(WriterServer)
+        server._workspace = self.workspace
+        foreign_manifest = json.loads(foreign.manifest_path.read_text(encoding="utf-8"))
+        with self.assertRaisesRegex(PermissionError, "differs from writer workspace"):
+            server._op_publish_first_workspace_mission({
+                "workspace_manifest": foreign_manifest,
+                "method_foundation": self.foundation, "proposal": {},
+                "proposal_hash": "0" * 64, "actor_ref": "human:tailscale-owner",
+            })
+        authorized = server._authorized_params(principal, "publish_first_workspace_mission", {
+            "workspace_manifest": {}, "method_foundation": {}, "proposal": {},
+            "proposal_hash": "0" * 64, "actor_ref": "human:tailscale-owner",
+        })
+        self.assertEqual(authorized["actor_ref"], "human:tailscale-owner")
 
 
 if __name__ == "__main__":
