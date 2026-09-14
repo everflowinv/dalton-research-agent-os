@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 import zipfile
+from unittest import mock
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -298,7 +299,26 @@ class ImmutableReleaseTests(unittest.TestCase):
                 )
                 archive.writestr("dalton_test-0.1.dist-info/RECORD", "")
             digest = __import__("hashlib").sha256(wheel.read_bytes()).hexdigest()
-            result = install_release(root, wheel, digest)
+            # Reproduce the live installer failure: a checkout on PYTHONPATH
+            # advertises the same distribution/version, while PYTHONHOME and
+            # a workspace binding belong to the caller rather than the release.
+            source = root / "source"
+            (source / "dalton_core").mkdir(parents=True)
+            (source / "dalton_core/__init__.py").write_text("SOURCE_ONLY=True\n")
+            metadata = source / "dalton_test-0.1.dist-info"
+            metadata.mkdir()
+            (metadata / "METADATA").write_text(
+                "Metadata-Version: 2.1\nName: dalton-test\nVersion: 0.1\n")
+            poisoned = {
+                "PYTHONPATH": str(source), "PYTHONHOME": str(root / "invalid-python-home"),
+                "DALTON_WORKSPACE_MANIFEST": str(root / "other/workspace.json"),
+            }
+            with mock.patch.dict(os.environ, poisoned):
+                result = install_release(root, wheel, digest)
+                self.assertEqual(
+                    {key: os.environ[key] for key in poisoned}, poisoned,
+                    "release installation must not mutate its parent environment",
+                )
             environment = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
             environment.pop("PYTHONPATH", None)
             completed = subprocess.run(

@@ -70,14 +70,24 @@ def validate_release(path: str | Path, expected_wheel_sha256: str) -> dict[str, 
 
 
 def _default_installer(wheel: Path, venv: Path) -> None:
-    subprocess.run([sys.executable, "-m", "venv", "--copies", str(venv)], check=True)
+    environment = dict(os.environ)
+    # The installer may be launched from a source checkout or a workspace-bound
+    # Cockpit.  Neither is part of the immutable release being assembled.  In
+    # particular, pip considers same-version metadata on PYTHONPATH already
+    # installed and can otherwise leave the new venv without the wheel payload.
+    for key in ("PYTHONPATH", "PYTHONHOME", "DALTON_WORKSPACE_MANIFEST"):
+        environment.pop(key, None)
+    subprocess.run(
+        [sys.executable, "-m", "venv", "--copies", str(venv)],
+        check=True, env=environment,
+    )
     subprocess.run(
         [
             str(venv / "bin" / "python"), "-m", "pip", "install",
             "--disable-pip-version-check", "--no-index", "--find-links", str(wheel.parent),
             str(wheel),
         ],
-        check=True,
+        check=True, env=environment,
     )
 
 
