@@ -1176,12 +1176,57 @@ class FeedEndToEndTests(unittest.TestCase):
         self.assertEqual(result["outcomes"][0]["reason_code"],
                          "connector_quota_exhausted")
 
+        # The quota window opens before the next tick. Because quota refusal
+        # did not move the cursor, the refused ref is first and all remaining
+        # refs continue normally.
+        class RecoveredRunner:
+            def run(inner, **kwargs):
+                return self.coordinator().runner.run(**kwargs)
+
+        coordinator.runner = RecoveredRunner()
+        resumed = coordinator.resolve_documents(
+            queue=[ACN_NOTE, EPAM_NOTE, CTSH_NOTE], universe=UNIVERSE,
+            headers={}, header_company={}, since="2026-08-01",
+        )
+        self.assertEqual(resumed["read"], 3)
+        self.assertEqual([row["document_ref"] for row in resumed["outcomes"]],
+                         [ACN_NOTE, EPAM_NOTE, CTSH_NOTE])
+
     def test_company_wiki_rpc_batch_is_below_the_authorized_plan_bound(self) -> None:
         plan = load_feed_discovery_plan(PLAN_PATH)
         self.assertEqual(plan["body_reads_per_tick"], 50)
         self.assertEqual(COMPANY_WIKI_BODY_READS_PER_TICK, 12)
         self.assertEqual(_feed_body_read_limit(COMPANY_WIKI, plan), 12)
         self.assertIsNone(_feed_body_read_limit(SALES_NOTES, plan))
+
+    def test_small_batches_resume_after_unattributed_documents(self) -> None:
+        attempted = []
+
+        def dropped(**kwargs):
+            attempted.append(kwargs["document_ref"])
+            return {"document_ref": kwargs["document_ref"], "outcome": "dropped",
+                    "reason": "not attributed"}
+
+        first = self.coordinator(body_reads_per_tick=2)
+        first._resolve_one = dropped
+        queue = [ACN_NOTE, EPAM_NOTE, CTSH_NOTE, OLD_NOTE, OPEN_NOTE]
+        one = first.resolve_documents(
+            queue=queue, universe=UNIVERSE, headers={}, header_company={},
+            since="2026-08-01",
+        )
+        # A real controller constructs a new coordinator each tick and keeps
+        # the cursor on its long-lived launcher.
+        second = self.coordinator(
+            body_reads_per_tick=2,
+            body_read_cursor_ref=first.body_read_cursor_ref,
+        )
+        second._resolve_one = dropped
+        two = second.resolve_documents(
+            queue=queue, universe=UNIVERSE, headers={}, header_company={},
+            since="2026-08-01",
+        )
+        self.assertEqual([r["document_ref"] for r in one["outcomes"]], queue[:2])
+        self.assertEqual([r["document_ref"] for r in two["outcomes"]], queue[2:4])
 
 
 def synthetic_digests(root: Path, *, days: int, per_day: int) -> Path:

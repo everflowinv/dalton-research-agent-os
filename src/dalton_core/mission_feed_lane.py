@@ -616,6 +616,7 @@ class FeedDiscoveryCoordinator:
         acquisitions_per_tick: int = ACQUISITIONS_PER_TICK,
         acquisition_wait_seconds: float = ACQUISITION_WAIT_SECONDS,
         body_reads_per_tick: int | None = None,
+        body_read_cursor_ref: str | None = None,
     ) -> None:
         if source_ref not in FEED_DISCOVERY_SOURCES:
             raise FeedLaneRejected(f"{source_ref} is not a feed discovery source")
@@ -637,6 +638,7 @@ class FeedDiscoveryCoordinator:
             self.plan["body_reads_per_tick"] if body_reads_per_tick is None
             else body_reads_per_tick
         )
+        self.body_read_cursor_ref = body_read_cursor_ref
 
     # -- windows --------------------------------------------------------
 
@@ -889,6 +891,14 @@ class FeedDiscoveryCoordinator:
         # is what keeps that finite.
         held = set(known)
         pending = [ref for ref in queue if ref not in held]
+        # Industry/dropped documents have no per-company discovery row by
+        # design, so they remain pending. Resume after the last attempted ref
+        # instead of letting the same small prefix starve the rest forever.
+        # This is only scheduling state; it does not claim the document was
+        # admitted to the mission and a process restart may safely re-read it.
+        if self.body_read_cursor_ref in pending:
+            pivot = pending.index(self.body_read_cursor_ref) + 1
+            pending = pending[pivot:] + pending[:pivot]
         outcomes: list[dict[str, Any]] = []
         for document_ref in pending[: max(0, bound)]:
             outcome = self._resolve_one(
@@ -906,6 +916,7 @@ class FeedDiscoveryCoordinator:
             # pending for the next quota window.
             if outcome.get("reason_code") == "connector_quota_exhausted":
                 break
+            self.body_read_cursor_ref = document_ref
         return {
             "source_ref": self.source_ref,
             "read": len(outcomes),
@@ -1439,9 +1450,12 @@ def _dispatch(server: Any, source_ref: str, launcher_kwarg: str) -> dict[str, An
         missions=server.coverage_mission, launcher=launcher, source_ref=source_ref,
         plan=plan,
         body_reads_per_tick=_feed_body_read_limit(source_ref, plan),
+        body_read_cursor_ref=getattr(launcher, "_body_read_cursor_ref", None),
         **runners,
     )
-    return coordinator.dispatch_once(universe=_mission_universe(server))
+    result = coordinator.dispatch_once(universe=_mission_universe(server))
+    launcher._body_read_cursor_ref = coordinator.body_read_cursor_ref
+    return result
 
 
 def _feed_body_read_limit(
