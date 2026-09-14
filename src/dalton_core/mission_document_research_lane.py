@@ -745,7 +745,39 @@ class MissionDocumentResearchCoordinator:
             return {"status": "unconfigured", "reason": "document research lane is absent"}
         holds = _read_holds(self.holds_path)
         admissions = self._admissions()
+        # A completed child records query_miss/no_verified_claim/candidate_staged
+        # as an immutable observation.  Older dispatches could later recreate a
+        # generic started_without_owned_live_ticket hold because those terminal
+        # outcomes intentionally do not occupy the promoted-outcome table.
+        # Reconcile only from the latest fully validated observation; a later
+        # recovery_required observation must remain visible.
+        from .mission_document_research_executor import (
+            read_mission_document_research_observations,
+        )
+        latest_observation: dict[str, Mapping[str, Any]] = {}
+        for observation in read_mission_document_research_observations(
+            self.store.connection
+        ):
+            latest_observation[observation["admission_ref"]] = observation
+        completed_refs = {
+            admission_ref
+            for admission_ref, observation in latest_observation.items()
+            if observation["outcome"] in {
+                "query_miss", "no_verified_claim",
+            }
+        }
+        admissions = [
+            admission for admission in admissions
+            if admission["id"] not in completed_refs
+        ]
         by_ref = {item["id"]: item for item in admissions}
+        if any(admission_ref in holds for admission_ref in completed_refs):
+            holds = {
+                admission_ref: held
+                for admission_ref, held in holds.items()
+                if admission_ref not in completed_refs
+            }
+            _write_holds(self.holds_path, holds)
         latest = self._latest()
         settled = None
         if latest is not None and latest["admission_ref"] in by_ref:

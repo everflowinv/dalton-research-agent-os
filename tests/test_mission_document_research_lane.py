@@ -6,6 +6,7 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -277,6 +278,34 @@ class MissionDocumentResearchLaneTests(unittest.TestCase):
             holds["holds"][first["id"]]["reason"],
             "started_without_owned_live_ticket",
         )
+
+    def test_terminal_observation_clears_stale_started_hold_only(self) -> None:
+        complete = self.store.add(1)
+        failed = self.store.add(2)
+        staged = self.store.add(3)
+        self.store.started(complete["id"])
+        self.store.started(failed["id"])
+        self.store.started(staged["id"])
+        self.assertEqual(self.lane.dispatch_once()["status"], "recovery_required")
+
+        observations = [
+            {"admission_ref": complete["id"], "outcome": "no_verified_claim"},
+            {"admission_ref": failed["id"], "outcome": "recovery_required"},
+            {"admission_ref": staged["id"], "outcome": "candidate_staged"},
+        ]
+        with patch(
+            "dalton_core.mission_document_research_executor."
+            "read_mission_document_research_observations",
+            return_value=observations,
+        ):
+            result = self.lane.dispatch_once()
+
+        self.assertEqual(result["status"], "recovery_required")
+        self.assertEqual(result["held"], 2)
+        holds = json.loads(self.lane.holds_path.read_text(encoding="utf-8"))["holds"]
+        self.assertNotIn(complete["id"], holds)
+        self.assertIn(failed["id"], holds)
+        self.assertIn(staged["id"], holds)
 
     def test_staged_outcome_is_pending_only_when_policy_requires_promotion(self) -> None:
         admission = self.store.add(1)
