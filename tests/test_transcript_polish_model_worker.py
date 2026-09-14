@@ -943,6 +943,24 @@ class RoutedTranscriptPolishWorkerTests(unittest.TestCase):
             "MODEL_OUTPUT_CONTRACT_REJECTED",
         )
         self.assertIsNone(self.scheduler.formal_result(self.probe.id))
+        rejected = routed["result"]["metadata"]["rejected_model_output"]
+        self.assertTrue(rejected["diagnostic_only"])
+        self.assertEqual(json.loads(rejected["outputs"]["text"]), {
+            "schema_version": "0.1", "segments": [],
+        })
+        self.assertEqual(
+            hashlib.sha256(rejected["outputs"]["text"].encode()).hexdigest(),
+            rejected["outputs"]["content_hash"],
+        )
+        self.assertTrue(rejected["error_message"])
+        self.assertEqual(routed["result"]["outputs"], {})
+        saved = self.store.connection.execute(
+            "SELECT result_envelope_json FROM scheduler_result_envelopes "
+            "WHERE result_envelope_id=?", (routed["result"]["id"],),
+        ).fetchone()
+        self.assertEqual(
+            json.loads(saved[0])["metadata"]["rejected_model_output"], rejected,
+        )
 
     def test_prompt_precomputes_contiguous_bounded_span_hashes(self) -> None:
         parameters = self.probe.metadata["parameters"]

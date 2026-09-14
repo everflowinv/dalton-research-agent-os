@@ -886,6 +886,23 @@ class RoutedTranscriptPolishModelWorker:
                     usage_refs=adapter_result.usage_refs,
                     created_at=adapter_result.created_at,
                 )
+                # A rejected output can still be a paid, useful provider reply.
+                # Keep it in the durable failed envelope for exact diagnosis or
+                # explicit recovery.  It remains diagnostic data, never an
+                # accepted candidate or permission to bypass output validation.
+                rejected = result.to_dict()
+                rejected["metadata"] = {
+                    **dict(result.metadata),
+                    "rejected_model_output": {
+                        "diagnostic_only": True,
+                        "adapter_result_ref": adapter_result.id,
+                        "adapter_result_hash": content_hash(adapter_result.to_dict()),
+                        "outputs": dict(adapter_result.outputs),
+                        "error_type": type(exc).__name__,
+                        "error_message": str(exc)[:2000],
+                    },
+                }
+                result = ResultEnvelope.from_dict(rejected)
             else:
                 try:
                     self._admit_candidate(work, text)
