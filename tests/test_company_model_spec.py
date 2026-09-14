@@ -249,7 +249,7 @@ class CompanyModelSpecTests(unittest.TestCase):
         self.assertEqual(json.loads(pretty), json.loads(compact))
         self.assertEqual(
             TASK_HASH,
-            "9d49c0f4828c096b7d238ef1d797ee9a37d6efe9b6fa198ad2cb360bc9c3eb14",
+            "fb20823061aebdea59bba9130d8afc0984577e143bbfed3409da984657246848",
         )
         self.assertNotEqual(
             TASK_HASH,
@@ -574,6 +574,12 @@ class CompanyModelSpecTests(unittest.TestCase):
         self.assertIn(
             "Derive a subtotal only when its formula ties exactly in every "
             "applicable source period",
+            prompt,
+        )
+        self.assertIn("A filed pretax-income line is one of those standard subtotals", prompt)
+        self.assertIn(
+            "A result tied to income including noncontrolling interests uses "
+            "net_income",
             prompt,
         )
         self.assertIn(

@@ -972,6 +972,36 @@ class FinancialStatementStructureTests(unittest.TestCase):
         with self.assertRaisesRegex(FinancialStatementStructureError, "does not tie"):
             validate_financial_statement_structure(proposal(inputs), company_spec(), inputs)
 
+    def test_filed_pretax_can_anchor_a_derived_final_earnings_bridge(self):
+        inputs = financial_inputs()
+        candidate = proposal(inputs)
+        pretax = next(line for line in candidate["lines"] if line["ref"] == "pretax")
+        pretax.update({
+            "kind": "filed", "concept": "pretax", "forecast_method": "unavailable",
+        })
+        candidate["formulas"] = [
+            formula for formula in candidate["formulas"]
+            if formula["output_ref"] != "pretax"
+        ]
+        structure, replay = validate_financial_statement_structure(
+            candidate, company_spec(), inputs,
+        )
+        self.assertTrue(replay["ready_for_forecast"])
+        self.assertEqual(
+            next(line for line in structure["lines"] if line["ref"] == "pretax")["kind"],
+            "filed",
+        )
+
+    def test_pre_nci_result_must_use_net_income_role_for_parent_bridge(self):
+        inputs = financial_inputs()
+        candidate = proposal(inputs)
+        net = next(line for line in candidate["lines"] if line["ref"] == "net")
+        net["role"] = "income_from_continuing_operations"
+        with self.assertRaisesRegex(
+            FinancialStatementStructureError, "sum formula roles"
+        ):
+            validate_financial_statement_structure(candidate, company_spec(), inputs)
+
     def test_eps_tie_uses_each_filed_periods_disclosed_precision(self):
         inputs = financial_inputs()
         shares = next(line for line in inputs["filed_lines"]

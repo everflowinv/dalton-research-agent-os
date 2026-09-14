@@ -313,7 +313,7 @@ TASK_HASH = content_hash({
         "ref": COST_REGISTRY_REF, "hash": COST_REGISTRY_HASH,
     },
     "authority_projection": "company-model-state-with-financial-notes:0.4",
-    "prompt_contract": "company-model-spec-prompt:0.15",
+    "prompt_contract": "company-model-spec-prompt:0.16",
     "structured_output_repair": "company-model-spec-repair:0.1",
 })
 
@@ -522,8 +522,13 @@ def build_prompt(state: Mapping[str, Any]) -> str:
         "from a final earnings bridge that ties exactly in every applicable source "
         "period. Derive a "
         "subtotal only when its formula ties exactly in every applicable source "
-        "period; otherwise retain the unavailable forecast gap. Presentation "
-        "rounding does not permit arbitrary or global tie "
+        "period; otherwise retain the unavailable forecast gap. "
+        "A filed pretax-income line is one of those standard subtotals: keep it "
+        "filed when it exists, and derive the next supported earnings line from it. "
+        "A result tied to income including noncontrolling interests uses net_income; "
+        "income_from_continuing_operations is reserved for the continuing-income "
+        "result before any separate noncontrolling-interest attribution bridge. "
+        "Presentation rounding does not permit arbitrary or global tie "
         "tolerance, rewriting a filed amount, or inventing a balancing term; "
         "per-share division uses each period's disclosed filed precision. Do not assign independent "
         "growth or shares to formula-derived totals as a substitute for the bridge. "
