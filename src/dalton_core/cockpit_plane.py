@@ -60,15 +60,17 @@ COMPANY_NAMES = {
 }
 SOURCE_LABELS = {
     "source:sec-edgar": "SEC 财报数据", "source:alphaengine": "卖方研报与电话会",
-    "source:company-ir": "公司投资者关系", "source:guidepoint": "专家访谈", "source:web-search": "公开网页搜索",
+    "source:company-ir": "公司官网投资者关系页面", "source:guidepoint": "专家访谈", "source:web-search": "公开网页搜索",
+    "source:sales-notes": "卖方销售快报", "source:company-wiki": "公司知识库",
+    "source:prior-research": "历史研究资料",
 }
 SOURCE_SLUG_LABELS = {
     "alphaengine": "卖方研报与电话会", "catalyst-calendar": "催化剂日历",
     "cn-hk-findata": "沪深港财务与交易数据", "cninfo": "巨潮资讯",
-    "company-wiki": "内部公司知识库", "employee-reviews": "员工评价",
+    "company-wiki": "公司知识库", "employee-reviews": "员工评价",
     "gemini-web-search": "Gemini 公开网页搜索", "guidepoint": "Guidepoint 专家访谈",
     "hkex-filings": "香港交易所公告", "reddit-last30days": "Reddit 近 30 天讨论",
-    "roic-transcript": "ROIC 电话会纪要", "sales-notes": "卖方销售简报",
+    "roic-transcript": "ROIC 电话会纪要", "sales-notes": "卖方销售快报",
     "sec": "SEC 财报与公告", "sec-financials": "SEC 三张财务报表",
     "sec-ownership": "SEC 股东与高管持股申报", "web-fetch": "公开网页读取",
     "x-x-search": "X 站内搜索", "x-xreach": "X 动态与新闻",
@@ -358,6 +360,8 @@ def _ops_waiting_reason(reason: Any, *, permission: bool = False) -> str:
     """Describe a parked ledger row without exposing its machine exception."""
 
     text = str(reason or "").casefold()
+    if "http error 403" in text or "http 403" in text:
+        return "数据来源拒绝访问（HTTP 403），已暂缓获取"
     if "pool_exhausted" in text:
         if "event_response" in text:
             return "事件响应模型预算池今天的余额不足"
@@ -402,6 +406,8 @@ def _ops_item_label(item_key: Any,
 def _runtime_error_display(reason: Any) -> str:
     """Classify a runtime error conservatively for the activity page."""
     text = str(reason or "").casefold()
+    if "http error 403" in text or "http 403" in text:
+        return "数据来源拒绝访问（HTTP 403）"
     if "budget" in text or "allowance" in text:
         return "任务受到当前费用或用量限制"
     if any(word in text for word in ("permission", "forbidden", "not permitted", "unauthorized")):
@@ -3145,7 +3151,12 @@ class CockpitPlane:
                 "sources": [{"source_ref": s["source_ref"], "label": SOURCE_LABELS.get(s["source_ref"], s["source_ref"]),
                              "role": s["role"], "connected": s["status"] == "connected",
                              "daily_cap": _source_daily_cap(s["source_ref"], mission["budget"])}
-                            for s in mission["source_plan"]],
+                            for s in mission["source_plan"]
+                            if s["source_ref"] != "source:company-ir"],
+                # IR pages describe company-owned web material, not a
+                # separately installed source. Preserve the original task
+                # declaration for inspection without presenting a phantom connector.
+                "source_plan_details": list(mission["source_plan"]),
                 "history": versions,
             },
             "companies": companies,

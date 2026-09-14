@@ -544,6 +544,7 @@ function readableReflectionAuthority(value){
 function displayMissionText(value){
   if(typeof value!=="string")return value;
   return displayText(value)
+    .replace(/^US IT Services 首次覆盖任务 v(\d+)$/,"美国 IT 服务行业首次覆盖任务（v$1）")
     .replaceAll("初筛（Initial Screen）","初步筛查报告")
     .replaceAll("投资逻辑（Thesis）","投资论点")
     .replaceAll("variant view","差异化观点");
@@ -721,6 +722,7 @@ function renderOverview(o){
       (plan.stopped?` · ${plan.stopped} 项建议暂停`:"");
   }
   $("goal-sources").replaceChildren(...g.sources.map(s=>node("span",`${s.connected?"● ":"○ "}${displayText(s.label)}`,`tag ${s.connected?"on":"off"}`)));
+  const sourceDetails=technicalDetails({source_plan:g.source_plan_details});if(sourceDetails)$("goal-sources").append(sourceDetails);
   $("goal-history").replaceChildren(...g.history.map(h=>{const d=node("div",null,"h");d.append(node("b",`第 ${h.version} 版 · ${fmtDate(h.created_at)}`),node("div",displayMissionText(h.title)),node("div",`${h.research_questions.length} 个问题 · ${h.universe.join("、")}`));return d}));
   renderOpsPanels(o.ops);
   const t=o.totals,b=o.budgets;
