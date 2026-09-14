@@ -10,6 +10,7 @@ from dalton_core.macos_launchagent import render
 from dalton_core.store import content_hash
 from dalton_core.workspace import create_workspace_manifest
 from dalton_core.workspace_control_setup import configure_workspace_control
+from dalton_core.writer_server import load_principals
 from dalton_core.workspace_service_setup import (
     WorkspaceServiceSetupError,
     export_service_template,
@@ -153,13 +154,19 @@ class WorkspaceServiceSetupTest(unittest.TestCase):
         workspace = self._workspace()
         # The model template is installed before the service template in the
         # production sequence.
-        for name in ("research-planner-model-config.json",
+        for name in (
                      "document-extraction-model-config.json",
                      "discovery-selection-model-config.json",
                      "claim-index-model-config.json",
                      "registered-annual-report-draft-model-config.json",
                      "registered-annual-report-verifier-model-config.json"):
             (workspace.state_dir / name).touch()
+        (workspace.state_dir / "research-planner-model-config.json").write_text(json.dumps({
+            "routing_policy_ref": "model-routing-policy-version:workspace-planner:9",
+            "credential_slot_refs": ["credential-slot:workspace"],
+            "broker_client_id": "client:dalton-core",
+            "expected_agent_id": "chem",
+        }))
         receipt = install_service_template(workspace.manifest_path, self.template)
         self.assertEqual(receipt["research_state"], "empty")
         installed = json.loads(workspace.config_path.read_text())
@@ -168,6 +175,9 @@ class WorkspaceServiceSetupTest(unittest.TestCase):
                          str(workspace.state_dir / "scheduler.sqlite"))
         self.assertIsNone(installed["bounded_planner"]["config"][
             "observation_mandate_version_ref"])
+        self.assertEqual(installed["bounded_planner"]["config"][
+            "planner_routing_policy_ref"],
+            "model-routing-policy-version:workspace-planner:9")
         self.assertEqual(installed["thesis_impact"]["config"]["company_thesis_refs"], {})
         self.assertFalse(installed["outbox"]["enabled"])
         self.assertFalse(installed["weekly_brief"]["enabled"])
@@ -184,6 +194,8 @@ class WorkspaceServiceSetupTest(unittest.TestCase):
         sync = json.loads((workspace.state_dir / "model-catalog-sync.json").read_text())
         self.assertEqual(sync["model_router_db"], str(workspace.state_dir / "model-router.sqlite"))
         ServiceConfig.from_file(workspace.config_path)
+        self.assertIn("research-review-control",
+                      load_principals(workspace.state_dir / "writer-tokens.json"))
         plists = render(
             self.root / "agents", self.root / "release/bin", workspace.state_dir,
             workspace.config_path, self.root / "logs",

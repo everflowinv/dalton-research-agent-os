@@ -181,6 +181,11 @@ def install_service_template(workspace_manifest: str | Path,
     operating = copy.deepcopy(template["operating"])
     state = workspace.state_dir
     planner = operating["bounded_planner"]["config"]
+    try:
+        planner_model = _read(state / "research-planner-model-config.json")
+    except WorkspaceServiceSetupError as exc:
+        raise WorkspaceServiceSetupError(
+            "install the workspace model template before service setup") from exc
     planner.update({
         "scheduler_db": str(state / "scheduler.sqlite"),
         "writer_socket": str(workspace.writer_socket),
@@ -188,6 +193,12 @@ def install_service_template(workspace_manifest: str | Path,
         "planner_model_router_db": str(state / "model-router.sqlite"),
         "planner_broker_socket": broker["socket_path"],
         "planner_broker_auth_key": broker["auth_key_path"],
+        # The service source may still name an older standalone planner policy.
+        # Bind the driver to the workspace-local, template-closed planner role.
+        "planner_routing_policy_ref": planner_model["routing_policy_ref"],
+        "planner_credential_slot_refs": planner_model["credential_slot_refs"],
+        "planner_broker_client_id": planner_model["broker_client_id"],
+        "planner_expected_agent_id": planner_model["expected_agent_id"],
     })
     thesis = operating["thesis_impact"]["config"]
     thesis.update({
@@ -276,6 +287,12 @@ def install_service_template(workspace_manifest: str | Path,
           {"schema_version": "research-language-policy:0.1", "required": True})
     _write(workspace.config_path, raw)
     try:
+        # The base control bootstrap ran before this template added Research
+        # Review.  Reconcile managed principals incrementally now, preserving
+        # their token bytes and every model/router authority already installed.
+        from .bootstrap import bootstrap
+        bootstrap(workspace.state_dir, workspace.config_path,
+                  workspace_manifest=workspace.manifest_path)
         # Rebind the Cockpit after research_review has supplied the extraction
         # fallback.  This is idempotent and also selects the installed planner
         # model configuration when present.
