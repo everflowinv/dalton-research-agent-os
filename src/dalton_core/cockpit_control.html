@@ -511,6 +511,17 @@ function readableLaneDetail(value){
 }
 function readableLogText(value){
   if(typeof value!=="string"||!value)return {display:value,technical:null};
+  const event=value.match(/^research-event:([0-9a-f]{32,64}) -> ([A-Z_]+) \/ note: ([\s\S]+)$/);
+  if(event){
+    const decisions={
+      NO_CHANGE:"事件研判已完成，维持现有研究判断。",
+      THESIS_STRENGTHENED:"事件研判已完成，现有投资论点得到加强。",
+      THESIS_WEAKENED:"事件研判已完成，现有投资论点有所减弱。",
+      THESIS_BROKEN:"事件研判已完成，现有投资论点不再成立。",
+      NEW_THESIS:"事件研判已完成，形成了新的投资论点。",
+    };
+    return {display:decisions[event[2]]||"事件研判已完成，具体判断见技术详情。",technical:value};
+  }
   const match=value.match(/^深度认知门十二问草稿 v(\d+)，分类 ([a-z0-9_-]+)，等待人裁决$/i);
   if(!match)return {display:displayText(value),technical:looksTechnical(value)?value:null};
   const label={turnaround:"经营改善观察",insufficient_evidence:"证据不足"}[match[2]]||"分类尚未识别";

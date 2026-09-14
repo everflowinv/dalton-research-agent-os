@@ -141,6 +141,29 @@ class CockpitRuntimeTextBoundariesTests(unittest.TestCase):
         self.assertNotIn("future_kind", result["display"])
         self.assertEqual(result["technical"], unknown)
 
+    def test_legacy_event_judgement_log_is_closed_and_keeps_raw_detail(self):
+        raw = (
+            "research-event:9098bea6d9c7fcac0d8760b85b4b421e -> "
+            "NO_CHANGE / note: 首选判断是：固定价格业务占比上升，属于qualitative："
+        )
+        result = self._evaluate(f"readableLogText({json.dumps(raw)})")
+        self.assertEqual(result["display"], "事件研判已完成，维持现有研究判断。")
+        self.assertEqual(result["technical"], raw)
+
+        declared = raw.replace("NO_CHANGE", "THESIS_WEAKENED")
+        result = self._evaluate(f"readableLogText({json.dumps(declared)})")
+        self.assertEqual(result["display"], "事件研判已完成，现有投资论点有所减弱。")
+        self.assertEqual(result["technical"], declared)
+
+        unknown = raw.replace("NO_CHANGE", "FUTURE_DECISION")
+        result = self._evaluate(f"readableLogText({json.dumps(unknown)})")
+        self.assertEqual(result["display"], "事件研判已完成，具体判断见技术详情。")
+        self.assertEqual(result["technical"], unknown)
+
+        near_match = raw.replace("research-event:", "other-event:")
+        result = self._evaluate(f"readableLogText({json.dumps(near_match)})")
+        self.assertEqual(result["display"], near_match)
+
     def test_legacy_reflection_authority_note_gets_plain_language(self):
         raw = (
             "这条记录只读不写：它不写 Ledger、不改 policy、不登记问题。"
