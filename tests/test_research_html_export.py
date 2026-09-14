@@ -130,7 +130,7 @@ class HtmlRenderTests(unittest.TestCase):
         self.assertIn("人工审批：无需人工审批", page)
         self.assertIn("本轮尚未起草", page)
         self.assertIn("结构化数据序列：营业收入同比增速", page)
-        self.assertIn("营业收入同比增速 $10B", page)
+        self.assertIn("来源说明（保留原文）：revenue_yoy_growth $10B", page)
         self.assertNotIn("not_applicable", page)
         self.assertNotIn("not_drafted_this_run", page)
         self.assertIn("缺少可比营业利润率（营业利润率）", page)
@@ -194,6 +194,17 @@ class HtmlRenderTests(unittest.TestCase):
         page = render_research_html(lib, mission=mission, claims={'claim:1': claim})
         self.assertIn('来源说明（保留原文）：Accenture plc reported Revenues', page)
         self.assertNotIn('营业收入187.2 亿美元', page)
+
+    def test_unmatched_number_row_preserves_replaceable_terms_verbatim(self):
+        mission, lib = self.fixture()
+        raw = 'cost_structure source wording must remain exact'
+        item = lib['products'][0]['sections'][0]['numbers'][0]
+        item.update(text=raw, period='FY2026', claim_version_ref='claim:1')
+        claim = {'id': 'claim:1', 'subject_ref': 'company:acn',
+                 'period': 'FY2026', 'normalized_statement': 'different source text'}
+        page = render_research_html(lib, mission=mission, claims={'claim:1': claim})
+        self.assertIn(f'来源说明（保留原文）：{raw}', page)
+        self.assertNotIn('成本结构 source wording', page)
 
     def test_incompatible_units_do_not_make_a_chart(self):
         mission, lib = self.fixture()
