@@ -131,6 +131,7 @@ dalton_core = [
 
 [tool.setuptools.data-files]
 "share/dalton-core/contracts" = ["contracts/*.schema.json"]
+"share/dalton-core/runtime-defaults" = ["deploy/phase9/p9a-research-playbook-v1.json"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
