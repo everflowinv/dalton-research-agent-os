@@ -225,15 +225,18 @@ class HtmlRenderTests(unittest.TestCase):
             'ACN 2026Q1（期末 2026-02-28）gross_margin 30.3%',
             'ACN 2026Q1（期末 2026-02-28）operating_margin -1.2%',
         ]
+        metrics = ('revenue', 'revenue_yoy_growth', 'gross_margin', 'operating_margin')
         section['numbers'] = [
             {'period': '2026Q1', 'text': raw,
-             'cell': {'kind': 'statement_accession', 'ref': f'cell:{index}'}}
-            for index, raw in enumerate(raws)
+             'cell': {'kind': 'statement_accession',
+                      'ref': f'comparison-cell:company-sec-cik-0001467373:{metric}:2026Q1',
+                      'accession': f'0001467373-26-0000{index + 1}'}}
+            for index, (raw, metric) in enumerate(zip(raws, metrics))
         ]
         page = render_research_html(lib, mission=mission)
         normal, details = page.split('<details class="refs">', 1)
         for expected in (
-            'ACN 2026年第1季度（期末2026年2月28日）营业收入：18044066000',
+            'ACN 2026年第一季度（期末2026年2月28日）营业收入：180.4 亿美元',
             '营业收入同比增速：8.3%', '毛利率：30.3%', '营业利润率：-1.2%',
         ):
             self.assertIn(expected, normal)
@@ -249,6 +252,27 @@ class HtmlRenderTests(unittest.TestCase):
         page = render_research_html(lib, mission=mission)
         self.assertIn(f'来源说明（保留原文）：{raw}', page)
         self.assertNotIn('毛利率：30.3%', page)
+
+    def test_comparison_material_rejects_incompatible_units_and_cell_identity(self):
+        mission, lib = self.fixture()
+        cases = [
+            ('ACN 2026Q1（期末 2026-02-28）revenue 30%', 'revenue'),
+            ('ACN 2026Q1（期末 2026-02-28）gross_margin 30', 'gross_margin'),
+        ]
+        section = lib['products'][0]['sections'][0]
+        section['numbers'] = []
+        for index, (raw, metric) in enumerate(cases):
+            section['numbers'].append({
+                'period': '2026Q1', 'text': raw,
+                'cell': {'kind': 'statement_accession',
+                         'ref': f'comparison-cell:company-sec-cik-0001467373:{metric}:2026Q1',
+                         'accession': f'0001467373-26-0000{index + 1}'},
+            })
+        page = render_research_html(lib, mission=mission)
+        for raw, _ in cases:
+            self.assertIn(f'来源说明（保留原文）：{raw}', page)
+        self.assertNotIn('营业收入：30.0%', page)
+        self.assertNotIn('毛利率：30.0%', page)
 
     def test_incompatible_units_do_not_make_a_chart(self):
         mission, lib = self.fixture()

@@ -87,6 +87,13 @@ _COMPARISON_METRIC_LABELS = {
     "gross_margin": "毛利率",
     "operating_margin": "营业利润率",
 }
+_COMPARISON_TICKER_SUBJECTS = {
+    "ACN": "company-sec-cik-0001467373",
+    "CTSH": "company-sec-cik-0001058290",
+    "EPAM": "company-sec-cik-0001352010",
+    "IBM": "company-sec-cik-0000051143",
+    "DXC": "company-sec-cik-001688568",
+}
 
 
 def _comparison_number_text(item: Mapping[str, Any], raw: str) -> str | None:
@@ -94,16 +101,38 @@ def _comparison_number_text(item: Mapping[str, Any], raw: str) -> str | None:
     matched = _COMPARISON_NUMBER_RE.fullmatch(raw)
     if matched is None or item.get("period") != matched.group("quarter"):
         return None
+    metric = matched.group("metric")
+    ticker = matched.group("ticker")
+    cell = item.get("cell")
+    expected_ref = (f'comparison-cell:{_COMPARISON_TICKER_SUBJECTS.get(ticker, "")}:'
+                    f'{metric}:{matched.group("quarter")}')
+    if (not isinstance(cell, Mapping)
+            or cell.get("kind") != "statement_accession"
+            or cell.get("ref") != expected_ref
+            or not isinstance(cell.get("accession"), str)
+            or not cell["accession"]):
+        return None
     try:
         ended = date.fromisoformat(matched.group("date"))
     except ValueError:
         return None
-    quarter = matched.group("quarter_number")
-    period = f'{matched.group("year")}年第{quarter}季度'
+    from .industry_framework import METRIC_UNITS
+    value = matched.group("value")
+    unit = METRIC_UNITS.get(metric)
+    if metric == "revenue":
+        if unit != "reported" or value.endswith("%"):
+            return None
+        shown_value = format_typed_value(
+            value, unit="usd", scale="one", currency="USD", metric="revenue")
+    else:
+        if unit != "percent" or not value.endswith("%"):
+            return None
+        shown_value = format_typed_value(
+            value[:-1], unit="percent", scale="one", metric=metric)
+    period = _period_label(matched.group("quarter"))
     period_end = f'{ended.year}年{ended.month}月{ended.day}日'
-    return (f'{matched.group("ticker")} {period}（期末{period_end}）'
-            f'{_COMPARISON_METRIC_LABELS[matched.group("metric")]}：'
-            f'{matched.group("value")}')
+    return (f'{ticker} {period}（期末{period_end}）'
+            f'{_COMPARISON_METRIC_LABELS[metric]}：{shown_value}')
 
 
 def _number_text(item: Mapping[str, Any],
