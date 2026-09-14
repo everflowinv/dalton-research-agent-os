@@ -3994,7 +3994,7 @@ class CockpitPlane:
 
         source_display = raw[:200]
         shown = display_metadata_text(transform_unquoted_prose(source_display, summary_values))
-        return shown, ({"original_summary": raw} if shown != source_display else None)
+        return shown, ({"original_summary": raw} if shown != raw else None)
 
     def log(self, *, since: str | None = None, limit: int = 150) -> dict[str, Any]:
         limit = max(1, min(int(limit), 500))

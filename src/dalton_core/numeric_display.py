@@ -116,8 +116,8 @@ def format_prose_usd_amounts(text: str) -> str:
 
 
 _ISO_DATE_RANGE = re.compile(
-    r"(?<![A-Za-z0-9])(?P<start>\d{4}-\d{2}-\d{2})\.\."
-    r"(?P<end>\d{4}-\d{2}-\d{2})(?![A-Za-z0-9])"
+    r"(?<![A-Za-z0-9/=?&#%_])(?P<start>\d{4}-\d{2}-\d{2})\.\."
+    r"(?P<end>\d{4}-\d{2}-\d{2})(?![A-Za-z0-9/=?&#%_])"
 )
 
 

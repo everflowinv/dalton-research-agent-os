@@ -258,14 +258,19 @@ class CockpitLanguageTests(unittest.TestCase):
         shown, technical = CockpitPlane._deliverable_log_summary(long_raw)
         self.assertLessEqual(len(shown), 200)
         self.assertEqual(technical, {"original_summary": long_raw})
+        plain_long = "这是一段系统生成的中文摘要。" * 30
+        shown, technical = CockpitPlane._deliverable_log_summary(plain_long)
+        self.assertEqual(shown, plain_long[:200])
+        self.assertEqual(technical, {"original_summary": plain_long})
 
     def test_reviewed_display_formats_closed_periods_and_business_term_only_outside_quotes(self) -> None:
         from dalton_core.research_gap_display import display_metadata_text
-        raw = ('FY27 到 FY2029，2026Q1、Q2 2025 的 discretionary spending；'
+        raw = ('FY27 到 FY2029，2026Q1、Q2 2025、Q1 FY2026、FY2027 Q2 的 discretionary spending；'
                '“FY27 discretionary spending”')
         self.assertEqual(
             display_metadata_text(raw),
-            ('2027财年 到 2029财年，2026年第一季度、2025年第二季度 的 可自由支配支出；'
+            ('2027财年 到 2029财年，2026年第一季度、2025年第二季度、'
+             '2026财年第一季度、2027财年第二季度 的 可自由支配支出；'
              '“FY27 discretionary spending”'),
         )
 

@@ -123,7 +123,9 @@ _TERM_PATTERN = re.compile(
     + r")(?![A-Za-z0-9_])", re.IGNORECASE)
 
 _EMBEDDED_PERIOD = re.compile(
-    r"(?<![A-Za-z0-9])(?:FY(?:20)?\d{2}(?:Q[1-4])?|CY(?:20)?\d{2}(?:Q[1-4])?|"
+    r"(?<![A-Za-z0-9])(?:(?:FY|CY)(?:20)?\d{2}\s+Q[1-4]|"
+    r"Q[1-4]\s+(?:FY|CY)(?:20)?\d{2}|"
+    r"FY(?:20)?\d{2}(?:Q[1-4])?|CY(?:20)?\d{2}(?:Q[1-4])?|"
     r"20\d{2}Q[1-4]|Q[1-4]\s+20\d{2})(?![A-Za-z0-9])",
     re.IGNORECASE,
 )
@@ -132,6 +134,16 @@ _EMBEDDED_PERIOD = re.compile(
 def _display_embedded_periods(part: str) -> str:
     def replace(match: re.Match[str]) -> str:
         raw = match.group(0)
+        fiscal_quarter = re.fullmatch(
+            r"(?:(FY|CY)((?:20)?\d{2})\s+Q([1-4])|Q([1-4])\s+(FY|CY)((?:20)?\d{2}))",
+            raw, re.IGNORECASE)
+        if fiscal_quarter:
+            basis = fiscal_quarter[1] or fiscal_quarter[5]
+            year_text = fiscal_quarter[2] or fiscal_quarter[6]
+            quarter = fiscal_quarter[3] or fiscal_quarter[4]
+            full_year = year_text if len(year_text) == 4 else f"20{year_text}"
+            return (f"{full_year}{'财年' if basis.upper() == 'FY' else '自然年'}"
+                    f"第{'一二三四'[int(quarter) - 1]}季度")
         alternate = re.fullmatch(r"Q([1-4])\s+(20\d{2})", raw, re.IGNORECASE)
         if alternate:
             return f"{alternate[2]}年第{'一二三四'[int(alternate[1]) - 1]}季度"
