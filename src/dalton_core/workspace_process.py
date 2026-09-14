@@ -43,6 +43,9 @@ def workspace_plan(
     if check_port:
         probe = socket.socket()
         try:
+            # Match HTTPServer's reuse setting: recently closed connections
+            # must not make a stopped workspace look like a live listener.
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             probe.bind(("127.0.0.1", workspace.cockpit_port))
         except OSError as exc:
             raise WorkspaceError("cockpit_port is already in use") from exc
