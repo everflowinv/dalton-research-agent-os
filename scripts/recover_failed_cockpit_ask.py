@@ -7,12 +7,13 @@ from dalton_core.research_gap_display import ask_gap_display_fields, display_met
 from dalton_core.research_language_runtime import run
 from dalton_core.cockpit_model import unwrap_json_object
 from dalton_core.ask_answer import parse_answer
+from dalton_core.ask_context import BLOCK_LABELS, BLOCK_TAGS
 from dalton_core.store import canonical_json
 
 def shown_from_prompt(prompt):
  import re
- blocks={'C':'claims','D':'dossier','B':'debates','F':'forecast','V':'valuation','P':'price','S':'street','K':'calendar','E':'events','G':'judgements','R':'reflections','T':'thesis','N':'feedback'}
- return [{'tag':tag,'statement':statement,'ref':None,'period':period or None,'company':'','at':'','block':blocks[tag[0]],'recovered_prompt_detail':detail or None}
+ blocks={letter:name for name,letter in BLOCK_TAGS.items()}
+ return [{'tag':tag,'statement':statement,'ref':None,'period':period or None,'company':'','at':'','block':blocks[tag[0]],'block_label':BLOCK_LABELS[blocks[tag[0]]],'recovered_prompt_detail':detail or None}
          for tag,period,detail,statement in re.findall(r'^([CDBFVPSKEGRTN]\d+)(?: \[([^]]+)\])?(?: （([^）]*)）)? (.*)$',prompt,re.M)]
 
 def load(p):return json.loads(p.read_text())

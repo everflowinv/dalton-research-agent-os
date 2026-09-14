@@ -21,7 +21,7 @@ class T(unittest.TestCase):
  def test_fullwidth_prompt_detail_is_not_part_of_citation_statement(self):
   import importlib.util
   spec=importlib.util.spec_from_file_location('recover_script',Path('scripts/recover_failed_cockpit_ask.py'));m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
-  self.assertEqual(m.shown_from_prompt('C7 [2026Q2] （DXC；收入） 正文。'),[{'tag':'C7','statement':'正文。','ref':None,'period':'2026Q2','company':'','at':'','block':'claims','recovered_prompt_detail':'DXC；收入'}])
+  self.assertEqual(m.shown_from_prompt('C7 [2026Q2] （DXC；收入） 正文。'),[{'tag':'C7','statement':'正文。','ref':None,'period':'2026Q2','company':'','at':'','block':'claims','block_label':'账本里的结论','recovered_prompt_detail':'DXC；收入'}])
  def test_wrong_formal_envelope_ref_refuses(self):
   self.assertNotEqual(self.cmd(ref='result:wrong').returncode,0);self.assertFalse((self.r/'out.json').exists())
  def test_reserved_output_finishes_after_cas_without_model_call(self):
