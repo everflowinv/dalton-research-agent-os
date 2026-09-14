@@ -29,7 +29,11 @@ def _formal_selection_valid(scheduler_db: Path, selection: Mapping[str, Any],
         work = WorkOrder.from_dict(json.loads(work_row["work_order_json"])).to_dict()
         envelope = ResultEnvelope.from_dict(json.loads(formal["result_envelope_json"])).to_dict()
         from .discovery_candidate_selection import selection_prompt, validate_selection
-        validated = validate_selection(envelope.get("outputs", {}).get("text", ""), source["view"])
+        validated = validate_selection(
+            envelope.get("outputs", {}).get("text", ""), source["view"],
+            missing_periods=source["missing_periods"],
+            selection_context=source.get("selection_context"),
+        )
         record = {"id": formal["result_record_id"], "work_order_id": formal["work_order_id"],
                   "attempt_number": formal["attempt_number"],
                   "result_envelope_id": formal["result_envelope_id"],

@@ -67,6 +67,54 @@ class DiscoveryCandidateSelectionTests(unittest.TestCase):
             with self.assertRaises(CandidateSelectionError):
                 validate_selection(json.dumps(output), view)
 
+    def test_directed_transcript_selection_drops_the_real_wrong_epam_quarter(self):
+        base = {"schema_version": "0.1", "contract_ref": CONTRACT_REF,
+                "source_envelope_ref": "source-envelope:epam",
+                "source_envelope_hash": "a" * 64,
+                "candidates": [{"document_ref": "alphaengine-doc:130000103953057",
+                                "rank": 1, "title": "EPAM Systems Q2 2026"}]}
+        view = {**base, "content_hash": content_hash(base)}
+        selected = validate_selection(json.dumps({"selected": [{
+            "document_ref": "alphaengine-doc:130000103953057",
+            "reason": "EPAM quarterly result, but not a listed missing period",
+        }]}), view, missing_periods=["FY2025-Q3", "FY2025-Q4"],
+            selection_context={"research_purpose": "earnings_call_transcript",
+                               "research_question": "Find the missing call"})
+        self.assertEqual(selected["selected"], [])
+
+    def test_directed_transcript_accepts_exact_quarter_and_fiscal_aliases(self):
+        titles = ("EPAM FY2025 Q3 Earnings Call", "EPAM Q3 2025 Earnings Call",
+                  "EPAM Third Fiscal Quarter 2025 Earnings Call", "EPAM 2025年第三季度电话会")
+        for index, title in enumerate(titles):
+            with self.subTest(title=title):
+                ref = f"alphaengine-doc:exact-{index}"
+                base = {"schema_version": "0.1", "contract_ref": CONTRACT_REF,
+                        "source_envelope_ref": "source-envelope:exact",
+                        "source_envelope_hash": "b" * 64,
+                        "candidates": [{"document_ref": ref, "rank": 1,
+                                        "title": title}]}
+                view = {**base, "content_hash": content_hash(base)}
+                selected = validate_selection(json.dumps({"selected": [{
+                    "document_ref": ref, "reason": "exact target quarter",
+                }]}), view, missing_periods=["FY25-Q3"],
+                    selection_context={
+                        "research_purpose": "earnings_call_transcript",
+                        "research_question": "Find the missing call",
+                    })
+                self.assertEqual([ref], [row["document_ref"]
+                                         for row in selected["selected"]])
+
+    def test_non_directed_selection_does_not_apply_the_quarter_filter(self):
+        raw, envelope = self.fixture()
+        view = candidate_view(raw, envelope)
+        selected = validate_selection(json.dumps({"selected": [{
+            "document_ref": "alphaengine-doc:ibm-q2", "reason": "useful peer report",
+        }]}), view, missing_periods=["FY2025-Q3"], selection_context={
+            "research_purpose": "sell_side_research",
+            "research_question": "Assess competitive positioning",
+        })
+        self.assertEqual(len(selected["selected"]), 1)
+
     def test_candidate_unknown_fields_do_not_enter_prompt(self):
         raw, envelope = self.fixture()
         rpc = json.loads(raw)

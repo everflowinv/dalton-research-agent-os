@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping
 from typing import Any
 
@@ -16,10 +17,47 @@ register_purpose_tier(PURPOSE, TIER_CHEAP)
 _TEXT_FIELDS = ("title", "publish_time", "rank_date", "document_code", "type_id")
 _LIST_FIELDS = ("companies", "industries", "markets", "sources")
 MAX_PROJECTED_LIST_ITEMS = 5
+_QUARTER_WORDS = {"first": 1, "second": 2, "third": 3, "fourth": 4}
 
 
 class CandidateSelectionError(ValueError):
     pass
+
+
+def _quarter_periods(text: str) -> set[tuple[int, int]]:
+    """Read explicit fiscal/calendar quarter labels without inferring from dates."""
+
+    periods: set[tuple[int, int]] = set()
+    for match in re.finditer(
+        r"(?i)\b(?:FY|CY)?\s*(20\d{2}|\d{2})\s*[- /]?\s*Q([1-4])\b", text
+    ):
+        year = int(match.group(1))
+        periods.add((2000 + year if year < 100 else year, int(match.group(2))))
+    for match in re.finditer(
+        r"(?i)\bQ([1-4])\s*[- /]?\s*(?:FY|CY)?\s*(20\d{2}|\d{2})\b", text
+    ):
+        year = int(match.group(2))
+        periods.add((2000 + year if year < 100 else year, int(match.group(1))))
+    for match in re.finditer(r"(20\d{2})\s*年?\s*第?([一二三四1-4])季度", text):
+        quarter = {"一": 1, "二": 2, "三": 3, "四": 4}.get(
+            match.group(2), int(match.group(2)) if match.group(2).isdigit() else 0
+        )
+        periods.add((int(match.group(1)), quarter))
+    for match in re.finditer(
+        r"(?i)\b(first|second|third|fourth)\s+(?:fiscal\s+)?quarter"
+        r"(?:\s+of)?\s+(?:FY|CY)?\s*(20\d{2}|\d{2})\b", text
+    ):
+        year = int(match.group(2))
+        periods.add((2000 + year if year < 100 else year,
+                     _QUARTER_WORDS[match.group(1).lower()]))
+    return periods
+
+
+def _matches_missing_quarter(title: str, missing_periods: list[str]) -> bool:
+    wanted: set[tuple[int, int]] = set()
+    for period in missing_periods:
+        wanted.update(_quarter_periods(period))
+    return bool(wanted and wanted.intersection(_quarter_periods(title)))
 
 
 class CockpitDiscoveryCandidateSelector:
@@ -46,7 +84,9 @@ class CockpitDiscoveryCandidateSelector:
             prompt=selection_prompt(view, company=company, missing_periods=missing_periods,
                                     selection_context=selection_context),
             mission=mission)
-        return {**validate_selection(call["text"], view),
+        return {**validate_selection(
+                    call["text"], view, missing_periods=missing_periods,
+                    selection_context=selection_context),
                 "work_order_ref": call["work_order_ref"],
                 "result_envelope_ref": call["result_envelope_ref"],
                 "invocation_ref": call["invocation_ref"],
@@ -153,14 +193,23 @@ def selection_prompt(view: Mapping[str, Any], *, company: Mapping[str, Any],
                 "selection_context": context, "candidate_view": dict(view)}))
 
 
-def validate_selection(text: str, view: Mapping[str, Any]) -> dict[str, Any]:
+def validate_selection(
+    text: str, view: Mapping[str, Any], *,
+    missing_periods: list[str] | None = None,
+    selection_context: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     try:
         raw = json.loads(text)
     except json.JSONDecodeError as exc:
         raise CandidateSelectionError("selection is not JSON") from exc
     if not isinstance(raw, Mapping) or set(raw) != {"selected"} or not isinstance(raw["selected"], list):
         raise CandidateSelectionError("selection has an invalid closed shape")
-    allowed = {row["document_ref"] for row in view["candidates"]}
+    candidates = {row["document_ref"]: row for row in view["candidates"]}
+    allowed = set(candidates)
+    directed_quarters = bool(missing_periods) and (
+        selection_context is None
+        or selection_context.get("research_purpose") == "earnings_call_transcript"
+    )
     selected = []
     seen = set()
     for row in raw["selected"]:
@@ -170,6 +219,10 @@ def validate_selection(text: str, view: Mapping[str, Any]) -> dict[str, Any]:
                 or len(row["reason"]) > 300):
             raise CandidateSelectionError("selection item is invalid")
         seen.add(row["document_ref"])
+        if directed_quarters and not _matches_missing_quarter(
+                str(candidates[row["document_ref"]].get("title") or ""),
+                missing_periods or []):
+            continue
         selected.append({"document_ref": row["document_ref"], "reason": row["reason"].strip()})
     contract_ref = view.get("contract_ref")
     if contract_ref not in {LEGACY_CONTRACT_REF, CONTRACT_REF}:
