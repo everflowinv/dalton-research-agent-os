@@ -425,7 +425,8 @@ def _ops_superseded_mission(item_key: Any, current: str | None) -> bool:
 
 
 def _ops_superseded_model_spec(
-        item: Mapping[str, Any], latest: Mapping[str, Mapping[str, Any]]) -> bool:
+        item: Mapping[str, Any], latest: Mapping[str, Mapping[str, Any]],
+        latest_inputs: Mapping[str, Mapping[str, Any]] | None = None) -> bool:
     """Hide a failed spec only after a later formal specification succeeded."""
     if item.get("lane") != "mission_model_spec":
         return False
@@ -438,12 +439,21 @@ def _ops_superseded_model_spec(
         return False
     successful = latest.get(parts[0])
     last_seen = item.get("last_seen")
-    return (isinstance(successful, Mapping)
-            and isinstance(successful.get("state_hash"), str)
-            and re.fullmatch(r"[0-9a-f]{64}", successful["state_hash"]) is not None
-            and isinstance(successful.get("created_at"), str)
-            and isinstance(last_seen, str)
-            and successful["created_at"] > last_seen)
+    later_success = (isinstance(successful, Mapping)
+                     and isinstance(successful.get("state_hash"), str)
+                     and re.fullmatch(r"[0-9a-f]{64}", successful["state_hash"]) is not None
+                     and isinstance(successful.get("created_at"), str)
+                     and isinstance(last_seen, str)
+                     and successful["created_at"] > last_seen)
+    current_input = (latest_inputs or {}).get(parts[0])
+    later_input = (isinstance(current_input, Mapping)
+                   and isinstance(current_input.get("state_hash"), str)
+                   and re.fullmatch(r"[0-9a-f]{64}", current_input["state_hash"]) is not None
+                   and current_input["state_hash"] != state_hash
+                   and isinstance(current_input.get("last_seen"), str)
+                   and isinstance(last_seen, str)
+                   and current_input["last_seen"] > last_seen)
+    return later_success or later_input
 
 
 def _runtime_error_display(reason: Any) -> str:
@@ -3640,6 +3650,23 @@ class CockpitPlane:
                     })
         except (sqlite3.Error, ValueError, TypeError):
             pass
+        latest_model_inputs: dict[str, dict[str, Any]] = {}
+        for bucket in backlog["dependencies"]:
+            for item in bucket["items"]:
+                if item.get("lane") != "mission_model_spec":
+                    continue
+                key = item.get("item_key")
+                seen_at = item.get("last_seen")
+                if not isinstance(key, str) or not isinstance(seen_at, str):
+                    continue
+                parts = key.split("|")
+                if (len(parts) < 2 or not parts[0].startswith("company:")
+                        or re.fullmatch(r"[0-9a-f]{64}", parts[1]) is None):
+                    continue
+                prior = latest_model_inputs.get(parts[0])
+                if prior is None or seen_at > prior["last_seen"]:
+                    latest_model_inputs[parts[0]] = {
+                        "state_hash": parts[1], "last_seen": seen_at}
         governance = self._governance_records()
         permission_records = {
             "mission_catalyst_calendar": "yfinance-calendar-v1.json",
@@ -3650,7 +3677,7 @@ class CockpitPlane:
         def historical(item: Mapping[str, Any]) -> bool:
             return (_ops_superseded_mission(
                         item.get("item_key"), current_mission_version)
-                    or _ops_superseded_model_spec(item, latest_model_specs))
+                    or _ops_superseded_model_spec(item, latest_model_specs, latest_model_inputs))
 
         dependencies = []
         historical_items = []

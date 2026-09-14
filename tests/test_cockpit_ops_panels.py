@@ -244,6 +244,12 @@ class OpsBacklogTests(PanelCase):
         self.assertFalse(_ops_superseded_model_spec(
             {**item, "item_key": company + "|not-a-hash"}, {company: {
                 "state_hash": "b" * 64, "created_at": "2026-09-13T10:00:00+00:00"}}))
+        # A later, well-formed observed input also proves the older fingerprint
+        # is historical even when the later attempt itself remains held.
+        self.assertTrue(_ops_superseded_model_spec(item, {}, {company: {
+            "state_hash": "c" * 64, "last_seen": "2026-09-13T10:00:00+00:00"}}))
+        self.assertFalse(_ops_superseded_model_spec(item, {}, {company: {
+            "state_hash": "a" * 64, "last_seen": "2026-09-13T10:00:00+00:00"}}))
 
     def test_the_page_carries_no_machine_words_for_a_dependency_it_knows(self) -> None:
         self.park()
