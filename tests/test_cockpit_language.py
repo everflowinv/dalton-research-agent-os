@@ -311,6 +311,13 @@ class CockpitLanguageTests(unittest.TestCase):
             "2026年第四季度 / 2027财年 展望；取得深度研究阶段验收分类定义",
         )
 
+    def test_furlough_gloss_preserves_quoted_source(self) -> None:
+        from dalton_core.research_gap_display import display_metadata_text
+        self.assertEqual(
+            display_metadata_text('第四季度 furlough（年假）安排；“furlough（年假）”'),
+            '第四季度 临时停工休假（furlough）安排；“furlough（年假）”',
+        )
+
     def test_model_action_journal_uses_readable_copy(self) -> None:
         from dalton_core import cockpit_plane
 

@@ -183,7 +183,8 @@ def display_metadata_text(value: Any) -> str:
         lambda part: _display_embedded_periods(
             part.replace("discretionary spending", "可自由支配支出")
                 .replace("discretionary 支出", "可自由支配支出")
-                .replace("Deep Insight Gate", "深度研究阶段验收")),
+                .replace("Deep Insight Gate", "深度研究阶段验收")
+                .replace("furlough（年假）", "临时停工休假（furlough）")),
     )
     return format_prose_date_ranges(format_prose_usd_amounts(text))
 
