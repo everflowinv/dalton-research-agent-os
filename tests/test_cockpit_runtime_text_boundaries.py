@@ -30,6 +30,7 @@ class CockpitRuntimeTextBoundariesTests(unittest.TestCase):
             "readableEventJudgement",
             "approvalSummary",
             "approvalDetailSummary",
+            "approvalReviewText",
         )
         functions = []
         for name in names:
@@ -202,6 +203,16 @@ class CockpitRuntimeTextBoundariesTests(unittest.TestCase):
         near = "thesis-version:unknown value"
         result = self._evaluate(f"approvalDetailSummary({json.dumps(near)})")
         self.assertEqual(result, {"display": near, "technical": None})
+
+    def test_approval_review_hides_only_closed_localized_bullet_refs(self):
+        raw = ("- thesis-version:b35bdc3d8aba4e4bb294c744b00f59c5（论点弱化）：正文\n"
+               "  因为：依据\n- thesis-version:unknown（论点弱化）：保留")
+        result = self._evaluate(f"approvalReviewText({json.dumps(raw)})")
+        self.assertEqual(
+            result["display"],
+            "- （论点弱化）：正文\n  因为：依据\n- thesis-version:unknown（论点弱化）：保留",
+        )
+        self.assertEqual(result["technical"], raw)
 
     def test_known_event_classifications_are_readable_and_raw_is_retained(self):
         raw = "该事件属于 qualitative、derived 层级的表述（claim-version:19d177…、f427bc…）。"
