@@ -2,6 +2,8 @@
 
 Date: 2026-09-10
 
+Update 2026-09-14: routine workspace creation now uses the Cockpit manager and automatically installs the existing research runtime. See [the current procedure](workspace-runtime-autoprovisioning-2026-09-14.md). The commands below remain a historical low-level namespace/release procedure and do not by themselves provision a research-ready workspace.
+
 This runbook describes the workspace tooling in the accepted source tree. It is an operator procedure, not a deployment receipt. Current acceptance used temporary directories and deterministic subprocess/transport stubs. It did not create or run a real multi-workspace fleet, contact model or data providers, publish Tailscale routes, or sign a mission.
 
 ## Preconditions and placeholders
@@ -52,7 +54,7 @@ The installer creates a content-addressed virtual environment, verifies the inst
 
 ## Prepare explicit shared provider capacity bindings
 
-Each model-provider account shared by multiple workspaces needs an owner-published capacity policy and a binding JSON file. The binding is not inferred from a credential name. Its closed shape is:
+When the host enforces a shared-account capacity policy, each governed model-provider account needs an owner-published policy and a binding JSON file. These bindings are optional host controls, not prerequisites for every new environment. The binding is not inferred from a credential name. Its closed shape is:
 
 ```json
 {
@@ -66,7 +68,7 @@ Each model-provider account shared by multiple workspaces needs an owner-publish
 }
 ```
 
-Create one file per provider/account binding, mode `0600`, outside every workspace root. A workspace may repeat `--shared-model-capacity-binding` for multiple providers. Two workspaces that consume the same provider account must point to the same capacity database and owner-declared account scope, with exact active policy refs and hashes. Do not copy credential tokens into this file.
+Create one file per provider/account binding, mode `0600`, outside every workspace root. A workspace may repeat `--shared-model-capacity-binding` for multiple providers. Two workspaces governed by the same shared-account capacity policy must point to the same capacity database and owner-declared account scope, with exact active policy refs and hashes. Do not copy credential tokens into this file.
 
 Connector capacity is also explicit. Prepare one mode `0600` JSON file per approved connector policy binding:
 
