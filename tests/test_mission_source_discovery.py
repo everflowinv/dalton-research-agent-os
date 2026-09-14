@@ -1141,6 +1141,28 @@ class CoordinatorTests(unittest.TestCase):
         acquired = self.missions.discovered_documents(mission["id"], status="acquired")
         self.assertIn(NEW_DOC, [item["document_ref"] for item in acquired])
 
+    def test_expired_shared_deadline_covers_maintenance_and_defers_search(self) -> None:
+        deadline = 0.0
+        with (
+            patch.object(self.coordinator, "settle_dispatches", return_value=[]) as dispatches,
+            patch.object(self.coordinator, "recover_local_web_discoveries", return_value=[]) as recovery,
+            patch.object(self.coordinator, "settle_documents", return_value=[]) as documents,
+            patch.object(self.coordinator, "carry_forward", return_value=[]) as carry,
+            patch.object(self.coordinator, "backfill_hosts", return_value={"status": "complete"}) as hosts,
+            patch.object(self.coordinator.missions, "backfill_document_reviews", return_value=[]) as reviews,
+            patch.object(self.coordinator, "_acquire_within_budget", return_value=([], True, [])),
+            patch.object(self.coordinator, "launch_discovery") as launch,
+        ):
+            result = self.coordinator.dispatch_once(deadline)
+        dispatches.assert_called_once_with(deadline)
+        recovery.assert_called_once_with(deadline=deadline)
+        documents.assert_called_once_with(deadline)
+        carry.assert_called_once_with(deadline)
+        hosts.assert_called_once_with(deadline=deadline)
+        reviews.assert_called_once_with(self.coordinator.plan["mission_ref"], deadline=deadline)
+        launch.assert_not_called()
+        self.assertEqual(result["discovery"]["status"], "deferred")
+
 
 class SearchChildTests(unittest.TestCase):
     """The real launcher spawns the real child in fake-search mode."""

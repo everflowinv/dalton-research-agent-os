@@ -39,6 +39,7 @@ import json
 import math
 import re
 import sqlite3
+import time
 from collections.abc import Mapping, Sequence
 from types import MappingProxyType
 from contextlib import contextmanager
@@ -3071,7 +3072,8 @@ class CoverageMissionAuthority:
     )
 
     def carry_forward_superseded_documents(
-        self, mission_ref: str, *, source_ref: str | None = None, limit: int = 100
+        self, mission_ref: str, *, source_ref: str | None = None, limit: int = 100,
+        deadline: float | None = None,
     ) -> list[dict[str, Any]]:
         """Re-register documents left under a superseded version of a mission.
 
@@ -3132,6 +3134,8 @@ class CoverageMissionAuthority:
         result: list[dict[str, Any]] = []
         carried_refs: set[str] = set()
         for row in rows:
+            if deadline is not None and time.monotonic() >= deadline:
+                break
             if row["document_ref"] in carried_refs:
                 continue
             entry = {
@@ -3187,7 +3191,9 @@ class CoverageMissionAuthority:
             result.append({**entry, "status": status, "record_id": record_id})
         return result
 
-    def backfill_document_reviews(self, mission_ref: str, *, limit: int = 100) -> list[dict[str, Any]]:
+    def backfill_document_reviews(
+        self, mission_ref: str, *, limit: int = 100, deadline: float | None = None,
+    ) -> list[dict[str, Any]]:
         """Recover acquisitions completed before queue deployment or a crash.
 
         Select only missing reviews in the active mission, then re-derive
@@ -3207,6 +3213,8 @@ class CoverageMissionAuthority:
         ).fetchall()
         result = []
         for row in rows:
+            if deadline is not None and time.monotonic() >= deadline:
+                break
             mission = self.mission(row["mission_version_ref"])
             try:
                 review = self.register_document_review(

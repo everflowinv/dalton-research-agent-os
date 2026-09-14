@@ -1209,17 +1209,17 @@ class MissionSourceDiscoveryCoordinator:
         )) if self.source_ref == WEB_SEARCH_SOURCE_REF else tuple(policy.get("skip_hosts", ()))
 
     # -- P9d-12/13 maintenance -------------------------------------------------
-    def carry_forward(self) -> list[dict[str, Any]]:
+    def carry_forward(self, deadline: float | None = None) -> list[dict[str, Any]]:
         """Re-register this source's documents stranded under a superseded mission version."""
 
         try:
             return self.missions.carry_forward_superseded_documents(
-                self.plan["mission_ref"], source_ref=self.source_ref
+                self.plan["mission_ref"], source_ref=self.source_ref, deadline=deadline,
             )
         except Exception as exc:  # maintenance must never take the tick down
             return [{"status": "error", "reason": f"{type(exc).__name__}: {exc}"}]
 
-    def settle_already_held(self) -> list[dict[str, Any]]:
+    def settle_already_held(self, deadline: float | None = None) -> list[dict[str, Any]]:
         """Reconcile every unsettled row whose bytes are now in authority.
 
         This deliberately runs before selection.  A direct governed fetch can
@@ -1252,6 +1252,8 @@ class MissionSourceDiscoveryCoordinator:
                 (self.source_ref,),
             ).fetchall()]
         for document in documents:
+            if deadline is not None and _monotonic() >= deadline:
+                break
             entry: dict[str, Any] = {
                 "record_id": document["record_id"], "document_ref": document["document_ref"],
             }
@@ -1277,7 +1279,8 @@ class MissionSourceDiscoveryCoordinator:
             settled.append(entry)
         return settled
 
-    def backfill_hosts(self, *, limit: int = 25) -> dict[str, Any]:
+    def backfill_hosts(self, *, limit: int = 25,
+                       deadline: float | None = None) -> dict[str, Any]:
         """Fill ``host`` for pre-P9d-13 web rows from each row's exact discovery envelope."""
 
         if self.source_ref != WEB_SEARCH_SOURCE_REF:
@@ -1293,6 +1296,8 @@ class MissionSourceDiscoveryCoordinator:
         failures: list[dict[str, str]] = []
         hosts_by_envelope: dict[str, dict[str, str]] = {}
         for document in rows:
+            if deadline is not None and _monotonic() >= deadline:
+                break
             try:
                 discovery = self.missions.discovery_record(document["discovery_ref"])
                 envelope_ref = discovery["source_envelope_ref"]
@@ -1310,11 +1315,13 @@ class MissionSourceDiscoveryCoordinator:
         return {"status": "filled" if filled else "stalled", "filled": filled, "failures": failures}
 
     # -- settlement ----------------------------------------------------------
-    def settle_dispatches(self) -> list[dict[str, Any]]:
+    def settle_dispatches(self, deadline: float | None = None) -> list[dict[str, Any]]:
         settled: list[dict[str, Any]] = []
         if self.search_launcher is None:
             return settled
         for dispatch in self.missions.open_discovery_dispatches(source_ref=self.source_ref):
+            if deadline is not None and _monotonic() >= deadline:
+                break
             try:
                 ticket = self.search_launcher.status(dispatch["ticket_ref"])
             except DiscoveryTicketNotFound:
@@ -1614,7 +1621,9 @@ class MissionSourceDiscoveryCoordinator:
             "provider_calls": 0,
         }
 
-    def recover_local_web_discoveries(self, *, limit: int = 20) -> list[dict[str, Any]]:
+    def recover_local_web_discoveries(
+        self, *, limit: int = 20, deadline: float | None = None,
+    ) -> list[dict[str, Any]]:
         """Recover paid successful searches whose child failed during local registration."""
 
         if self.source_ref != WEB_SEARCH_SOURCE_REF or self.search_launcher is None:
@@ -1646,6 +1655,8 @@ class MissionSourceDiscoveryCoordinator:
             self._local_recovery_cursor = (last["created_at"], last["dispatch_id"])
         recovered: list[dict[str, Any]] = []
         for dispatch in candidates:
+            if deadline is not None and _monotonic() >= deadline:
+                break
             try:
                 ticket = self.search_launcher.status(dispatch["ticket_ref"])
                 recovered.append(self._recover_web_dispatch(dispatch, ticket))
@@ -1657,11 +1668,13 @@ class MissionSourceDiscoveryCoordinator:
                 })
         return recovered
 
-    def settle_documents(self) -> list[dict[str, Any]]:
+    def settle_documents(self, deadline: float | None = None) -> list[dict[str, Any]]:
         settled: list[dict[str, Any]] = []
         if self.acquisition_launcher is None:
             return settled
         for document in self.missions.launched_discovered_documents(source_ref=self.source_ref):
+            if deadline is not None and _monotonic() >= deadline:
+                break
             try:
                 ticket = self.acquisition_launcher.status(document["ticket_ref"])
             except LookupError:
@@ -2561,7 +2574,7 @@ class MissionSourceDiscoveryCoordinator:
                 break
             # Settle the child that just finished, or the next launch sees a
             # document still marked launched and reports itself busy.
-            settled_documents = settled_documents + self.settle_documents()
+            settled_documents = settled_documents + self.settle_documents(deadline)
         return acquisitions, out_of_time, settled_documents
 
     def dispatch_once(self, deadline: float | None = None) -> dict[str, Any]:
@@ -2573,17 +2586,18 @@ class MissionSourceDiscoveryCoordinator:
         """
 
         retried_after_restart = self._retry_failures_now
-        settled_dispatches = self.settle_dispatches()
-        recovered_dispatches = self.recover_local_web_discoveries()
-        settled_documents = self.settle_documents()
+        settled_dispatches = self.settle_dispatches(deadline)
+        recovered_dispatches = self.recover_local_web_discoveries(deadline=deadline)
+        settled_documents = self.settle_documents(deadline)
         # P9d-12/13 maintenance, all before any new spend: documents stranded
         # by a mission version change come back under the current grant,
         # pre-ledger rows learn their host, and documents already held owe a
         # review rather than a fetch.
-        carried_forward = self.carry_forward()
-        host_backfill = self.backfill_hosts()
-        already_held = self.settle_already_held()
-        review_backfill = self.missions.backfill_document_reviews(self.plan["mission_ref"])
+        carried_forward = self.carry_forward(deadline)
+        host_backfill = self.backfill_hosts(deadline=deadline)
+        already_held = self.settle_already_held(deadline)
+        review_backfill = self.missions.backfill_document_reviews(
+            self.plan["mission_ref"], deadline=deadline)
         # Acquiring an already-discovered document comes before spending the
         # shared budget on a new search: known gaps first, then new ones.
         #
@@ -2600,7 +2614,11 @@ class MissionSourceDiscoveryCoordinator:
         # writer's patience is spent by the whole request.
         acquisitions, out_of_time, settled_documents = self._acquire_within_budget(
             settled_documents, deadline)
-        discovery = self.launch_discovery()
+        discovery = (
+            {"status": "deferred", "reason": "tick budget exhausted"}
+            if deadline is not None and _monotonic() >= deadline
+            else self.launch_discovery()
+        )
         launched = [item for item in acquisitions if item.get("status") == "launched"]
         launched_documents = len(launched)
         # Report the first document this tick actually took, not the attempt
