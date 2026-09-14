@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -133,7 +134,11 @@ class ResearchReviewControlPlane:
             config.candidate_staging_path
         )
         if writer is None:
-            principal = load_principals(self.token_config).get(
+            principal = load_principals(
+                self.token_config,
+                allow_managed_operation_subset=not bool(
+                    os.environ.get("DALTON_WORKSPACE_MANIFEST")),
+            ).get(
                 "research-review-control"
             )
             if principal is None:
