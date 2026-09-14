@@ -308,6 +308,13 @@ class PromptTests(unittest.TestCase):
         # The state itself has to be in the prompt or the plan is a guess.
         self.assertIn("quarterly_financials", prompt)
 
+    def test_company_ir_is_public_web_material_not_a_connector(self):
+        prompt = build_prompt(state())
+        self.assertIn("`source:company-ir` names first-party material", prompt)
+        self.assertIn("it is not a separate connector", prompt)
+        self.assertIn("existing public-web search and fetch path", prompt)
+        self.assertIn("Never tell the user to connect or approve a company-IR source", prompt)
+
     @staticmethod
     def document(company_ref, number, *, preview_bytes, reviewed=False):
         digest = f"{number:064x}"
