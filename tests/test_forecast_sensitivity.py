@@ -789,7 +789,9 @@ class RenderTests(unittest.TestCase):
         # The quarter each extreme happened in, beside the number.
         self.assertIn("(2024-11-30)", text)
         # An unavailable line prints its reason where its number would be.
-        self.assertIn("not_material", text)
+        self.assertIn("Free cash flow                    --", text)
+        self.assertIn("模型规则将现金流量表标为非重大项目", text)
+        self.assertNotIn("not_material", text)
         self.assertIn("驱动因素按此排序", text)
         # The reader is told the columns are flat holds, not paths.
         self.assertIn("每个情景列在所示全部季度中保持同一假设水平", text)

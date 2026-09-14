@@ -824,7 +824,9 @@ class PageVocabularyTests(unittest.TestCase):
 
     def test_the_lane_row_shows_the_sentence_and_keeps_the_raw_reason_apart(self) -> None:
         page = self.PAGE.read_text(encoding="utf-8")
-        self.assertIn("if(l.detail)", page)
+        self.assertIn("detail=readableLaneDetail(l.detail)", page)
+        self.assertIn("if(detail.display)", page)
+        self.assertIn("technicalDetails(detail.technical)", page)
         self.assertIn(".lane small.raw", page)
 
     def test_the_price_block_says_when_it_is_not_a_close(self) -> None:
