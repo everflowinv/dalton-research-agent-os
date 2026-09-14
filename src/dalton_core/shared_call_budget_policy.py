@@ -35,14 +35,17 @@ def validate_shared_call_budget_policy(value: Mapping[str, Any]) -> dict[str, An
         raise SharedCallBudgetPolicyError("shared call budget policy updated_at is invalid")
     if not isinstance(wire.get("actor_ref"), str) or not wire["actor_ref"].startswith("human:"):
         raise SharedCallBudgetPolicyError("shared call budget policy actor_ref is invalid")
-    wire["default_max_cost_usd"] = _cost(wire["default_max_cost_usd"], "default_max_cost_usd")
+    # Validate without changing the hashed JSON representation (1 and 1.0
+    # are both valid values but have different serialized hashes).
+    _cost(wire["default_max_cost_usd"], "default_max_cost_usd")
     if not isinstance(wire.get("purpose_max_cost_usd"), Mapping):
         raise SharedCallBudgetPolicyError("purpose_max_cost_usd must be an object")
     checked = {}
     for purpose, cost in wire["purpose_max_cost_usd"].items():
         if not isinstance(purpose, str) or not _PURPOSE.fullmatch(purpose):
             raise SharedCallBudgetPolicyError("purpose_max_cost_usd has a noncanonical purpose")
-        checked[purpose] = _cost(cost, f"purpose_max_cost_usd.{purpose}")
+        _cost(cost, f"purpose_max_cost_usd.{purpose}")
+        checked[purpose] = cost
     return {**wire, "purpose_max_cost_usd": checked, "content_hash": asserted}
 
 def load_shared_call_budget_policy(path: str | Path) -> dict[str, Any]:
@@ -56,4 +59,4 @@ def load_shared_call_budget_policy(path: str | Path) -> dict[str, Any]:
 
 def effective_shared_max_cost(policy: Mapping[str, Any], purpose: str) -> float:
     checked = validate_shared_call_budget_policy(policy)
-    return checked["purpose_max_cost_usd"].get(purpose, checked["default_max_cost_usd"])
+    return float(checked["purpose_max_cost_usd"].get(purpose, checked["default_max_cost_usd"]))

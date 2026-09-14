@@ -49,6 +49,17 @@ class SharedCallBudgetPolicyTests(unittest.TestCase):
             with self.assertRaises(SharedCallBudgetPolicyError):
                 load_shared_call_budget_policy(link)
 
+    def test_integer_cost_keeps_valid_hash_across_repeated_validation(self):
+        from dalton_core.shared_call_budget_policy import effective_shared_max_cost
+        with tempfile.TemporaryDirectory() as name:
+            path = Path(name) / "policy.json"
+            original = self.policy(default_max_cost_usd=1, purpose_max_cost_usd={"draft": 2})
+            path.write_text(json.dumps(original))
+            loaded = load_shared_call_budget_policy(path)
+            self.assertEqual(loaded, original)
+            self.assertEqual(effective_shared_max_cost(loaded, "draft"), 2.0)
+            self.assertEqual(effective_shared_max_cost(loaded, "plan"), 1.0)
+
     def test_bounded_planner_reads_the_same_shared_policy(self):
         from dataclasses import asdict
         from dalton_core.bounded_planner_driver import BoundedPlannerDriverConfig
