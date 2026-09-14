@@ -72,5 +72,55 @@ class SharedCallBudgetPolicyTests(unittest.TestCase):
             configured = BoundedPlannerDriverConfig.from_mapping(raw)
             self.assertEqual(configured.planner_call_budget["max_cost_usd"], 0.7)
 
+    def test_each_extraction_window_hot_refreshes_shared_cost_only(self):
+        from dalton_core.document_extraction import build_work as prose_work
+        from dalton_core.document_numeric_extraction import build_work as numeric_work
+        from dalton_core.metric_discovery_extraction import build_work as discovery_work
+        from tests.test_document_numeric_extraction import CONTEXT as NUMERIC_CONTEXT, SLOTS
+        from tests.test_metric_discovery_extraction import CONTEXT as DISCOVERY_CONTEXT
+
+        prose_context = {**DISCOVERY_CONTEXT, "offset": 0, "end": 400}
+        numeric_context = {**DISCOVERY_CONTEXT, **NUMERIC_CONTEXT}
+        builders = (
+            ("document_extraction", lambda config: prose_work(prose_context, model_config=config)),
+            ("document_numeric_extraction",
+             lambda config: numeric_work(numeric_context, SLOTS, model_config=config)),
+            ("metric_discovery_extraction",
+             lambda config: discovery_work(DISCOVERY_CONTEXT, model_config=config)),
+        )
+        with tempfile.TemporaryDirectory() as name:
+            path = Path(name) / "policy.json"
+            config = {"shared_call_budget_policy_path": str(path)}
+
+            def install(cost, revision):
+                purposes = {purpose: cost for purpose, _ in builders}
+                path.write_text(json.dumps(self.policy(
+                    default_max_cost_usd=cost, purpose_max_cost_usd=purposes,
+                    revision=revision, updated_at=f"2026-09-14T00:00:0{revision}+00:00",
+                )))
+
+            install(1.0, 1)
+            first = [build(config) for _, build in builders]
+            install(2.0, 2)
+            raised = [build(config) for _, build in builders]
+            install(0.5, 3)
+            reduced = [build(config) for _, build in builders]
+
+            for before, higher, lower in zip(first, raised, reduced):
+                self.assertEqual(before.budget["max_cost_usd"], 1.0)
+                self.assertEqual(higher.budget["max_cost_usd"], 2.0)
+                self.assertEqual(lower.budget["max_cost_usd"], 0.5)
+                for work in (before, higher, lower):
+                    self.assertEqual(work.metadata["call_budget"]["max_cost_usd"],
+                                     work.budget["max_cost_usd"])
+                self.assertEqual(
+                    {key: before.budget[key] for key in before.budget if key != "max_cost_usd"},
+                    {key: higher.budget[key] for key in higher.budget if key != "max_cost_usd"},
+                )
+                self.assertNotEqual(before.id, higher.id)
+                self.assertNotEqual(higher.id, lower.id)
+                # Work already constructed for a prior reservation remains frozen.
+                self.assertEqual(before.budget["max_cost_usd"], 1.0)
+
 
 if __name__ == "__main__": unittest.main()

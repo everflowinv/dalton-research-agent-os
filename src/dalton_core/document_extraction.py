@@ -437,7 +437,9 @@ def build_work(context: Mapping[str, Any], *, model_config: Mapping[str, Any] | 
 
     configured = model_config or {}
     explicit = call_budget is not None or any(
-        key in (model_config or {}) for key in ("call_budget", "purpose_call_budgets")
+        key in configured for key in (
+            "call_budget", "purpose_call_budgets", "shared_call_budget_policy_path",
+        )
     )
     resolved = dict(call_budget or resolve_call_budget(
         configured, "document_extraction", defaults=LEGACY_CALL_BUDGET,
