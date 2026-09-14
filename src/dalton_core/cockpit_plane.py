@@ -429,14 +429,14 @@ def _ops_model_spec_history_reason(
         latest_inputs: Mapping[str, Mapping[str, Any]] | None = None) -> str | None:
     """Classify a failed spec only from a later success or newer input."""
     if item.get("lane") != "mission_model_spec":
-        return False
+        return None
     item_key = item.get("item_key")
     if not isinstance(item_key, str):
-        return False
+        return None
     parts = item_key.split("|")
     if (len(parts) < 2 or not parts[0].startswith("company:")
             or re.fullmatch(r"[0-9a-f]{64}", parts[1]) is None):
-        return False
+        return None
     successful = latest.get(parts[0])
     last_seen = item.get("last_seen")
     later_success = (isinstance(successful, Mapping)
