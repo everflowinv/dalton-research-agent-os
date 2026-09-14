@@ -115,6 +115,12 @@ def _call_budget_view(state_dir: str | Path, purpose: str, *,
                   if kind == "call" else resolve_run_budget(config, purpose, defaults=defaults_wire["purposes"][purpose]))
                  if has_defaults or (kind == "call" and consumer_defaults is not None)
                  else None)
+    if effective is None and kind == "call" and shared_policy is not None:
+        from .shared_call_budget_policy import effective_shared_max_cost
+        # Some Cockpit-only purposes have no token/timeout baseline. Their
+        # globally governed cost is still known and must remain editable.
+        effective = {"max_cost_usd": effective_shared_max_cost(
+            shared_policy, purpose)}
     overrides = validate((config.get(f"purpose_{kind}_budgets") or {}).get(purpose, {}))
     general = validate(config.get(f"{kind}_budget", {}))
     return {"editable": True, "source": str(path), "effective": effective,

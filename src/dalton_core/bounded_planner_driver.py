@@ -81,6 +81,7 @@ class BoundedPlannerDriverConfig:
         "max_input_tokens": 16_000, "max_output_tokens": 1_200,
         "max_cost_usd": DEFAULT_PLANNER_MAX_COST_USD, "timeout_seconds": 180,
     })
+    shared_call_budget_policy_path: Path | None = None
 
     @classmethod
     def from_mapping(cls, raw: dict[str, Any]) -> "BoundedPlannerDriverConfig":
@@ -248,6 +249,10 @@ class BoundedPlannerDriverConfig:
                 else DEFAULT_PLANNER_MAX_COST_USD
             ),
             planner_call_budget=planner_call_budget,
+            shared_call_budget_policy_path=(
+                None if raw.get("shared_call_budget_policy_path") is None
+                else Path(raw["shared_call_budget_policy_path"])
+            ),
             **paths, **numbers,
         )
 
@@ -500,7 +505,14 @@ class BoundedPlannerDriver:
                         *, pool: str | None = None) -> dict[str, Any]:
         """One bounded model attempt for a loop that can act on the answer."""
 
-        call_budget = self.config.planner_call_budget
+        call_budget = dict(self.config.planner_call_budget)
+        if self.config.shared_call_budget_policy_path is not None:
+            from .call_budget import resolve_call_budget
+            call_budget = resolve_call_budget({
+                "call_budget": call_budget,
+                "shared_call_budget_policy_path": str(
+                    self.config.shared_call_budget_policy_path),
+            }, "plan", defaults=call_budget)
         params: dict[str, Any] = {
             "context_pack_ref": context["id"],
             "max_input_tokens": call_budget["max_input_tokens"],

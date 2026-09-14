@@ -808,6 +808,32 @@ class BoundedPlannerDriverTests(unittest.TestCase):
         bad["extra"] = True
         with self.assertRaises(BoundedPlannerDriverError):
             BoundedPlannerDriverConfig.from_mapping(bad)
+
+    def test_shared_cost_is_resolved_again_for_each_model_proposal(self) -> None:
+        policy_path = self.root / "shared-call-budget.json"
+        def publish(revision: int, cost: float) -> None:
+            body = {"schema_version":"dalton-shared-call-budget-policy-0.1",
+                "default_max_cost_usd":cost,"purpose_max_cost_usd":{},
+                "revision":revision,"prior_hash":None,"updated_at":"2026-09-14T00:00:00+00:00",
+                "actor_ref":"human:owner"}
+            policy_path.write_text(json.dumps({**body,"content_hash":content_hash(body)}))
+        publish(1, 1.0)
+        raw = {"writer_socket":self.socket,"token_config":str(self.root/"tokens.json"),
+            "scheduler_db":str(self.scheduler_path),"user_agent":"Dalton Test","max_response_bytes":1000,
+            "timeout_seconds":5.0,"max_probes_per_tick":1,"filed_window_days":400,
+            "observation_mandate_version_ref":None,"doctrine_pack_version_ref":None,
+            "doctrine_pack_version_hash":None,"planner_routing_policy_ref":None,
+            "planner_credential_slot_refs":None,"planner_model_router_db":None,
+            "planner_broker_socket":None,"planner_broker_auth_key":None,
+            "planner_broker_client_id":"client:dalton-core","planner_expected_agent_id":"chem",
+            "planner_max_cost_usd":1.0,"shared_call_budget_policy_path":str(policy_path)}
+        config = BoundedPlannerDriverConfig.from_mapping(raw)
+        calls=[]
+        driver=BoundedPlannerDriver(config,client=type("Client",(),{
+            "call":lambda self,op,params:calls.append((op,params)) or {"status":"ok"}})())
+        publish(2, 2.0)
+        driver._model_proposal({"id":"context:test"})
+        self.assertEqual(calls[0][1]["max_cost_usd"],2.0)
         bad = dict(raw, writer_socket="relative/sock")
         with self.assertRaises(BoundedPlannerDriverError):
             BoundedPlannerDriverConfig.from_mapping(bad)

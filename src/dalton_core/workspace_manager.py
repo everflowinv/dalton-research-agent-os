@@ -179,7 +179,8 @@ def set_shared_call_budget(config_path: Path, login: str, purpose: str,
         if current["content_hash"] != expected_hash:
             raise WorkspaceError("共享模型费用策略已更新，请刷新后重试")
         purposes = dict(current["purpose_max_cost_usd"])
-        if purposes.get(purpose) == float(max_cost_usd):
+        if (purposes.get(purpose, current["default_max_cost_usd"])
+                == float(max_cost_usd)):
             return {"status": "unchanged", "policy": current}
         purposes[purpose] = float(max_cost_usd)
         body = {"schema_version": SCHEMA_VERSION,

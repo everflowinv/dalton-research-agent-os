@@ -421,6 +421,26 @@ class ResearchPlanThesisImpactControlTests(unittest.TestCase):
         with self.assertRaises(ResearchPlanThesisImpactConflict):
             self.control._call_budget("thesis_impact_verifier", VERIFIER_BUDGET)
 
+    def test_shared_cost_is_resolved_again_for_each_thesis_call(self) -> None:
+        self._seed_thesis()
+        policy_path = Path(self.temp.name) / "shared-call-budget.json"
+        def publish(revision: int, cost: float) -> None:
+            body = {"schema_version":"dalton-shared-call-budget-policy-0.1",
+                "default_max_cost_usd":cost,"purpose_max_cost_usd":{},"revision":revision,
+                "prior_hash":None,"updated_at":"2026-09-14T00:00:00+00:00","actor_ref":"human:owner"}
+            digest=hashlib.sha256(canonical_json(body).encode()).hexdigest()
+            policy_path.write_text(json.dumps({**body,"content_hash":digest}))
+        publish(1,1.0)
+        self.control = ResearchPlanThesisImpactCoordinator(
+            closure=self.closure, impact=self.impact,
+            shared_call_budget_policy_path=policy_path)
+        self.assertEqual(self.control._call_budget(
+            "thesis_impact_assessment", ASSESSMENT_BUDGET)[0]["max_cost_usd"],1.0)
+        publish(2,2.0)
+        started = self._close_and_start()
+        work = started["impact"]["assessment_work_order"]
+        self.assertEqual(work["budget"]["max_cost_usd"],2.0)
+
     def test_policy_rollover_parks_the_target_instead_of_looping(self) -> None:
         """A pass frozen against a replaced policy is reported, never promoted."""
 

@@ -99,6 +99,23 @@ class BudgetConfigurationTests(fixtures.StateDirectoryCase):
         self.assertFalse(view["editable"])
         self.assertIn("预算配置无法读取", view["reason"])
 
+    def test_unlisted_purpose_still_shows_the_shared_cost(self):
+        from dalton_core.shared_call_budget_policy import SCHEMA_VERSION
+        from dalton_core.store import content_hash
+        policy_path = self.root / "shared-call-budget.json"
+        body = {"schema_version":SCHEMA_VERSION,"default_max_cost_usd":1.0,
+            "purpose_max_cost_usd":{},"revision":1,"prior_hash":None,
+            "updated_at":"2026-09-14T00:00:00+00:00","actor_ref":"human:owner"}
+        policy_path.write_text(json.dumps({**body,"content_hash":content_hash(body)}))
+        initial = self.root / "initial-screen-model-config.json"
+        raw = dict(self.model_config)
+        raw["shared_call_budget_policy_path"] = str(policy_path)
+        initial.write_text(json.dumps(raw))
+        view = call_budget_view(
+            self.root, "ask", cockpit_model_config_path=initial)
+        self.assertTrue(view["editable"])
+        self.assertEqual(view["effective"], {"max_cost_usd":1.0})
+
     def test_reset_returns_to_declared_defaults_and_write_failure_keeps_history_honest(self):
         self.save({"max_cost_usd": 2})
         self.assertEqual(self.save({})["effective"]["max_cost_usd"], 1.0)

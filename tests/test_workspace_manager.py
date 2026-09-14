@@ -128,6 +128,11 @@ class WorkspaceManagerTests(unittest.TestCase):
         policy = {**body, "content_hash": content_hash(body)}
         policy_path.write_text(json.dumps(policy)); policy_path.chmod(0o600)
         self.config["shared_call_budget_policy_path"] = str(policy_path); self.save()
+        unchanged = set_shared_call_budget(
+            self.path, "owner@example.com", "draft", 1.0,
+            policy["content_hash"])
+        self.assertEqual(unchanged["status"], "unchanged")
+        self.assertEqual(json.loads(policy_path.read_text()), policy)
         result = set_shared_call_budget(self.path, "owner@example.com", "draft", .8,
                                         policy["content_hash"])
         self.assertEqual(result["policy"]["purpose_max_cost_usd"], {"draft": .8})

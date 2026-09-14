@@ -125,6 +125,7 @@ class ResearchPlanThesisImpactCoordinator:
         impact: ThesisImpactAuthority,
         budget_config_path: Path | None = None,
         model_execution_bindings: Mapping[str, Mapping[str, Any]] | None = None,
+        shared_call_budget_policy_path: Path | None = None,
     ) -> None:
         if closure is not None:
             if any(item is not None for item in (plan, backlog, scheduler)):
@@ -150,6 +151,7 @@ class ResearchPlanThesisImpactCoordinator:
         self.impact = impact
         self.store = impact.store
         self.budget_config_path = budget_config_path
+        self.shared_call_budget_policy_path = shared_call_budget_policy_path
         if model_execution_bindings is not None and set(model_execution_bindings) != {
             "assessment", "verification"
         }:
@@ -176,11 +178,14 @@ class ResearchPlanThesisImpactCoordinator:
                 raise ResearchPlanThesisImpactConflict(
                     f"thesis-impact budget config is invalid: {exc}"
                 ) from exc
-            if not isinstance(wire, Mapping) or set(wire) - {"call_budget", "purpose_call_budgets"}:
+            if not isinstance(wire, Mapping) or set(wire) - {"call_budget", "purpose_call_budgets", "shared_call_budget_policy_path"}:
                 raise ResearchPlanThesisImpactConflict(
                     "thesis-impact budget config has an invalid closed shape"
                 )
             config = wire
+        if self.shared_call_budget_policy_path is not None:
+            config = {**config, "shared_call_budget_policy_path": str(
+                self.shared_call_budget_policy_path)}
         defaults = {
             "max_input_tokens": legacy["max_input_tokens"],
             "max_output_tokens": legacy["max_output_tokens"],

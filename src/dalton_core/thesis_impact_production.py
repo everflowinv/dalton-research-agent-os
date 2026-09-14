@@ -82,6 +82,7 @@ class ThesisImpactProductionConfig:
     verifier_transport_retry: Mapping[str, int] | None = None
     assessment_provider_retry: Mapping[str, Any] | None = None
     verifier_provider_retry: Mapping[str, Any] | None = None
+    shared_call_budget_policy_path: Path | None = None
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> "ThesisImpactProductionConfig":
@@ -109,6 +110,7 @@ class ThesisImpactProductionConfig:
             "assessment_transport_retry", "verifier_transport_retry",
             "assessment_provider_retry", "verifier_provider_retry",
             "broker_max_frame_bytes",
+            "shared_call_budget_policy_path",
         }
         if set(raw) - optional != required:
             raise ThesisImpactProductionError(
@@ -217,6 +219,11 @@ class ThesisImpactProductionConfig:
             max_targets=maximum,
             timeout_seconds=float(timeout),
             broker_max_frame_bytes=broker_max_frame_bytes,
+            shared_call_budget_policy_path=(
+                None if raw.get("shared_call_budget_policy_path") is None
+                else _path(raw["shared_call_budget_policy_path"],
+                           "shared_call_budget_policy_path")
+            ),
             **retries,
         )
 

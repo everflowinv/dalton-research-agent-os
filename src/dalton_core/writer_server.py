@@ -2264,6 +2264,8 @@ class WriterServer:
                 impact=self._thesis_impact,
                 budget_config_path=self.state_dir / "thesis-impact-budget-config.json",
                 model_execution_bindings=thesis_execution_bindings,
+                shared_call_budget_policy_path=(None if thesis_runtime_config is None
+                    else thesis_runtime_config.shared_call_budget_policy_path),
             )
 
     def serve_forever(self) -> None:
