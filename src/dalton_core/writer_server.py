@@ -15,6 +15,7 @@ import concurrent.futures
 import hashlib
 import hmac
 import json
+import math
 import os
 import re
 import signal
@@ -3095,48 +3096,94 @@ class WriterServer:
                 or budget["max_alphaengine_calls_24h"] < 0
                 or isinstance(budget["max_daily_cost_usd"], bool)
                 or not isinstance(budget["max_daily_cost_usd"], (int, float))
+                or not math.isfinite(float(budget["max_daily_cost_usd"]))
                 or budget["max_daily_cost_usd"] < 0):
             raise ValidationError("research budget values are invalid")
         from .budget_pools import pool_caps
         pool_caps(prospective)
+        from .day_budget_configuration import synchronize_day_budget_policy
+        service_path = None if self._workspace is None else self._workspace.config_path
+        # Validate the ledger and every runtime binding before publishing the
+        # first append-only Core authority. The applying call below is itself
+        # file-rollback-safe and idempotently reuses an unreferenced policy.
+        synchronize_day_budget_policy(
+            self.state_dir, service_config_path=service_path,
+            cap_usd=float(budget["max_daily_cost_usd"]), dry_run=True)
         actor = p["actor_ref"]
         now = datetime.now(timezone.utc).isoformat()
         current_policy = self.store.active_policy_version().to_dict()
-        policy_body = dict(current_policy["policy"]); policy_body["research_budget"] = dict(budget)
-        policy_version = int(current_policy["version"]) + 1
-        policy = self.store.create_policy(policy_body, policy_version_id=f"policy-{policy_version}",
-            version_number=policy_version, activate=True, policy_ref=current_policy["policy_ref"],
-            effective_from=now, actor_ref=actor, prior_version_ref=current_policy["id"],
-            change_reason="owner updated the canonical research budget authority chain")
-        policy_record = policy.get("policy_version", policy)
+        policy_body = dict(current_policy["policy"])
+        policy_body["research_budget"] = dict(budget)
+        # Older policies also expose the same authority in flat ledger units.
+        # Keep those compatibility fields derived from the canonical budget;
+        # otherwise a raised mission still hits the former outer ceiling.
+        if "max_daily_cost_micros" in policy_body:
+            policy_body["max_daily_cost_micros"] = int(
+                Decimal(str(budget["max_daily_cost_usd"])) * 1_000_000)
+        if "max_daily_paid_calls" in policy_body:
+            policy_body["max_daily_paid_calls"] = budget["max_daily_paid_calls"]
+        if "max_alphaengine_calls_24h" in policy_body:
+            policy_body["max_alphaengine_calls_24h"] = budget["max_alphaengine_calls_24h"]
+        if current_policy["policy"] == policy_body:
+            policy_record = current_policy
+        else:
+            policy_version = int(current_policy["version"]) + 1
+            policy = self.store.create_policy(policy_body, policy_version_id=f"policy-{policy_version}",
+                version_number=policy_version, activate=True, policy_ref=current_policy["policy_ref"],
+                effective_from=now, actor_ref=actor, prior_version_ref=current_policy["id"],
+                change_reason="owner updated the canonical research budget authority chain")
+            policy_record = policy.get("policy_version", policy)
         old_mandate = self.agenda.mandate_version(mission["bindings"]["mandate_version"]["ref"])
-        mandate_version = int(old_mandate["version"]) + 1
-        mandate = self.agenda.create_mandate(old_mandate["mandate_ref"], objective=old_mandate["objective"],
-            scope_refs=old_mandate["scope_refs"], constraints={**old_mandate["constraints"], "research_budget": dict(budget)},
-            success_criteria=old_mandate["success_criteria"], effective_from=now, effective_until=None,
-            actor_ref=actor, activate=True, version_id=f"{old_mandate['mandate_ref'].replace('mandate:', 'mandate-version:')}:{mandate_version}",
-            idempotency_key=f"{old_mandate['mandate_ref']}:{mandate_version}:research-budget")
+        active_mandate = next((item for item in self.agenda.active_mandates()
+            if item["mandate_ref"] == old_mandate["mandate_ref"]), old_mandate)
+        if active_mandate["constraints"].get("research_budget") == dict(budget):
+            mandate = active_mandate
+        else:
+            mandate_version = int(active_mandate["version"]) + 1
+            mandate = self.agenda.create_mandate(active_mandate["mandate_ref"], objective=active_mandate["objective"],
+                scope_refs=active_mandate["scope_refs"], constraints={**active_mandate["constraints"], "research_budget": dict(budget)},
+                success_criteria=active_mandate["success_criteria"], effective_from=now, effective_until=None,
+                actor_ref=actor, activate=True, version_id=f"{active_mandate['mandate_ref'].replace('mandate:', 'mandate-version:')}:{mandate_version}",
+                idempotency_key=f"{active_mandate['mandate_ref']}:{mandate_version}:research-budget")
         old_constitution = self.research_constitution.constitution(mission["bindings"]["constitution_version"]["ref"])
-        constitution_version = int(old_constitution["version"]) + 1
-        bindings = dict(old_constitution["bindings"])
+        active_constitution = self.research_constitution.active_constitution(old_constitution["constitution_ref"])
+        bindings = dict(active_constitution["bindings"])
         bindings["governance_policy_version"] = {"ref": policy_record["id"], "hash": policy_record["content_hash"]}
         bindings["mandate_version"] = {"ref": mandate["id"], "hash": mandate["content_hash"]}
-        constitution = self.research_constitution.publish_constitution(old_constitution["constitution_ref"],
-            industry_ref=old_constitution["industry_ref"], title=old_constitution["title"], bindings=bindings,
-            method=old_constitution["method"], actor_ref=actor,
-            version_id=f"constitution-version:{old_constitution['constitution_ref'].split(':',1)[1]}:{constitution_version}",
-            prior_version_ref=old_constitution["id"], idempotency_key=f"{old_constitution['constitution_ref']}:{constitution_version}:research-budget")
-        version = int(mission["version"]) + 1
-        values = {key: json.loads(json.dumps(mission[key])) for key in (
-            "title", "objective", "industry_ref", "universe", "research_questions", "deliverables", "source_plan", "autonomy")}
-        values.update(budget=prospective, bindings={**mission["bindings"],
+        if active_constitution["bindings"] == bindings:
+            constitution = active_constitution
+        else:
+            constitution_version = int(active_constitution["version"]) + 1
+            constitution = self.research_constitution.publish_constitution(active_constitution["constitution_ref"],
+                industry_ref=active_constitution["industry_ref"], title=active_constitution["title"], bindings=bindings,
+                method=active_constitution["method"], actor_ref=actor,
+                version_id=f"constitution-version:{active_constitution['constitution_ref'].split(':',1)[1]}:{constitution_version}",
+                prior_version_ref=active_constitution["id"], idempotency_key=f"{active_constitution['constitution_ref']}:{constitution_version}:research-budget")
+        mission_bindings = {**mission["bindings"],
             "mandate_version": {"ref": mandate["id"], "hash": mandate["content_hash"]},
-            "constitution_version": {"ref": constitution["id"], "hash": constitution["content_hash"]}},
-            actor_ref=actor, version_id=f"coverage-mission-version:{mission['mission_ref'].split(':',1)[1]}:{version}",
-            prior_version_ref=mission["id"], idempotency_key=f"{mission['mission_ref']}:{version}:research-budget")
-        published = self.coverage_mission.create_mission(mission["mission_ref"], **values)
+            "constitution_version": {"ref": constitution["id"], "hash": constitution["content_hash"]}}
+        if mission["budget"] == prospective and mission["bindings"] == mission_bindings:
+            published = mission
+        else:
+            version = int(mission["version"]) + 1
+            values = {key: json.loads(json.dumps(mission[key])) for key in (
+                "title", "objective", "industry_ref", "universe", "research_questions", "deliverables", "source_plan", "autonomy")}
+            values.update(budget=prospective, bindings=mission_bindings,
+                actor_ref=actor, version_id=f"coverage-mission-version:{mission['mission_ref'].split(':',1)[1]}:{version}",
+                prior_version_ref=mission["id"], idempotency_key=f"{mission['mission_ref']}:{version}:research-budget")
+            published = self.coverage_mission.create_mission(mission["mission_ref"], **values)
+        day_policy = synchronize_day_budget_policy(
+            self.state_dir, service_config_path=service_path,
+            cap_usd=float(budget["max_daily_cost_usd"]), dry_run=False)
+        policy_ref = day_policy["policy_version_id"]
+        for cached in (self._planner_model_config, self._document_extraction_model_config):
+            if cached is not None:
+                cached["budget_policy_ref"] = policy_ref
+        if self._planner_model_config is not None:
+            self._reload_planner_model_config()
         return {"status": "updated", "policy": policy_record["id"], "mandate": mandate["id"],
-                "constitution": constitution["id"], "mission": published["id"]}
+                "constitution": constitution["id"], "mission": published["id"],
+                "day_budget_policy": policy_ref}
 
     def _op_publish_first_workspace_mission(self, p: Mapping[str, Any]) -> Any:
         if self._workspace is None:
