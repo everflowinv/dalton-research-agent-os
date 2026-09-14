@@ -2745,8 +2745,8 @@ class CockpitPlane:
             "available": True, "window": idle.get("window"),
             "ticks": idle.get("ticks"), "idle_ticks": idle.get("idle_ticks"),
             "idle_ratio": idle.get("ratio"),
-            "idle_note": (f"{idle.get('idle_ticks')}/{idle.get('ticks')} "
-                          "次心跳里没有任何流水线有事可做"),
+            "idle_note": (f"{idle.get('ticks')} 次调度中，{idle.get('idle_ticks')} "
+                          "次所有流程都处于空闲状态。"),
             "stalled_lanes": stalled[:6],
         }
 

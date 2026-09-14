@@ -383,6 +383,10 @@ class NarrativeTests(unittest.TestCase):
         self.assertIn("新登记 2 条", rendered["prose"])
         self.assertIn("被回答 1 条", rendered["prose"])
         self.assertIn("退役 1 条", rendered["prose"])
+        self.assertIn(
+            "4 次调度中，3 次所有流程都处于空闲状态。空闲比例为 75%。",
+            rendered["prose"],
+        )
 
     def test_an_unavailable_metric_is_said_out_loud_rather_than_skipped(self):
         metrics = compute_metrics(

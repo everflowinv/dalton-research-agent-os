@@ -819,6 +819,7 @@ class BudgetPoolTests(Int2Case):
         self.assertEqual(ticks["ticks"], 2)
         self.assertEqual(ticks["idle_ticks"], 1)
         self.assertEqual(ticks["idle_ratio"], 0.5)
+        self.assertEqual(ticks["idle_note"], "2 次调度中，1 次所有流程都处于空闲状态。")
         # A lane that wanted to run and could not is named in the owner's
         # words, not by its driver key.
         stalled = {row["lane"]: row for row in ticks["stalled_lanes"]}

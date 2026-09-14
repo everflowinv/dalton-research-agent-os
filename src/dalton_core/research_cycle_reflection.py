@@ -954,8 +954,8 @@ def narrative(metrics: Mapping[str, Any], window: Mapping[str, Any]) -> dict[str
         )
     if ticks.get("available"):
         lines.append(
-            f"{ticks['ticks']} 次 tick 里有 {ticks['idle_ticks']} 次每条 lane 都报了 idle 或 skipped，"
-            f"闲置率 {ticks['ratio']:.0%}。"
+            f"{ticks['ticks']} 次调度中，{ticks['idle_ticks']} 次所有流程都处于空闲状态。"
+            f"空闲比例为 {ticks['ratio']:.0%}。"
         )
     else:
         lines.append(f"闲置率不可算：{ticks.get('reason')}")
