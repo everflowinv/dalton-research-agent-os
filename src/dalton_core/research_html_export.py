@@ -138,6 +138,49 @@ def _comparison_number_text(item: Mapping[str, Any], raw: str) -> str | None:
             f'{_COMPARISON_METRIC_LABELS[metric]}：{shown_value}')
 
 
+def _structured_comparison_display(
+    raw_title: str, body: Any, numbers: Sequence[Mapping[str, Any]],
+) -> tuple[str, str] | None:
+    """Fold only the closed computed-comparison TSV carried beside its table."""
+    raw = str(body or "")
+    if raw_title not in {"cross_company_comparison", "跨公司对比"} or not numbers:
+        return None
+    if any(_comparison_number_text(item, str(item.get("text") or "")) is None
+           for item in numbers):
+        return None
+    lines = raw.splitlines()
+    if not lines or len(lines[0].split("\t")) < 3:
+        return None
+    header = lines[0].split("\t")
+    if header[:2] != ["company", "metric"]:
+        return None
+    width = len(header)
+    boundary = len(lines)
+    for index, line in enumerate(lines[1:], 1):
+        if not line or line.startswith("# "):
+            boundary = index
+            break
+        cells = line.split("\t")
+        if (len(cells) != width
+                or cells[0] not in _COMPARISON_TICKER_SUBJECTS
+                or cells[1] not in {*_COMPARISON_METRIC_LABELS,
+                                    *_COMPARISON_METRIC_LABELS.values()}):
+            return None
+    if boundary <= 1:
+        return None
+    notes = "\n".join(lines[boundary:]).strip()
+    if notes.startswith("# "):
+        notes = "\n".join(
+            line[2:] if line.startswith("# ") else line
+            for line in notes.splitlines())
+    # Localized comparison notes may retain the governed metric key in
+    # parentheses.  The raw key remains below in technical details.
+    for metric in _COMPARISON_METRIC_LABELS:
+        notes = notes.replace(f"（{metric}）", "")
+    shown = notes or "结构化比较数据见下表。"
+    return shown, raw
+
+
 def _number_text(item: Mapping[str, Any],
                  claims: Mapping[str, Mapping[str, Any]]) -> tuple[str, str | None]:
     """Present the exact SEC auto-template as Chinese structured data.
@@ -611,6 +654,13 @@ def render_research_html(
                     technical_refs.append(ref)
             original_templates = [raw for _, _, raw in number_rows if raw]
             technical_text = ", ".join(_source_text(ref) for ref in technical_refs) if technical_refs else "暂无来源"
+            structured_comparison = _structured_comparison_display(
+                raw_title, section.get("body"),
+                [row for row in nums if isinstance(row, Mapping)])
+            shown_body = (_display_metric_terms(structured_comparison[0]) if structured_comparison is not None
+                          else _display_metric_terms(section.get("body") or "暂无可核验内容"))
+            if structured_comparison is not None:
+                technical_text += "\n结构化比较原始记录：\n" + structured_comparison[1]
             if original_templates:
                 technical_text += "\n结构化记录原文：\n" + "\n".join(original_templates)
             if shown_title != raw_title:
@@ -621,7 +671,7 @@ def render_research_html(
             if changed_gaps:
                 technical_text += "\n待补项原始记录：\n" + "\n".join(changed_gaps)
             chunks.append(
-                f'<article><h3>{_esc(shown_title)}</h3><p class="prose">{_esc(_display_metric_terms(section.get("body") or "暂无可核验内容"))}</p>{_chart(nums, claims, f"chart-{pi}-{si}", subject_ref=product.get("subject_ref")) if nums else ""}{("<div class=\"tablewrap\"><table><thead><tr><th>期间</th><th>结构化数据</th></tr></thead><tbody>"+table+"</tbody></table></div>") if table else ""}<details class="refs"><summary>技术详情与来源（{len(technical_refs)}）</summary><code>{_esc(technical_text)}</code></details><p class="gaps">待补资料：{_esc("；".join(shown for _, shown in gap_rows) or "当前未记录待补项")}</p></article>'
+                f'<article><h3>{_esc(shown_title)}</h3><p class="prose">{_esc(shown_body)}</p>{_chart(nums, claims, f"chart-{pi}-{si}", subject_ref=product.get("subject_ref")) if nums else ""}{("<div class=\"tablewrap\"><table><thead><tr><th>期间</th><th>结构化数据</th></tr></thead><tbody>"+table+"</tbody></table></div>") if table else ""}<details class="refs"><summary>技术详情与来源（{len(technical_refs)}）</summary><code>{_esc(technical_text)}</code></details><p class="gaps">待补资料：{_esc("；".join(shown for _, shown in gap_rows) or "当前未记录待补项")}</p></article>'
             )
         if not chunks:
             chunks = [

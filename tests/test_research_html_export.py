@@ -259,6 +259,49 @@ class HtmlRenderTests(unittest.TestCase):
             self.assertNotIn(raw, normal)
             self.assertIn(raw, details)
 
+    def test_closed_cross_company_tsv_is_folded_but_notes_and_table_remain(self):
+        mission, lib = self.fixture()
+        section = lib['products'][0]['sections'][0]
+        section['title'] = 'cross_company_comparison'
+        raw_number = 'ACN 2026Q1（期末 2026-02-28）revenue 18044066000'
+        section['numbers'] = [{
+            'period': '2026Q1', 'text': raw_number,
+            'cell': {'kind': 'statement_accession',
+                     'ref': 'comparison-cell:company-sec-cik-0001467373:revenue:2026Q1',
+                     'accession': '0001467373-26-00001'}}]
+        raw_body = ('company\tmetric\t2026Q1\n'
+                    'ACN\trevenue\t18044066000\n'
+                    '# 各公司毛利率（gross_margin）与营业利润率（operating_margin）口径不同，'
+                    '不可直接横向比较。')
+        section['body'] = raw_body
+        page = render_research_html(lib, mission=mission)
+        article = page.split('<article>', 1)[1].split('</article>', 1)[0]
+        visible, details = article.split('<details class="refs">', 1)
+        self.assertIn('各公司毛利率与营业利润率口径不同，不可直接横向比较。', visible)
+        self.assertNotIn('gross_margin', visible)
+        self.assertNotIn('operating_margin', visible)
+        self.assertIn('营业收入：180.4 亿美元', visible)
+        self.assertNotIn('company\tmetric', visible)
+        self.assertNotIn('18044066000', visible)
+        self.assertIn('结构化比较原始记录', details)
+        self.assertIn(raw_body, details)
+
+    def test_nonclosed_comparison_body_is_never_hidden(self):
+        mission, lib = self.fixture()
+        section = lib['products'][0]['sections'][0]
+        section['title'] = 'cross_company_comparison'
+        raw_number = 'ACN 2026Q1（期末 2026-02-28）revenue 18044066000'
+        section['numbers'] = [{
+            'period': '2026Q1', 'text': raw_number,
+            'cell': {'kind': 'statement_accession',
+                     'ref': 'comparison-cell:company-sec-cik-0001467373:revenue:2026Q1',
+                     'accession': '0001467373-26-00001'}}]
+        section['body'] = ('company\tmetric\t2026Q1\n'
+                           'ACN\trevenue\t18044066000\n'
+                           '这是不可隐藏的额外研究判断。')
+        page = render_research_html(lib, mission=mission)
+        self.assertIn('这是不可隐藏的额外研究判断。', page)
+
     def test_comparison_material_shape_and_period_must_match_exactly(self):
         mission, lib = self.fixture()
         raw = 'ACN 2026Q1（期末 2026-02-28）gross_margin 30.3%'
