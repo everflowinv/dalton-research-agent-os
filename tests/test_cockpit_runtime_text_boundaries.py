@@ -206,7 +206,7 @@ class CockpitRuntimeTextBoundariesTests(unittest.TestCase):
     def test_mission_terms_are_localized_without_touching_other_text(self):
         raw = "五家公司初筛（Initial Screen）与投资逻辑（Thesis）；验证 variant view"
         result = self._evaluate(f"displayMissionText({json.dumps(raw)})")
-        self.assertEqual(result, "五家公司初步筛查报告与投资论点；验证 差异化观点")
+        self.assertEqual(result, "五家公司初步筛查报告与投资论点；验证差异化观点")
 
     def test_approval_detail_hides_only_closed_thesis_version_prefix(self):
         raw = "thesis-version:b35bdc3d8aba4e4bb294c744b00f59c5（论点弱化）：正文"
