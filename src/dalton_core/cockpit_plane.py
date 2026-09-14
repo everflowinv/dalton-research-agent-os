@@ -403,6 +403,49 @@ def _ops_item_label(item_key: Any,
         return "行业任务"
     return "任务记录"
 
+def _ops_superseded_mission(item_key: Any, current: str | None) -> bool:
+    """Recognise an exact older same-scope mission binding in any key segment."""
+    if current is None or not isinstance(item_key, str):
+        return False
+    marker = "coverage-mission-version:"
+    candidates = [part for part in item_key.split("|") if part.startswith(marker)]
+    if not candidates:
+        return False
+    current_scope, separator, current_number = current.rpartition(":")
+    if not separator or not current_number.isdigit():
+        return False
+    parsed = []
+    for candidate in candidates:
+        scope, separator, number = candidate.rpartition(":")
+        if not separator or not number.isdigit():
+            return False
+        parsed.append((scope, int(number)))
+    return all(scope == current_scope and version < int(current_number)
+               for scope, version in parsed)
+
+
+def _ops_superseded_model_spec(
+        item: Mapping[str, Any], latest: Mapping[str, Mapping[str, Any]]) -> bool:
+    """Hide a failed spec only after a later formal specification succeeded."""
+    if item.get("lane") != "mission_model_spec":
+        return False
+    item_key = item.get("item_key")
+    if not isinstance(item_key, str):
+        return False
+    parts = item_key.split("|")
+    if (len(parts) < 2 or not parts[0].startswith("company:")
+            or re.fullmatch(r"[0-9a-f]{64}", parts[1]) is None):
+        return False
+    successful = latest.get(parts[0])
+    last_seen = item.get("last_seen")
+    return (isinstance(successful, Mapping)
+            and isinstance(successful.get("state_hash"), str)
+            and re.fullmatch(r"[0-9a-f]{64}", successful["state_hash"]) is not None
+            and isinstance(successful.get("created_at"), str)
+            and isinstance(last_seen, str)
+            and successful["created_at"] > last_seen)
+
+
 def _runtime_error_display(reason: Any) -> str:
     """Classify a runtime error conservatively for the activity page."""
     text = str(reason or "").casefold()
@@ -3585,6 +3628,18 @@ class CockpitPlane:
                     )
         except (CockpitMissionMissing, sqlite3.Error, ValueError, TypeError):
             pass
+        latest_model_specs: dict[str, dict[str, Any]] = {}
+        try:
+            with self._core() as core:
+                for row in core.execute(
+                        "SELECT company_ref,state_hash,created_at FROM "
+                        "coverage_mission_company_model_specs ORDER BY created_at DESC"):
+                    latest_model_specs.setdefault(str(row["company_ref"]), {
+                        "state_hash": str(row["state_hash"]),
+                        "created_at": str(row["created_at"]),
+                    })
+        except (sqlite3.Error, ValueError, TypeError):
+            pass
         governance = self._governance_records()
         permission_records = {
             "mission_catalyst_calendar": "yfinance-calendar-v1.json",
@@ -3592,26 +3647,26 @@ class CockpitPlane:
             "mission_market_prices": "yfinance-daily-prices-v1.json",
         }
 
-        def superseded_mission(item_key: Any) -> bool:
-            if current_mission_version is None or not isinstance(item_key, str):
-                return False
-            prefix = item_key.split("|", 1)[0]
-            if not prefix.startswith("coverage-mission-version:"):
-                return False
-            if not prefix.rsplit(":", 1)[-1].isdigit():
-                return False
-            current_scope = current_mission_version.rsplit(":", 1)[0]
-            return (prefix.rsplit(":", 1)[0] == current_scope
-                    and int(prefix.rsplit(":", 1)[-1])
-                    < int(current_mission_version.rsplit(":", 1)[-1]))
+        def historical(item: Mapping[str, Any]) -> bool:
+            return (_ops_superseded_mission(
+                        item.get("item_key"), current_mission_version)
+                    or _ops_superseded_model_spec(item, latest_model_specs))
+
         dependencies = []
         historical_items = []
         for bucket in backlog["dependencies"]:
             active = [item for item in bucket["items"]
-                      if not superseded_mission(item.get("item_key"))]
+                      if not historical(item)]
             historical_items.extend({
-                **item, "history_status": "mission_superseded",
-                "history_note": "任务目标已更新，保留这次等待记录供追溯",
+                **item, "history_status": (
+                    "mission_superseded" if _ops_superseded_mission(
+                        item.get("item_key"), current_mission_version)
+                    else "model_spec_superseded"),
+                "history_note": (
+                    "任务目标已更新，保留这次等待记录供追溯"
+                    if _ops_superseded_mission(
+                        item.get("item_key"), current_mission_version)
+                    else "后续公司模型定义已成功，保留这次失败记录供追溯"),
                 "lane_label": REGISTRY_LANE_LABELS.get(item["lane"], item["lane"]),
                 "item_label": _ops_item_label(item.get("item_key"), members),
                 "technical_details": {"item_key": item.get("item_key"),

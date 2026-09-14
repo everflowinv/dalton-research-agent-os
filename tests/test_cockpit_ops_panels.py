@@ -23,6 +23,8 @@ from dalton_core.cockpit_plane import (
     LANE_STATUS_BUCKETS,
     LANE_STATUS_BUCKET_OF,
     REGISTRY_LANE_LABELS,
+    _ops_superseded_mission,
+    _ops_superseded_model_spec,
 )
 from dalton_core.extraction_backlog import observed_yield
 from dalton_core.lane_failure_class import LaneFailureBudget
@@ -215,6 +217,33 @@ class OpsBacklogTests(PanelCase):
         })
         self.assertEqual(historical,
                          {f"coverage-mission-version:us-it-services:{version - 1}|old"})
+
+    def test_old_mission_binding_is_found_in_any_exact_key_segment(self) -> None:
+        current = "coverage-mission-version:us-it-services:17"
+        prefix = "company:sec-cik:0000051143|" + "a" * 64 + "|"
+        self.assertTrue(_ops_superseded_mission(
+            prefix + "coverage-mission-version:us-it-services:14|contract:x", current))
+        for value in (
+            prefix + "coverage-mission-version:us-it-services:17",
+            prefix + "coverage-mission-version:us-it-services:18",
+            prefix + "coverage-mission-version:other:14",
+            prefix + "coverage-mission-version:us-it-services:not-a-version",
+            prefix + "coverage-mission-version:us-it-services:14|coverage-mission-version:other:1",
+        ):
+            with self.subTest(value=value):
+                self.assertFalse(_ops_superseded_mission(value, current))
+
+    def test_model_spec_failure_requires_a_later_formal_success(self) -> None:
+        company = "company:sec-cik:0001467373"
+        item = {"lane": "mission_model_spec", "item_key": company + "|" + "a" * 64,
+                "last_seen": "2026-09-12T10:00:00+00:00"}
+        self.assertTrue(_ops_superseded_model_spec(item, {company: {
+            "state_hash": "b" * 64, "created_at": "2026-09-13T10:00:00+00:00"}}))
+        self.assertFalse(_ops_superseded_model_spec(item, {company: {
+            "state_hash": "b" * 64, "created_at": "2026-09-11T10:00:00+00:00"}}))
+        self.assertFalse(_ops_superseded_model_spec(
+            {**item, "item_key": company + "|not-a-hash"}, {company: {
+                "state_hash": "b" * 64, "created_at": "2026-09-13T10:00:00+00:00"}}))
 
     def test_the_page_carries_no_machine_words_for_a_dependency_it_knows(self) -> None:
         self.park()
