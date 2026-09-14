@@ -38,3 +38,8 @@
 - Governance: `/Users/everflow/Library/Application Support/Dalton/state/dalton-core/connector-governance/`
 - Existing accepted quota audit: `docs/reports/ctsh-alphaengine-rolling-quota-audit-2026-09-10.md`
 - Source status: `docs/PROJECT_STATUS.md`（电话会有效季度与Guidepoint/Wiki边界）
+# 2026-09-14 v16 运行更新
+
+截至本次只读核对，v16 并未耗尽 AlphaEngine 配额。最近 24 小时共有 6 个连接器调用和 6 次物理尝试，全部成功，每个调用都只有一次物理尝试；当前任务依次完成 ACN、CTSH、EPAM，并已启动 IBM。最新调度 tick 的 `pool_exhausted` 为 0。界面中的 `carried_forward=3` 表示跨任务版本接续的三份资料，并非三次失败调用。
+
+历史 v14 确有浪费：CTSH 卖方研报查询（查询哈希前缀 `df9b67c75d`）在供应商返回 `ConnectorQuotaExceeded` 后，约每五分钟重复一次。代码原因是资料仍有缺口时，较早成功页留下的分页游标可以绕过最新失败调度的重试间隔。R25e 候选提交 `ff6e6f78` 将即时续页限定为“最近一次调度成功且仍需下一页”；失败调度必须等待既定冷却期。该修复已集成到候选 `73bbfb00`，尚未部署。两项定向测试证明失败分页即使仍有游标也会等待，而成功分页仍能继续。
