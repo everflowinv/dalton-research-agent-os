@@ -341,7 +341,9 @@ class CockpitLanguageTests(unittest.TestCase):
     def test_dynamic_planner_fields_are_mapped_before_composition(self) -> None:
         text = HTML.read_text(encoding="utf-8")
         self.assertIn('${displayText(q.subject)}：${displayText(q.question)}', text)
-        self.assertIn('需要核实：${displayText(q.wants)}', text)
+        self.assertIn('const original=displayText(q.wants)', text)
+        self.assertIn('需要核实：${wants}', text)
+        self.assertIn('technicalDetails({original_text:q.wants})', text)
         self.assertIn('${displayText(d.subject)} · ${displayText(d.item)}', text)
 
     def test_event_and_cadence_prose_is_mapped_before_composition(self) -> None:
