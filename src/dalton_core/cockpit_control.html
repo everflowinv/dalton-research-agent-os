@@ -618,6 +618,7 @@ function readableError(value,context="操作"){
     else if(/model route|no model|routing/.test(lower))message="暂时没有符合本任务要求的模型。";
     else if(/timeout|timed out|busy|locked/.test(lower))message="系统正忙，请稍后重试。";
     else if(/not found|unavailable|missing/.test(lower))message="所需资料暂时不可用。";
+    else if(/now at|thesis.version|conflict/i.test(raw))message="这条建议针对的是旧版本的投资论点，论点已更新；请关闭这条过期建议，系统会基于当前论点重新生成。";
     else message=`${context}暂时未完成，请稍后重试。`;
   }
   return {message,nextStep:value&&typeof value==="object"?value.next_step:null,technical:(value&&typeof value==="object"?value.technical_detail:null)||raw}

@@ -4996,6 +4996,32 @@ class CockpitPlane:
                     if kind == "gate_reopen":
                         summary, extra = _gate_reopen_view(record, summary)
                         details.update(extra)
+                    actions = list(CHECKPOINT_ACTIONS[kind]) if decidable else []
+                    stale_reason = None
+                    if kind == "thesis_revision_candidate":
+                        # A candidate is written against one immutable thesis
+                        # version.  Accepting one the thesis has moved past is
+                        # refused by the authority (correctly -- the old
+                        # evidence must not overwrite a newer judgement), so
+                        # the honest card says so and offers to close it, and
+                        # the zero-base lane writes a fresh candidate against
+                        # the current thesis on its next pass.
+                        thesis_ref = record.get("thesis_ref")
+                        pinned = record.get("thesis_version_ref")
+                        if isinstance(thesis_ref, str) and isinstance(pinned, str):
+                            current = core.execute(
+                                "SELECT v.version_id FROM current_pointers p "
+                                "JOIN thesis_versions v ON v.version_id=p.version_id "
+                                "WHERE p.thesis_id=?", (thesis_ref,),
+                            ).fetchone()
+                            if current is not None and current["version_id"] != pinned:
+                                stale_reason = (
+                                    "这条建议针对的是旧版本的投资论点（论点此后已更新），"
+                                    "接受会被系统拒绝。可关闭它；从零复盘下一轮会基于"
+                                    "当前论点生成新建议。"
+                                )
+                                actions = [{"decision": "reject",
+                                            "label": "关闭这条过期建议"}] if decidable else []
                     items.append({
                         "kind": kind, "ref": row[key], "hash": row["content_hash"],
                         "at": row["created_at"],
@@ -5007,11 +5033,12 @@ class CockpitPlane:
                         "summary": summary,
                         "details": {name: value for name, value in details.items()
                                     if value not in (None, [], "")},
+                        "display_reason": stale_reason,
                         # Both halves, side by side.
                         "reflection": reflections["by_judgement"].get(
                             record.get("judgement_ref")),
-                        "actions": list(CHECKPOINT_ACTIONS[kind]) if decidable else [],
-                        "needs_rationale": decidable,
+                        "actions": actions,
+                        "needs_rationale": False if stale_reason else decidable,
                         **({"occurrence_count": superseded_counts[row[key]] + 1}
                            if row[key] in superseded_counts else {}),
                         **({} if decidable else {

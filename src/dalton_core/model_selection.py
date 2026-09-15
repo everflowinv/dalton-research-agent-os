@@ -659,10 +659,20 @@ def set_tier_selection(
     configs = model_configs(state_dir)
     runtimes: list[dict[str, Any]] = []
     for purpose in members:
-        runtime = _runtime_policy_config(state_dir, purpose)
-        if runtime is not None and all(
-            runtime["path"] != seen["path"] for seen in runtimes
-        ):
+        try:
+            runtime = _runtime_policy_config(state_dir, purpose)
+        except ModelSelectionError:
+            # A tier spans every stage of its kind, and not every installation
+            # pins every runtime stage in service.json -- human_intent runs
+            # file-based where no intent_composer block exists.  A missing pin
+            # is a stage this save simply does not touch; refusing the whole
+            # tier because one member is configured elsewhere would make the
+            # tier editor unusable on exactly the hosts it exists for.
+            runtime = None
+        if runtime is not None:
+            # Keep every section: one service.json usually pins several stages
+            # (bounded_planner, agenda, thesis_impact) in different sections,
+            # and a tier edit repoints each of them.
             runtimes.append(runtime)
     configs = [*configs, *runtimes]
     if not configs:
@@ -725,9 +735,35 @@ def set_tier_selection(
             config[slots_field] = merged_slots
             changed = True
         (repointed if changed else unchanged).append(item["name"])
+    # One write per file.  Lane configs each own their file, but a tier edit
+    # may repoint several *sections* of the same service.json, and each
+    # section's item carries its own full-file parse with only its own update.
+    # Fold sibling sections onto one canonical parse so a later section cannot
+    # overwrite an earlier one's new pin.
+    lane_writes: dict[str, tuple[Any, dict]] = {}
+    runtime_writes: dict[str, dict[str, Any]] = {}
+    for item in configs:
+        if item["name"] not in repointed:
+            continue
+        if "runtime_config" not in item:
+            lane_writes.setdefault(str(item["path"]), (item["path"], item["config"]))
+            continue
+        canonical = runtime_writes.get(str(item["path"]))
+        if canonical is None:
+            runtime_writes[str(item["path"])] = item
+            continue
+        section_path = item["name"].split("#", 1)[1].split(".")
+        parent = canonical["config"]
+        for key in section_path[:-1]:
+            parent = parent[key]
+        parent[item["field"]] = item["runtime_config"][item["field"]]
+        slots = item["runtime_config"].get(
+            item.get("slots_field", "credential_slot_refs"))
+        if slots:
+            parent[item.get("slots_field", "credential_slot_refs")] = slots
     _write_configs_atomically([
-        (item["path"], item["config"])
-        for item in configs if item["name"] in repointed
+        *lane_writes.values(),
+        *[(item["path"], item["config"]) for item in runtime_writes.values()],
     ])
     versions = sorted(
         {
