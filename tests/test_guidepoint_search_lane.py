@@ -34,6 +34,7 @@ from dalton_core.guidepoint_search import (
     QUOTE_POLICY,
     SEARCH_CAPABILITY_ID,
     SEARCH_PROFILE_REF,
+    SEARCH_RATE_POLICY_REF,
     FakeGuidepointHandle,
     GuidepointCoreSearch,
     GuidepointQuotePolicyError,
@@ -483,6 +484,49 @@ class ExecutorTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+
+    def test_a_stale_register_key_yields_to_an_active_policy_meeting_the_code_ceiling(self) -> None:
+        from unittest import mock
+
+        from dalton_core import guidepoint_search as module
+
+        real_quota = module.governed_daily_quota
+
+        def quota_at(limit: int):
+            base = real_quota(module.TEMPLATE_KEY, module.OPERATION)
+            return {**base, "daily_unit_limit": limit}
+
+        h = Harness(self.root, FakeGuidepointHandle(ROWS))
+        self.addCleanup(h.close)
+        # The lane registers under the 25-a-day constants it shipped with.
+        with mock.patch.object(module, "governed_daily_quota", lambda slug, op: quota_at(25)):
+            h.search.ensure_governed_authorities()
+        # The owner raises out of band: a policy at the new ceiling activated
+        # directly against the store, without the lane's register key.
+        real_register = h.search.connectors.register_rate_policy
+
+        def register_raised(policy, idempotency_key=None):
+            raised = dict(policy)
+            raised["id"] = f"{policy['policy_ref']}:v2"
+            raised["version"] = 2
+            raised["prior_version_ref"] = policy["id"]
+            return real_register(raised, idempotency_key=None)
+
+        with mock.patch.object(
+            module, "governed_daily_quota", lambda slug, op: quota_at(500)
+        ), mock.patch.object(
+            h.search.connectors, "register_rate_policy", register_raised
+        ):
+            h.search._authorities = None
+            raised = h.search.ensure_governed_authorities()
+        self.assertEqual(raised["rate_policy"]["limits"]["calls"], 500)
+        # Now the code constants describe the raise too. The immutable
+        # register key still hashes the 25-a-day request, so the next
+        # authorities build must adopt the active raised policy rather than
+        # refusing every search.
+        h.search._authorities = None
+        again = h.search.ensure_governed_authorities()
+        self.assertGreaterEqual(again["rate_policy"]["limits"]["calls"], 500)
 
     def test_a_search_leaves_excerpt_refs_a_raw_artifact_and_a_free_replay(self) -> None:
         h = Harness(self.root, FakeGuidepointHandle(ROWS))

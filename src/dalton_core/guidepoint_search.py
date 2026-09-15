@@ -63,7 +63,7 @@ from .alphaengine_core_acquisition import (
 )
 from .alphaengine_core_search import register_chained_profile
 from .capability_catalog import CapabilityCatalog, CapabilityNotFound
-from .connector import ConnectorStore
+from .connector import ConnectorConflict, ConnectorStore
 from .connector_authority_port import (
     ConnectorAuthorityPort,
     ConnectorCompletionReceiptReader,
@@ -1259,33 +1259,53 @@ class GuidepointCoreSearch:
         )
         quota = governed_daily_quota(TEMPLATE_KEY, OPERATION)
         price_book = {"price_rate_refs": [price["id"]], "required_price_meters": ["calls"]}
-        rate_policy = self.connectors.register_rate_policy(
-            {
-                "schema_version": "0.1",
-                "id": f"{SEARCH_RATE_POLICY_REF}:v1",
-                "created_at": self.governance.effective_from,
-                "policy_ref": SEARCH_RATE_POLICY_REF,
-                "quota_scope_ref": "connector-quota-scope:guidepoint:search_library",
-                "version": 1,
-                "prior_version_ref": None,
-                "connector_profile_ref": profile["id"],
-                "window_seconds": quota["window_seconds"],
-                "reset_timezone": quota["reset_timezone"],
-                "max_concurrency": 1,
-                "quota_currency": "USD",
-                **price_book,
-                "price_book_hash": content_hash(price_book),
-                "limits": apply_governed_quota_to_limits(
-                    quota,
-                    max_response_bytes=profile["max_response_bytes"],
-                    max_records=profile["max_records"],
-                ),
-                "effective_from": self.governance.effective_from,
-                "effective_until": None,
-                "actor_ref": self.governance.approved_by,
-            },
-            idempotency_key="guidepoint-search-library:rate-policy:v1",
+        desired_limits = apply_governed_quota_to_limits(
+            quota,
+            max_response_bytes=profile["max_response_bytes"],
+            max_records=profile["max_records"],
         )
+        try:
+            rate_policy = self.connectors.register_rate_policy(
+                {
+                    "schema_version": "0.1",
+                    "id": f"{SEARCH_RATE_POLICY_REF}:v1",
+                    "created_at": self.governance.effective_from,
+                    "policy_ref": SEARCH_RATE_POLICY_REF,
+                    "quota_scope_ref": "connector-quota-scope:guidepoint:search_library",
+                    "version": 1,
+                    "prior_version_ref": None,
+                    "connector_profile_ref": profile["id"],
+                    "window_seconds": quota["window_seconds"],
+                    "reset_timezone": quota["reset_timezone"],
+                    "max_concurrency": 1,
+                    "quota_currency": "USD",
+                    **price_book,
+                    "price_book_hash": content_hash(price_book),
+                    "limits": desired_limits,
+                    "effective_from": self.governance.effective_from,
+                    "effective_until": None,
+                    "actor_ref": self.governance.approved_by,
+                },
+                idempotency_key="guidepoint-search-library:rate-policy:v1",
+            )
+        except ConnectorConflict:
+            # 2026-09-15: the owner raised the quota out of band (a v2 policy
+            # activated directly against the store), so the immutable register
+            # key now hashes differently than the version the code constants
+            # describe. An active policy whose ceilings are at least the code's
+            # own is the owner's raise -- take it as the authority of record
+            # rather than refusing every search.
+            active = self.connectors._active_rate_policy(
+                self.connectors.connection,
+                SEARCH_RATE_POLICY_REF,
+                _wire_time(self.clock()),
+            )
+            if active is None or any(
+                int(active.get("limits", {}).get(metric, 0)) < int(limit)
+                for metric, limit in desired_limits.items()
+            ):
+                raise
+            rate_policy = active
         self._authorities = {
             "descriptor": descriptor,
             "binding": binding,
