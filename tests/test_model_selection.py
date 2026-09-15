@@ -614,6 +614,25 @@ class SetTierSelectionTests(StateDirectoryCase):
                                     chain=chain, now=NOW)
         self.assertEqual(result["status"], "unchanged")
 
+    def test_a_tier_save_widens_the_allow_list_to_every_reachable_model(self) -> None:
+        # 2026-09-15: the allow-list was written once around that day's chains
+        # and tier saves never touched it again. Live, the verifier chain moved
+        # to gemini-3-8-flash-antigravity-high while the list still named the
+        # old trio, and every tier-mode purpose pinned to the policy -- the
+        # cheap-tier language check above all -- was refused with
+        # profile_not_allowed and no eligible candidate at all.
+        set_tier_selection(
+            self.root, tier="verifier", mode="explicit",
+            chain=["profile:gemini-3-8-flash",
+                   "profile:claude-fable-5-1"], now=NOW)
+        policy = self.router.get_policy(self.stored()["routing_policy_ref"])
+        tiers = (policy.get("fallback_chains") or {}).get("tiers") or {}
+        self.assertEqual(
+            policy["filters"]["allowed_profile_ids"],
+            sorted({profile for chain in tiers.values() for profile in chain}))
+        self.assertIn("profile:gemini-3-8-flash",
+                      policy["filters"]["allowed_profile_ids"])
+
     def test_an_unknown_tier_is_refused(self) -> None:
         with self.assertRaises(ModelSelectionError):
             set_tier_selection(self.root, tier="premium", mode="explicit",

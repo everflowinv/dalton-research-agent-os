@@ -338,27 +338,46 @@ class CockpitChainTests(unittest.TestCase):
         self.assertEqual(settlement["actual_micros"], admission["reserved_micros"])
         self.assertGreater(settlement["actual_micros"], 0)
 
-    def test_host_completion_failure_halts_without_a_second_paid_call(self) -> None:
+    def test_host_completion_failure_falls_back_without_charging_the_day(self) -> None:
+        # 2026-09-15: a host-frame failure (the CLI gateway's weekly-limit
+        # text, wrapped by the broker) carries no usage and no model content,
+        # so the chain moves to the next link and the day ledger is not
+        # charged the reserved ceiling for the link that never answered.
         adapter = ChainAdapter({"profile:gpt-6-astra": {
             "code": "HOST_COMPLETION_FAILED", "message": "host completion failed"}})
-        with self.assertRaises(CockpitModelError):
-            self._model(adapter, policy_version_ref=self.chain_policy).call(
-                purpose="plan", request_id="host-failed", prompt="draft",
-                mission=self.mission)
-        self.assertEqual(adapter.served, ["profile:gpt-6-astra"])
+        answer = self._model(adapter, policy_version_ref=self.chain_policy).call(
+            purpose="plan", request_id="host-failed", prompt="draft",
+            mission=self.mission)
+        self.assertTrue(answer)
+        self.assertEqual(
+            adapter.served, ["profile:gpt-6-astra", "profile:claude-fable-5-1"])
         with ThesisImpactBudgetStore(self.root / "budget.sqlite") as ledger:
-            admission = json.loads(ledger.connection.execute(
-                "SELECT record_json FROM thesis_impact_day_admissions").fetchone()[0])
-            settlement = json.loads(ledger.connection.execute(
-                "SELECT record_json FROM thesis_impact_day_settlements").fetchone()[0])
-        self.assertEqual(settlement["actual_micros"], admission["reserved_micros"])
+            admissions = ledger.connection.execute(
+                "SELECT record_json FROM thesis_impact_day_admissions"
+            ).fetchall()
+            settlements = ledger.connection.execute(
+                "SELECT record_json FROM thesis_impact_day_settlements"
+            ).fetchall()
+        served = json.loads(admissions[0][0])["reserved_micros"]
+        settled = [json.loads(row[0])["actual_micros"] for row in settlements]
+        # The served link settles what it reserved; the wall settles nothing.
+        self.assertEqual(settled.count(0), len(settled) - settled.count(served))
+        self.assertLessEqual(sum(settled), served)
 
     def test_broker_budget_failure_is_not_rewritten_as_a_no_send_refusal(self) -> None:
+        # 2026-09-15: a budget refusal is per link, so the chain now falls
+        # through to the next one. With every link refusing the downstream
+        # budget the chain exhausts, and the failure must still be reported as
+        # the broker's refusal -- not rewritten as though nothing was sent.
         adapter = ChainAdapter({
             "profile:gpt-6-astra": {
                 "code": "PROVIDER_BUDGET_EXCEEDED",
                 "message": "broker refused its downstream budget",
-            }
+            },
+            "profile:claude-fable-5-1": {
+                "code": "PROVIDER_BUDGET_EXCEEDED",
+                "message": "broker refused its downstream budget",
+            },
         })
         with self.assertRaisesRegex(CockpitModelError, "broker refused") as raised:
             self._model(adapter, policy_version_ref=self.chain_policy).call(
@@ -366,9 +385,10 @@ class CockpitChainTests(unittest.TestCase):
                 mission=self.mission,
             )
 
-        # The adapter ran, and budget refusal is a halting class: there is no
-        # blind fallback call to a second provider.
-        self.assertEqual(adapter.served, ["profile:gpt-6-astra"])
+        # Both links were tried and both refused; the chain did not stop at
+        # the first wall.
+        self.assertEqual(
+            adapter.served, ["profile:gpt-6-astra", "profile:claude-fable-5-1"])
         with ThesisImpactBudgetStore(self.root / "budget.sqlite") as ledger:
             admission = json.loads(ledger.connection.execute(
                 "SELECT record_json FROM thesis_impact_day_admissions"
@@ -1814,7 +1834,12 @@ class CockpitChainTests(unittest.TestCase):
                     {"code": "REQUIRED_CONTROLS_UNAVAILABLE", "message": "gap",
                      "proved_local_not_sent": True}
                     if not self.served else
-                    {"code": "HOST_COMPLETION_FAILED", "message": "unknown dispatch"}
+                    # A provider error with no local not-sent proof keeps the
+                    # old unknown-dispatch reading: halt and retain the full
+                    # reservation. (HOST_COMPLETION_FAILED used to stand in
+                    # here, but since 2026-09-15 it is a known no-usage host
+                    # frame that falls back instead.)
+                    {"code": "PROVIDER_ERROR", "message": "unknown dispatch"}
                 )
                 return super().execute(work, route, profile)
 

@@ -581,6 +581,20 @@ def publish_tier_selection(
     wire = {
         key: value for key, value in pinned.items() if key not in _VERSION_KEYS
     }
+    # The allow-list follows the chains. It was written once, by hand, around
+    # the chains of that day; tier saves kept editing the chains without it,
+    # so a link the owner had just selected -- or a whole other tier's links,
+    # for any purpose pinned to this policy -- read profile_not_allowed and
+    # the route was rejected with no eligible candidate at all. The list is
+    # therefore exactly the models some tier can reach; purpose-explicit
+    # overrides do not need naming here because an explicit chain bypasses
+    # the allow-list by design.
+    filters = dict(pinned.get("filters") or {})
+    if filters.get("allowed_profile_ids"):
+        filters["allowed_profile_ids"] = sorted(
+            {profile for chain in chains.values() for profile in chain}
+        )
+        wire["filters"] = filters
     # The router refuses an empty overrides object, so the key disappears
     # entirely when a tier edit was the last override standing.
     if overrides:

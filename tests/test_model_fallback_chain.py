@@ -194,6 +194,11 @@ class TierMapTests(unittest.TestCase):
             ({"code": "SAFETY_BLOCKED"}, "content_refusal"),
             ({"code": "PROVIDER_BUDGET_EXCEEDED"}, "budget_refused"),
             ({"code": "INVALID_REQUEST"}, "contract_violation"),
+            # 2026-09-15: a CLI gateway that hit its subscription weekly limit
+            # emits error text instead of model output and the broker wraps it
+            # as an invalid host result. The host did not answer.
+            ({"code": "INVALID_HOST_RESULT"}, "provider_failure"),
+            ({"code": "HOST_COMPLETION_FAILED"}, "provider_failure"),
             ({"code": "SOMETHING_NOBODY_HAS_SEEN"}, "unclassified_failure"),
             ({"code": "HTTP_503"}, "provider_failure"),
             ({"code": "HTTP_429"}, "provider_failure"),
@@ -224,6 +229,22 @@ class TierMapTests(unittest.TestCase):
             self.assertFalse(may_fall_back(failure))
         with self.assertRaisesRegex(FallbackChainError, "unclassified"):
             may_fall_back("something_went_wrong")
+
+    def test_a_quota_walled_host_and_a_budget_refusal_both_fall_back(self) -> None:
+        # 2026-09-15: claude-fable-5-1 spent the day refusing with
+        # INVALID_HOST_RESULT (the CLI's weekly-limit text) and every brain
+        # chain halted on it; the same mornings, one flash model's provider
+        # input cap budget-refused the cheap tier to a standstill. Both are
+        # per-link walls -- the next link is the remedy the chain exists to
+        # try, and neither had been earning it.
+        from dalton_core.openclaw_model_adapter import BrokerBudgetExceeded
+
+        self.assertTrue(may_fall_back(
+            classify_model_failure({"code": "INVALID_HOST_RESULT"})))
+        self.assertTrue(may_fall_back(
+            classify_model_failure({"code": "PROVIDER_BUDGET_EXCEEDED"})))
+        self.assertTrue(may_fall_back(
+            classify_model_failure(BrokerBudgetExceeded("provider max_input_tokens"))))
 
 
 class ChainExecutionTests(unittest.TestCase):

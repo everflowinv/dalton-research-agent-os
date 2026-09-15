@@ -183,6 +183,12 @@ FALLBACK_FAILURES: frozenset[str] = frozenset({
     "transport_failure",
     "provider_failure",
     "model_unavailable",
+    # 2026-09-15: a budget refusal is per link, not per chain. The refusing
+    # budget is the provider's own input cap or the day ledger, and either way
+    # the next link -- bigger window, cheaper meter -- is exactly the move the
+    # chain exists to make. Halting here left the cheap tier dark for whole
+    # mornings on a single flash model's input cap.
+    "budget_refused",
 })
 # Named rather than "everything else", so an unclassified failure fails closed
 # instead of quietly earning a retry on a second provider.
@@ -191,7 +197,6 @@ HALTING_FAILURES: frozenset[str] = frozenset({
     # can run. Halt this chain attempt and let the Scheduler retry it later.
     "capacity_busy",
     "content_refusal",
-    "budget_refused",
     "contract_violation",
     # What the classifier returns when it does not recognise the failure. It is
     # a halt, not an exception: a lane that cannot name why the model failed
@@ -231,6 +236,12 @@ _FAILURE_CODES: tuple[tuple[tuple[str, ...], str], ...] = (
     (("RATE_LIMIT", "RATE_LIMITED", "TOO_MANY_REQUESTS", "THROTTLED",
       "PROVIDER_ERROR", "UPSTREAM", "INTERNAL_ERROR", "SERVER_ERROR",
       "BAD_GATEWAY", "SERVICE_ERROR"), "provider_failure"),
+    # 2026-09-15: a CLI-gateway host that errors out -- a subscription weekly
+    # limit is what forced this -- emits error text instead of model output,
+    # and the broker wraps it as an invalid host result. The host did not
+    # answer; this must precede the INVALID catch-all below or it lands in
+    # contract_violation and halts the whole chain on a quota wall.
+    (("INVALID_HOST_RESULT", "HOST_COMPLETION_FAILED"), "provider_failure"),
     (("CONTENT_REFUSAL", "CONTENT_FILTER", "REFUSED", "SAFETY", "BLOCKED",
       "MODERATION"), "content_refusal"),
     (("BUDGET",), "budget_refused"),

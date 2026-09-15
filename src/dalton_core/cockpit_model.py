@@ -2329,6 +2329,16 @@ class CockpitModel:
                 # a provider call. Every other failed host envelope may have
                 # consumed the full bounded call before validation failed.
                 code = str((envelope.error or {}).get("code", "")).upper()
+                # The broker's own host-frame validation -- the CLI gateway
+                # returned error text instead of model output, a subscription
+                # weekly limit being the live case -- carries no usage and no
+                # model content, the same reading thesis_impact_control makes
+                # when it re-drives them. They must keep the fallback class
+                # the classifier gives them instead of being downgraded to a
+                # halt below; halting here left every brain chain dark for a
+                # day on one gateway's quota wall.
+                host_frame_failure = code in {
+                    "HOST_COMPLETION_FAILED", "INVALID_HOST_RESULT"}
                 dispatch_proof = (envelope.metadata or {}).get("dispatch_proof")
                 broker_local_code = code in {
                     "BUSY", "CONCURRENCY_LIMIT", "BROKER_CONCURRENCY_LIMIT",
@@ -2340,7 +2350,15 @@ class CockpitModel:
                 broker_local_not_sent = (
                     broker_local_code and dispatch_proof == _LOCAL_NOT_SENT_PROOF
                 )
-                may_have_reached_provider = not broker_local_not_sent
+                # A host-frame failure's envelope carries no usage because the
+                # broker validated the frame and nothing model-shaped came
+                # back -- the same no-usage reading thesis_impact_control
+                # re-drives on. Charging the day ledger its reserved ceiling
+                # for each one is how a quota-walled gateway burned the whole
+                # morning's pools without a single answer.
+                may_have_reached_provider = (
+                    not broker_local_not_sent and not host_frame_failure
+                )
                 if broker_local_not_sent:
                     local_dispatch_proofs[profile["id"]] = dict(dispatch_proof)
                     if code == "REQUIRED_CONTROLS_UNAVAILABLE":
@@ -2356,7 +2374,8 @@ class CockpitModel:
                 return {"outcome": "failed",
                         "failure_class": (
                             "unclassified_failure"
-                            if may_have_reached_provider and failure_class in {
+                            if may_have_reached_provider and not host_frame_failure
+                            and failure_class in {
                                 "transport_failure", "provider_failure", "model_unavailable"
                             }
                             else "unclassified_failure"
