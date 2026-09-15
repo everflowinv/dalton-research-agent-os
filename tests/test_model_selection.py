@@ -649,7 +649,7 @@ class SetSelectionTests(StateDirectoryCase):
             updated["bounded_planner"]["config"]["planner_credential_slot_refs"],
         )
         self.assertTrue(result["requires_restart"])
-        self.assertIn("service.json#bounded_planner.planner_routing_policy_ref",
+        self.assertIn("service.json#bounded_planner.config.planner_routing_policy_ref",
                       result["model_configs_repointed"])
 
     def test_human_intent_selection_preserves_nested_transport_setup(self) -> None:
