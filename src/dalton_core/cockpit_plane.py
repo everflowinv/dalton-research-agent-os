@@ -5699,6 +5699,18 @@ class CockpitPlane:
                 router = sqlite3.connect(f"file:{router_path}?mode=ro", uri=True)
                 router.row_factory = sqlite3.Row
                 router.execute("PRAGMA busy_timeout = 3000")
+                # The same "current version of every profile" the models page
+                # shows, read from the router we already hold open; without it
+                # every call in this ledger reads 未登记模型.
+                catalogue: dict[str, dict[str, Any]] = {}
+                for row in router.execute(
+                    "SELECT p.profile_json FROM model_endpoint_profile_versions p "
+                    "WHERE NOT EXISTS (SELECT 1 FROM model_endpoint_profile_versions newer "
+                    "WHERE newer.profile_id=p.profile_id AND newer.version>p.version)"
+                ).fetchall():
+                    profile = json.loads(row[0])
+                    if isinstance(profile, Mapping) and profile.get("id"):
+                        catalogue[str(profile["id"])] = profile
                 params: list[Any] = []
                 where = ""
                 if before is not None:
@@ -5729,7 +5741,7 @@ class CockpitPlane:
                 for row in rows:
                     purpose = str(row["purpose"] or row["tier"] or "")
                     label = PURPOSE_LABELS.get(purpose, purpose)
-                    model = (self._model_display_name(str(row["profile_id"] or ""), {})
+                    model = (self._model_display_name(str(row["profile_id"] or ""), catalogue)
                              or str(row["profile_id"] or ""))
                     cost = costs.get(str(row["decision_id"]))
                     if row["served"]:

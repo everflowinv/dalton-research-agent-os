@@ -107,6 +107,16 @@ LEDGER_FILENAME = "crowd-observations.jsonl"
 # a source which is down is not asked once a minute, short enough that a
 # credential bound at lunchtime is picked up in the afternoon.
 FAILURE_COOL_OFF_TICKS = 12
+# One hung host-tool child must not darken the writer's other lanes. This
+# lane's reads run synchronously inside one writer request, and the writer
+# answers or fails a request in STORE_REQUEST_TIMEOUT (30 s); every op queued
+# behind an over-long child times out with it -- live, that turned a spinning
+# crowd child into conviction-call and stage-bridge RemoteErrors. So a crowd
+# child is killed at 20 s (a read is one API call; healthy reads finish in
+# single-digit seconds), and once a tick has spent 10 s on children the rest
+# defer to the next tick: worst case 10 + 20 = 30 s, exactly the budget.
+CROWD_CHILD_TIMEOUT_SECONDS = 20.0
+CROWD_TICK_CHILD_BUDGET_SECONDS = 10.0
 DRIVER_KEY = "crowd_source"
 
 
@@ -724,7 +734,17 @@ class MissionCrowdSourceLaneCoordinator:
             return {**gated, "sources": [], "held": {}}
         self._age_holds()
         connected = self._connected_sources()
-        sources = [self._run(source, connected) for source in sorted(self.runners)]
+        started = self.clock().timestamp()
+        sources: list[dict[str, Any]] = []
+        for source in sorted(self.runners):
+            spent = self.clock().timestamp() - started
+            if spent >= CROWD_TICK_CHILD_BUDGET_SECONDS:
+                sources.append({
+                    "source": source, "status": "held",
+                    "reason": f"本轮时间预算已用 {spent:.0f}s，下一轮继续读这个来源",
+                })
+                continue
+            sources.append(self._run(source, connected))
         recorded = [item for item in sources if item["status"] == "recorded"]
         return {
             "status": "recorded" if recorded else "idle",
@@ -833,6 +853,7 @@ def build_crowd_source_runner(
         actor_ref=actor_ref,
         clock=clock,
         credential_resolver=credential_resolver,
+        timeout_seconds=CROWD_CHILD_TIMEOUT_SECONDS,
     )
 
 

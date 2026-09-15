@@ -137,15 +137,18 @@ header.top p{margin:4px 0 0;color:var(--muted)}
 .chain-edit .actions{flex-direction:column;justify-content:center;gap:6px}
 .traj-toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:10px 0}
 .traj-stats{color:var(--muted);font-size:12px}
-.traj-waterfall{position:relative;height:34px;border-radius:12px;background:var(--panel);border:1px solid var(--line);margin:8px 0;overflow:hidden}
-.traj-span{position:absolute;top:8px;height:18px;border-radius:4px;cursor:pointer;min-width:3px}
+.traj-waterfall{position:relative;height:38px;border-radius:12px;background:var(--panel);border:1px solid var(--line);margin:8px 0;overflow:hidden}
+.traj-span{position:absolute;top:5px;height:14px;border-radius:4px;cursor:pointer;min-width:3px}
 .traj-span.ok{background:var(--teal)}.traj-span.skip{background:var(--dim)}.traj-span.warn{background:var(--amber)}.traj-span.failed{background:var(--rose)}.traj-span.run{background:var(--sky)}
 .traj-list{display:flex;flex-direction:column;gap:4px}
 .traj-row{display:flex;gap:10px;align-items:baseline;padding:8px 12px;border-radius:12px;background:var(--panel);border:1px solid transparent;cursor:pointer}
 .traj-row:hover{border-color:var(--line2)}
 .traj-row time{color:var(--muted);font-size:12px;flex:0 0 64px;font-variant-numeric:tabular-nums}
 .traj-kind{flex:0 0 58px;font-size:12px;color:var(--muted)}
-.traj-row .t{flex:1;font-size:13px}
+.traj-row .t{flex:1;font-size:13px;display:flex;align-items:center;gap:6px;min-width:0}
+.traj-row .t>span:last-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.traj-row .st{width:9px;height:9px;min-width:9px;aspect-ratio:1;flex:0 0 9px;border-radius:50%;background:var(--dim);display:inline-block}
+.traj-row .st.on{background:var(--green)}.traj-row .st.hold{background:var(--amber)}.traj-row .st.err{background:var(--rose)}
 .traj-row .c{color:var(--muted);font-size:12px;flex:0 0 76px;text-align:right;font-variant-numeric:tabular-nums}
 .traj-inspect{padding:10px 14px;border-radius:12px;background:var(--panel2);border:1px solid var(--line);margin:2px 0 6px 74px;font-size:13px}
 .lane .st{width:10px;height:10px;min-width:10px;aspect-ratio:1;flex:0 0 10px;border-radius:50%;margin-top:6px;background:var(--dim)}
@@ -671,18 +674,26 @@ function versionLabel(version){return version==null||version==="?"?"版本未标
 const PRODUCT_LABELS={company_dossier:"公司档案",debate_map:"核心争议",industry_framework:"行业框架",initial_screen:"初步筛选",investment_memo:"投资备忘录"};
 const SECTION_LABELS={business_model:"商业模式",segments_and_mix:"业务结构",demand_drivers:"需求驱动",supply_and_cost:"供给与成本",competitive_position:"竞争地位",management_and_capital_allocation:"管理层与资本配置",guidance_style:"指引与兑现",kpi_dictionary:"关键指标口径",catalyst_calendar:"催化剂日历",history_of_price_drivers:"历史股价驱动",industry_classification:"行业分类",variant_view:"差异化观点",industry_characteristics:"行业特征",long_term_drivers:"长期驱动",short_term_drivers:"短期驱动",cross_company_comparison:"公司比较",gaps:"资料缺口"};
 function contentLabel(value,map,fallback){return map[value]||fallback}
-function prepareReader(label){lastReaderFocus=document.activeElement;const r=$("reader"),sheet=$("reader-sheet");r.classList.add("show");r.setAttribute("role","dialog");r.setAttribute("aria-modal","true");r.setAttribute("aria-label",label||"研究详情");sheet.tabIndex=-1;setTimeout(()=>sheet.focus(),0);return sheet}
+let readerViewSeq=0;
+/* Every reader view takes a number. An async render that resolves after the
+   user moved on (the 15s trajectory refresh racing a freshly opened models
+   page) must abort instead of replaceChildren-ing over the new view — that
+   race is what made 查看模型与预算 open 执行轨迹. */
+function stampReaderView(sheet){sheet.dataset.viewSeq=String(++readerViewSeq);
+  if(typeof trajTimer!=="undefined"&&trajTimer){clearTimeout(trajTimer);trajTimer=null}
+  return sheet}
+function prepareReader(label){lastReaderFocus=document.activeElement;const r=$("reader"),sheet=$("reader-sheet");r.classList.add("show");r.setAttribute("role","dialog");r.setAttribute("aria-modal","true");r.setAttribute("aria-label",label||"研究详情");sheet.tabIndex=-1;setTimeout(()=>sheet.focus(),0);return stampReaderView(sheet)}
 function stageState(c,ref,index){const at=RESEARCH_STAGES.findIndex(x=>x[0]===c.stage_ref);if(index<at)return"done";if(index===at)return"now";return"future"}
 function renderCompanyJourney(companies){const grid=node("div",null,"journey-grid");grid.append(node("div","公司","journey-head"),...RESEARCH_STAGES.map(x=>node("div",x[1],"journey-head")));companies.forEach(c=>{const b=node("button",null,"company-launch");b.setAttribute("aria-label",`打开 ${c.name} 研究详情`);b.dataset.companyRef=c.company_ref;const stage=RESEARCH_STAGES.find(x=>x[0]===c.stage_ref)?.[1]||c.stage_label||"研究进行中";const state=c.journey_status_label||c.stage_status_label||"";b.append(node("span",`${c.ticker} · ${c.name}`),node("small",[stage,state].filter(Boolean).join(" · ")));b.onclick=()=>openCompany(c,b);grid.append(b);RESEARCH_STAGES.forEach((x,i)=>{const state=stageState(c,x[0],i),cell=node("div",state==="now"?(c.gate_decision?.label||c.stage_status_label||"当前阶段"):state==="done"?"已完成":"待进入",`stage-cell ${state}`);cell.setAttribute("aria-label",`${x[1]}：${cell.textContent}`);grid.append(cell)})});$("companies").replaceChildren(grid)}
 function detailBox(title,content){const b=node("div",null,"detail-box");b.append(node("h3",title));if(content)b.append(content);else b.append(node("div","暂无已发布内容","empty"));return b}
-function openCompany(c,opener){lastReaderFocus=opener||document.activeElement;$("reader").dataset.returnCompany=c.company_ref;const reader=$("reader"),sheet=$("reader-sheet");reader.classList.add("show");reader.setAttribute("role","dialog");reader.setAttribute("aria-modal","true");reader.setAttribute("aria-label",`${c.name} 研究详情`);sheet.tabIndex=-1;const close=node("button","关闭","ghost close");close.setAttribute("aria-label","关闭公司详情");close.onclick=closeReader;const head=node("div",null,"company-detail-head"),title=node("div");const stage=RESEARCH_STAGES.find(x=>x[0]===c.stage_ref)?.[1]||c.stage_label||"研究进行中",state=c.stage_status_label||c.journey_status_label||"";title.append(node("h2",`${c.ticker} · ${c.name}`),node("div",[stage,state,c.note].filter(Boolean).join(" · "),"meta"));head.append(title,close);const tabs=node("div",null,"detail-tabs");tabs.setAttribute("role","tablist");const panels=[];const defs=[
+function openCompany(c,opener){lastReaderFocus=opener||document.activeElement;$("reader").dataset.returnCompany=c.company_ref;const reader=$("reader"),sheet=$("reader-sheet");reader.classList.add("show");reader.setAttribute("role","dialog");reader.setAttribute("aria-modal","true");reader.setAttribute("aria-label",`${c.name} 研究详情`);stampReaderView(sheet);sheet.tabIndex=-1;const close=node("button","关闭","ghost close");close.setAttribute("aria-label","关闭公司详情");close.onclick=closeReader;const head=node("div",null,"company-detail-head"),title=node("div");const stage=RESEARCH_STAGES.find(x=>x[0]===c.stage_ref)?.[1]||c.stage_label||"研究进行中",state=c.stage_status_label||c.journey_status_label||"";title.append(node("h2",`${c.ticker} · ${c.name}`),node("div",[stage,state,c.note].filter(Boolean).join(" · "),"meta"));head.append(title,close);const tabs=node("div",null,"detail-tabs");tabs.setAttribute("role","tablist");const panels=[];const defs=[
  ["概览",()=>{const x=node("div",null,"detail-grid"),readiness=node("div");readiness.append(node("b",c.gate_decision?.label||c.stage_status||"尚无审批记录"),node("div",c.source_readiness?.label||c.note||"—","hint"));if(c.latest_generation_failure)readiness.append(node("div",c.latest_generation_failure,"hint"));x.append(detailBox("市场",c.market?marketLine(c.market):null),detailBox("阶段与当前资料",readiness),detailBox("阶段清单",c.checklist&&c.checklist.length?checklist(c.checklist):null),detailBox("资料与结论数量",node("div",`资料 ${c.progress.found} · 已读 ${c.progress.read} · 结论 ${c.claims.total} · 数字 ${(c.figures&&c.figures.total)||0}`,"hint")));return x}],
  ["证据",()=>{const x=node("div");if(c.document)x.append(docCard(c.document));if(c.claims.latest.length){const ul=node("ul",null,"latest");c.claims.latest.forEach(v=>ul.append(node("li",v.statement)));x.append(ul)}if(c.figures&&c.figures.latest.length)x.append(figures(c.figures));return x}],
  ["模型",()=>{const x=node("div");if(c.model)x.append(modelBlock(c));else ["forecast_model_version","sensitivity_projection","valuation_snapshot"].forEach(k=>{const y=invariantRefusal((c.invariants||{})[k]);if(y)x.append(y)});if(c.valuation)x.append(valuationBlock(c.valuation));return x}],
  ["事件",()=>{const x=node("div");let shown=false;if(c.catalyst){x.append(catalystBlock(c.catalyst));shown=true}if(c.events&&c.events.total){x.append(eventsBlock(c.events));shown=true}if(c.judgements&&c.judgements.total){x.append(judgementBlock(c.judgements));shown=true}if(!shown)x.append(node("div",c.events?.empty_reason||"目前没有可核实的新事件。","empty"));if(c.events?.next_step)x.append(node("div",c.events.next_step,"hint"));return x}],
  ["产物",()=>{const x=node("div");const products=node("div","正在读取已发布研究产物…","empty");const exports=node("div",null,"actions");const exportStatus=node("p","下载内容包含数据版本、来源与未完成项；发布状态与人工审批分开显示。","hint");exportStatus.setAttribute("role","status");for(const [format,label] of [["html","下载 HTML 报告"],["xlsx","下载 Excel 模型"]]){const b=node("button",label,"btn");b.type="button";b.onclick=()=>downloadResearch(c.company_ref,format,b,exportStatus);exports.append(b)}x.append(exports,exportStatus,products);loadResearchProducts(c.company_ref,products);if(c.reflections&&c.reflections.length)x.append(reflectionBlock(c.reflections));if(c.research_tasks&&c.research_tasks.length)x.append(tasksBlock(c.research_tasks));if(c.cadence&&c.cadence.length)x.append(cadenceBlock(c.cadence));x.append(cardActions(c));return x}]
  ];function select(i){tabs.querySelectorAll("button").forEach((b,j)=>{b.setAttribute("aria-selected",String(i===j));b.tabIndex=i===j?0:-1});panels.forEach((p,j)=>p.hidden=i!==j)}defs.forEach(([label,build],i)=>{const b=node("button",label,"detail-tab");b.setAttribute("role","tab");b.onclick=()=>select(i);b.onkeydown=e=>{if(e.key==="ArrowRight"||e.key==="ArrowLeft"){const n=(i+(e.key==="ArrowRight"?1:-1)+defs.length)%defs.length;tabs.children[n].focus();select(n)}};tabs.append(b);const p=node("div",null,"detail-panel");p.setAttribute("role","tabpanel");p.append(build());panels.push(p)});sheet.replaceChildren(head,tabs,...panels);select(0);sheet.focus()}
-function closeReader(){$("reader").classList.remove("show");if(lastReaderFocus&&lastReaderFocus.isConnected)lastReaderFocus.focus();else{const ref=$("reader").dataset.returnCompany;const target=[...document.querySelectorAll(".company-launch")].find(x=>x.dataset.companyRef===ref);if(target)target.focus()}lastReaderFocus=null}
+function closeReader(){$("reader").classList.remove("show");if(trajTimer){clearTimeout(trajTimer);trajTimer=null}if(lastReaderFocus&&lastReaderFocus.isConnected)lastReaderFocus.focus();else{const ref=$("reader").dataset.returnCompany;const target=[...document.querySelectorAll(".company-launch")].find(x=>x.dataset.companyRef===ref);if(target)target.focus()}lastReaderFocus=null}
 async function downloadResearch(companyRef,format,button,status){
   button.disabled=true;status.textContent="正在整理已发布研究与来源…";
   try{
@@ -1241,8 +1252,9 @@ async function openTrajectory(){const sheet=prepareReader("研究详情");
   catch(e){sheet.replaceChildren(readerClose());showProblem(sheet,e,"读取执行轨迹")}}
 async function renderTrajectory(sheet,before,reset){
   const seq=++trajSeq;
+  const view=sheet.dataset.viewSeq;
   const r=await getJson(before?`/v1/cockpit/trajectory?before=${encodeURIComponent(before)}`:"/v1/cockpit/trajectory");
-  if(seq!==trajSeq)return;
+  if(seq!==trajSeq||sheet.dataset.viewSeq!==view)return;
   if(reset)sheet.replaceChildren(readerClose(),node("h2","执行轨迹"),
     node("div","每一步：哪个环节调用了哪个模型、承接还是跳过及原因、工单状态、预算拒绝。点击任意一行查看详情；打开期间自动跟随最新（向上滚动即暂停跟随）。","meta"));
   const list=sheet.querySelector(".traj-list")||node("div",null,"traj-list");
@@ -1268,8 +1280,10 @@ async function renderTrajectory(sheet,before,reset){
   const fragment=document.createDocumentFragment();
   for(const e of rows){
     const row=node("div",null,"traj-row");
-    row.append(node("time",e.at.slice(11,19)),node("span",TRAJ_KIND_LABELS[e.kind]||e.kind,"traj-kind"),
-      node("span",`<span class="st ${e.status==="ok"?"on":e.status==="warn"?"hold":e.status==="failed"?"err":""}" style="display:inline-block;margin-right:6px"></span>${displayText(e.title)}`,"t"));
+    const title=node("span",null,"t");
+    title.append(node("span",null,"st "+(e.status==="ok"?"on":e.status==="warn"?"hold":e.status==="failed"?"err":"")));
+    title.append(rawNode("span",displayText(e.title)));
+    row.append(node("time",e.at.slice(11,19)),node("span",TRAJ_KIND_LABELS[e.kind]||e.kind,"traj-kind"),title);
     if(e.cost_usd)row.append(node("span",`$${e.cost_usd}`,"c"));
     row.onclick=()=>{
       const existing=list.querySelector(".traj-inspect[data-for]");
@@ -1296,7 +1310,7 @@ async function renderTrajectory(sheet,before,reset){
       spanEl.style.left=`${((t-min)/span)*96}%`;spanEl.style.width="4px";
       spanEl.title=`${e.at.slice(11,19)} ${e.title}`;
       waterfall.append(spanEl)}
-    const tl=node("span",null,"traj-kind");tl.style.cssText="position:absolute;right:6px;top:8px;font-size:11px";
+    const tl=node("span",null,"traj-kind");tl.style.cssText="position:absolute;right:8px;bottom:3px;font-size:11px";
     tl.textContent="← 早 · 晚 →";waterfall.append(tl)}
   trajOlder=r.older;
   let more=sheet.querySelector(".traj-more");
@@ -1306,11 +1320,12 @@ async function renderTrajectory(sheet,before,reset){
   else if(!trajOlder&&more)more.remove();
   if(reset&&trajFollow)requestAnimationFrame(()=>sheet.scrollTop=0);
 }
-function trajectoryRefreshLoop(){const sheet=document.querySelector(".reader .traj-list");
-  if(!sheet){trajTimer=null;return}
-  const reader=sheet.closest(".reader");
-  const nearTail=reader.scrollTop<120;
-  if(trajFollow&&nearTail)renderTrajectory(reader,null,true).catch(()=>{});
+function trajectoryRefreshLoop(){
+  const list=document.querySelector("#reader-sheet .traj-list");
+  if(!list||!$("reader").classList.contains("show")){trajTimer=null;return}
+  const sheet=list.closest("#reader-sheet");
+  const nearTail=sheet.scrollTop<120;
+  if(trajFollow&&nearTail)renderTrajectory(sheet,null,true).catch(()=>{});
   trajTimer=setTimeout(trajectoryRefreshLoop,15000)}
 $("open-trajectory").onclick=async()=>{openTrajectory();if(trajTimer)clearTimeout(trajTimer);trajTimer=setTimeout(trajectoryRefreshLoop,15000)};
 /* Q2: 每周回头看. Prose and table both derived from counted things; no model

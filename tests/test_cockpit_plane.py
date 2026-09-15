@@ -765,5 +765,56 @@ class CockpitPlaneTests(unittest.TestCase):
         self.assertIsNone(unwrap_json_object("[1, 2]"))
 
 
+class TrajectoryTests(unittest.TestCase):
+    """The ledger names the model that served, out of the router's catalogue."""
+
+    def test_call_events_name_registered_models(self) -> None:
+        from dalton_core.model_fallback_chain import execute_chain
+        from dalton_core.model_router import ModelRouter
+        from dalton_core.openclaw_catalog_reconcile import sync_openclaw_model_catalog
+        from dalton_core.research_planner_setup import (
+            credential_slots_for, ensure_planner_policy,
+        )
+        from tests.test_model_fallback_chain import FakeBroker, _work
+        from tests.test_openclaw_catalog_reconcile import _config
+
+        with tempfile.TemporaryDirectory() as raw:
+            harness = CockpitHarness(Path(raw))
+            self.addCleanup(harness.close)
+            router = ModelRouter(Path(raw) / "router.sqlite")
+            self.addCleanup(router.close)
+            sync_openclaw_model_catalog(router, _config(), checked_at=harness.h.h.clock())
+            policy_ref = ensure_planner_policy(
+                router, tier="brain", now=harness.h.h.clock(),
+                policy_id="model-routing-policy:trajectory-test",
+            )["policy_version_ref"]
+            result = execute_chain(
+                router,
+                _work("work:trajectory-test"),
+                purpose="plan", tier="brain", capability="research",
+                attempt_number=1,
+                policy_version_ref=policy_ref,
+                credential_slot_refs=credential_slots_for(
+                    router, ["profile:gpt-6-astra"]),
+                required_modalities=["text"],
+                required_context_tokens=2_000,
+                estimated_input_tokens=1_000,
+                estimated_output_tokens=500,
+                idempotency_prefix="traj:work:trajectory-test",
+                call=FakeBroker({}),
+            )
+            self.assertEqual(result["status"], "served")
+            served_profile = next(
+                profile for profile in router.latest_profiles()
+                if profile["id"] == result["profile_id"])
+            events = harness.plane.trajectory()["events"]
+            calls = [e for e in events if e["kind"] == "call" and e["status"] == "ok"]
+            self.assertTrue(calls)
+            for event in calls:
+                self.assertNotIn("未登记模型", event["title"])
+            self.assertTrue(any(served_profile["model"] in event["title"]
+                                for event in calls))
+
+
 if __name__ == "__main__":
     unittest.main()
