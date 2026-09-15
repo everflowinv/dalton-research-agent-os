@@ -218,10 +218,13 @@ class ConnectorQuotaPolicyTests(unittest.TestCase):
                     # W3: the fund's own prior work on a company. A local file
                     # read like S1's, and smaller: onboarding reads every
                     # prior document once and then only what the owner adds.
+                    # 2026-09-15: 200 → 10,000, same reasoning as the wiki --
+                    # the enumerator lists the local corpus once per company
+                    # per tick, which alone is a few hundred listings a day.
                     "connector_slug": "prior-research",
                     "operation": "get_document",
                     "quota_unit": "document",
-                    "daily_unit_limit": 200,
+                    "daily_unit_limit": 10_000,
                     "max_physical_calls_per_unit": 1,
                     "window_seconds": 86_400,
                     "reset_timezone": "Asia/Shanghai",
@@ -230,7 +233,7 @@ class ConnectorQuotaPolicyTests(unittest.TestCase):
                     "connector_slug": "prior-research",
                     "operation": "list_documents",
                     "quota_unit": "search",
-                    "daily_unit_limit": 200,
+                    "daily_unit_limit": 10_000,
                     "max_physical_calls_per_unit": 1,
                     "window_seconds": 86_400,
                     "reset_timezone": "Asia/Shanghai",

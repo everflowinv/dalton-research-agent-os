@@ -325,10 +325,15 @@ _DAILY_QUOTAS = MappingProxyType(
         # an order of magnitude -- a handful of screens, memos and models per
         # covered name -- and it changes only when a person adds a file. The
         # ceilings bound a loop; they are not a budget.
+        #
+        # 2026-09-15: 200 → 10,000. Listing a local directory costs nothing
+        # outside this machine, and the enumerator legitimately lists once per
+        # company per tick -- 251 listings by mid-afternoon exhausted the old
+        # ceiling and darkened the lane for the rest of the day.
         ("prior-research", "list_documents"): MappingProxyType(
             {
                 "quota_unit": "search",
-                "daily_unit_limit": 200,
+                "daily_unit_limit": 10_000,
                 "max_physical_calls_per_unit": 1,
             }
         ),
@@ -336,8 +341,8 @@ _DAILY_QUOTAS = MappingProxyType(
             {
                 "quota_unit": "document",
                 # Onboarding reads every prior document once and then only
-                # what the owner adds. Two hundred is several backfills.
-                "daily_unit_limit": 200,
+                # what the owner adds.
+                "daily_unit_limit": 10_000,
                 "max_physical_calls_per_unit": 1,
             }
         ),

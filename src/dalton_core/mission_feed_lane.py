@@ -1495,7 +1495,17 @@ def _dispatch(server: Any, source_ref: str, launcher_kwarg: str) -> dict[str, An
         tick_budget_seconds=tick_budget_seconds,
         **runners,
     )
-    result = coordinator.dispatch_once(universe=_mission_universe(server))
+    try:
+        result = coordinator.dispatch_once(universe=_mission_universe(server))
+    except ConnectorQuotaExceeded as exc:
+        # 2026-09-15: a spent daily quota is a lane state the owner can read
+        # and wait out, not an unmapped writer failure. Live, the
+        # prior-research enumerator burned its 200-a-day listing a local
+        # corpus once a tick and the cockpit could only say RemoteError.
+        return {
+            "status": "unavailable", "reason_code": "connector_quota_exhausted",
+            "source_ref": source_ref, "reason": str(exc),
+        }
     launcher._body_read_cursor_ref = coordinator.body_read_cursor_ref
     return result
 
