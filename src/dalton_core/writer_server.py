@@ -3154,7 +3154,11 @@ class WriterServer:
         old_constitution = self.research_constitution.constitution(mission["bindings"]["constitution_version"]["ref"])
         active_constitution = self.research_constitution.active_constitution(old_constitution["constitution_ref"])
         bindings = dict(active_constitution["bindings"])
-        bindings["governance_policy_version"] = {"ref": policy_record["id"], "hash": policy_record["content_hash"]}
+        # The unchanged path returns the contract dict (``id``); the create
+        # path returns the store's wire (``policy_version_id``).  Both are the
+        # same immutable version; only the key spelling differs.
+        policy_version_id = policy_record.get("id") or policy_record["policy_version_id"]
+        bindings["governance_policy_version"] = {"ref": policy_version_id, "hash": policy_record["content_hash"]}
         bindings["mandate_version"] = {"ref": mandate["id"], "hash": mandate["content_hash"]}
         if active_constitution["bindings"] == bindings:
             constitution = active_constitution
@@ -3188,7 +3192,7 @@ class WriterServer:
                 cached["budget_policy_ref"] = policy_ref
         if self._planner_model_config is not None:
             self._reload_planner_model_config()
-        return {"status": "updated", "policy": policy_record["id"], "mandate": mandate["id"],
+        return {"status": "updated", "policy": policy_version_id, "mandate": mandate["id"],
                 "constitution": constitution["id"], "mission": published["id"],
                 "day_budget_policy": policy_ref}
 
