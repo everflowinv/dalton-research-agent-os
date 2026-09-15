@@ -53,7 +53,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
-from .connector import source_envelope_content_hash
+from .connector import ConnectorConflict, source_envelope_content_hash
 from .connector_inventory import load_packaged_connector_inventory
 from .connector_quota_policy import (
     apply_governed_quota_to_limits,
@@ -342,8 +342,8 @@ class HostToolRunner:
             max_records=self.max_records,
         )
         policy_id = f"policy:connector-rate:host-tool:{self.template_key}:{operation}:0.1"
-        policy = self.connectors.register_rate_policy(
-            {
+        desired_policy = {
+
                 "schema_version": "0.1",
                 "id": policy_id,
                 "created_at": created_at,
@@ -363,12 +363,32 @@ class HostToolRunner:
                     "required_price_meters": ["calls"],
                 }),
                 "limits": limits,
-                "effective_from": created_at,
-                "effective_until": None,
-                "actor_ref": self.actor_ref,
-            },
-            idempotency_key=f"{policy_id}:register",
-        )
+            "effective_from": created_at,
+            "effective_until": None,
+            "actor_ref": self.actor_ref,
+        }
+        try:
+            policy = self.connectors.register_rate_policy(
+                desired_policy, idempotency_key=f"{policy_id}:register")
+        except ConnectorConflict:
+            # 2026-09-15: the owner raised this quota out of band (a v2
+            # policy activated directly against the store), so the immutable
+            # register key now hashes differently than the version the code
+            # constants describe.  An active policy whose ceilings are at
+            # least the code's own is the owner's raise -- take it as the
+            # authority of record rather than refusing every dispatch.
+            from datetime import datetime as _dt, timezone as _tz
+            active = self.connectors._active_rate_policy(
+                self.connectors.connection,
+                f"policy:connector-rate:host-tool:{self.template_key}:{operation}:0.1",
+                _dt.now(_tz.utc).isoformat(timespec="microseconds"),
+            )
+            if active is None or any(
+                int(active.get("limits", {}).get(metric, 0)) < int(limit)
+                for metric, limit in desired_policy["limits"].items()
+            ):
+                raise
+            policy = active
         self._authorities = {"profile": profile, "rate": rate, "policy": policy}
         return self._authorities
 

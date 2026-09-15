@@ -63,6 +63,9 @@ SOURCE_LABELS = {
     "source:company-ir": "公司官网投资者关系页面", "source:guidepoint": "专家访谈", "source:web-search": "公开网页搜索",
     "source:sales-notes": "卖方销售快报", "source:company-wiki": "公司知识库",
     "source:prior-research": "历史研究资料",
+    # S3 crowd sources, named like the rest rather than by their refs.
+    "source:xueqiu": "雪球散户讨论", "source:x": "X（推特）公开讨论",
+    "source:blind": "匿名员工评价（Blind）",
 }
 SOURCE_SLUG_LABELS = {
     "alphaengine": "卖方研报与电话会", "catalyst-calendar": "催化剂日历",
@@ -74,7 +77,9 @@ SOURCE_SLUG_LABELS = {
     "sec": "SEC 财报与公告", "sec-financials": "SEC 三张财务报表",
     "sec-ownership": "SEC 股东与高管持股申报", "web-fetch": "公开网页读取",
     "x-x-search": "X 站内搜索", "x-xreach": "X 动态与新闻",
-    "xueqiu": "雪球", "yfinance": "Yahoo Finance 市场数据",
+    "xueqiu": "雪球散户讨论", "x-xreach": "X（推特）公开讨论",
+    "employee-reviews": "匿名员工评价（Blind）",
+    "yfinance": "Yahoo Finance 市场数据",
 }
 
 

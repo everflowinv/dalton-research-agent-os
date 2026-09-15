@@ -1266,7 +1266,7 @@ async function renderTrajectory(sheet,before,reset){
   const rows=r.events.filter(e=>trajFilter==="all"||e.kind===trajFilter);
   if(reset)list.replaceChildren();
   const fragment=document.createDocumentFragment();
-  for(const e of rows.reverse()){
+  for(const e of rows){
     const row=node("div",null,"traj-row");
     row.append(node("time",e.at.slice(11,19)),node("span",TRAJ_KIND_LABELS[e.kind]||e.kind,"traj-kind"),
       node("span",`<span class="st ${e.status==="ok"?"on":e.status==="warn"?"hold":e.status==="failed"?"err":""}" style="display:inline-block;margin-right:6px"></span>${displayText(e.title)}`,"t"));
@@ -1283,7 +1283,7 @@ async function renderTrajectory(sheet,before,reset){
       if(tech)panel.append(tech);
       row.after(panel)};
     fragment.append(row)}
-  if(reset)list.append(fragment);else list.prepend(fragment);
+  if(reset)list.replaceChildren(fragment);else list.append(fragment);
   // waterfall spans
   const waterfall=sheet.querySelector(".traj-waterfall");
   if(waterfall&&reset){
@@ -1293,21 +1293,23 @@ async function renderTrajectory(sheet,before,reset){
     for(const e of r.events){
       const spanEl=node("span",null,"traj-span "+e.status);
       const t=Date.parse(e.at);
-      spanEl.style.left=`${((t-min)/span)*100}%`;spanEl.style.width="4px";
+      spanEl.style.left=`${((t-min)/span)*96}%`;spanEl.style.width="4px";
       spanEl.title=`${e.at.slice(11,19)} ${e.title}`;
-      waterfall.append(spanEl)}}
+      waterfall.append(spanEl)}
+    const tl=node("span",null,"traj-kind");tl.style.cssText="position:absolute;right:6px;top:8px;font-size:11px";
+    tl.textContent="← 早 · 晚 →";waterfall.append(tl)}
   trajOlder=r.older;
   let more=sheet.querySelector(".traj-more");
   if(trajOlder&&!more){more=node("button","加载更早","ghost");more.className="ghost traj-more";
     more.onclick=async()=>{more.disabled=true;await renderTrajectory(sheet,trajOlder,false);more.disabled=false};
     sheet.append(more)}
   else if(!trajOlder&&more)more.remove();
-  if(reset&&trajFollow)requestAnimationFrame(()=>sheet.scrollTop=sheet.scrollHeight);
+  if(reset&&trajFollow)requestAnimationFrame(()=>sheet.scrollTop=0);
 }
 function trajectoryRefreshLoop(){const sheet=document.querySelector(".reader .traj-list");
   if(!sheet){trajTimer=null;return}
   const reader=sheet.closest(".reader");
-  const nearTail=reader.scrollHeight-reader.scrollTop-reader.clientHeight<80;
+  const nearTail=reader.scrollTop<120;
   if(trajFollow&&nearTail)renderTrajectory(reader,null,true).catch(()=>{});
   trajTimer=setTimeout(trajectoryRefreshLoop,15000)}
 $("open-trajectory").onclick=async()=>{openTrajectory();if(trajTimer)clearTimeout(trajTimer);trajTimer=setTimeout(trajectoryRefreshLoop,15000)};

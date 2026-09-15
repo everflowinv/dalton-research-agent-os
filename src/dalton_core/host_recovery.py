@@ -80,13 +80,22 @@ def host_recovery_states(events: Iterable[Mapping[str, Any]], *,
                                  state["delay"] * recovery["backoff_multiplier"])
             state["until"] = when + timedelta(seconds=state["delay"])
             continue
-        if event["outcome"] != "transport_terminal":
+        # 2026-09-15: a retryable failure (timeout, 5xx) or an unknown one
+        # is still the host refusing us.  Counting only terminal outcomes let
+        # nasdaq.com take twenty-nine retryable failures across two URLs in a
+        # day without ever entering the window, which is the exact loop the
+        # owner asked to end.  The distinct-URL guard stays for the one bad
+        # page case; a host that piled up five times that many failures on
+        # any URLs is dead regardless of how few pages they were.
+        if event["outcome"] == "acquired":
             continue
         failures = state["failures"]
         failures.append((when, event["document_ref"]))
         while failures and failures[0][0] < when - timedelta(seconds=window_seconds):
             failures.popleft()
-        if len({ref for _, ref in failures}) >= minimum_distinct_urls:
+        distinct = len({ref for _, ref in failures})
+        if (distinct >= minimum_distinct_urls
+                or len(failures) >= minimum_distinct_urls * 5):
             state["until"] = when + timedelta(seconds=cooldown_seconds)
     result = []
     for host, state in sorted(states.items()):

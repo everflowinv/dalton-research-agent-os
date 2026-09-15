@@ -444,10 +444,19 @@ def _respondent_name(value: Any) -> str:
     second ref because an expert changed jobs.
     """
 
+    # 2026-09-15: the live library anonymizes most respondents -- full_name
+    # is null and the row carries only a title ("Expert", "Vice President",
+    # ...).  Refusing those rows discarded nearly the whole result page, so
+    # the title is the name when the name is withheld; only a row with
+    # neither is refused.
     if isinstance(value, str):
         name = _identity_text(value)
     elif isinstance(value, Mapping):
-        name = _identity_text(str(value.get("full_name") or value.get("name") or ""))
+        name = _identity_text(str(
+            value.get("full_name") or value.get("name") or ""))
+        if not name:
+            title = value.get("title")
+            name = _identity_text(str(title)) if isinstance(title, str) else ""
     else:
         name = ""
     if not name:
