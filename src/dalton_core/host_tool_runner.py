@@ -183,11 +183,16 @@ class HostToolRunner:
         # connector reaches nothing while the template says it reaches a host
         # -- so the transport is checked here, once, rather than trusted.
         kind = self._template["transport"]["kind"]
-        if kind != "host_tool":
+        if kind not in ("host_tool", "public_https"):
             raise HostToolRunError(
                 f"{template_key} is a {kind} connector; the host-tool runner "
                 "only executes host_tool templates"
             )
+        # S3: the crowd's employee-reviews child is a public_https connector
+        # that fetches its one allowlisted host itself, in process.  Running
+        # it through this runner keeps one admission, quota and envelope
+        # path; the network policy stays None because the child's own
+        # contract already names the only host it may touch.
         self._authorities: dict[str, Any] | None = None
 
     # -- approval ---------------------------------------------------------

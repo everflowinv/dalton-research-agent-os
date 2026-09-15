@@ -798,6 +798,7 @@ def build_crowd_source_runner(
     spool: Any,
     actor_ref: str = "automation:coverage-mission",
     clock: Callable[[], datetime] | None = None,
+    credential_resolver: Callable[[str], str] | None = None,
 ) -> Any:
     """A host-tool runner bound to one crowd operation and its child command.
 
@@ -831,6 +832,7 @@ def build_crowd_source_runner(
         credential_slot_refs=identity.get("credential_slot_refs", ()),
         actor_ref=actor_ref,
         clock=clock,
+        credential_resolver=credential_resolver,
     )
 
 
@@ -858,6 +860,38 @@ def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
             return (None if pointer is None
                     else server.coverage_mission.mission(pointer["mission_version_id"]))
 
+        def host_credential_resolver(slot_ref: str) -> str:
+            """Real values the host holds; a binding statement where it does not.
+
+            Xueqiu's cookie lives in agent-reach's own config and is returned
+            verbatim.  X's cookies live in the browser jar that the xreach
+            tool extracts for itself on every run, so those slots answer with
+            the binding route rather than a secret -- the wrapper only
+            forwards values that actually look like tokens.
+            """
+            import re as _re
+
+            try:
+                raw = Path.home().joinpath(
+                    ".agent-reach/config.yaml").read_text(encoding="utf-8")
+            except OSError:
+                raw = ""
+            keys = {
+                "credential-slot:xueqiu-cookie": "xueqiu_cookie",
+                "credential-slot:x-auth-token": "twitter_auth_token",
+                "credential-slot:x-ct0": "twitter_ct0",
+            }
+            key = keys.get(slot_ref)
+            if key:
+                match = _re.search(
+                    "^" + _re.escape(key) + r":\s*(.+?)\s*$", raw, _re.M)
+                if match:
+                    value = match.group(1).strip()
+                    if value[:1] in ("'", '"') and value[-1:] == value[:1]:
+                        value = value[1:-1]
+                    return value
+            return "browser-cookie-jar"
+
         def runner_factory(*, source: str, operation: str, launcher: Any,
                            governance: Any) -> Any:
             return build_crowd_source_runner(
@@ -868,6 +902,7 @@ def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
                 observability=server.observability,
                 spool=getattr(server, "spool", None)
                 or getattr(server, "_transcript_spool", None),
+                credential_resolver=host_credential_resolver,
             )
 
         coordinator = MissionCrowdSourceLaneCoordinator(
