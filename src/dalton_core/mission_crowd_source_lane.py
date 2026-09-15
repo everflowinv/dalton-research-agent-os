@@ -865,7 +865,9 @@ def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
                 governance=governance, store=server.store,
                 connectors=getattr(server, "connectors", None)
                 or getattr(server, "_connectors", None),
-                observability=server.observability, spool=server.spool,
+                observability=server.observability,
+                spool=getattr(server, "spool", None)
+                or getattr(server, "_transcript_spool", None),
             )
 
         coordinator = MissionCrowdSourceLaneCoordinator(
