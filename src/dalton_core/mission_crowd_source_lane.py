@@ -898,6 +898,10 @@ def add_arguments(parser: Any) -> None:
     parser.add_argument("--crowd-source-xreach-tool", default=None)
     parser.add_argument("--crowd-source-credential-grant", default=None,
                         help="host grant envelope naming the cookie slots")
+    parser.add_argument("--crowd-source-xueqiu-credential-grant", default=None,
+                        help="per-source grant envelope for the Xueqiu channel")
+    parser.add_argument("--crowd-source-xreach-credential-grant", default=None,
+                        help="per-source grant envelope for the X/Twitter tool")
     parser.add_argument("--crowd-source-fixture", default=None,
                         help="rehearsal only: replay a captured run")
 
@@ -941,7 +945,9 @@ def build_launcher(args: Any) -> Any | None:
     if xueqiu_paths:
         built["xueqiu"] = XueqiuLauncher(
             state_dir=state_dir, governance_paths=xueqiu_paths,
-            credential_grant_path=args.crowd_source_credential_grant,
+            credential_grant_path=(
+                args.crowd_source_xueqiu_credential_grant
+                or args.crowd_source_credential_grant),
             tool=args.crowd_source_xueqiu_tool,
             fallback_tool=args.crowd_source_xueqiu_fallback_tool,
             mode_args=mode_args,
@@ -950,7 +956,9 @@ def build_launcher(args: Any) -> Any | None:
     if x_paths:
         built["x"] = XreachLauncher(
             state_dir=state_dir, governance_paths=x_paths,
-            credential_grant_path=args.crowd_source_credential_grant,
+            credential_grant_path=(
+                args.crowd_source_xreach_credential_grant
+                or args.crowd_source_credential_grant),
             tool=args.crowd_source_xreach_tool, mode_args=mode_args,
         )
     review_paths = paths("employee-reviews")
@@ -1004,12 +1012,22 @@ def argv_fragment(context: Any) -> list[str]:
     # tool that is not there is a flag that is not passed, and the child
     # refuses that operation by name rather than guessing a path.
     tools = context.state / "host-tools"
-    for flag, name in (("--crowd-source-xueqiu-tool", "agent-reach"),
+    for flag, name in (("--crowd-source-xueqiu-tool", "xueqiu"),
                        ("--crowd-source-xueqiu-fallback-tool", "xueqiu-hot-rank"),
                        ("--crowd-source-xreach-tool", "xreach")):
         tool = tools / name
         if tool.exists():
             argv.extend([flag, str(tool)])
+    # One envelope names one target, and the Xueqiu channel and the X tool are
+    # two targets, so each source carries its own grant from this conventional
+    # directory. Absent files leave the children to refuse by name, exactly as
+    # before.
+    grants = context.state / "credential-grants"
+    for flag, name in (("--crowd-source-xueqiu-credential-grant", "xueqiu.json"),
+                       ("--crowd-source-xreach-credential-grant", "xreach.json")):
+        grant = grants / name
+        if grant.is_file():
+            argv.extend([flag, str(grant)])
     return argv
 
 
