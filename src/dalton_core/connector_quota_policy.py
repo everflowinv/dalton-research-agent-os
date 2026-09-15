@@ -67,7 +67,9 @@ _DAILY_QUOTAS = MappingProxyType(
         ("guidepoint", "search_library"): MappingProxyType(
             {
                 "quota_unit": "search",
-                "daily_unit_limit": 25,
+                # 2026-09-15: owner raised 25 -> 500; the original ceiling
+                # starved real research sweeps.
+                "daily_unit_limit": 500,
                 "max_physical_calls_per_unit": 1,
             }
         ),
@@ -290,33 +292,32 @@ _DAILY_QUOTAS = MappingProxyType(
                 "quota_unit": "search",
                 # One enumeration per window per tick, and a tick walks a few
                 # windows; a few hundred a day is a bug, not a workload.
-                "daily_unit_limit": 500,
+                # 2026-09-15: owner raised 500 -> 5000.
+                "daily_unit_limit": 5_000,
                 "max_physical_calls_per_unit": 1,
             }
         ),
         ("sales-notes", "get_note"): MappingProxyType(
             {
                 "quota_unit": "document",
-                # About twelve notes arrive per run and twenty-four a day. A
-                # thousand covers a full backfill of the whole archive in one
-                # day and still bounds a loop.
-                "daily_unit_limit": 1_000,
+                # 2026-09-15: owner raised 1,000 -> 10,000.
+                "daily_unit_limit": 10_000,
                 "max_physical_calls_per_unit": 1,
             }
         ),
         ("company-wiki", "list_documents"): MappingProxyType(
             {
                 "quota_unit": "search",
-                "daily_unit_limit": 500,
+                # 2026-09-15: owner raised 500 -> 5000.
+                "daily_unit_limit": 5_000,
                 "max_physical_calls_per_unit": 1,
             }
         ),
         ("company-wiki", "get_document"): MappingProxyType(
             {
                 "quota_unit": "document",
-                # The whole corpus is about a thousand documents, so this is
-                # "read everything once" and no more.
-                "daily_unit_limit": 1_000,
+                # 2026-09-15: owner raised 1,000 -> 10,000.
+                "daily_unit_limit": 10_000,
                 "max_physical_calls_per_unit": 1,
             }
         ),
