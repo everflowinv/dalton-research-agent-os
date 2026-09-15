@@ -124,6 +124,14 @@ header.top p{margin:4px 0 0;color:var(--muted)}
 .latest li{padding:6px 0;border-top:1px dashed var(--line)}
 .lanes{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
 .lane{padding:14px;border-radius:14px;background:rgba(0,0,0,.2);border:1px solid var(--line);display:flex;gap:12px;align-items:flex-start}
+.chain-edit{display:flex;gap:10px;align-items:flex-start;flex-wrap:wrap;margin:8px 0}
+.chain-box{flex:1 1 220px;min-width:200px;padding:8px;border-radius:12px;background:rgba(0,0,0,.25);border:1px solid var(--line)}
+.chain-head{color:var(--muted);font-size:12px;margin-bottom:6px}
+.chain-list{display:flex;flex-direction:column;gap:4px}
+.chain-item{display:flex;align-items:center;gap:6px;padding:6px 8px;border-radius:8px;background:rgba(0,0,0,.25);border:1px solid var(--line);cursor:grab}
+.chain-item.sel{border-color:var(--accent,#7aa2f7)}
+.chain-item.over{border-style:dashed}
+.chain-box select{width:100%}
 .lane .st{width:10px;height:10px;min-width:10px;aspect-ratio:1;flex:0 0 10px;border-radius:50%;margin-top:6px;background:var(--dim)}
 .lane .st.on{background:var(--green);animation:pulse 2s infinite}.lane .st.hold{background:var(--amber)}.lane .st.err{background:var(--rose)}
 .lane b{display:block}.lane small{color:var(--muted)}
@@ -838,8 +846,9 @@ function renderOverview(o){
   const t=o.totals,b=o.budgets;
   $("totals").replaceChildren(stat(t.found,"找到的资料","网页、研报、电话会"),stat(t.read,"已读完的资料",`还有 ${t.waiting} 份排队`),stat(t.claims,"入库的结论",t.claims_today?`今天新增 ${t.claims_today} 条`:"今天还没有新增"),
     stat(b.model_calls?`${b.model_calls.used}/${b.model_calls.cap}`:"—","今天的模型调用",b.model_calls?`已花 $${b.model_calls.cost_usd}，上限 $${b.model_calls.cost_cap_usd}`:"未接入"));
-  const researchBudget=node("div",null,"draft"),budgetInputs={};[["max_daily_paid_calls","每日模型调用"],["max_daily_cost_usd","每日费用（美元）"],["max_alphaengine_calls_24h","每日 AlphaEngine 调用"]].forEach(([key,label])=>{const input=document.createElement("input");input.type="number";input.min="0";input.value=g.budget[key];budgetInputs[key]=input;const wrap=node("label");wrap.append(node("span",label,"field-label"),input);researchBudget.append(wrap)});
-  const saveResearchBudget=node("button","保存研究预算","ghost"),researchBudgetStatus=node("span","","status");saveResearchBudget.onclick=async()=>{saveResearchBudget.disabled=true;const budget={};for(const [key,input] of Object.entries(budgetInputs))budget[key]=key==="max_daily_cost_usd"?Number(input.value):Number.parseInt(input.value,10);try{await postJson("/v1/cockpit/research_budget",{mission_ref:g.mission_ref,budget,expected_mission_hash:g.hash});toast("研究预算已同步生效");loadOverview(true)}catch(e){researchBudgetStatus.textContent=readableError(e,"保存研究预算").message;researchBudgetStatus.className="status err";saveResearchBudget.disabled=false}};researchBudget.append(saveResearchBudget,researchBudgetStatus);$("totals").append(researchBudget);
+  const budgetEntry=node("button","模型与预算","ghost");
+  budgetEntry.onclick=openModels;
+  $("totals").append(budgetEntry);
   $("totals-sub").textContent=`截至 ${fmtDate(o.as_of)}`+(b.web?` · 网页搜索今日 ${b.web.spent}/${b.web.cap}`:"")+(b.alphaengine?` · 研报获取 24 小时 ${b.alphaengine.spent}/${b.alphaengine.cap}`:"");
   $("lanes").replaceChildren(...o.activity.lanes.map(l=>{const d=node("div",null,"lane");const cls=laneClassOf(l.status),detail=readableLaneDetail(l.detail);d.append(node("span",null,`st ${cls}`));const c=node("div");c.append(node("b",l.label),node("small",`${laneStatus(l.status,l.detail)} · ${displayText(l.note)}`));if(detail.display)c.append(node("small",detail.display,"raw"));const tech=technicalDetails(detail.technical);if(tech)c.append(tech);d.append(c);return d}));
   const run=$("running");run.replaceChildren(...o.activity.running.map(r=>{const d=node("div",null,"r");d.append(node("span",null,"spin"),node("span",displayText(r.title)+(r.detail?` — ${displayText(r.detail)}`:"")));return d}));
@@ -1057,10 +1066,71 @@ function renderSources(sheet,r){sheet.replaceChildren(readerClose(),node("h2","�
 $("open-models").onclick=openModels;$("hero-models").onclick=openModels;$("workspace-open-models").onclick=openModels;
 async function openModels(){const sheet=prepareReader("研究详情");
   sheet.replaceChildren(node("div","正在读取…","empty"));
-  try{renderModels(sheet,await getJson("/v1/cockpit/models"))}
+  try{const [models,overview]=await Promise.all([getJson("/v1/cockpit/models"),getJson("/v1/cockpit/overview")]);
+    renderModels(sheet,models,overview)}
   catch(e){sheet.replaceChildren(readerClose());showProblem(sheet,e,"读取模型配置")}}
-function renderModels(sheet,r){sheet.replaceChildren(readerClose(),node("h2","每个环节用哪个模型"),
-  node("div","每个环节会说明当前使用的是模型顺序还是候选集。多数修改会在下一次调用生效；需要重启的环节会单独提示。如需恢复原配置，请重新选择原方案。","meta"));
+function tierChainEditor(card,r){
+  /* One tier's fallback chain: left box is the live chain (drag to reorder,
+     select and → to remove), right box is every registered model (select and
+     ← to append). Saving posts the whole chain for the tier. */
+  const choiceNames=new Map(r.choices.map(choice=>[choice.model,choice.display_name]));
+  card.chain.forEach(link=>choiceNames.set(link.model,link.display_name));
+  const picked=card.chain.map(l=>l.model);
+  const box=node("div",null,"chain-edit");
+  const left=node("div",null,"chain-box"),leftHead=node("div","调用顺序（可拖动调整）","chain-head");
+  left.append(leftHead);
+  const right=node("div",null,"chain-box"),rightHead=node("div","备选模型","chain-head");
+  right.append(rightHead);
+  const leftList=node("div",null,"chain-list");leftList.dataset.role="tier-chain";
+  let dragIndex=null;
+  const rerenderLeft=()=>{leftList.replaceChildren();
+    picked.forEach((profileId,index)=>{const item=node("div",null,"chain-item");
+      item.draggable=true;item.dataset.index=String(index);
+      const label=node("span",`${index+1}. ${choiceNames.get(profileId)||profileId}`);
+      const up=node("button","↑","ghost"),down=node("button","↓","ghost"),remove=node("button","移除","ghost");
+      up.type=down.type=remove.type="button";up.setAttribute("aria-label","上移");down.setAttribute("aria-label","下移");
+      up.disabled=index===0;down.disabled=index===picked.length-1;
+      up.onclick=()=>{[picked[index-1],picked[index]]=[picked[index],picked[index-1]];rerenderLeft()};
+      down.onclick=()=>{[picked[index+1],picked[index]]=[picked[index],picked[index+1]];rerenderLeft()};
+      remove.onclick=()=>{picked.splice(index,1);rerenderLeft()};
+      item.ondragstart=()=>{dragIndex=index};
+      item.ondragover=ev=>{ev.preventDefault();item.classList.add("over")};
+      item.ondragleave=()=>item.classList.remove("over");
+      item.ondrop=ev=>{ev.preventDefault();item.classList.remove("over");
+        if(dragIndex===null||dragIndex===index)return;
+        const [moved]=picked.splice(dragIndex,1);picked.splice(index,0,moved);dragIndex=null;rerenderLeft()};
+      item.append(label,up,down,remove);leftList.append(item)});
+    if(!picked.length)leftList.append(node("div","链为空：保存前至少保留一个模型","empty"));
+  };
+  rerenderLeft();
+  left.append(leftList);
+  const rightList=document.createElement("select");rightList.size="8";rightList.multiple=false;
+  rightList.setAttribute("aria-label","备选模型");
+  r.choices.forEach(choice=>{const option=document.createElement("option");option.value=choice.model;
+    option.textContent=`${choice.display_name}${choice.note?"（"+choice.note+"）":""}`;rightList.append(option)});
+  const toChain=node("button","← 加入链尾","ghost"),fromChain=node("button","从链中移除 →","ghost");
+  toChain.type=fromChain.type="button";
+  toChain.onclick=()=>{const model=rightList.value;if(model&&!picked.includes(model)){picked.push(model);rerenderLeft()}};
+  fromChain.onclick=()=>{const selected=leftList.querySelector(".chain-item.sel");
+    if(selected){picked.splice(Number(selected.dataset.index),1);rerenderLeft()}};
+  leftList.onclick=ev=>{const item=ev.target.closest(".chain-item");if(!item)return;
+    leftList.querySelectorAll(".chain-item").forEach(nodeItem=>nodeItem.classList.remove("sel"));
+    if(ev.target.tagName!=="BUTTON")item.classList.add("sel")};
+  const moveRow=node("div",null,"actions");moveRow.append(toChain,fromChain);
+  right.append(rightList);
+  const save=node("button","保存这一类的模型顺序","primary"),st=node("span","","status");
+  save.dataset.role="tier-save";
+  save.onclick=async()=>{if(!picked.length){st.className="status err";st.textContent="链至少需要一个模型";return}
+    save.disabled=true;st.className="status";st.textContent="正在保存…";
+    try{const out=await postJson("/v1/cockpit/model_select",{tier:card.tier,mode:"explicit",chain:[...picked]});
+      const message=out.requires_restart?(out.reload_note||"已保存；该类有常驻服务固定的环节，重启后完全生效"):(out.reload_note||"已生效，下一次调用就用它");
+      st.className="status ok";st.textContent=message;toast(message);openModels()}
+    catch(e){st.className="status err";st.textContent=readableError(e,"保存模型顺序").message;save.disabled=false}};
+  box.append(left,moveRow,right);
+  return {box,save,st};
+}
+function renderModels(sheet,r,overview){sheet.replaceChildren(readerClose(),node("h2","模型与预算"),
+    node("div","三类模型各排一条调用顺序：高阶推理、批量阅读、独立复核。左框是当前顺序（可拖动），右框是备选模型；保存后多数修改在下一次调用生效。","meta"));
   const sharedModels=r.shared_catalog&&Array.isArray(r.shared_catalog.models)?r.shared_catalog.models:[];
   if(sharedModels.length){const shared=node("section");shared.append(node("h3","已有模型连接配置"));sharedModels.forEach(model=>{const row=node("div",null,"lane");row.append(node("span",null,"st wait"));const copy=node("div");copy.append(node("b",model.display_name||"已登记模型"),node("small",[model.provider,model.family_label].filter(Boolean).join(" · ")||"模型信息已登记"),node("small",`能力：${(model.capability_labels||[]).join("、")||"尚未标明"}`,"raw"),node("small","连接配置已登记；研究调用需在本环境配置","raw"));row.append(copy);shared.append(row)});sheet.append(shared)}
   if(!r.available){sheet.append(node("div",r.reason,"empty"));return}
@@ -1070,71 +1140,48 @@ function renderModels(sheet,r){sheet.replaceChildren(readerClose(),node("h2","�
       try{await postJson("/v1/cockpit/model_notice_ack",{ref:n.ref});toast("已记下");openModels();loadApprovals()}
       catch(e){b.disabled=false;toast(readableError(e,"确认通知").message)}};
     d.append(b);sheet.append(d)});
-  const stages=node("section");stages.append(node("h3","环节"));
-  r.purposes.forEach(pp=>{const d=node("div",null,"lane");d.append(node("span",null,"st on"));
-    d.dataset.purpose=pp.purpose;
-    const c=node("div");c.append(node("b",`${pp.label} · ${pp.tier_label}`));
-    const chainSep=pp.mode==="candidate_set"?"、":" → ";
-    c.append(node("small",`现在：${pp.mode_label}${pp.chain.length?" — "+pp.chain.map(l=>`${pp.mode==="candidate_set"?"":l.position+". "}${l.display_name}${l.note?"（"+l.note+"）":""}`).join(chainSep):""}`));
-    c.append(node("small",`配置来源：${pp.configuration_source_label||"当前运行配置"}${pp.requires_restart?" · 修改后需重启相关服务":""}${pp.configuration_status==="configured"&&!pp.editable?" · 当前仅可查看":""}`,"raw"));
-    const configTech=technicalDetails({policy_version_ref:pp.policy_version_ref,configuration_source:pp.configuration_source,configuration_error:pp.configuration_error});if(configTech)c.append(configTech);
-    c.append(node("small",pp.last_served?`上一次：${pp.last_served.display_name} · ${pp.last_served_note}`:pp.last_served_note,"raw"));
-    const routeTech=technicalDetails({profile_ids:pp.chain.map(l=>l.model),last_served_profile_id:pp.last_served&&pp.last_served.model,superseded_profile_ids:pp.superseded_chain});if(routeTech)c.append(routeTech);
-    if(pp.superseded_note)c.append(node("small",pp.superseded_note,"raw"));
-    const row=node("div",null,"actions");
-    const mode=document.createElement("select");
-    mode.dataset.role="model-mode";
-    r.modes.forEach(m=>{const o=document.createElement("option");o.value=m.value;o.textContent=m.label;
-      if(m.value===(pp.mode==="explicit"?"explicit":"tier"))o.selected=true;mode.append(o)});
-    const picked=pp.mode==="explicit"?pp.chain.map(l=>l.model):[],choiceNames=new Map(r.choices.map(choice=>[choice.model,choice.display_name]));
-    pp.chain.forEach(link=>choiceNames.set(link.model,link.display_name));
-    const chooser=document.createElement("select");chooser.setAttribute("aria-label","选择要加入调用顺序的模型");
-    chooser.dataset.role="model-choice";
-    r.choices.forEach(choice=>{const option=document.createElement("option");option.value=choice.model;option.textContent=choice.display_name;chooser.append(option)});
-    const add=node("button","加入顺序","ghost"),pickedView=node("div",null,"meta");add.dataset.role="model-add";pickedView.dataset.role="model-chain";
-    const renderPicked=()=>{pickedView.replaceChildren();picked.forEach((profileId,index)=>{const item=node("span",`${index+1}. ${choiceNames.get(profileId)||"未登记模型"} `);const remove=node("button","移除","ghost");remove.type="button";remove.onclick=()=>{picked.splice(index,1);renderPicked()};item.append(remove);pickedView.append(item)})};renderPicked();
-    add.type="button";add.onclick=()=>{if(chooser.value&&!picked.includes(chooser.value)){picked.push(chooser.value);renderPicked()}};
-    const setChooser=()=>{const disabled=mode.value!=="explicit"||pp.configuration_status!=="configured"||!pp.editable;chooser.disabled=disabled;add.disabled=disabled;pickedView.querySelectorAll("button").forEach(button=>button.disabled=disabled)};
-    if(pp.configuration_status!=="configured"||!pp.editable)mode.disabled=true;
-    mode.onchange=setChooser;setChooser();
-    const save=node("button","保存","primary"),st=node("span","","status");
-    save.dataset.role="model-save";
-    if(pp.configuration_status!=="configured"||!pp.editable)save.disabled=true;
-    save.onclick=async()=>{save.disabled=true;st.className="status";st.textContent="正在保存模型选择…";
-      const chain=[...picked];
-      try{const out=await postJson("/v1/cockpit/model_select",{purpose:pp.purpose,mode:mode.value,chain});
-        const message=out.requires_restart?(out.reload_note||"配置已保存，重启相关服务后生效"):(out.reload_note||"已生效，下一次调用就用它");
-        st.className="status ok";st.textContent=message;toast(message);if(!out.requires_restart)openModels()}
-      catch(e){st.className="status err";st.textContent=readableError(e,"保存模型选择").message;save.disabled=false}};
-    row.append(mode,chooser,add,pickedView,save,st);c.append(row);
-    for(const kind of ["call","run"]){const budget=pp[`${kind}_budget`];
-    if(budget&&budget.editable){
-      const section=node("details"),summary=node("summary",kind==="call"?"调用预算":"每轮任务预算");section.append(summary);
-      section.append(node("small",kind==="call"&&budget.shared_call_cost?"单次费用上限由所有研究环境共享；token 和超时仅作用于当前环境，请分开保存。":"留空沿用默认值。日预算和预算池仍会限制实际开销。","meta"));
-      let fields=kind==="call"?[["max_cost_usd","单次费用上限（美元）","any"],["max_input_tokens","输入额度（token，系统按文本估算）","1"],
-        ["max_output_tokens","输出额度（token）","1"],["timeout_seconds","单次超时（秒）","1"]]:
-        [["max_cost_usd","每轮费用上限（美元）","any"],["max_units","每轮处理单元数","1"],
-         ["max_events","每轮事件数","1"],["max_events_per_company","每家公司事件数","1"],
-         ["max_calls","每轮调用数","1"]].filter(([key])=>(budget.fields||[]).includes(key));
-      if(kind==="call"&&budget.shared_call_cost){const wrap=node("label"),caption=node("span","所有研究环境单次费用上限（美元）","field-label"),cost=document.createElement("input");
-        cost.type="number";cost.min="0";cost.step="any";cost.value=budget.effective?.max_cost_usd??"";wrap.append(caption,cost);section.append(wrap);
-        const saveCost=node("button","保存共享费用上限","ghost"),costMessage=node("span","","status");saveCost.onclick=async()=>{saveCost.disabled=true;
-          try{await postJson("/v1/cockpit/model_budget",{purpose:pp.purpose,kind:"call",budget:{max_cost_usd:Number(cost.value)},expected_config_hash:budget.config_hash,expected_shared_policy_hash:budget.shared_call_cost.policy_hash});toast("共享费用上限已保存，所有环境下次调用生效");openModels()}
-          catch(e){costMessage.textContent=readableError(e,"保存共享费用上限").message;costMessage.className="status err";saveCost.disabled=false}};section.append(saveCost,costMessage);fields=fields.filter(([key])=>key!=="max_cost_usd")}
-      const inputs={},initial={};fields.forEach(([key,label,step])=>{const wrap=node("label",null),caption=node("span",label,"field-label"),input=document.createElement("input");
-        input.type="number";input.min="0";input.step=step;input.value=budget.overrides[key]??"";
-        initial[key]=input.value;
-        input.setAttribute("aria-label",label);input.placeholder=String((budget.effective||budget.general||{})[key]??"沿用运行配置");inputs[key]=input;wrap.append(caption,input);section.append(wrap)});
-      const apply=node("button","保存预算","ghost"),message=node("span","","status");
-      apply.onclick=async()=>{let value={};for(const [key,input] of Object.entries(inputs)){if(input.value.trim())value[key]=Number(input.value)}
-        apply.disabled=true;message.textContent="正在保存预算…";
-        try{const out=await postJson("/v1/cockpit/model_budget",{purpose:pp.purpose,kind,budget:value,expected_config_hash:budget.config_hash,expected_shared_policy_hash:budget.shared_call_cost?.policy_hash});
-          toast(out.requires_restart?"预算已保存，重启相关服务后生效":"预算已保存，下次任务使用新配置");openModels()}
-        catch(e){message.textContent=readableError(e,"保存预算").message;message.className="status err";apply.disabled=false}};
-      section.append(apply,message);c.append(section);
-    }}
+  const stages=node("section");stages.append(node("h3","三类模型"));
+  const cards=r.tier_cards||[];
+  cards.forEach(card=>{const d=node("div",null,"lane");d.dataset.tier=card.tier;
+    d.append(node("span",null,"st on"));
+    const c=node("div");
+    c.append(node("b",`${card.label}`),node("small",`覆盖 ${card.purposes.length} 个环节${card.requires_restart?" · 该类含常驻服务固定的环节，保存后需重启才完全生效":""}`));
+    const editor=tierChainEditor(card,r);
+    c.append(editor.box);
+    const row=node("div",null,"actions");row.append(editor.save,editor.st);c.append(row);
+    const details=node("details"),summary=node("summary","这一类包含哪些环节");details.append(summary);
+    card.purposes.forEach(p=>{details.append(node("small",`${p.label} · ${p.mode_label}${p.requires_restart?" · 修改需重启":""}`,"raw"))});
+    c.append(details);
     d.append(c);stages.append(d)});
   sheet.append(stages);
+  const goal=overview&&overview.goal?overview.goal:null;
+  if(goal&&goal.budget){
+    const section=node("section");section.append(node("h3","预算上限"));
+    section.append(node("div","只保留三道上限：每天总费用、AlphaEngine 搜索次数、每天阅读份数。分项预算池和模型调用次数只做统计，不再拦截。","meta"));
+    const wrap=node("div",null,"lane");wrap.append(node("span",null,"st on"));
+    const c=node("div",null,"draft");const inputs={};
+    [["max_daily_cost_usd","每天总费用上限（美元）","any"],
+     ["max_alphaengine_calls_24h","AlphaEngine 搜索次数上限（每 24 小时）","1"],
+     ["max_daily_document_reads","每天阅读份数上限（留空＝不限）","1"]].forEach(([key,label,step])=>{
+      const field=node("label"),caption=node("span",label,"field-label"),input=document.createElement("input");
+      input.type="number";input.min="0";input.step=step;input.value=goal.budget[key]??"";input.setAttribute("aria-label",label);
+      inputs[key]=input;field.append(caption,input);c.append(field)});
+    const poolsToggle=node("label",null,"check");
+    const poolsBox=document.createElement("input");poolsBox.type="checkbox";poolsBox.checked=goal.budget.pools_enforcement==="off";
+    poolsToggle.append(poolsBox,node("span","分项预算池只统计、不拦截","field-label"));c.append(poolsToggle);
+    const save=node("button","保存预算上限","primary"),st=node("span","","status");
+    save.onclick=async()=>{save.disabled=true;st.className="status";st.textContent="正在保存…";
+      const budget={max_daily_paid_calls:goal.budget.max_daily_paid_calls,
+        max_daily_cost_usd:Number(inputs.max_daily_cost_usd.value||0),
+        max_alphaengine_calls_24h:Number.parseInt(inputs.max_alphaengine_calls_24h.value||"0",10),
+        pools_enforcement:poolsBox.checked?"off":"on"};
+      const reads=inputs.max_daily_document_reads.value.trim();
+      if(reads!=="")budget.max_daily_document_reads=Number.parseInt(reads,10);
+      try{await postJson("/v1/cockpit/research_budget",{mission_ref:goal.mission_ref,budget,expected_mission_hash:goal.hash});
+        st.className="status ok";st.textContent="预算上限已同步生效";toast("预算上限已同步生效");openModels()}
+      catch(e){st.className="status err";st.textContent=readableError(e,"保存预算上限").message;save.disabled=false}};
+    c.append(save,st);wrap.append(c);section.append(wrap);sheet.append(section);
+  }
   const avail=node("section");avail.append(node("h3","可以选的模型"));
   r.choices.forEach(choice=>{const line=node("div",null,"raw");
     line.append(node("span",`${choice.display_name} · 模型家族 ${choice.family_label} · 能力 ${choice.capability_labels.join("、")||"未说明"}${choice.note?"（"+choice.note+"）":""}`));const choiceTech=technicalDetails({profile_id:choice.model,provider:choice.provider,model_ref:choice.model_ref,family:choice.family,capabilities:choice.capabilities,profile_version_ref:choice.profile_version_ref});if(choiceTech)line.append(choiceTech);

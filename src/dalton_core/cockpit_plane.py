@@ -5823,12 +5823,36 @@ class CockpitPlane:
             ),
             key=lambda item: item["model"],
         )
+        # 2026-09-15: the owner edits one chain per tier. The card's chain is
+        # the tier's own chain as the pinned policies declare it -- read from a
+        # purpose that follows the tier, so a per-purpose override never
+        # masquerade as the tier's choice.
+        tier_cards: dict[str, dict[str, Any]] = {}
+        for row in purposes:
+            tier = row["tier"]
+            card = tier_cards.setdefault(tier, {
+                "tier": tier,
+                "label": row["tier_label"],
+                "chain": [],
+                "requires_restart": False,
+                "purposes": [],
+            })
+            card["purposes"].append({
+                "purpose": row["purpose"], "label": row["label"],
+                "mode": row["mode"], "mode_label": row["mode_label"],
+                "requires_restart": row["requires_restart"],
+                "editable": row["editable"],
+            })
+            card["requires_restart"] = card["requires_restart"] or row["requires_restart"]
+            if not card["chain"] and row["mode"] == "tier":
+                card["chain"] = list(row["chain"])
         return {
             "available": True,
             "as_of": _iso(self.clock()),
             "schema_version": SCHEMA_VERSION,
             "policy_version_ref": None,
             "purposes": purposes,
+            "tier_cards": sorted(tier_cards.values(), key=lambda card: card["tier"]),
             "modes": [{"value": mode,
                        "label": MODEL_SELECTION_MODE_LABELS.get(mode, mode)}
                       for mode in SELECTION_MODES],
@@ -6161,9 +6185,12 @@ class CockpitPlane:
         if not isinstance(value, Mapping):
             raise CockpitError("研究预算必须是一个对象")
         budget = value.get("budget")
-        fields = {"max_daily_paid_calls", "max_daily_cost_usd", "max_alphaengine_calls_24h"}
-        if not isinstance(budget, Mapping) or set(budget) != fields:
+        required = {"max_daily_paid_calls", "max_daily_cost_usd", "max_alphaengine_calls_24h"}
+        optional = {"pools_enforcement", "max_daily_document_reads"}
+        if not isinstance(budget, Mapping) or not required <= set(budget) or not set(budget) <= required | optional:
             raise CockpitError("研究预算字段不完整")
+        if "pools_enforcement" in budget and budget["pools_enforcement"] not in ("on", "off"):
+            raise CockpitError("分项预算池的执行开关只接受 on 或 off")
         result = self._governance(login, "set_research_budget_authority_chain", {
             "mission_ref": _text(value.get("mission_ref"), "mission_ref", maximum=160),
             "budget": dict(budget),
@@ -6175,13 +6202,17 @@ class CockpitPlane:
         return result
 
     def select_model(self, login: str, value: Mapping[str, Any]) -> dict[str, Any]:
-        """P14-M2: the owner points one calling stage at a model, or at its tier."""
+        """P14-M2: the owner points one calling stage at a model, or at its tier.
+
+        2026-09-15: a ``tier`` key edits the whole tier (高阶推理 / 批量阅读 /
+        独立复核) in one save instead of one stage at a time.
+        """
 
         from .model_selection import PURPOSE_LABELS, SELECTION_MODES
 
         if not isinstance(value, Mapping):
             raise CockpitError("选择必须是一个对象")
-        purpose = _text(value.get("purpose"), "purpose", maximum=64)
+        tier = value.get("tier")
         mode = _text(value.get("mode"), "mode", maximum=32)
         if mode not in SELECTION_MODES:
             raise CockpitError("请选择“使用系统推荐配置”或“手动指定模型”")
@@ -6192,7 +6223,26 @@ class CockpitPlane:
             raise CockpitError("手动指定的模型必须是模型标识列表")
         if mode == "explicit" and not chain:
             raise CockpitError("手动指定模型时至少需要一个模型，并按调用顺序排列")
-        params: dict[str, Any] = {"purpose": purpose, "mode": mode}
+        if tier is not None:
+            from .model_fallback_chain import purpose_tiers
+            tiers = {held for held in purpose_tiers().values()}
+            tier = _text(tier, "tier", maximum=32)
+            if tier not in tiers:
+                raise CockpitError("模型类别必须是高阶推理、批量阅读或独立复核")
+            params: dict[str, Any] = {"tier": tier, "mode": mode}
+            if mode == "explicit":
+                params["chain"] = [_text(item, "chain[]", maximum=256) for item in chain]
+            result = self._governance(
+                login, "set_model_selection", params, failure="这个选择没有生效")
+            self.journal.record_event(
+                kind="model_selection", title=f"你给「{MODEL_TIER_LABELS[tier]}」整类选了模型",
+                detail=("使用系统推荐配置" if mode == "tier"
+                        else " → ".join(chain)),
+                login=login, refs={"tier": tier, "mode": mode,
+                                   "profile_ids": ",".join(chain)})
+            return {**result, "tier": tier, "label": MODEL_TIER_LABELS[tier]}
+        purpose = _text(value.get("purpose"), "purpose", maximum=64)
+        params = {"purpose": purpose, "mode": mode}
         if mode == "explicit":
             params["chain"] = [_text(item, "chain[]", maximum=256) for item in chain]
         result = self._governance(

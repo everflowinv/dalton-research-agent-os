@@ -43,6 +43,7 @@ from .model_fallback_chain import (
     FallbackChainError,
     purpose_selection,
     purpose_tiers,
+    tier_chain,
     tier_for,
     validate_selection,
 )
@@ -534,6 +535,225 @@ def publish_selection(
         "policy_version_ref": wire["policy_version_ref"],
         "prior_version_ref": wire["prior_version_ref"],
         **checked,
+    }
+
+
+def publish_tier_selection(
+    router: ModelRouter,
+    *,
+    policy_version_ref: str,
+    tier: str,
+    mode: str,
+    chain: Sequence[str] = (),
+    actor_ref: str | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Append the routing-policy version that carries one *tier* selection.
+
+    The 2026-09-15 owner simplification edits models per tier -- one chain for
+    every high-order reasoning stage, one for batch reading, one for
+    independent verification -- rather than per purpose.  The tier's chain is
+    written into ``fallback_chains.tiers`` and every per-purpose override in
+    that tier is dropped, so a tier edit means exactly what it says: all of
+    the tier's stages follow the new chain.  Validation runs against a
+    representative purpose of the tier so family independence and verifier
+    lineage rules keep applying unchanged.
+    """
+
+    members = sorted(name for name, held in purpose_tiers().items() if held == tier)
+    if not members:
+        raise ModelSelectionError(f"{tier} is not a model tier this Core knows about")
+    links = list(tier_chain(tier)) if mode == "tier" else [str(item) for item in chain]
+    checked = validate_selection(
+        router, purpose=members[0], mode="explicit", chain=links,
+    )
+    pinned = router.get_policy(policy_version_ref)
+    latest = _latest_policy(router, pinned["id"])
+    overrides = {
+        name: entry
+        for name, entry in (pinned.get("purpose_overrides") or {}).items()
+        if tier_for(name) != tier
+    }
+    chains = dict((pinned.get("fallback_chains") or {}).get("tiers") or {})
+    chains[tier] = list(links)
+    wire = {
+        key: value for key, value in pinned.items() if key not in _VERSION_KEYS
+    }
+    # The router refuses an empty overrides object, so the key disappears
+    # entirely when a tier edit was the last override standing.
+    if overrides:
+        wire["purpose_overrides"] = overrides
+    else:
+        wire.pop("purpose_overrides", None)
+    wire["fallback_chains"] = {
+        **(pinned.get("fallback_chains") or {}),
+        "tiers": chains,
+    }
+    if actor_ref:
+        wire["tier_selections"] = {
+            **(pinned.get("tier_selections") or {}),
+            tier: {"chain": list(links), "actor_ref": actor_ref},
+        }
+    comparable = {
+        key: value for key, value in latest.items() if key not in _VERSION_KEYS
+    }
+    if canonical_json(comparable) == canonical_json(wire):
+        return {
+            "status": "duplicate",
+            "policy_id": pinned["id"],
+            "policy_version_ref": latest["policy_version_ref"],
+            "prior_version_ref": latest["prior_version_ref"],
+            "tier": tier,
+            "mode": mode,
+            "chain": list(links),
+        }
+    if latest["policy_version_ref"] != pinned["policy_version_ref"]:
+        raise ModelSelectionError(
+            f"{pinned['id']} has moved on since this was read "
+            f"({latest['policy_version_ref']} is current); read it again and "
+            "choose against that"
+        )
+    wire.update({
+        "version": int(latest["version"]) + 1,
+        "prior_version_ref": latest["policy_version_ref"],
+        "policy_version_ref": _next_version_ref(latest),
+        "created_at": (now or datetime.now(timezone.utc)).isoformat(
+            timespec="microseconds"
+        ),
+    })
+    wire["content_hash"] = content_hash(wire)
+    result = router.register_policy(wire)
+    if result["status"] == "conflict":
+        raise ModelSelectionError(result.get("reason", "the policy version conflicted"))
+    return {
+        "status": result["status"],
+        "policy_id": pinned["id"],
+        "policy_version_ref": wire["policy_version_ref"],
+        "prior_version_ref": wire["prior_version_ref"],
+        "tier": tier,
+        "mode": mode,
+        "chain": list(links),
+    }
+
+
+def set_tier_selection(
+    state_dir: str | Path,
+    *,
+    tier: str,
+    mode: str,
+    chain: Sequence[str] = (),
+    actor_ref: str | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Publish one tier's chain and repoint every model configuration at it.
+
+    Same shape as :func:`set_model_selection`, but the subject is the tier:
+    every registered configuration is repointed regardless of which purpose
+    its lane serves, and the restart note reflects whether any purpose of the
+    tier is pinned by a resident service configuration.
+    """
+
+    members = sorted(name for name, held in purpose_tiers().items() if held == tier)
+    if not members:
+        raise ModelSelectionError(f"{tier} is not a model tier this Core knows about")
+    configs = model_configs(state_dir)
+    runtimes: list[dict[str, Any]] = []
+    for purpose in members:
+        runtime = _runtime_policy_config(state_dir, purpose)
+        if runtime is not None and all(
+            runtime["path"] != seen["path"] for seen in runtimes
+        ):
+            runtimes.append(runtime)
+    configs = [*configs, *runtimes]
+    if not configs:
+        raise ModelSelectionError(
+            "this machine has no model configuration to point at a selection"
+        )
+    published: dict[tuple[str, str], dict[str, Any]] = {}
+    prepared: list[tuple[dict[str, Any], str, str, str]] = []
+    repointed: list[str] = []
+    unchanged: list[str] = []
+    # Validate every router and pinned policy before appending any immutable
+    # version. An invalid late config must not leave half the roles selected.
+    for item in configs:
+        config = item.get("runtime_config", item["config"])
+        policy_ref = config[item.get("field", "routing_policy_ref")]
+        router_db = item.get("router_db", config.get("model_router_db"))
+        if not isinstance(router_db, str) or not Path(router_db).is_file():
+            raise ModelSelectionError(
+                f"{item['name']} names a model router database that is not here"
+            )
+        with ModelRouter(router_db, read_only=True) as router:
+            pinned = router.get_policy(policy_ref)
+            latest = _latest_policy(router, pinned["id"])
+            try:
+                validate_selection(
+                    router, purpose=members[0],
+                    mode="explicit",
+                    chain=list(chain) if mode == "explicit" else list(tier_chain(tier)),
+                )
+            except FallbackChainError as exc:
+                raise ModelSelectionError(str(exc)) from exc
+        prepared.append((item, router_db, pinned["id"], latest["policy_version_ref"]))
+    for item, router_db, policy_id, latest_ref in prepared:
+        config = item.get("runtime_config", item["config"])
+        policy_ref = config[item.get("field", "routing_policy_ref")]
+        key = (router_db, policy_id)
+        if key not in published:
+            with ModelRouter(router_db) as router:
+                try:
+                    published[key] = publish_tier_selection(
+                        router,
+                        policy_version_ref=latest_ref,
+                        tier=tier, mode=mode, chain=chain,
+                        actor_ref=actor_ref, now=now,
+                    )
+                except FallbackChainError as exc:
+                    raise ModelSelectionError(str(exc)) from exc
+        outcome = published[key]
+        new_ref = outcome["policy_version_ref"]
+        changed = new_ref != policy_ref
+        config[item.get("field", "routing_policy_ref")] = new_ref
+        with ModelRouter(router_db, read_only=True) as router:
+            profiles = {row["id"]: row for row in router.latest_profiles()}
+        selected_slots = [profiles[profile_id]["credential_slot_ref"]
+                          for profile_id in outcome["chain"]]
+        slots_field = item.get("slots_field", "credential_slot_refs")
+        prior_slots = list(config.get(slots_field) or [])
+        merged_slots = list(dict.fromkeys([*prior_slots, *selected_slots]))
+        if merged_slots != prior_slots:
+            config[slots_field] = merged_slots
+            changed = True
+        (repointed if changed else unchanged).append(item["name"])
+    _write_configs_atomically([
+        (item["path"], item["config"])
+        for item in configs if item["name"] in repointed
+    ])
+    versions = sorted(
+        {
+            (outcome["policy_id"], outcome["policy_version_ref"], outcome["status"])
+            for outcome in published.values()
+        }
+    )
+    return {
+        "status": "published" if repointed else "unchanged",
+        "tier": tier,
+        "mode": mode,
+        "actor_ref": actor_ref,
+        "chain": list(chain) if mode == "explicit" else list(tier_chain(tier)),
+        "purposes": members,
+        "policy_versions": [
+            {"policy_id": policy_id, "policy_version_ref": ref, "publication": status}
+            for policy_id, ref, status in versions
+        ],
+        "model_configs_repointed": repointed,
+        "model_configs_unchanged": unchanged,
+        "requires_restart": bool(runtimes),
+        "reload_note": (
+            ("该类里有常驻服务固定的环节，需要重启常驻服务后完全生效；service.json 已原子更新。" if runtimes
+             else "不用重启：每条流水线下一次调用时会读到新的策略版本。")
+            + "回滚就是把上一版的选择再发布一次。"
+        ),
     }
 
 

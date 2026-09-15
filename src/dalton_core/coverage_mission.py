@@ -550,7 +550,13 @@ def validate_mission_body(value: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(body["budget"], Mapping):
         raise CoverageMissionValidationError("budget must be an object")
     budget = dict(body["budget"])
-    optional_budget = {"pools", "max_alphaengine_probe_calls_24h"}
+    optional_budget = {
+        "pools", "max_alphaengine_probe_calls_24h",
+        # 2026-09-15 owner simplification: sub-pool caps may report spend
+        # without refusing, and reading may carry its own document-per-day
+        # stopper independent of money.
+        "pools_enforcement", "max_daily_document_reads",
+    }
     if not required_budget.issubset(budget) or not set(budget).issubset(
         required_budget | optional_budget
     ):
@@ -565,6 +571,17 @@ def validate_mission_body(value: Mapping[str, Any]) -> dict[str, Any]:
             budget["max_alphaengine_calls_24h"], "budget.max_alphaengine_calls_24h"
         ),
     }
+    if "pools_enforcement" in budget:
+        if budget["pools_enforcement"] not in ("on", "off"):
+            raise CoverageMissionValidationError(
+                "budget.pools_enforcement must be 'on' or 'off'"
+            )
+        validated_budget["pools_enforcement"] = budget["pools_enforcement"]
+    if "max_daily_document_reads" in budget:
+        validated_budget["max_daily_document_reads"] = _non_negative_int(
+            budget["max_daily_document_reads"],
+            "budget.max_daily_document_reads",
+        )
     if "pools" in budget:
         from .budget_pools import BudgetPoolError, pool_caps
 

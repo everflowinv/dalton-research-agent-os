@@ -439,6 +439,15 @@ def run_extraction(
                             stop_reason = "max_windows"
                             complete = False
                             break
+                        if not _daily_read_admit(
+                            host.store.connection, mission, review["document_ref"],
+                        ):
+                            # The owner's document-per-day reading stopper.
+                            # Soft like max_windows: the review stays open and
+                            # the next day (UTC) picks it up where it left off.
+                            stop_reason = "daily_read_limit"
+                            complete = False
+                            break
                         result = service.generate(
                             review_id=review["review_id"], expected_review_hash=review_hash, offset=offset,
                             expected_context_hash=context["content_hash"], actor_ref=actor,
@@ -617,6 +626,46 @@ _PERMANENT_UNREADABLE = (
     "requires a password and is not rendered",
     "gzip content is incomplete or invalid",
 )
+
+
+def _daily_read_admit(
+    connection: Any, mission: Mapping[str, Any], document_ref: str,
+) -> bool:
+    """Whether one more distinct document may start reading today (UTC).
+
+    The owner's 2026-09-15 simplification keeps three stoppers -- the day's
+    money, the AlphaEngine call count, and this document-per-day reading cap.
+    A mission without ``max_daily_document_reads`` never stops here, and a
+    document already started today (the run that hit the cap mid-document
+    resumes it) never counts twice.
+    """
+
+    budget = mission.get("budget") or {}
+    cap = budget.get("max_daily_document_reads")
+    if cap is None:
+        return True
+    day = datetime.now(timezone.utc).date().isoformat()
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS document_extraction_daily_reads ("
+        "day TEXT NOT NULL, document_ref TEXT NOT NULL, "
+        "PRIMARY KEY (day, document_ref)) WITHOUT ROWID"
+    )
+    present = connection.execute(
+        "SELECT 1 FROM document_extraction_daily_reads WHERE day=? AND document_ref=?",
+        (day, document_ref),
+    ).fetchone()
+    if present is not None:
+        return True  # already started today; a capped-out run resumes it
+    counted = connection.execute(
+        "SELECT COUNT(*) FROM document_extraction_daily_reads WHERE day=?", (day,),
+    ).fetchone()[0]
+    if counted >= int(cap):
+        return False
+    connection.execute(
+        "INSERT INTO document_extraction_daily_reads (day, document_ref) VALUES (?, ?)",
+        (day, document_ref),
+    )
+    return True
 
 
 def _permanently_unreadable(reason: str, *, offset: int | None = None) -> bool:

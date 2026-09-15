@@ -407,6 +407,12 @@ def mission_pool_scope(
         "pool": _pool_name(pool),
         "pool_caps_micros": dict(caps["caps_micros"]),
     }
+    # 2026-09-15: the owner runs the sub-pools as statistics, not stoppers.
+    # The caps keep travelling with every admission so the cockpit still
+    # reports each lane's share of the day; "off" only removes the refusal.
+    enforcement = mission["budget"].get("pools_enforcement")
+    if enforcement is not None:
+        scope["pool_enforcement"] = str(enforcement)
     who = lane or operation or purpose
     if who:
         scope["pool_lane"] = str(who)
@@ -737,7 +743,7 @@ def pool_decision(
     spent = int(spend.get(pool, 0)) + int(lent.get(pool, 0))
     shortfall = spent + int(reserved_micros) - cap
     borrowed: dict[str, int] = {}
-    if shortfall > 0:
+    if shortfall > 0 and mission_binding.get("pool_enforcement") != "off":
         offers = borrowable_micros(
             pool, spend, caps, now=now, day=day, lent=lent,
         )

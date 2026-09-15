@@ -53,6 +53,7 @@ from dalton_core.model_selection import (
     record_retirement_notices,
     retirement_fallbacks,
     set_model_selection,
+    set_tier_selection,
 )
 from dalton_core.model_configurations import model_config_names
 from dalton_core.openclaw_allow_patch import (
@@ -559,6 +560,44 @@ class StateDirectoryCase(RouterCase):
 
     def stored(self) -> dict:
         return json.loads(self.config_path.read_text(encoding="utf-8"))
+
+
+class SetTierSelectionTests(StateDirectoryCase):
+    """2026-09-15: one chain per tier replaces per-purpose picking."""
+
+    def test_tier_selection_replaces_overrides_and_repoints_configs(self) -> None:
+        from dalton_core.model_router import policy_chain
+
+        set_model_selection(
+            self.root, purpose="ask", mode="explicit",
+            chain=["profile:claude-fable-5-1"], now=NOW)
+        result = set_tier_selection(
+            self.root, tier="brain", mode="explicit",
+            chain=["profile:gpt-6-astra", "profile:claude-fable-5-1"], now=NOW)
+        self.assertEqual(result["status"], "published")
+        self.assertIn("plan", result["purposes"])
+        self.assertFalse(result["requires_restart"])
+        config = self.stored()
+        policy = self.router.get_policy(config["routing_policy_ref"])
+        for purpose in ("ask", "dossier", "plan"):
+            resolved = policy_chain(policy, tier="brain", purpose=purpose)
+            self.assertEqual(
+                resolved["chain"],
+                ("profile:gpt-6-astra", "profile:claude-fable-5-1"), purpose)
+        self.assertNotIn("ask", policy.get("purpose_overrides") or {})
+
+    def test_saving_the_same_tier_chain_again_changes_nothing(self) -> None:
+        chain = list(tier_chain("brain"))
+        set_tier_selection(self.root, tier="brain", mode="explicit",
+                           chain=chain, now=NOW)
+        result = set_tier_selection(self.root, tier="brain", mode="explicit",
+                                    chain=chain, now=NOW)
+        self.assertEqual(result["status"], "unchanged")
+
+    def test_an_unknown_tier_is_refused(self) -> None:
+        with self.assertRaises(ModelSelectionError):
+            set_tier_selection(self.root, tier="premium", mode="explicit",
+                               chain=["profile:gpt-6-astra"], now=NOW)
 
 
 class SetSelectionTests(StateDirectoryCase):
@@ -2026,10 +2065,13 @@ class CockpitModelPageTests(unittest.TestCase):
         self.assertEqual({link["model"] for link in row["chain"]}, set(profiles))
         page = (Path(__file__).resolve().parents[1]
                 / "src/dalton_core/cockpit_control.html").read_text("utf-8")
-        self.assertIn('pp.mode==="candidate_set"?"、":" → "', page)
+        # 2026-09-15: the page edits one chain per tier instead of one per
+        # purpose; candidate_set rendering lives in the tier card payload.
+        self.assertIn("tierChainEditor", page)
+        self.assertIn('postJson("/v1/cockpit/model_select",{tier:card.tier', page)
         self.assertIn("option.value=choice.model", page)
-        self.assertIn("option.textContent=choice.display_name", page)
-        self.assertIn("const chain=[...picked]", page)
+        self.assertIn("choice.display_name", page)
+        self.assertIn("chain:[...picked]", page)
         self.assertNotIn('picked.value=pp.mode==="explicit"', page)
 
     def test_one_unresolved_binding_does_not_hide_the_other_stages(self) -> None:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-FINAL_TEXT_RULES_VERSION = "simplified-chinese-research-prose:0.3"
+FINAL_TEXT_RULES_VERSION = "simplified-chinese-research-prose:0.4"
 
 
 def final_text_instructions() -> tuple[str, ...]:
@@ -29,6 +29,20 @@ def final_text_instructions() -> tuple[str, ...]:
         "Combine overlapping caveats. Do not repeat defensive pairs such as '这不证明……、不能"
         "据此……、不作为……' when one precise limitation says the same thing. Do not pad every "
         "paragraph with both sides after the preferred case is clear.",
+        "The reader sees only the current version. Never write about versions in the body: no "
+        "prior-version phrasing (上一·版 / 前一版 / 本次更新 / 相比之前 / 新版、旧版) or "
+        "equivalent. Judge prior "
+        "material silently -- carry forward what still holds, revise what changed -- and state "
+        "today's view as the view, full stop. Process notes about revisions belong in the "
+        "system's review workflow, never in the deliverable.",
+        "Paragraph the prose for reading. Each section body is split into paragraphs of two to "
+        "five sentences, one theme per paragraph with a blank line between them; a single "
+        "unbroken block of prose is a defect. Do not number paragraphs or write ordered lists.",
+        "State what is, not what is not. Defensive negations -- '不是', '不能', '不代表', "
+        "'不等于', '并非', '而非', '无法', '不再', '不必', '并不' -- are banned from final "
+        "prose unless the negation itself carries the research meaning (a genuine contradiction, "
+        "a hard refusal, or a boundary the reader must know). Rewrite around the positive "
+        "statement: '增速不代表改善' → '增速放缓，成分仍以价格贡献为主'.",
         "Preserve the meaning of genuine gaps, source boundaries, numerical limits, approval "
         "boundaries and refusals. Never invent a fact, source, number, approval or completed action "
         "to make the Chinese more decisive. Keep authoritative numeric values unchanged; for "

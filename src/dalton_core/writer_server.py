@@ -776,8 +776,10 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     }),
     # P14-M2. ``chain`` is only meaningful with ``mode: "explicit"``; the
     # selection validator refuses the two together in the other direction, so
-    # a page that sent both would be told which one it meant.
-    "set_model_selection": frozenset({"purpose", "mode", "chain", "actor_ref"}),
+    # a page that sent both would be told which one it meant.  ``tier`` is the
+    # 2026-09-15 whole-tier edit and stands in for ``purpose``.
+    "set_model_selection": frozenset({
+        "purpose", "tier", "mode", "chain", "actor_ref"}),
     "set_model_call_budget": frozenset({"purpose", "kind", "budget", "expected_config_hash", "actor_ref"}),
     "set_research_budget_authority_chain": frozenset({"mission_ref", "budget", "expected_mission_hash", "actor_ref"}),
     # No path parameter. The file this writes is named by the writer's own
@@ -3085,8 +3087,10 @@ class WriterServer:
         if mission["content_hash"] != p["expected_mission_hash"]:
             raise IdempotencyConflict("mission changed; reload before saving budget")
         fields = {"max_daily_paid_calls", "max_daily_cost_usd", "max_alphaengine_calls_24h"}
+        optional_fields = {"pools_enforcement", "max_daily_document_reads"}
         budget = p["budget"]
-        if not isinstance(budget, Mapping) or set(budget) != fields:
+        if (not isinstance(budget, Mapping) or not fields <= set(budget)
+                or not set(budget) <= fields | optional_fields):
             raise ValidationError("research budget has an invalid closed shape")
         # Reuse mission validation before publishing any authority.
         prospective = {**mission["budget"], **budget}
@@ -3351,7 +3355,9 @@ class WriterServer:
         produces a Claim.
         """
 
-        from .model_selection import ModelSelectionError, set_model_selection
+        from .model_selection import (
+            ModelSelectionError, set_model_selection, set_tier_selection,
+        )
 
         values = dict(p)
         mode = values.get("mode")
@@ -3361,6 +3367,27 @@ class WriterServer:
         ):
             raise WriterServerError("chain must be a list of profile ids")
         try:
+            if values.get("tier") is not None:
+                # 2026-09-15: the owner edits one chain per tier (reasoning,
+                # reading, verification) rather than per calling stage.
+                result = set_tier_selection(
+                    self.state_dir,
+                    tier=str(values["tier"]),
+                    mode=str(mode),
+                    chain=chain,
+                    actor_ref=str(values["actor_ref"]),
+                )
+                if "plan" in result.get("purposes", []):
+                    applied, reason = self._reload_planner_model_config()
+                    result = {
+                        **result,
+                        "requires_restart": result.get("requires_restart") or not applied,
+                        "reload_note": (
+                            "已用于下一次规划调用。"
+                            if applied else reason
+                        ),
+                    }
+                return result
             result = set_model_selection(
                 self.state_dir,
                 purpose=str(values["purpose"]),

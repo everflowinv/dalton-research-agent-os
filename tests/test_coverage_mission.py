@@ -661,3 +661,48 @@ class StageLadderAcrossVersionsTests(MissionHarness):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SimplifiedBudgetFieldsTests(unittest.TestCase):
+    """2026-09-15: pools may report without refusing; reading has its own cap."""
+
+    @staticmethod
+    def body(**budget_extra):
+        from tests.p9a_fixtures import mission_params, bootstrap_method_authorities
+        import tempfile
+        from pathlib import Path
+        from dalton_core.store import DaltonStore
+        with tempfile.TemporaryDirectory() as directory:
+            store = DaltonStore(str(Path(directory) / "core.sqlite"))
+            try:
+                state = bootstrap_method_authorities(store)
+                params = mission_params(state)
+                params.pop("mission_ref")
+                budget = dict(params["budget"])
+                budget.update(budget_extra)
+                return {
+                    "title": params["title"], "objective": params["objective"],
+                    "industry_ref": params["industry_ref"],
+                    "universe": params["universe"],
+                    "research_questions": params["research_questions"],
+                    "deliverables": params["deliverables"],
+                    "source_plan": params["source_plan"],
+                    "bindings": params["bindings"], "autonomy": params["autonomy"],
+                    "budget": budget,
+                }
+            finally:
+                store.close()
+
+    def test_pools_enforcement_and_document_reads_are_accepted(self):
+        from dalton_core.coverage_mission import validate_mission_body
+        validated = validate_mission_body(self.body(
+            pools_enforcement="off", max_daily_document_reads=500))["budget"]
+        self.assertEqual(validated["pools_enforcement"], "off")
+        self.assertEqual(validated["max_daily_document_reads"], 500)
+
+    def test_unknown_enforcement_word_is_refused(self):
+        from dalton_core.coverage_mission import (
+            CoverageMissionValidationError, validate_mission_body,
+        )
+        with self.assertRaises(CoverageMissionValidationError):
+            validate_mission_body(self.body(pools_enforcement="sometimes"))

@@ -358,8 +358,13 @@ class ThesisImpactBudgetStore:
             # four capacity pools this call spends from, the caps are that
             # mission version's split of the day, and the lane is who asked --
             # recorded so the cockpit can name who ran out rather than only
-            # that somebody did.
-            optional = {"outer_budget", "pool", "pool_caps_micros", "pool_lane"}
+            # that somebody did.  ``pool_enforcement`` rides along from the
+            # 2026-09-15 simplification: "off" means the caps report spend
+            # and never refuse.
+            optional = {
+                "outer_budget", "pool", "pool_caps_micros", "pool_lane",
+                "pool_enforcement",
+            }
             if not fields <= set(mission_binding) or set(mission_binding) - fields - optional:
                 raise ThesisImpactBudgetValidationError("invalid mission budget binding")
             if ("pool" in mission_binding) != ("pool_caps_micros" in mission_binding):

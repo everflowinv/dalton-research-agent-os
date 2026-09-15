@@ -192,7 +192,7 @@ class CockpitLanguageTests(unittest.TestCase):
         text = HTML.read_text(encoding="utf-8")
         for expected in (
             "允许使用", "已允许使用", "模型信息已保存并生效",
-            "多数修改会在下一次调用生效", "历史修订申请",
+            "保存后多数修改在下一次调用生效", "历史修订申请",
             "本次没有形成可发布的调整",
         ):
             self.assertIn(expected, text)
@@ -206,7 +206,8 @@ class CockpitLanguageTests(unittest.TestCase):
     def test_approval_and_model_actions_avoid_internal_language(self) -> None:
         frontend = HTML.read_text(encoding="utf-8")
         backend = Path(__import__("dalton_core.cockpit_plane", fromlist=["x"]).__file__).read_text(encoding="utf-8")
-        self.assertIn("正在保存模型选择…", frontend)
+        self.assertIn("正在保存…", frontend)
+        self.assertIn("保存这一类的模型顺序", frontend)
         for expected in ("投资备忘录：是否批准进入持续覆盖",
                          "等待正式研究审批流程接入；本页暂不能提交决定",
                          "暂缓决定论点修订", "重新出具初步筛查报告"):

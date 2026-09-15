@@ -246,6 +246,21 @@ class PoolAdmissionTests(unittest.TestCase):
         ).fetchone()
         self.assertEqual((row["pool"], row["pool_lane"]), ("adhoc", "lane:x"))
 
+    def test_pools_enforcement_off_admits_past_the_cap_and_keeps_counting(self) -> None:
+        # 2026-09-15 owner simplification: the four pools report spend without
+        # refusing; only the day cap still binds.
+        mission_off = {**self.mission, "budget": {
+            **self.mission["budget"], "pools_enforcement": "off"}}
+        self.mission = mission_off
+        self.admit("one", "adhoc", 2_400_000)
+        past_cap = self.admit("two", "adhoc", 2_400_000)
+        self.assertEqual(past_cap["status"], "fresh")
+        self.assertEqual(past_cap["pool"], "adhoc")
+        status = pool_status(
+            self.store, mission=mission_off, day=DAY)
+        adhoc = status["pools"]["adhoc"]
+        self.assertGreater(adhoc["spent_micros"], adhoc["cap_micros"])
+
     def test_a_spent_pool_is_returned_not_raised(self) -> None:
         self.admit("one", "adhoc", 2_400_000)
         refused = self.admit("two", "adhoc", 200_000)

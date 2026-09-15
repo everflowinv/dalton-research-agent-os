@@ -756,3 +756,30 @@ class HostKeepaliveTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DailyReadGateTests(unittest.TestCase):
+    """2026-09-15: the owner's document-per-day reading stopper."""
+
+    def setUp(self) -> None:
+        import sqlite3
+        self.connection = sqlite3.connect(":memory:")
+        self.connection.row_factory = sqlite3.Row
+        self.addCleanup(self.connection.close)
+        self.mission = {"budget": {"max_daily_document_reads": 2}}
+
+    def test_a_missing_cap_never_stops_reading(self):
+        from dalton_core.document_extraction_cli import _daily_read_admit
+        self.assertTrue(_daily_read_admit(
+            self.connection, {"budget": {}}, "alphaengine-doc:1"))
+
+    def test_the_cap_counts_distinct_documents_and_resumes_started_ones(self):
+        from dalton_core.document_extraction_cli import _daily_read_admit
+        self.assertTrue(_daily_read_admit(self.connection, self.mission, "doc:1"))
+        self.assertTrue(_daily_read_admit(self.connection, self.mission, "doc:2"))
+        self.assertFalse(_daily_read_admit(self.connection, self.mission, "doc:3"))
+        # A document already started today always finishes, cap or no cap.
+        self.assertTrue(_daily_read_admit(self.connection, self.mission, "doc:1"))
+        counted = self.connection.execute(
+            "SELECT COUNT(*) FROM document_extraction_daily_reads").fetchone()[0]
+        self.assertEqual(counted, 2)

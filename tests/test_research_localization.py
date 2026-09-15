@@ -67,7 +67,7 @@ class ResearchLocalizationTests(unittest.TestCase):
     unknown["content_hash"] = hashlib.sha256((json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode()).hexdigest()
     with self.assertRaisesRegex(ResearchLocalizationError, "identity is unsupported"):
         validate_localization(source, unknown)
-    self.assertEqual(current["rules_version"], "simplified-chinese-research-prose:0.3")
+    self.assertEqual(current["rules_version"], "simplified-chinese-research-prose:0.4")
 
  def test_localization_rejects_source_drift_added_number_and_unclean_verifier(self):
     source = product()
