@@ -894,6 +894,10 @@ class AgendaControlApplication:
         # Dalton has not been let at, and what changed underneath us.
         if path == "/v1/cockpit/models":
             return {**plane.models(), "enabled": True}
+        # 2026-09-15: the owner asked to SEE what the system is doing, in the
+        # style of a harness trajectory view -- the steps, not a lane table.
+        if path == "/v1/cockpit/trajectory":
+            return plane.trajectory()
         # INT2 / Q2: 每周回头看 -- the latest week's "我们把时间花在哪".
         if path == "/v1/cockpit/ops":
             # P17d 运维待办: what is parked on which dependency. Read-only and

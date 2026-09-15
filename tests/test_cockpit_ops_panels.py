@@ -554,3 +554,19 @@ class PageTests(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+class TrajectoryPageTests(unittest.TestCase):
+    """2026-09-15: the harness-style trajectory ledger."""
+
+    def setUp(self) -> None:
+        self.page = (Path(__file__).resolve().parents[1]
+                     / "src/dalton_core/cockpit_control.html").read_text("utf-8")
+
+    def test_log_view_links_the_trajectory_and_page_renders_ledger(self) -> None:
+        self.assertIn('id="open-trajectory"', self.page)
+        self.assertIn("traj-waterfall", self.page)
+        self.assertIn("traj-list", self.page)
+        self.assertIn("/v1/cockpit/trajectory", self.page)
+        self.assertIn("加载更早", self.page)
+        self.assertIn("跟随最新", self.page)

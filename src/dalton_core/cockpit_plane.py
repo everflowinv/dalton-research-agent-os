@@ -1543,6 +1543,26 @@ MODEL_SELECTION_MODE_LABELS = {
     "policy_filters": "由当前策略筛选模型",
     "tier_preview": "默认档位预览（尚未绑定策略）",
 }
+WORK_STATE_LABELS = {
+    "ready": "排队", "leased": "开始执行", "succeeded": "完成",
+    "failed": "失败", "deferred": "延后", "cancelled": "取消",
+}
+SKIP_REASON_LABELS = {
+    "budget_refused": "当时预算未放行",
+    "profile_retired": "模型已下线",
+    "profile_not_allowed": "该环境未获授权使用此模型",
+    "credential_slot_unavailable": "对应渠道凭证暂不可用",
+    "capability_not_supported": "模型能力不符",
+    "profile_not_available": "网关当前不提供",
+    "unknown_send": "发送状态未知，已保守跳过",
+    "verify_not_independent": "与产出方同家族，不能复核",
+}
+BUDGET_REASON_LABELS = {
+    "owner_budget_exceeded": "当日总预算已用完",
+    "mission_budget_exceeded": "任务当日额度已用完",
+    "outer_research_budget_exceeded": "跨任务当日额度已用完",
+    "pool_exhausted": "分项预算池已用完",
+}
 MODEL_TIER_LABELS = {
     "brain": "高阶推理与规划",
     "cheap": "批量阅读与整理",
@@ -5618,6 +5638,7 @@ class CockpitPlane:
             "verify": "独立核验", "adjudicate": "判断裁决",
             "code": "代码分析", "summarize": "摘要整理",
             "extract": "信息抽取", "format": "格式整理",
+            "provider-controlled-verify": "受控核验（可复核他人结论）",
         }
         return [labels.get(str(value), "能力说明待补充")
                 for value in (values or [])]
@@ -5643,6 +5664,151 @@ class CockpitPlane:
                             "capability_labels": self._model_capability_labels(item["capabilities"])}
                            for item in catalog["models"]],
                 "workspace_authorized": False}
+
+    def trajectory(self, *, limit: int = 120, before: str | None = None) -> dict[str, Any]:
+        """A turn-aware event ledger plus per-record detail, newest-first.
+
+        Modelled on the deepseek-harness trajectory view: the steps them-
+        selves -- every model call with its purpose, chain position, served
+        or skip reason and estimated cost; every work-order transition; every
+        budget refusal -- as ledger rows an inspector can open, with a
+        cursor so the page can page history backward from the tail.
+        """
+
+        from decimal import Decimal
+
+        events: list[dict[str, Any]] = []
+
+        def push(at: str, kind: str, status: str, title: str, *,
+                 detail: str | None = None, cost_usd: str | None = None,
+                 actor: str | None = None) -> None:
+            events.append({
+                "at": at, "kind": kind, "status": status, "title": title,
+                "detail": detail, "cost_usd": cost_usd, "actor": actor,
+            })
+
+        router_path = self._model_router_db()
+        if router_path and Path(router_path).is_file():
+            try:
+                router = sqlite3.connect(f"file:{router_path}?mode=ro", uri=True)
+                router.row_factory = sqlite3.Row
+                router.execute("PRAGMA busy_timeout = 3000")
+                params: list[Any] = []
+                where = ""
+                if before is not None:
+                    where = "WHERE created_at < ?"
+                    params.append(before)
+                rows = router.execute(
+                    "SELECT decision_id,purpose,tier,chain_position,profile_id,"
+                    "served,skip_reason,created_at FROM model_route_chain_links "
+                    + where + " ORDER BY link_sequence DESC LIMIT ?",
+                    [*params, limit],
+                ).fetchall()
+                costs: dict[str, str] = {}
+                decisions = router.execute(
+                    "SELECT decision_id,decision_json FROM model_route_decisions "
+                    "ORDER BY decision_sequence DESC LIMIT 400"
+                ).fetchall()
+                for row in decisions:
+                    record = json.loads(row["decision_json"])
+                    selected = record.get("selected_profile_version_ref")
+                    if not selected:
+                        continue
+                    for candidate in record.get("candidate_snapshot") or []:
+                        if candidate.get("profile_version_ref") == selected:
+                            costs[row["decision_id"]] = str(
+                                Decimal(str(candidate.get("estimated_cost_usd") or 0))
+                            )
+                            break
+                for row in rows:
+                    purpose = str(row["purpose"] or row["tier"] or "")
+                    label = PURPOSE_LABELS.get(purpose, purpose)
+                    model = (self._model_display_name(str(row["profile_id"] or ""), {})
+                             or str(row["profile_id"] or ""))
+                    cost = costs.get(str(row["decision_id"]))
+                    if row["served"]:
+                        push(str(row["created_at"]), "call", "ok",
+                             f"{label} → {model}（第 {row['chain_position']} 顺位）",
+                             cost_usd=cost, actor=purpose)
+                    else:
+                        reason = str(row["skip_reason"] or "skipped")
+                        push(str(row["created_at"]), "call", "skip",
+                             f"{label}：{model} 未承接",
+                             detail=f"原因：{SKIP_REASON_LABELS.get(reason, reason)}",
+                             actor=purpose)
+                router.close()
+            except (sqlite3.Error, OSError, ValueError):
+                pass
+
+        try:
+            scheduler = sqlite3.connect(
+                f"file:{self.config.scheduler_db}?mode=ro", uri=True)
+            scheduler.row_factory = sqlite3.Row
+            scheduler.execute("PRAGMA busy_timeout = 3000")
+            params: list[Any] = []
+            where = ""
+            if before is not None:
+                where = "WHERE created_at < ?"
+                params.append(before)
+            rows = scheduler.execute(
+                "SELECT work_order_id,state,reason,created_at "
+                "FROM scheduler_attempt_events " + where
+                + " ORDER BY event_seq DESC LIMIT ?",
+                [*params, max(20, limit // 3)],
+            ).fetchall()
+            for row in rows:
+                who = str(row["work_order_id"] or "")
+                if ":" in who:
+                    who = who.split(":", 1)[1]
+                    who = who.split("-", 1)[-1] if "-" in who else who
+                state = str(row["state"] or "")
+                push(str(row["created_at"]), "work",
+                     "failed" if state == "failed"
+                     else "ok" if state == "succeeded" else "run",
+                     f"工单{WORK_STATE_LABELS.get(state, state)}：{who[:44]}",
+                     detail=str(row["reason"] or "") or None)
+            scheduler.close()
+        except (sqlite3.Error, OSError, ValueError):
+            pass
+
+        budget_db = Path(self.config.state_dir) / "thesis-impact-budget.sqlite"
+        if budget_db.is_file():
+            try:
+                budget = sqlite3.connect(f"file:{budget_db}?mode=ro", uri=True)
+                budget.row_factory = sqlite3.Row
+                budget.execute("PRAGMA busy_timeout = 3000")
+                day = self.clock().astimezone(timezone.utc).date().isoformat()
+                params: list[Any] = [day]
+                where = "WHERE day=?"
+                if before is not None:
+                    where += " AND created_at < ?"
+                    params.append(before)
+                rows = budget.execute(
+                    "SELECT record_json FROM thesis_impact_day_rejections "
+                    + where + " ORDER BY rowid DESC LIMIT ?",
+                    [*params, 30],
+                ).fetchall()
+                for row in rows:
+                    record = json.loads(row["record_json"])
+                    reason = record.get("reason") or "refused"
+                    push(str(record.get("created_at") or ""), "budget", "warn",
+                         BUDGET_REASON_LABELS.get(reason, reason),
+                         detail=(
+                             f"预留 ${Decimal(record.get('reserved_micros', 0)) / Decimal(1_000_000):.4f}"
+                             f"，已用 ${Decimal(record.get('committed_micros', record.get('spent', 0))) / Decimal(1_000_000):.2f}"
+                             f" / 上限 ${Decimal(record.get('cap_micros', 0)) / Decimal(1_000_000):.0f}"))
+                budget.close()
+            except (sqlite3.Error, OSError, ValueError):
+                pass
+
+        events.sort(key=lambda item: item["at"], reverse=True)
+        window = events[:limit]
+        return {
+            "as_of": _iso(self.clock()),
+            "events": window,
+            "count": len(window),
+            "older": window[-1]["at"] if len(window) == limit and len(events) > limit else None,
+        }
 
     def models(self) -> dict[str, Any]:
         """Per calling stage: the tier, the chain it will really use, and a choice.
@@ -5838,9 +6004,16 @@ class CockpitPlane:
                     "capability_labels": self._model_capability_labels(
                         profile.get("capabilities")),
                     "unpriced": bool(profile.get("unpriced")),
+                    "verifier_eligible": (
+                        "provider-controlled-verify" in (profile.get("capabilities") or [])
+                        and not str(profile.get("family") or "").startswith("unclassified:")
+                    ),
                     "note": (
                         "未声明可核验的模型家族：不能承担独立核验"
                         if str(profile.get("family") or "").startswith("unclassified:")
+                        else "缺少受控计数：不能放在独立复核链里"
+                        if "provider-controlled-verify" not in (profile.get("capabilities") or [])
+                        and "verify" in (profile.get("capabilities") or [])
                         else "未定价：只能放在链的最后一位"
                         if profile.get("unpriced") else None
                     ),

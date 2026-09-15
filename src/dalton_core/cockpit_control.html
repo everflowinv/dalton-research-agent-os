@@ -124,14 +124,30 @@ header.top p{margin:4px 0 0;color:var(--muted)}
 .latest li{padding:6px 0;border-top:1px dashed var(--line)}
 .lanes{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
 .lane{padding:14px;border-radius:14px;background:rgba(0,0,0,.2);border:1px solid var(--line);display:flex;gap:12px;align-items:flex-start}
-.chain-edit{display:flex;gap:10px;align-items:flex-start;flex-wrap:wrap;margin:8px 0}
-.chain-box{flex:1 1 220px;min-width:200px;padding:8px;border-radius:12px;background:rgba(0,0,0,.25);border:1px solid var(--line)}
-.chain-head{color:var(--muted);font-size:12px;margin-bottom:6px}
-.chain-list{display:flex;flex-direction:column;gap:4px}
-.chain-item{display:flex;align-items:center;gap:6px;padding:6px 8px;border-radius:8px;background:rgba(0,0,0,.25);border:1px solid var(--line);cursor:grab}
-.chain-item.sel{border-color:var(--accent,#7aa2f7)}
-.chain-item.over{border-style:dashed}
-.chain-box select{width:100%}
+.chain-edit{display:flex;gap:14px;align-items:stretch;flex-wrap:wrap;margin:10px 0 6px}
+.chain-box{flex:1 1 240px;min-width:220px;padding:12px 14px;border-radius:var(--radius,16px);background:var(--panel,rgba(255,255,255,.045));border:1px solid var(--line);display:flex;flex-direction:column;gap:8px}
+.chain-head{color:var(--muted);font-size:12px;letter-spacing:.02em}
+.chain-list{display:flex;flex-direction:column;gap:6px;min-height:44px}
+.chain-item{display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:12px;background:var(--panel2,rgba(255,255,255,.07));border:1px solid var(--line);cursor:grab;font-size:13px;transition:border-color .15s}
+.chain-item:hover{border-color:var(--line2)}
+.chain-item.sel{border-color:var(--teal)}
+.chain-item.over{border-style:dashed;border-color:var(--teal)}
+.chain-item span:first-child{flex:1}
+.chain-box select{width:100%;background:var(--bg0,#070b16);color:var(--text);border:1px solid var(--line);border-radius:12px;padding:8px 10px;font:inherit}
+.chain-edit .actions{flex-direction:column;justify-content:center;gap:6px}
+.traj-toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:10px 0}
+.traj-stats{color:var(--muted);font-size:12px}
+.traj-waterfall{position:relative;height:34px;border-radius:12px;background:var(--panel);border:1px solid var(--line);margin:8px 0;overflow:hidden}
+.traj-span{position:absolute;top:8px;height:18px;border-radius:4px;cursor:pointer;min-width:3px}
+.traj-span.ok{background:var(--teal)}.traj-span.skip{background:var(--dim)}.traj-span.warn{background:var(--amber)}.traj-span.failed{background:var(--rose)}.traj-span.run{background:var(--sky)}
+.traj-list{display:flex;flex-direction:column;gap:4px}
+.traj-row{display:flex;gap:10px;align-items:baseline;padding:8px 12px;border-radius:12px;background:var(--panel);border:1px solid transparent;cursor:pointer}
+.traj-row:hover{border-color:var(--line2)}
+.traj-row time{color:var(--muted);font-size:12px;flex:0 0 64px;font-variant-numeric:tabular-nums}
+.traj-kind{flex:0 0 58px;font-size:12px;color:var(--muted)}
+.traj-row .t{flex:1;font-size:13px}
+.traj-row .c{color:var(--muted);font-size:12px;flex:0 0 76px;text-align:right;font-variant-numeric:tabular-nums}
+.traj-inspect{padding:10px 14px;border-radius:12px;background:var(--panel2);border:1px solid var(--line);margin:2px 0 6px 74px;font-size:13px}
 .lane .st{width:10px;height:10px;min-width:10px;aspect-ratio:1;flex:0 0 10px;border-radius:50%;margin-top:6px;background:var(--dim)}
 .lane .st.on{background:var(--green);animation:pulse 2s infinite}.lane .st.hold{background:var(--amber)}.lane .st.err{background:var(--rose)}
 .lane b{display:block}.lane small{color:var(--muted)}
@@ -422,6 +438,7 @@ pre.table{background:#f6f8fb;color:#28364b;border-color:var(--line)}table{color:
   <!-- LOG -->
   <section class="view" id="view-log">
     <div class="card">
+      <div class="actions" style="margin-bottom:10px"><button class="ghost" id="open-trajectory">打开执行轨迹（每步调用了什么、结果如何）</button></div>
       <div class="chips" id="log-filters">
         <span class="chip on" data-f="all">全部动态</span><span class="chip" data-f="discoveries">资料检索</span><span class="chip" data-f="fetches,acquisitions,sec-lane-runs">资料采集</span>
         <span class="chip" data-f="extractions,review">阅读与提取</span><span class="chip" data-f="claim">新增结论</span><span class="chip" data-f="question,goal,steer,approval">操作记录</span><span class="chip" data-f="problem">运行问题</span>
@@ -619,6 +636,7 @@ function readableError(value,context="操作"){
     else if(/timeout|timed out|busy|locked/.test(lower))message="系统正忙，请稍后重试。";
     else if(/not found|unavailable|missing/.test(lower))message="所需资料暂时不可用。";
     else if(/now at|thesis.version|conflict/i.test(raw))message="这条建议针对的是旧版本的投资论点，论点已更新；请关闭这条过期建议，系统会基于当前论点重新生成。";
+    else if(/verifier controls|provider-controlled|declare.*lineage/i.test(raw))message="这个模型缺少受控计数或已声明家族，不能放进独立复核链；请选标有「✓ 可独立复核」的模型。";
     else message=`${context}暂时未完成，请稍后重试。`;
   }
   return {message,nextStep:value&&typeof value==="object"?value.next_step:null,technical:(value&&typeof value==="object"?value.technical_detail:null)||raw}
@@ -1107,8 +1125,12 @@ function tierChainEditor(card,r){
   left.append(leftList);
   const rightList=document.createElement("select");rightList.size="8";rightList.multiple=false;
   rightList.setAttribute("aria-label","备选模型");
+  const verifierOnly=card.tier==="verifier";
   r.choices.forEach(choice=>{const option=document.createElement("option");option.value=choice.model;
-    option.textContent=`${choice.display_name}${choice.note?"（"+choice.note+"）":""}`;rightList.append(option)});
+    const ineligible=verifierOnly&&!choice.verifier_eligible;
+    if(ineligible)option.disabled=true;
+    option.textContent=`${choice.display_name}${verifierOnly?(choice.verifier_eligible?" ✓ 可独立复核":" ✕ 不可复核"):""}${choice.note?"（"+choice.note+"）":""}`;
+    rightList.append(option)});
   const toChain=node("button","← 加入链尾","ghost"),fromChain=node("button","从链中移除 →","ghost");
   toChain.type=fromChain.type="button";
   toChain.onclick=()=>{const model=rightList.value;if(model&&!picked.includes(model)){picked.push(model);rerenderLeft()}};
@@ -1210,6 +1232,85 @@ function renderModels(sheet,r,overview){sheet.replaceChildren(readerClose(),node
   col("Dalton 已获授权、本机尚未登记",cat.allowed_not_in_dalton,cat.allowed_not_in_dalton_note,false);
   col("本机仍有登记、模型网关已下线",cat.dalton_not_in_openclaw,cat.dalton_not_in_openclaw_note,false);
   sheet.append(box)}
+/* 执行轨迹: deepseek-harness 式账本 + 瀑布总览 + 检查器 + 尾部跟随. */
+let trajTimer=null,trajFollow=true,trajOlder=null,trajFilter="all",trajSeq=0;
+const TRAJ_KIND_LABELS={call:"模型调用",work:"工单",budget:"预算"};
+async function openTrajectory(){const sheet=prepareReader("研究详情");
+  sheet.replaceChildren(node("div","正在读取…","empty"));
+  try{await renderTrajectory(sheet,null,true)}
+  catch(e){sheet.replaceChildren(readerClose());showProblem(sheet,e,"读取执行轨迹")}}
+async function renderTrajectory(sheet,before,reset){
+  const seq=++trajSeq;
+  const r=await getJson(before?`/v1/cockpit/trajectory?before=${encodeURIComponent(before)}`:"/v1/cockpit/trajectory");
+  if(seq!==trajSeq)return;
+  if(reset)sheet.replaceChildren(readerClose(),node("h2","执行轨迹"),
+    node("div","每一步：哪个环节调用了哪个模型、承接还是跳过及原因、工单状态、预算拒绝。点击任意一行查看详情；打开期间自动跟随最新（向上滚动即暂停跟随）。","meta"));
+  const list=sheet.querySelector(".traj-list")||node("div",null,"traj-list");
+  const served=r.events.filter(e=>e.kind==="call"&&e.status==="ok").length;
+  const cost=r.events.reduce((sum,e)=>sum+(parseFloat(e.cost_usd)||0),0);
+  let toolbar=sheet.querySelector(".traj-toolbar");
+  if(!toolbar){toolbar=node("div",null,"traj-toolbar");
+    const follow=node("label",null,"check");const box=document.createElement("input");box.type="checkbox";box.checked=true;
+    follow.append(box,node("span","跟随最新","field-label"));box.onchange=()=>{trajFollow=box.checked};
+    for(const [key,label] of [["all","全部"],["call","模型调用"],["work","工单"],["budget","预算"]]){
+      const chip=node("span",label,"chip"+(trajFilter===key?" on":""));chip.style.cursor="pointer";
+      chip.onclick=()=>{trajFilter=key;toolbar.querySelectorAll(".chip").forEach(c=>c.classList.remove("on"));chip.classList.add("on");renderTrajectory(sheet,null,true)};
+      toolbar.append(chip)}
+    toolbar.append(follow,node("span",`本页 ${r.events.length} 条 · 调用 ${served} 次 · 预留 $${cost.toFixed(2)} · 更新于 ${clock(r.as_of)}`,"traj-stats"));
+    sheet.append(toolbar);
+    const waterfall=node("div",null,"traj-waterfall");waterfall.title="时间总览：每格一步，颜色=结果";sheet.append(waterfall);
+    sheet.append(list)}
+  else{
+    const stats=toolbar.querySelector(".traj-stats");
+    if(stats)stats.textContent=`本页 ${r.events.length} 条 · 调用 ${served} 次 · 预留 $${cost.toFixed(2)} · 更新于 ${clock(r.as_of)}`}
+  const rows=r.events.filter(e=>trajFilter==="all"||e.kind===trajFilter);
+  if(reset)list.replaceChildren();
+  const fragment=document.createDocumentFragment();
+  for(const e of rows.reverse()){
+    const row=node("div",null,"traj-row");
+    row.append(node("time",e.at.slice(11,19)),node("span",TRAJ_KIND_LABELS[e.kind]||e.kind,"traj-kind"),
+      node("span",`<span class="st ${e.status==="ok"?"on":e.status==="warn"?"hold":e.status==="failed"?"err":""}" style="display:inline-block;margin-right:6px"></span>${displayText(e.title)}`,"t"));
+    if(e.cost_usd)row.append(node("span",`$${e.cost_usd}`,"c"));
+    row.onclick=()=>{
+      const existing=list.querySelector(".traj-inspect[data-for]");
+      if(existing&&existing.dataset.for===e.at+e.title){existing.remove();return}
+      if(existing)existing.remove();
+      const panel=node("div",null,"traj-inspect");panel.dataset.for=e.at+e.title;
+      panel.append(node("div",`${TRAJ_KIND_LABELS[e.kind]||e.kind} · ${fmtDate(e.at)} ${e.at.slice(11,19)} · 状态 ${e.status}`,"raw"));
+      if(e.actor)panel.append(node("div",`环节：${e.actor}`,"raw"));
+      if(e.detail)panel.append(node("div",displayText(e.detail),"raw"));
+      const tech=technicalDetails({at:e.at,kind:e.kind,status:e.status,actor:e.actor,cost_usd:e.cost_usd,detail:e.detail});
+      if(tech)panel.append(tech);
+      row.after(panel)};
+    fragment.append(row)}
+  if(reset)list.append(fragment);else list.prepend(fragment);
+  // waterfall spans
+  const waterfall=sheet.querySelector(".traj-waterfall");
+  if(waterfall&&reset){
+    waterfall.replaceChildren();
+    const times=r.events.map(e=>Date.parse(e.at));
+    const min=Math.min(...times),max=Math.max(...times),span=Math.max(max-min,1);
+    for(const e of r.events){
+      const spanEl=node("span",null,"traj-span "+e.status);
+      const t=Date.parse(e.at);
+      spanEl.style.left=`${((t-min)/span)*100}%`;spanEl.style.width="4px";
+      spanEl.title=`${e.at.slice(11,19)} ${e.title}`;
+      waterfall.append(spanEl)}}
+  trajOlder=r.older;
+  let more=sheet.querySelector(".traj-more");
+  if(trajOlder&&!more){more=node("button","加载更早","ghost");more.className="ghost traj-more";
+    more.onclick=async()=>{more.disabled=true;await renderTrajectory(sheet,trajOlder,false);more.disabled=false};
+    sheet.append(more)}
+  else if(!trajOlder&&more)more.remove();
+  if(reset&&trajFollow)requestAnimationFrame(()=>sheet.scrollTop=sheet.scrollHeight);
+}
+function trajectoryRefreshLoop(){const sheet=document.querySelector(".reader .traj-list");
+  if(!sheet){trajTimer=null;return}
+  const reader=sheet.closest(".reader");
+  const nearTail=reader.scrollHeight-reader.scrollTop-reader.clientHeight<80;
+  if(trajFollow&&nearTail)renderTrajectory(reader,null,true).catch(()=>{});
+  trajTimer=setTimeout(trajectoryRefreshLoop,15000)}
+$("open-trajectory").onclick=async()=>{openTrajectory();if(trajTimer)clearTimeout(trajTimer);trajTimer=setTimeout(trajectoryRefreshLoop,15000)};
 /* Q2: 每周回头看. Prose and table both derived from counted things; no model
    wrote either, which is why they are shown verbatim. */
 $("open-reflection").onclick=openReflection;
