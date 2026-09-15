@@ -393,7 +393,7 @@ class CoordinatorTests(unittest.TestCase):
     def test_the_budget_is_the_smallest_of_three_ceilings(self) -> None:
         budget = self.coordinator(self.launcher()).budget()
         self.assertEqual(budget["governed_daily_limit"], guidepoint_daily_call_ceiling())
-        self.assertEqual(budget["governed_daily_limit"], 25)
+        self.assertEqual(budget["governed_daily_limit"], 500)
         self.assertEqual(budget["plan_daily_limit"], 20)
         self.assertEqual(budget["spent_24h"], 0)
         self.assertEqual(budget["remaining_24h"], 20)
