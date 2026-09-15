@@ -589,11 +589,6 @@ def publish_tier_selection(
         **(pinned.get("fallback_chains") or {}),
         "tiers": chains,
     }
-    if actor_ref:
-        wire["tier_selections"] = {
-            **(pinned.get("tier_selections") or {}),
-            tier: {"chain": list(links), "actor_ref": actor_ref},
-        }
     comparable = {
         key: value for key, value in latest.items() if key not in _VERSION_KEYS
     }
