@@ -78,11 +78,23 @@ class HostRecoveryFoldTests(unittest.TestCase):
                        "document_ref": "url:0", "outcome": "acquired"})
         self.assertEqual(state(later), [])
 
-    def test_retryable_failures_alone_never_quarantine_a_host(self):
+    def test_retryable_failures_count_toward_quarantine_but_one_bad_page_does_not(self):
         now = datetime.now(timezone.utc)
+        # One page retrying is not a dead host: the distinct-URL guard holds.
+        one_page = [{"host": "temporary.example", "created_at": now.isoformat(),
+                     "document_ref": "url:same", "outcome": "transport_retryable"}
+                    for _ in range(4)]
+        self.assertEqual(host_recovery_states(one_page, as_of=now, **POLICY), [])
+        # A host refusing us across pages is dead whether it says so with
+        # terminal errors or with timeouts: nasdaq.com took twenty-nine
+        # retryable failures across two URLs in a day without ever entering
+        # the window, which is the loop the 2026-09-15 change ends.
         events = [{"host": "temporary.example", "created_at": now.isoformat(),
-                   "document_ref": f"url:{i}", "outcome": "transport_retryable"} for i in range(5)]
-        self.assertEqual(host_recovery_states(events, as_of=now, **POLICY), [])
+                   "document_ref": f"url:{i}", "outcome": "transport_retryable"}
+                  for i in range(3)]
+        held = host_recovery_states(events, as_of=now, **POLICY)
+        self.assertEqual(len(held), 1)
+        self.assertEqual(held[0]["state"], "quarantined")
 
     def test_multiplier_one_retains_the_configured_interval_after_a_failed_probe(self):
         now = datetime(2026, 9, 11, tzinfo=timezone.utc)

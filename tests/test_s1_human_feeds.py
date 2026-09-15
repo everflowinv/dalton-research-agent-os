@@ -1460,20 +1460,31 @@ class RunnerBoundaryTests(unittest.TestCase):
                         coordinator.return_value.dispatch_once.assert_called_once_with(universe=UNIVERSE)
 
     def test_the_runner_refuses_a_template_that_is_not_a_host_tool(self) -> None:
-        from dalton_core.host_tool_runner import HostToolRunError, HostToolRunner
-        from dalton_core.sec_financials_core import sec_financials_identity
+        from dalton_core.employee_reviews_core import employee_reviews_identity
+        from dalton_core.guidepoint_core import guidepoint_identity
+        from dalton_core.host_tool_runner import HostToolRunner, HostToolRunError
 
-        # Pointed at a public_https template it would publish a profile
-        # claiming no host allowlist and no network policy for a connector
-        # whose template names two SEC hosts.
+        # Pointed at an mcp_managed template the runner would publish a
+        # profile claiming no host allowlist and no network policy for a
+        # connector the template delegates to a managed MCP server.
+        # public_https is the one deliberate exception since S3: the crowd's
+        # employee-reviews child fetches its own allowlisted host in process.
         with self.assertRaises(HostToolRunError) as ctx:
             HostToolRunner(
                 store=None, connectors=None, observability=None, spool=None,
-                template_key="sec-financials",
-                identity=sec_financials_identity(),
+                template_key="guidepoint",
+                identity=guidepoint_identity("search_library"),
                 governance=None, command=lambda parameters, output_dir: [],
             )
-        self.assertIn("public_https", str(ctx.exception))
+        self.assertIn("mcp_managed", str(ctx.exception))
+        accepted = HostToolRunner(
+            store=None, connectors=None, observability=None, spool=None,
+            template_key="employee-reviews",
+            identity=employee_reviews_identity(),
+            governance=None, command=lambda parameters, output_dir: [],
+            connector_slug="employee-reviews",
+        )
+        self.assertEqual(accepted._template["transport"]["kind"], "public_https")
 
     def test_the_lane_refuses_to_spend_quota_before_the_authority_knows_the_feed(self) -> None:
         from dalton_core import mission_feed_lane
