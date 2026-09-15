@@ -431,7 +431,9 @@ def _runtime_policy_config(state_dir: str | Path, purpose: str) -> dict[str, Any
         raise ModelSelectionError(
             f"service.json does not configure the {purpose} runtime policy pin")
     router_db = config.get(router_field) or service.get("model_router_db")
-    return {"name": f"service.json#{section}.{field}", "path": path,
+    # The name is the true JSON path of the pin inside service.json; the
+    # tier merge walks it to fold sibling sections into one write.
+    return {"name": f"service.json#{section}.config.{field}", "path": path,
             "config": service, "runtime_config": config, "field": field,
             "slots_field": slots_field, "router_db": router_db,
             "routing_policy_ref": config[field]}
