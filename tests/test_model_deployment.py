@@ -51,7 +51,7 @@ class ModelDeploymentTests(unittest.TestCase):
         self.assertEqual(
             {(item["provider"], item["model"]) for item in profiles},
             {
-                ("deepseek", "deepseek-v4-flash"),
+                ("deepseek", "deepseek-flash"),
                 ("openai", "gpt-5.6-sol"),
                 ("openai", "gpt-5.6-terra"),
                 # P13k: the planner's model. Curated rather than derived,
@@ -71,7 +71,6 @@ class ModelDeploymentTests(unittest.TestCase):
                 ("qwen", "deepseek-v4-pro-0813"),
                 ("qwen", "glm-5.2"),
                 ("openai", "gpt-5.5"),
-                ("deepseek", "deepseek-v4-pro"),
                 ("xai", "grok-4.6"),
                 ("xai", "grok-build-0.1"),
                 ("xai", "grok-4.3"),

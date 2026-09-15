@@ -352,7 +352,7 @@ class OpenClawCatalogReconcileTests(unittest.TestCase):
             "profile:deepseek-v4-flash-low-calibration",
         )
         self.assertEqual(catalog[0]["provider"], "deepseek")
-        self.assertEqual(catalog[0]["model"], "deepseek-v4-flash")
+        self.assertEqual(catalog[0]["model"], "deepseek-flash")
 
     def test_loader_rejects_duplicate_json_keys(self):
         with tempfile.TemporaryDirectory() as directory:

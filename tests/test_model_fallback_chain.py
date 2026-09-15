@@ -369,7 +369,7 @@ class ChainExecutionTests(unittest.TestCase):
             self._run("brain", broker)
 
     def test_the_chain_order_beats_the_policys_cheapest_first_preference(self) -> None:
-        # glm-5.3-flash is a fifth of deepseek-v4-flash's price and second in
+        # glm-5.3-flash costs less than DeepSeek Flash and is second in
         # the chain. A cost-sorted policy would take it first; the chain says no.
         broker = FakeBroker({})
         result = self._run("cheap", broker, purpose="p14m_cheap_probe")
@@ -389,9 +389,9 @@ class ChainExecutionTests(unittest.TestCase):
         })
         result = self._run("cheap", broker, purpose="p14m_cheap_probe", admit=admit)
         self.assertEqual(result["profile_id"], "profile:zai-glm-5-3-flash")
-        # deepseek: (0.22*1000 + 0.66*500)/1e6 USD; glm-5.3-flash: (0.075*1000 +
+        # deepseek: (0.15*1000 + 0.60*500)/1e6 USD; glm-5.3-flash: (0.075*1000 +
         # 0.25*500)/1e6. Each admission charges its own link's rate card.
-        self.assertEqual(admitted, [550, 200])
+        self.assertEqual(admitted, [450, 200])
 
     def test_a_budget_refusal_halts_rather_than_shopping_the_call_around(self) -> None:
         broker = FakeBroker({})

@@ -98,17 +98,19 @@ _BROKER_V3_ENDPOINT_NAMES = (
 
 _ENDPOINTS: tuple[dict[str, Any], ...] = (
     {
+        # Durable profile id is retained for existing extraction/planner policies.
+        # Official API alias now serves V4.1 Flash (2026-09-10).
         "name": "deepseek-v4-flash",
         "provider": "deepseek",
-        "model": "deepseek-v4-flash",
+        "model": "deepseek-flash",
         "family": "deepseek-v4",
         "credential_slot_ref": "credential-slot:openclaw:deepseek",
         "capabilities": ["research", "verify", "code", "summarize", "extract"],
         "max_context_tokens": 1_000_000,
         "max_output_tokens": 128_000,
         "max_input_tokens": 800_000,
-        "input_cost": 0.22,
-        "output_cost": 0.66,
+        "input_cost": 0.15,
+        "output_cost": 0.60,
     },
     {
         "name": "gpt-5-6-sol",
@@ -328,19 +330,6 @@ _ENDPOINTS: tuple[dict[str, Any], ...] = (
         "max_input_tokens": 872_000,
         "input_cost": 5.0,
         "output_cost": 30.0,
-    },
-    {
-        "name": "deepseek-v4-pro",
-        "provider": "deepseek",
-        "model": "deepseek-v4-pro",
-        "family": "deepseek-v4",
-        "credential_slot_ref": "credential-slot:openclaw:deepseek",
-        "capabilities": ["research", "research-hard", "verify", "adjudicate", "code"],
-        "max_context_tokens": 1_000_000,
-        "max_output_tokens": 384_000,
-        "max_input_tokens": 616_000,
-        "input_cost": 0.66,
-        "output_cost": 1.98,
     },
     {
         "name": "grok-4-6",
