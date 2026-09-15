@@ -1266,7 +1266,9 @@ class MissionSourceDiscoveryCoordinator:
             ):
                 # The ledger says held but this source's authority does not
                 # agree; report it rather than queue a review for nothing.
-                settled.append({**entry, "status": "not_in_authority"})
+                settled.append({
+                    **entry, "status": "not_in_authority", "review_status": None,
+                })
                 continue
             result = self.missions.settle_document_already_held(document["record_id"])
             entry["status"] = result["status"]

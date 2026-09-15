@@ -382,7 +382,13 @@ class FetchCoordinatorTests(unittest.TestCase):
         tick = self.coordinator.dispatch_once()
         self.assertEqual(tick["settled_dispatches"][0]["new_document_count"], 1)
         held = tick["already_held"]
-        self.assertEqual([(h["document_ref"], h["status"], h["review_status"]) for h in held], [(URL_A, "acquired", "fresh")])
+        # URL_B is still queued and its bytes are not in authority, so the
+        # d3c7dca7 reconciliation reports it rather than queueing a review;
+        # only URL_A owes the human queue one.
+        self.assertEqual(
+            [(h["document_ref"], h["status"], h["review_status"]) for h in held],
+            [(URL_A, "acquired", "fresh"), (URL_B, "not_in_authority", None)],
+        )
         # No fetch was spent on it; the fetch that did launch is URL_B.
         self.assertEqual([c["document_ref"] for c in self.fetch_launcher.calls], [URL_B])
         reviews = self.missions.document_reviews(self.mission["id"], state="awaiting_human_extraction")
@@ -505,9 +511,15 @@ class FetchCoordinatorTests(unittest.TestCase):
         )
         tick = self.coordinator.dispatch_once()
         acquisition = tick["acquisition"]
-        self.assertEqual(acquisition["status"], "already_in_authority")
-        self.assertEqual((acquisition["document_ref"], acquisition["settled_status"]), (URL_B, "acquired"))
-        self.assertEqual(acquisition["review_status"], "fresh")
+        # The d3c7dca7 reconciliation settles held bytes before selection, so
+        # URL_B is reconciled as already held and the acquisition loop finds
+        # nothing left to launch.
+        self.assertEqual(acquisition["status"], "idle")
+        self.assertEqual(
+            [(h["document_ref"], h["status"], h["review_status"])
+             for h in tick["already_held"]],
+            [(URL_B, "acquired", "fresh")],
+        )
         # No second fetch was launched for those bytes.
         self.assertEqual(len(self.fetch_launcher.calls), before)
         reviews = self.missions.document_reviews(self.mission["id"], state="awaiting_human_extraction")

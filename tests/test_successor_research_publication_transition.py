@@ -73,6 +73,18 @@ class ResearchPublicationTransitionTest(unittest.TestCase):
         self.assertFalse(any(path.exists() for path in created))
 
     def test_executor_installs_starts_and_observes_real_waiting_worker(self):
+        # The rehearsal runs the worker out of the r11a accepted runtime
+        # source tree, which exists only on the host that executed that
+        # release.  Everywhere else the case is inert, not broken.
+        runtime_root = Path(os.environ.get(
+            "DALTON_ACCEPTED_RUNTIME_SOURCE_ROOT",
+            "/Users/everflow/Projects/dalton-foundation-r25-final-v11-worktree"))
+        if not (runtime_root / "src/dalton_core/research_output_preparation.py").is_file():
+            self.skipTest(
+                "accepted runtime source root is absent; point "
+                "DALTON_ACCEPTED_RUNTIME_SOURCE_ROOT at a checkout of "
+                "045484612406452fd31a6eeafcbbed31b166dffd to run the rehearsal"
+            )
         created = apply(packet_root=self.packet, state_dir=self.state,
                         launch_agents_dir=self.launch, transition=self.transition)
         manifest = {"research_publication_transition": self.transition}
@@ -89,9 +101,7 @@ class ResearchPublicationTransitionTest(unittest.TestCase):
         def start(label):
             self.assertEqual("com.dalton.research-publication-worker", label)
             config = self.state / "research-publication-worker-config.json"
-            runtime = Path(os.environ.get(
-                "DALTON_ACCEPTED_RUNTIME_SOURCE_ROOT",
-                "/Users/everflow/Projects/dalton-foundation-r25-final-v11-worktree"))
+            runtime = runtime_root
             self.assertTrue((runtime / "src/dalton_core/research_output_preparation.py").is_file())
             self.assertEqual(
                 "045484612406452fd31a6eeafcbbed31b166dffd",
