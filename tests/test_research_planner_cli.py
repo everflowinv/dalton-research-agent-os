@@ -322,7 +322,7 @@ class PlannerEffectiveConfigTests(unittest.TestCase):
         budget = result["purpose_call_budgets"]["plan"]
         self.assertEqual(budget["max_input_tokens"], 250_000)
         self.assertEqual(budget["timeout_seconds"], 720)
-        self.assertEqual(budget["max_cost_usd"], 1.50)
+        self.assertEqual(budget["max_cost_usd"], 1.00)
         self.assertEqual(result["routing"], {"profile": "owner"})
 
     def test_absent_owner_override_preserves_the_existing_child_behavior(self):

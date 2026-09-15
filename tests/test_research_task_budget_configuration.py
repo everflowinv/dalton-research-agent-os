@@ -11,7 +11,7 @@ from tests.test_research_task import ResearchTaskFixture, inquiry
 
 
 class ConfiguredTaskTests(ResearchTaskFixture):
-    daily_cost_usd = 100.0
+    daily_cost_usd = 200.0
 
     def service_budget(self, cost):
         # Use an actual installed-shaped directory, confined to this fixture.
@@ -124,4 +124,4 @@ class ConfiguredTaskTests(ResearchTaskFixture):
                                 max_admissions=8, task_budget=selected)
         self.assertEqual(result["admitted"], 1)
         self.assertEqual(result["tasks"][0]["budget"], selected)
-        self.assertEqual(result["pool"]["reserved_micros"], 3_500_000)
+        self.assertEqual(result["pool"]["reserved_micros"], 7_000_000)

@@ -60,7 +60,7 @@ class TickBudgetTests(unittest.TestCase):
             return {"status": "launched" if taken["n"] <= launches else "idle"}
 
         coordinator.launch_acquisition = launch_acquisition
-        coordinator.settle_documents = lambda: ["settled"]
+        coordinator.settle_documents = lambda deadline=None: ["settled"]
         with patch.object(m, "_monotonic", clock):
             acquisitions, out_of_time, settled = coordinator._acquire_within_budget(
                 [], getattr(self, "shared_deadline", None))

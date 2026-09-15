@@ -62,7 +62,7 @@ class FakeLauncher:
 
 
 class LaneTests(ResearchTaskFixture):
-    daily_cost_usd = 20.0
+    daily_cost_usd = 40.0
 
     def setUp(self) -> None:
         super().setUp()
@@ -165,12 +165,12 @@ class LaneTests(ResearchTaskFixture):
 
     def test_an_exhausted_pool_is_a_skip_with_the_name_c2_named_after_it(self) -> None:
         # The arithmetic is the test's own, and it divides exactly: this
-        # fixture's mission allows $20 a day, the ad-hoc pool is a quarter of
-        # that, and one task is two rounds at the driver's per-round price.
-        # Five tasks spend the pool to the cent, with nothing left to round.
+        # fixture's mission allows $40 a day, the ad-hoc pool is a quarter of
+        # that, and one task is two rounds at the driver's $1.00 per-round
+        # price.  Five tasks spend the pool to the cent, with nothing left.
         pool = rt.pool(self.mission)
         per_task = rt.task_estimate_micros({"max_rounds": 2})
-        self.assertEqual(per_task, 1_000_000)
+        self.assertEqual(per_task, 2_000_000)
         expected = pool["cap_micros"] // per_task
         self.assertEqual(expected, 5)
         self.assertEqual(pool["cap_micros"] % per_task, 0)

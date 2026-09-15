@@ -64,9 +64,10 @@ class ResearchTaskFixture(unittest.TestCase):
     grants_word = True
     publishes = ("probe-template:adhoc-sec-filings-index:v1",)
     scope_refs = (INDUSTRY, ACN)
-    # The mission manifest's own $5 day makes a $1.25 pool, which is one task.
-    # The pool cases want exactly that; the cases about admission itself want
-    # room to admit more than one and are explicit about buying it.
+    # The planner round reservation is the packaged plan cap ($1.00 since
+    # 84c3cb74); a task is at least two rounds, so a default-mission pool buys
+    # nothing.  The pool cases want exactly one task and buy an $8 day (a $2
+    # pool); the cases about admission itself buy $20 of room outright.
     daily_cost_usd: float | None = None
 
     def setUp(self) -> None:
@@ -224,6 +225,8 @@ class AdmissionTests(ResearchTaskFixture):
 
 
 class PoolTests(ResearchTaskFixture):
+    daily_cost_usd = 8.0
+
     def test_the_pool_is_a_quarter_of_the_mission_day(self) -> None:
         wire = rt.pool(self.mission)
         self.assertEqual(wire["name"], "adhoc")
@@ -237,10 +240,10 @@ class PoolTests(ResearchTaskFixture):
         second = inquiry(question="What drove ACN's sales mix in FY26?", rank=1)
         plan = self.record_plan([first, second])
         entries = self.admissions(plan)
-        # $5 mission day, $1.25 pool, $0.50 a round, two rounds a task.
+        # $8 mission day, $2 pool, $1.00 a round, two rounds a task.
         self.assertTrue(entries[0]["admissible"])
         self.assertEqual(entries[1]["reason"], "pool_exhausted")
-        self.assertEqual(entries[1]["pool"]["cap_micros"], 1_250_000)
+        self.assertEqual(entries[1]["pool"]["cap_micros"], 2_000_000)
 
     def _ledger_spend(self, micros: int, *, day: str, pool: str = "adhoc",
                       settle: int | None = None) -> Path:
@@ -294,8 +297,8 @@ class PoolTests(ResearchTaskFixture):
 
         state = rt.pool_state(
             self.authority, self.mission, day=day, budget_db=budget_db)
-        self.assertEqual(state["cap_micros"], 1_250_000)
-        self.assertEqual(state["reserved_micros"], 1_000_000)
+        self.assertEqual(state["cap_micros"], 2_000_000)
+        self.assertEqual(state["reserved_micros"], 2_000_000)
         # What the call actually cost, not what it reserved.
         self.assertEqual(state["settled_micros"], 300_000)
         # Reserved and settled overlap wherever a task admitted today has
@@ -319,7 +322,7 @@ class PoolTests(ResearchTaskFixture):
         state = rt.pool_state(
             self.authority, self.mission, day=day, budget_db=budget_db)
         self.assertEqual(state["settled_micros"], 0)
-        self.assertEqual(state["remaining_micros"], 1_250_000)
+        self.assertEqual(state["remaining_micros"], 2_000_000)
 
     def test_without_a_ledger_the_reading_is_the_one_p14e_shipped(self) -> None:
         # An installation whose planner is still unbudgeted must not be told it
@@ -340,7 +343,7 @@ class PoolTests(ResearchTaskFixture):
             self.authority, self.mission,
             day=datetime.now(timezone.utc).date().isoformat(),
         )
-        self.assertEqual(today["reserved_micros"], 1_000_000)
+        self.assertEqual(today["reserved_micros"], 2_000_000)
         self.assertEqual(
             rt.pool_state(self.authority, self.mission, day="2020-01-01")[
                 "reserved_micros"], 0,
@@ -348,6 +351,7 @@ class PoolTests(ResearchTaskFixture):
 
 
 class TemplateSubsetTests(ResearchTaskFixture):
+    daily_cost_usd = 20.0
     publishes = tuple(rt.ADHOC_TEMPLATE_REFS)
 
     def test_only_templates_an_executor_can_run_are_bindable(self) -> None:
@@ -530,6 +534,7 @@ class RetirementTests(ResearchTaskFixture):
 
 
 class IdentityNormalisationTests(ResearchTaskFixture):
+    daily_cost_usd = 20.0
     def test_a_rewrapped_question_is_the_same_question(self) -> None:
         wrapped = inquiry(question="Do ACN's three adjusted\n  revenue definitions\treconcile?")
         flat = inquiry(question="Do ACN's three adjusted revenue definitions reconcile?")
@@ -737,6 +742,7 @@ class UngrantedMissionTests(ResearchTaskFixture):
 
 
 class AdmissionSourceTests(ResearchTaskFixture):
+    daily_cost_usd = 20.0
     def test_a_human_loop_still_needs_a_human_and_hashes_as_before(self) -> None:
         recorded = self.backlog.record_question(
             mandate_version_ref=self.mission["bindings"]["mandate_version"]["ref"],
@@ -790,6 +796,7 @@ class AdmissionSourceTests(ResearchTaskFixture):
 
 
 class TerminalGateTests(ResearchTaskFixture):
+    daily_cost_usd = 20.0
     def setUp(self) -> None:
         super().setUp()
         self.observability = ObservabilityStore(self.store)
@@ -842,6 +849,7 @@ class TerminalGateTests(ResearchTaskFixture):
 
 
 class ChildTests(ResearchTaskFixture):
+    daily_cost_usd = 20.0
     def test_the_child_admits_one_and_reports_the_refusals(self) -> None:
         from dalton_core.research_task_cli import run_admissions
 
@@ -861,7 +869,7 @@ class ChildTests(ResearchTaskFixture):
         self.assertEqual(
             [item["reason"] for item in summary["refused"]], ["out_of_universe"],
         )
-        self.assertEqual(summary["pool"]["reserved_micros"], 1_000_000)
+        self.assertEqual(summary["pool"]["reserved_micros"], 2_000_000)
         written = json.loads((self.state_dir / "summary.json").read_text(encoding="utf-8"))
         self.assertEqual(written["tasks"][0]["loop_ref"], summary["tasks"][0]["loop_ref"])
 
