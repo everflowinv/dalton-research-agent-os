@@ -863,7 +863,8 @@ def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
             return build_crowd_source_runner(
                 source=source, operation=operation, launcher=launcher,
                 governance=governance, store=server.store,
-                connectors=server.connectors,
+                connectors=getattr(server, "connectors", None)
+                or getattr(server, "_connectors", None),
                 observability=server.observability, spool=server.spool,
             )
 
