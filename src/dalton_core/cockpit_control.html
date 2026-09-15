@@ -636,7 +636,7 @@ function readableError(value,context="操作"){
     else if(/timeout|timed out|busy|locked/.test(lower))message="系统正忙，请稍后重试。";
     else if(/not found|unavailable|missing/.test(lower))message="所需资料暂时不可用。";
     else if(/now at|thesis.version|conflict/i.test(raw))message="这条建议针对的是旧版本的投资论点，论点已更新；请关闭这条过期建议，系统会基于当前论点重新生成。";
-    else if(/verifier controls|provider-controlled|declare.*lineage/i.test(raw))message="这个模型缺少受控计数或已声明家族，不能放进独立复核链；请选标有「✓ 可独立复核」的模型。";
+    else if(/verifier controls|provider-controlled|declare.*lineage/i.test(raw))message="这个模型缺少受控计数或已声明家族，按当前设置不能放进独立复核链；请换一个模型。";
     else message=`${context}暂时未完成，请稍后重试。`;
   }
   return {message,nextStep:value&&typeof value==="object"?value.next_step:null,technical:(value&&typeof value==="object"?value.technical_detail:null)||raw}
@@ -1125,7 +1125,7 @@ function tierChainEditor(card,r){
   left.append(leftList);
   const rightList=document.createElement("select");rightList.size="8";rightList.multiple=false;
   rightList.setAttribute("aria-label","备选模型");
-  const verifierOnly=card.tier==="verifier";
+  const verifierOnly=card.tier==="verifier"&&r.eligibility_enforced!==false;
   r.choices.forEach(choice=>{const option=document.createElement("option");option.value=choice.model;
     const ineligible=verifierOnly&&!choice.verifier_eligible;
     if(ineligible)option.disabled=true;

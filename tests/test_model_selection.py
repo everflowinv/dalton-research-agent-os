@@ -31,6 +31,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from dalton_core.cockpit_plane import CockpitConfig, CockpitPlane
+from unittest.mock import patch
+
+from dalton_core import model_fallback_chain as fallback_chain
 from dalton_core.model_fallback_chain import (
     FallbackChainError,
     TIERS,
@@ -337,11 +340,18 @@ class UnpricedModelTests(RouterCase):
             chain=["profile:deepseek-v4-flash", self.unpriced],
         )
         self.assertEqual(checked["chain"][-1], self.unpriced)
-        with self.assertRaisesRegex(FallbackChainError, "only be the last resort"):
+        # 2026-09-15: eligibility rules are off by default; pin both sides.
+        self.assertEqual(
             validate_selection(
                 self.router, purpose=CHEAP_PURPOSE, mode="explicit",
                 chain=[self.unpriced, "profile:deepseek-v4-flash"],
-            )
+            )["chain"][0], self.unpriced)
+        with patch.object(fallback_chain, "CHAIN_ELIGIBILITY_ENFORCED", True):
+            with self.assertRaisesRegex(FallbackChainError, "only be the last resort"):
+                validate_selection(
+                    self.router, purpose=CHEAP_PURPOSE, mode="explicit",
+                    chain=[self.unpriced, "profile:deepseek-v4-flash"],
+                )
 
     def test_routing_refuses_an_unpriced_model_anywhere_but_the_end(self) -> None:
         published = publish_selection(
@@ -396,7 +406,14 @@ class VerifierIndependenceTests(RouterCase):
         self.assertEqual(checked["chain"][0], "profile:gemini-3-8-flash")
 
     def test_uncontrolled_profile_cannot_be_selected_for_verification(self) -> None:
-        with self.assertRaisesRegex(FallbackChainError, "providerControls"):
+        # 2026-09-15: off by default, the same chain is a valid selection;
+        # the refusal is pinned with the flag on so the rule survives.
+        validate_selection(
+            self.router, purpose=VERIFY_PURPOSE, mode="explicit",
+            chain=["profile:claude-fable-5-1"],
+        )
+        with patch.object(fallback_chain, "CHAIN_ELIGIBILITY_ENFORCED", True), \
+                self.assertRaisesRegex(FallbackChainError, "providerControls"):
             validate_selection(
                 self.router, purpose=VERIFY_PURPOSE, mode="explicit",
                 chain=["profile:claude-fable-5-1"],
@@ -413,7 +430,10 @@ class VerifierIndependenceTests(RouterCase):
             actor_ref=OWNER, created_at=NOW.isoformat(),
         )
         sync_openclaw_model_catalog(self.router, config, checked_at=NOW)
-        with self.assertRaisesRegex(FallbackChainError, "no declared family"):
+        validate_selection(self.router, purpose=VERIFY_PURPOSE, mode="explicit",
+                           chain=[broker["id"]])
+        with patch.object(fallback_chain, "CHAIN_ELIGIBILITY_ENFORCED", True), \
+                self.assertRaisesRegex(FallbackChainError, "no declared family"):
             validate_selection(self.router, purpose=VERIFY_PURPOSE, mode="explicit",
                                chain=[broker["id"]])
 

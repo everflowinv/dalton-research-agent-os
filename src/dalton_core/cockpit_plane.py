@@ -5676,6 +5676,7 @@ class CockpitPlane:
         """
 
         from decimal import Decimal
+        from .model_selection import PURPOSE_LABELS
 
         events: list[dict[str, Any]] = []
 
@@ -6046,10 +6047,23 @@ class CockpitPlane:
             card["requires_restart"] = card["requires_restart"] or row["requires_restart"]
             if not card["chain"] and row["mode"] == "tier":
                 card["chain"] = list(row["chain"])
+        from .model_fallback_chain import CHAIN_ELIGIBILITY_ENFORCED
+        if not CHAIN_ELIGIBILITY_ENFORCED:
+            # The owner's 2026-09-15 direction: every model may join every
+            # tier's chain.  The capability facts stay on each choice so the
+            # picker can still say what a model declares.
+            for choice in choices:
+                choice["verifier_eligible"] = True
+                if choice["note"] in (
+                    "未声明可核验的模型家族：不能承担独立核验",
+                    "缺少受控计数：不能放在独立复核链里",
+                ):
+                    choice["note"] = None
         return {
             "available": True,
             "as_of": _iso(self.clock()),
             "schema_version": SCHEMA_VERSION,
+            "eligibility_enforced": CHAIN_ELIGIBILITY_ENFORCED,
             "policy_version_ref": None,
             "purposes": purposes,
             "tier_cards": sorted(tier_cards.values(), key=lambda card: card["tier"]),

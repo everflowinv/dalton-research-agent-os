@@ -79,6 +79,13 @@ TIER_VERIFIER = "verifier"
 # produced what it is checking. The router still applies the independence
 # filter on top -- the chain makes the common case right, the filter makes the
 # uncommon case safe.
+# 2026-09-15 owner direction: every model is eligible for every tier by
+# default.  The eligibility rules below -- an unpriced model may only close a
+# chain, a verifier must declare broker-enforced controls and a family -- stay
+# in the code and come back the day this flag is turned on again.
+CHAIN_ELIGIBILITY_ENFORCED = False
+
+
 _TIER_CHAINS: dict[str, tuple[str, ...]] = {
     TIER_BRAIN: (
         "profile:gpt-6-astra",
@@ -476,11 +483,12 @@ def validate_selection(
             )
     for position, profile_id in enumerate(links, start=1):
         if held[profile_id].get("unpriced") and position != len(links):
-            raise FallbackChainError(
-                f"{profile_id} has no published price, so it can only be the last "
-                "resort; put it at the end of the chain or leave it out"
-            )
-    if tier == TIER_VERIFIER:
+            if CHAIN_ELIGIBILITY_ENFORCED:
+                raise FallbackChainError(
+                    f"{profile_id} has no published price, so it can only be the last "
+                    "resort; put it at the end of the chain or leave it out"
+                )
+    if tier == TIER_VERIFIER and CHAIN_ELIGIBILITY_ENFORCED:
         for profile_id in links:
             profile = held[profile_id]
             family = profile["family"]
@@ -970,6 +978,7 @@ def routing_overview(
 
 
 __all__ = [
+    "CHAIN_ELIGIBILITY_ENFORCED",
     "FALLBACK_FAILURES",
     "HALTING_FAILURES",
     "TIERS",
