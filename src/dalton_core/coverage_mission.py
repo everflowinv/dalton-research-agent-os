@@ -3096,6 +3096,9 @@ class CoverageMissionAuthority:
         never copied twice.
         """
 
+        if deadline is not None and time.monotonic() >= deadline:
+            return []
+
         mission_ref = _text(mission_ref, "mission_ref")
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
             raise CoverageMissionValidationError("carry-forward limit must be 1..500")
@@ -3200,6 +3203,9 @@ class CoverageMissionAuthority:
         each grant through the normal registration path. No acquisition or
         model calls occur; resolved reviews can never be reopened.
         """
+
+        if deadline is not None and time.monotonic() >= deadline:
+            return []
         mission_ref = _text(mission_ref, "mission_ref")
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
             raise CoverageMissionValidationError("backfill limit must be 1..100")

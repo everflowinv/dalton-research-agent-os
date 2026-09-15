@@ -1212,6 +1212,8 @@ class MissionSourceDiscoveryCoordinator:
     def carry_forward(self, deadline: float | None = None) -> list[dict[str, Any]]:
         """Re-register this source's documents stranded under a superseded mission version."""
 
+        if deadline is not None and _monotonic() >= deadline:
+            return []
         try:
             return self.missions.carry_forward_superseded_documents(
                 self.plan["mission_ref"], source_ref=self.source_ref, deadline=deadline,
@@ -1229,6 +1231,8 @@ class MissionSourceDiscoveryCoordinator:
         """
 
         settled: list[dict[str, Any]] = []
+        if deadline is not None and _monotonic() >= deadline:
+            return settled
         documents = self.missions.already_held_documents(source_ref=self.source_ref)
         if self.source_ref == ALPHAENGINE_SOURCE_REF:
             # Select the authority-backed rows in SQL.  Taking the first N
@@ -1285,6 +1289,8 @@ class MissionSourceDiscoveryCoordinator:
 
         if self.source_ref != WEB_SEARCH_SOURCE_REF:
             return {"status": "not_applicable"}
+        if deadline is not None and _monotonic() >= deadline:
+            return {"status": "deferred", "filled": 0, "failures": []}
         rows = self.missions.documents_without_host(source_ref=self.source_ref, limit=limit)
         if not rows:
             return {"status": "complete", "filled": 0}
@@ -1318,6 +1324,8 @@ class MissionSourceDiscoveryCoordinator:
     def settle_dispatches(self, deadline: float | None = None) -> list[dict[str, Any]]:
         settled: list[dict[str, Any]] = []
         if self.search_launcher is None:
+            return settled
+        if deadline is not None and _monotonic() >= deadline:
             return settled
         for dispatch in self.missions.open_discovery_dispatches(source_ref=self.source_ref):
             if deadline is not None and _monotonic() >= deadline:
@@ -1628,6 +1636,8 @@ class MissionSourceDiscoveryCoordinator:
 
         if self.source_ref != WEB_SEARCH_SOURCE_REF or self.search_launcher is None:
             return []
+        if deadline is not None and _monotonic() >= deadline:
+            return []
         try:
             mission = self.missions.active_mission(self.plan["mission_ref"])
         except CoverageMissionNotFound:
@@ -1650,9 +1660,6 @@ class MissionSourceDiscoveryCoordinator:
                 discovery_plan_ref=self.plan["id"],
                 discovery_plan_hash=self.plan["content_hash"], limit=limit,
             )
-        if candidates:
-            last = candidates[-1]
-            self._local_recovery_cursor = (last["created_at"], last["dispatch_id"])
         recovered: list[dict[str, Any]] = []
         for dispatch in candidates:
             if deadline is not None and _monotonic() >= deadline:
@@ -1666,11 +1673,14 @@ class MissionSourceDiscoveryCoordinator:
                     "status": "refused", "reason": f"{type(exc).__name__}: {exc}",
                     "provider_calls": 0,
                 })
+            self._local_recovery_cursor = (dispatch["created_at"], dispatch["dispatch_id"])
         return recovered
 
     def settle_documents(self, deadline: float | None = None) -> list[dict[str, Any]]:
         settled: list[dict[str, Any]] = []
         if self.acquisition_launcher is None:
+            return settled
+        if deadline is not None and _monotonic() >= deadline:
             return settled
         for document in self.missions.launched_discovered_documents(source_ref=self.source_ref):
             if deadline is not None and _monotonic() >= deadline:
@@ -2585,6 +2595,8 @@ class MissionSourceDiscoveryCoordinator:
         request the whole op rides in.
         """
 
+        own_deadline = _monotonic() + max(0.0, self.tick_budget_seconds)
+        deadline = own_deadline if deadline is None else min(own_deadline, deadline)
         retried_after_restart = self._retry_failures_now
         settled_dispatches = self.settle_dispatches(deadline)
         recovered_dispatches = self.recover_local_web_discoveries(deadline=deadline)

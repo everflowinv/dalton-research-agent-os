@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from dalton_core.alphaengine_core_search import (
     AlphaEngineCoreSearch,
@@ -1162,6 +1162,58 @@ class CoordinatorTests(unittest.TestCase):
         reviews.assert_called_once_with(self.coordinator.plan["mission_ref"], deadline=deadline)
         launch.assert_not_called()
         self.assertEqual(result["discovery"]["status"], "deferred")
+
+    def test_expired_maintenance_deadline_skips_row_selection_queries(self) -> None:
+        deadline = 0.0
+        self.coordinator.search_launcher = object()
+        self.coordinator.acquisition_launcher = object()
+        with (
+            patch.object(self.coordinator.missions, "carry_forward_superseded_documents") as carry,
+            patch.object(self.coordinator.missions, "already_held_documents") as held,
+            patch.object(self.coordinator.missions, "open_discovery_dispatches") as dispatches,
+            patch.object(self.coordinator.missions, "active_mission") as active,
+            patch.object(self.coordinator.missions, "launched_discovered_documents") as launched,
+        ):
+            self.assertEqual(self.coordinator.carry_forward(deadline), [])
+            self.assertEqual(self.coordinator.settle_already_held(deadline), [])
+            self.assertEqual(self.coordinator.settle_dispatches(deadline), [])
+            self.assertEqual(self.coordinator.recover_local_web_discoveries(deadline=deadline), [])
+            self.assertEqual(self.coordinator.settle_documents(deadline), [])
+        carry.assert_not_called()
+        held.assert_not_called()
+        dispatches.assert_not_called()
+        active.assert_not_called()
+        launched.assert_not_called()
+
+    def test_recovery_cursor_advances_only_past_processed_candidates(self) -> None:
+        first = {"created_at": "2026-01-01T00:00:00Z", "dispatch_id": "dispatch:1",
+                 "ticket_ref": "ticket:1"}
+        second = {"created_at": "2026-01-01T00:00:01Z", "dispatch_id": "dispatch:2",
+                  "ticket_ref": "ticket:2"}
+        self.coordinator.source_ref = "source:web-search"
+        self.coordinator.search_launcher = Mock(status=Mock(return_value={"status": "failed"}))
+        with (
+            patch.object(self.coordinator.missions, "active_mission", return_value={"id": "mission:v2"}),
+            patch.object(self.coordinator.missions, "failed_discovery_dispatch_page",
+                         return_value=[first, second]) as page,
+            patch.object(self.coordinator, "_recover_web_dispatch", return_value={"status": "recovered"}),
+            patch("dalton_core.mission_source_discovery._monotonic", side_effect=[0.0, 0.0, 2.0]),
+        ):
+            self.coordinator.recover_local_web_discoveries(deadline=1.0)
+        self.assertEqual(self.coordinator._local_recovery_cursor,
+                         (first["created_at"], first["dispatch_id"]))
+        with (
+            patch.object(self.coordinator.missions, "active_mission", return_value={"id": "mission:v2"}),
+            patch.object(self.coordinator.missions, "failed_discovery_dispatch_page",
+                         return_value=[second]) as next_page,
+            patch.object(self.coordinator, "_recover_web_dispatch", return_value={"status": "recovered"}),
+            patch("dalton_core.mission_source_discovery._monotonic", return_value=0.0),
+        ):
+            self.coordinator.recover_local_web_discoveries(deadline=1.0)
+        self.assertEqual(next_page.call_args.kwargs["after"],
+                         (first["created_at"], first["dispatch_id"]))
+        self.assertEqual(self.coordinator._local_recovery_cursor,
+                         (second["created_at"], second["dispatch_id"]))
 
 
 class SearchChildTests(unittest.TestCase):
