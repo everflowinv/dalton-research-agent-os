@@ -288,19 +288,29 @@ class DaltonStore:
 
         row = self.connection.execute("PRAGMA journal_mode").fetchone()
         if row is not None and str(row[0]).lower() == "wal":
-            return
-        deadline = time.monotonic() + _WAL_CONVERSION_SECONDS
-        while True:
-            try:
-                self.connection.execute("PRAGMA journal_mode = WAL")
-                return
-            except sqlite3.OperationalError:
-                row = self.connection.execute("PRAGMA journal_mode").fetchone()
-                if row is not None and str(row[0]).lower() == "wal":
-                    return
-                if time.monotonic() >= deadline:
-                    raise
-                time.sleep(0.05)
+            pass
+        else:
+            deadline = time.monotonic() + _WAL_CONVERSION_SECONDS
+            while True:
+                try:
+                    self.connection.execute("PRAGMA journal_mode = WAL")
+                    break
+                except sqlite3.OperationalError:
+                    row = self.connection.execute("PRAGMA journal_mode").fetchone()
+                    if row is not None and str(row[0]).lower() == "wal":
+                        break
+                    if time.monotonic() > deadline:
+                        raise
+        # 2026-09-16: bound the WAL file itself. Continuous readers (lane
+        # children, cockpit overviews, patrol probes) keep completing
+        # checkpoints from truncating, and the live WAL grew to 1.2 GB --
+        # sixteen times the 72 MB database. Every fresh read-only connection
+        # then rebuilt a wal-index over the whole thing and every query
+        # reassembled pages out of it: the cockpit overview read 10-60 s from
+        # other machines while the same queries ran in 2 s on a fresh file.
+        # journal_size_limit caps the post-checkpoint remnant, so a checkpoint
+        # that does complete actually shrinks the file back down.
+        self.connection.execute("PRAGMA journal_size_limit = 134217728")
 
     def _migrate_thesis_authority_columns(self) -> None:
         """Upgrade the legacy model-verification-only thesis table in place.
