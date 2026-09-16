@@ -45,6 +45,8 @@ from .research_planner import (
     ResearchPlanInputTooLarge,
     ResearchPlanError,
     build_prompt,
+    document_reading_priorities,
+    gap_filling_inquiries,
     plan_from_response,
     project_state_for_prompt,
     prompt_size_report,
@@ -53,6 +55,36 @@ from .research_state import build_research_state, state_digest
 from .store import DaltonStore, canonical_json
 
 SUMMARY_SCHEMA_VERSION = "0.1"
+# One state, one decision.  The child already replays a *stored* plan for an
+# unchanged state and costs nothing; what it did not do was remember an
+# attempt that produced no plan, so a state the planner had already refused --
+# or one whose route was down -- re-entered every five minutes and bought a
+# fresh WorkOrder each time.  Live, 2026-09-14..16: 401 rounds over 8 distinct
+# states, one of them decided 317 times, 309 of the 401 ending
+# ``model_unavailable``.  The ledger below is the memory that was missing.
+PLAN_ATTEMPT_LEDGER = "research-plan-attempts.json"
+# Bounded on purpose: this is a memory of the last few states, not a history.
+MAX_LEDGER_ENTRIES = 16
+# Outcomes this exact state will produce again, every time, for ever.  A
+# refusal is a judgement about the state, and the state has not moved.
+TERMINAL_PLAN_STATUSES: frozenset[str] = frozenset({
+    "refused", "input_too_large",
+})
+# ...and the ones that are about this moment rather than this state: no route,
+# a spent pool, a lease held by another attempt.  Those are worth asking again
+# -- but not every five minutes, because each one mints a WorkOrder and the
+# scheduler database grew 76MB on them.
+TRANSIENT_RETRY_SECONDS = 1_800
+# What one planner WorkOrder may carry.  The prompt *is* the work order's
+# question, and the state is inlined into it, so a 266KB prompt is a 266KB row
+# in scheduler.sqlite for every tick.  The projection is therefore fitted to
+# the tighter of the model's own input bound and this, and the difference
+# between them is inventory that becomes a count and a hash instead of rows.
+#
+# Externalising the state entirely -- ``input_refs`` plus a context-pack ref,
+# the shape ``human_intent.save_context_pack`` already uses -- is the real
+# answer and needs ``cockpit_model.build_work``; it is named in the report.
+MAX_WORK_ORDER_PROMPT_BYTES = 64_000
 # The planner reads a small object and answers with a short ranked list. Both
 # bounds are generous against that, and small against a filing window.
 # 2026-09-16: 120,000 → 80,000. The staged projection carries the live state
@@ -266,6 +298,89 @@ def build_state(store: DaltonStore, missions: CoverageMissionAuthority,
     )
 
 
+def read_attempt_ledger(state_dir: Path) -> dict[str, Any]:
+    """The last few states this child decided, and how each attempt ended.
+
+    Unreadable is empty.  A corrupt or absent ledger must never stop the
+    planner from planning; the worst it can cost is one repeated decision.
+    """
+
+    try:
+        value = json.loads((state_dir / PLAN_ATTEMPT_LEDGER).read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 - absent or unreadable is "no memory"
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def record_attempt(state_dir: Path, state_hash: str, summary: Mapping[str, Any]) -> None:
+    """Remember how this state's attempt ended, bounded and owner-only."""
+
+    if not state_hash:
+        return
+    ledger = read_attempt_ledger(state_dir)
+    previous = ledger.get(state_hash) or {}
+    ledger[state_hash] = {
+        "at": summary.get("created_at"),
+        "status": summary.get("status"),
+        "plan_status": summary.get("plan_status"),
+        "attempts": int(previous.get("attempts") or 0) + 1,
+        "reason": (str(summary.get("failure_reason"))[:300]
+                   if summary.get("failure_reason") else None),
+    }
+    ordered = sorted(ledger.items(), key=lambda item: str(item[1].get("at") or ""),
+                     reverse=True)[:MAX_LEDGER_ENTRIES]
+    try:
+        _write_owner_only(state_dir / PLAN_ATTEMPT_LEDGER, dict(ordered))
+    except Exception:  # noqa: BLE001 - a ledger we cannot write is still no crash
+        return
+
+
+def attempt_hold(
+    ledger: Mapping[str, Any], state_hash: str, *, now: datetime,
+) -> dict[str, Any] | None:
+    """Whether this exact state was already decided, and may not be re-asked.
+
+    Asked **before** the model is built, so a hold costs no WorkOrder, no
+    routing decision and no row in the scheduler.  That is the whole point: the
+    child used to hold only on a *stored* plan, which meant every outcome that
+    stored nothing -- a refusal, a dead route, a spent pool -- re-entered on
+    the next tick with the same state and minted another WorkOrder.
+    """
+
+    record = ledger.get(state_hash)
+    if not isinstance(record, Mapping) or not record.get("at"):
+        return None
+    plan_status = str(record.get("plan_status") or "")
+    reason = record.get("reason")
+    if plan_status in TERMINAL_PLAN_STATUSES:
+        return {
+            "plan_status": "held",
+            "failure_reason": (
+                "研究状态没有变化，没有必要重新决策：上一轮用同一份状态问过，"
+                f"结果是 {plan_status}"
+                + (f"（{reason}）" if reason else "")
+                + "；同一个状态只会得到同一个拒绝，所以这一轮不建 work order"),
+            "held_reason": "terminal_for_this_state",
+            "held_attempts": int(record.get("attempts") or 0),
+        }
+    try:
+        since = (now - datetime.fromisoformat(str(record["at"]))).total_seconds()
+    except (TypeError, ValueError):
+        return None
+    if since < TRANSIENT_RETRY_SECONDS:
+        return {
+            "plan_status": "held",
+            "failure_reason": (
+                "研究状态没有变化，没有必要重新决策：上一轮用同一份状态问过，"
+                f"{int(since)} 秒前以 {plan_status or record.get('status')} 结束"
+                + (f"（{reason}）" if reason else "")
+                + f"；{TRANSIENT_RETRY_SECONDS} 秒之内不再重复建 work order"),
+            "held_reason": "transient_backoff",
+            "held_attempts": int(record.get("attempts") or 0),
+        }
+    return None
+
+
 def run_planner(
     *,
     state_dir: Path,
@@ -291,8 +406,18 @@ def run_planner(
         "replayed": False,
         "cost_micros": 0,
         "failure_reason": None,
+        # 0 by design, not by accident: a plan is a proposal about the
+        # system's own work and never a Claim about the world.  Kept in the
+        # summary so a parent reading every lane's summary the same way still
+        # gets an answer; ``plan_status`` and the two counts below are what
+        # say whether this lane landed anything.
         "formal_authority_writes": 0,
         "prompt_input": None,
+        # What a fresh plan actually asks the reading lanes to do next, and
+        # how much of it anybody can execute today.
+        "reading_priorities": [],
+        "addressable_inquiries": 0,
+        "held_reason": None,
     }
     store = DaltonStore(str(state_dir / "core.sqlite"))
     try:
@@ -323,7 +448,16 @@ def run_planner(
                 "inquiries": len(existing["inquiries"]),
                 "sufficiency": len(existing.get("sufficiency") or []),
                 "plan_ref": existing["plan_id"],
+                "reading_priorities": document_reading_priorities(existing),
+                "addressable_inquiries": sum(
+                    1 for row in gap_filling_inquiries(existing) if row["addressable"]),
             })
+            return summary
+        # The same state that produced no plan last time will produce no plan
+        # this time. Held here, before the model exists, so nothing is enqueued.
+        held = attempt_hold(read_attempt_ledger(state_dir), state["content_hash"], now=now)
+        if held is not None and not dry_run:
+            summary.update({"status": "held", **held})
             return summary
         if dry_run or model_config_path is None:
             prompt_report = prompt_size_report(state)
@@ -341,12 +475,19 @@ def run_planner(
             max_cost_usd=MAX_COST_USD, timeout_seconds=TIMEOUT_SECONDS,
         )
         call_budget = model.budget_for("plan")
+        # The tighter of what the model accepts and what one work order may
+        # carry. The prompt is the work order's question; fitting only to the
+        # model's bound is how a 266KB row lands in the scheduler every tick.
+        prompt_bound = min(int(call_budget["max_input_tokens"]),
+                           MAX_WORK_ORDER_PROMPT_BYTES)
         try:
-            prompt_state = project_state_for_prompt(
-                state, max_input_bytes=int(call_budget["max_input_tokens"]))
+            prompt_state = project_state_for_prompt(state, max_input_bytes=prompt_bound)
         except ResearchPlanInputTooLarge as exc:
+            # Distinct from a route outage: no projection of *this* state fits,
+            # and it will not fit on the next tick either. Named so the ledger
+            # holds it instead of asking again every five minutes.
             summary.update({
-                "status": "succeeded", "plan_status": "model_unavailable",
+                "status": "succeeded", "plan_status": "input_too_large",
                 "failure_reason": f"{type(exc).__name__}: {exc}",
                 "prompt_bytes": exc.report["prompt_bytes"],
                 "prompt_input": exc.report,
@@ -354,9 +495,9 @@ def run_planner(
             return summary
         prompt = build_prompt(prompt_state)
         summary["prompt_bytes"] = len(prompt.encode("utf-8"))
+        summary["work_order_prompt_bound"] = MAX_WORK_ORDER_PROMPT_BYTES
         summary["prompt_input"] = {
-            **prompt_size_report(
-                prompt_state, max_input_bytes=int(call_budget["max_input_tokens"])),
+            **prompt_size_report(prompt_state, max_input_bytes=prompt_bound),
             "full_state_prompt_bytes": len(build_prompt(state).encode("utf-8")),
             "projection": prompt_state.get("prompt_projection"),
         }
@@ -404,12 +545,21 @@ def run_planner(
             "directives": len(plan["directives"]), "inquiries": len(plan["inquiries"]),
             "sufficiency": len(plan.get("sufficiency") or []),
             "assessment": plan["assessment"], "plan_ref": stored["plan_id"],
+            "reading_priorities": document_reading_priorities(plan),
+            "addressable_inquiries": sum(
+                1 for row in gap_filling_inquiries(plan) if row["addressable"]),
         })
         return summary
     except Exception as exc:  # unexpected: record for the parent, then surface
         summary["failure_reason"] = f"unexpected {type(exc).__name__}: {exc}"
         raise
     finally:
+        # Remembered whatever happened, including the crash path: an attempt
+        # that ended in an unexpected exception is still an attempt against
+        # this state, and repeating it every five minutes is what filled the
+        # scheduler.
+        if summary.get("state_hash"):
+            record_attempt(state_dir, str(summary["state_hash"]), summary)
         _write_owner_only(summary_dir / "summary.json", summary)
         store.close()
 
@@ -437,7 +587,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     if not args.quiet:
         print(json.dumps(summary, ensure_ascii=False, sort_keys=True, indent=1))
-    return 0 if summary["status"] in ("succeeded", "idle") else 1
+    # ``held`` is a decision, not a failure: the state has not moved, so
+    # there was nothing to decide. Exiting non-zero would make the parent
+    # read a correct, cheap tick as a broken child.
+    return 0 if summary["status"] in ("succeeded", "idle", "held") else 1
 
 
 if __name__ == "__main__":  # pragma: no cover - exercised as a subprocess

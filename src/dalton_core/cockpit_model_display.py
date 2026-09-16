@@ -227,3 +227,110 @@ def present_invariants(values: dict[str, dict[str, Any]]) -> dict[str, dict[str,
                              for reason in row.get('findings') or []],
             } for row in item.get('not_checked') or []]
     return values
+
+
+# WP-A/A2 display: the routing model page, in the owner's language.
+#
+# The cooldown itself is a routing decision recorded in the router database
+# (``model_profile_cooldowns``, via ``model_profile_health``): once an endpoint
+# has proved it is not answering, selection stops offering it, so no call is
+# made and no budget is reserved.  That is the right behaviour and it is also
+# invisible -- a brain chain quietly running on its second link for six hours
+# looks exactly like a chain whose first link was never chosen.  On 2026-09-16
+# that invisibility cost a morning's pools.
+#
+# So every chain row the model page draws says it: which model is being held
+# back, until when, and why.  Read-only; the page has no button here, because a
+# cooldown is not a setting -- it expires, or the owner changes the chain.
+COOLDOWN_REASON_LABELS = {
+    'provider_rate_limited': '连续限流（HTTP 429）',
+    'provider_failure_streak': '连续多次供应商失败',
+    'probe_failed': '冷却到期后的探测调用又失败',
+}
+
+
+def cooldown_index(cooldowns: Any) -> dict[str, dict[str, Any]]:
+    """The active cooldowns from ``routing_overview()``, keyed by profile id.
+
+    Takes either the whole ``cooldowns`` block or just its ``active`` list, so
+    the caller does not have to know which shape it happens to be holding.
+    """
+
+    active = cooldowns.get('active') if isinstance(cooldowns, Mapping) else cooldowns
+    if not isinstance(active, (list, tuple)):
+        return {}
+    return {str(item['profile_id']): dict(item) for item in active
+            if isinstance(item, Mapping) and item.get('profile_id')}
+
+
+def _cooldown_clock(value: Any) -> str | None:
+    """``HH:MM（UTC）`` from an RFC3339 instant, or ``None`` if unreadable.
+
+    UTC and said so, rather than the reader's local time: the page hands raw
+    instants to the browser everywhere else, and a bare ``06:30`` rendered
+    server-side would be the one time on the page in a different zone.
+    """
+
+    from datetime import datetime, timezone
+
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        moment = datetime.fromisoformat(value.replace('Z', '+00:00'))
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(timezone.utc).strftime('%H:%M') + '（UTC）'
+
+
+def cooldown_note(cooldown: Mapping[str, Any] | None) -> str | None:
+    """One line for one held-back model: 供应商冷却中，至 HH:MM，原因：…"""
+
+    if not isinstance(cooldown, Mapping) or not cooldown:
+        return None
+    reason = COOLDOWN_REASON_LABELS.get(str(cooldown.get('reason')), '供应商连续失败')
+    clock = _cooldown_clock(cooldown.get('until'))
+    streak = cooldown.get('streak')
+    repeat = ('' if not isinstance(streak, int) or streak < 2
+              else f'，已是第 {streak} 次')
+    return ('供应商冷却中'
+            + (f'，至 {clock}' if clock else '')
+            + f'，原因：{reason}{repeat}。冷却期内不选它，也不会为它预留预算。')
+
+
+def chain_link_note(existing: Any, cooldown: Mapping[str, Any] | None) -> str | None:
+    """Fold the cooldown line into whatever note the link already carried."""
+
+    held = cooldown_note(cooldown)
+    if held is None:
+        return existing if isinstance(existing, str) and existing else None
+    if isinstance(existing, str) and existing:
+        return f'{existing}；{held}'
+    return held
+
+
+def purpose_cooldown_note(chain: Any, index: Mapping[str, Mapping[str, Any]],
+                          display_name: Callable[[str], str] | None = None) -> str | None:
+    """The row's own heading: which of this stage's models are being held back.
+
+    Named rather than counted, and it says what the chain does next, because
+    "one of your models is cooling" and "this stage has nothing left" are very
+    different pieces of news and the difference is the whole point.
+    """
+
+    if not isinstance(chain, (list, tuple)) or not index:
+        return None
+    ordered = [str(link.get('profile_id') or link.get('model') or '')
+               for link in chain if isinstance(link, Mapping)]
+    held = [profile_id for profile_id in ordered if profile_id in index]
+    if not held:
+        return None
+    shown = '、'.join((display_name(profile_id) if display_name else profile_id)
+                     for profile_id in held)
+    remaining = [profile_id for profile_id in ordered if profile_id not in index]
+    if not remaining:
+        return (f'这一环的模型都在供应商冷却中（{shown}），暂时无法调用；'
+                '冷却结束后会自动恢复，也可以在这一行改选其他模型。')
+    following = (display_name(remaining[0]) if display_name else remaining[0])
+    return f'{shown} 正在供应商冷却中，这一环暂时由 {following} 承接。'

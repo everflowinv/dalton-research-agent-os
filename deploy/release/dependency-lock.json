@@ -1,0 +1,256 @@
+{
+  "dependency_lock_hash": "031fdbe75e53ff9782b71625f9211df883e14148a03bc164745123a101afb02e",
+  "dependency_wheels": [
+    {
+      "filename": "Unidecode-1.4.0-py3-none-any.whl",
+      "sha256": "c3c7606c27503ad8d501270406e345ddb480a7b5f38827eafe4fa82a137f0021"
+    },
+    {
+      "filename": "aiofiles-25.1.0-py3-none-any.whl",
+      "sha256": "abe311e527c862958650f9438e859c1fa7568a141b22abcd015e120e86a85695"
+    },
+    {
+      "filename": "annotated_types-0.8.0-py3-none-any.whl",
+      "sha256": "f072f4d804ea359e4eaf198b1af7a8b0943881a87f31bb764f8bf219bb9419e0"
+    },
+    {
+      "filename": "anyio-4.15.1-py3-none-any.whl",
+      "sha256": "6152fdbbf9a77fdec97731721bebf7c4c44f7c29b424b0065826173efc7ed101"
+    },
+    {
+      "filename": "beautifulsoup4-4.15.0-py3-none-any.whl",
+      "sha256": "d6f88de62e1d4e38ecb1077eb9724cd0eff29d2a08ca16a401e9b9e93f117cf9"
+    },
+    {
+      "filename": "certifi-2026.7.22-py3-none-any.whl",
+      "sha256": "62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775"
+    },
+    {
+      "filename": "cffi-2.1.1-cp314-cp314-macosx_11_0_arm64.whl",
+      "sha256": "661c298b4821edebead0c91edd2b00374d67ad7c5a1f7a91d4442633b79d6a72"
+    },
+    {
+      "filename": "charset_normalizer-3.5.0-cp314-cp314-macosx_10_15_universal2.whl",
+      "sha256": "1f99a8c3a1da5d955edbad18208b3d627bdd54c48a6e739fa877bdca98c686d6"
+    },
+    {
+      "filename": "cryptography-50.0.1-cp311-abi3-macosx_11_0_arm64.whl",
+      "sha256": "b8f852c65863251b9e3a1b8c150ce21e59b522dbb6a7d4bc80e680d38388e986"
+    },
+    {
+      "filename": "curl_cffi-0.16.3-cp310-abi3-macosx_11_0_arm64.whl",
+      "sha256": "f3b63da797912bc82911e34dfe449725514e4281527fb516931fc457087cfb44"
+    },
+    {
+      "filename": "edgartools-5.57.0-py3-none-any.whl",
+      "sha256": "e3ae3e2eb82bb227c27aa1e0596605d60710cdae66a3c797ed83203d8a3ea965"
+    },
+    {
+      "filename": "et_xmlfile-2.0.0-py3-none-any.whl",
+      "sha256": "7a91720bc756843502c3b7504c77b8fe44217c85c537d85037f0f536151b2caa"
+    },
+    {
+      "filename": "filelock-3.32.6-py3-none-any.whl",
+      "sha256": "3f16ecd0117feae0dfc147e8c62eb5daeccd8bd800378c3ddf416de9b4feb6b1"
+    },
+    {
+      "filename": "h11-0.16.0-py3-none-any.whl",
+      "sha256": "63cf8bbe7522de3bf65932fda1d9c2772064ffb3dae62d55932da54b31cb6c86"
+    },
+    {
+      "filename": "httpcore-1.0.9-py3-none-any.whl",
+      "sha256": "2d400746a40668fc9dec9810239072b40b4484b640a8c38fd654a024c7a1bf55"
+    },
+    {
+      "filename": "httpx-0.28.1-py3-none-any.whl",
+      "sha256": "d909fcccc110f8c7faf814ca82a9a4d816bc5a6dbfea25d6591d6985b8ba59ad"
+    },
+    {
+      "filename": "httpxthrottlecache-0.6.1-py3-none-any.whl",
+      "sha256": "45387b7b0bf12a687d1a0b4a2c1a5faa7258f587e63caabc64e5486724b7149c"
+    },
+    {
+      "filename": "humanize-4.16.0-py3-none-any.whl",
+      "sha256": "353eb2f34c09d098b2880eee8bef21832eae6d174f48c5762fff7e5fcb74d01d"
+    },
+    {
+      "filename": "idna-3.18-py3-none-any.whl",
+      "sha256": "7f952cbe720b688055e3f87de14f5c3e5fdaa8bc3928985c4077ca689de849a2"
+    },
+    {
+      "filename": "jinja2-3.1.6-py3-none-any.whl",
+      "sha256": "85ece4451f492d0c13c5dd7c13a64681a86afae63a5f347908daf103ce6d2f67"
+    },
+    {
+      "filename": "lxml-6.1.3-cp314-cp314-macosx_10_15_universal2.whl",
+      "sha256": "2bec13085dc8ef48a3fe62f7dfcacfeda2c785cdf19cc8eeda2bb9ed081da165"
+    },
+    {
+      "filename": "markdown_it_py-4.2.0-py3-none-any.whl",
+      "sha256": "9f7ebbcd14fe59494226453aed97c1070d83f8d24b6fc3a3bcf9a38092641c4a"
+    },
+    {
+      "filename": "markupsafe-3.0.3-cp314-cp314-macosx_11_0_arm64.whl",
+      "sha256": "c47a551199eb8eb2121d4f0f15ae0f923d31350ab9280078d1e5f12b249e0026"
+    },
+    {
+      "filename": "mdurl-0.1.2-py3-none-any.whl",
+      "sha256": "84008a41e51615a49fc9966191ff91509e3c40b939176e643fd50a5c2196b8f8"
+    },
+    {
+      "filename": "multitasking-0.0.13-py3-none-any.whl",
+      "sha256": "ec9243af140c67bfe52dc98d7173c294512735a88e8425c458b250db99dc2b48"
+    },
+    {
+      "filename": "nest_asyncio-1.6.0-py3-none-any.whl",
+      "sha256": "87af6efd6b5e897c81050477ef65c62e2b2f35d51703cae01aff2905b1852e1c"
+    },
+    {
+      "filename": "numpy-2.5.3-cp314-cp314-macosx_14_0_arm64.whl",
+      "sha256": "adc1ada2662f8a5f960b8a10d9986897e7499ef07e06d4cfe7197f8cce923c07"
+    },
+    {
+      "filename": "openpyxl-3.1.5-py2.py3-none-any.whl",
+      "sha256": "5282c12b107bffeef825f4617dc029afaf41d0ea60823bbb665ef3079dc79de2"
+    },
+    {
+      "filename": "orjson-3.12.0-cp314-cp314-macosx_15_0_arm64.whl",
+      "sha256": "8c3bb86dd10f39b3fbf434b7d5dc7cac77d6fc8ac572ae30a10731ede2c4b647"
+    },
+    {
+      "filename": "pandas-3.0.5-cp314-cp314-macosx_11_0_arm64.whl",
+      "sha256": "53730687fcd161883b24e10411c06d6a4c0f2275d2faf3bb2bc25deb4ba8007c"
+    },
+    {
+      "filename": "peewee-4.5.1-py3-none-any.whl",
+      "sha256": "dbbdc93e9be08d1df49ceed48dc5d609bfeda6112848086f1f6c1f1debe70975"
+    },
+    {
+      "filename": "platformdirs-4.11.8-py3-none-any.whl",
+      "sha256": "52f2f181bbfde907966932cc8312d967d02976422d66d537ea16092b8e291081"
+    },
+    {
+      "filename": "protobuf-7.36.1-cp310-abi3-macosx_10_9_universal2.whl",
+      "sha256": "3cf2ee25d006cee57294a1196ea43b37feb78e0dcd1e8af5c1aeddb777655aca"
+    },
+    {
+      "filename": "pyarrow-25.0.1-cp314-cp314-macosx_12_0_arm64.whl",
+      "sha256": "bf0b672390cdcb640d7288f96b826d71ff4e9abb254a86c89890baf51a29cee6"
+    },
+    {
+      "filename": "pycparser-3.0-py3-none-any.whl",
+      "sha256": "b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992"
+    },
+    {
+      "filename": "pycryptodome-3.23.0-cp37-abi3-macosx_10_9_universal2.whl",
+      "sha256": "187058ab80b3281b1de11c2e6842a357a1f71b42cb1e15bce373f3d238135c27"
+    },
+    {
+      "filename": "pydantic-2.13.5-py3-none-any.whl",
+      "sha256": "346a034f080da3755d8e9cb5e00e8b07de1d39e4f6e2c87d8ab7cafa0b269a73"
+    },
+    {
+      "filename": "pydantic_core-2.46.5-cp314-cp314-macosx_11_0_arm64.whl",
+      "sha256": "1a353f84de772f423b5ffb11d7ae352fbbef0f446f3c0b0af0f8236d7233606e"
+    },
+    {
+      "filename": "pygments-2.21.0-py3-none-any.whl",
+      "sha256": "2363c69b61c4a97c838da3b130dcd6468f4848992b21a82f2a63ec34377137d9"
+    },
+    {
+      "filename": "pypdf-6.17.0-py3-none-any.whl",
+      "sha256": "5bd827266a21553b74d910e350131a6227b72f2ab4209bf372814b8195fa11c5"
+    },
+    {
+      "filename": "pyrate_limiter-4.5.0-py3-none-any.whl",
+      "sha256": "e7320a715adf404cb7b2f399e05ceb59cae165275b21f7708eb1b9fd9608e91c"
+    },
+    {
+      "filename": "python_dateutil-2.9.0.post0-py2.py3-none-any.whl",
+      "sha256": "a8b2bc7bffae282281c8140a97d3aa9c14da0b136dfe83f850eea9a5f7470427"
+    },
+    {
+      "filename": "pytz-2026.3.post1-py2.py3-none-any.whl",
+      "sha256": "dd95840dd199baea12d9cc096a1d452caa6596a1c1e4b5f3dbd1541855d5e815"
+    },
+    {
+      "filename": "rank_bm25-0.2.2-py3-none-any.whl",
+      "sha256": "7bd4a95571adadfc271746fa146a4bcfd89c0cf731e49c3d1ad863290adbe8ae"
+    },
+    {
+      "filename": "rapidfuzz-3.14.6-cp314-cp314-macosx_11_0_arm64.whl",
+      "sha256": "8fa7d45388dec34a86038f2a38380f4922b74b5dd8991247f629a531178db10f"
+    },
+    {
+      "filename": "requests-2.34.2-py3-none-any.whl",
+      "sha256": "2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0"
+    },
+    {
+      "filename": "rich-15.0.0-py3-none-any.whl",
+      "sha256": "33bd4ef74232fb73fe9279a257718407f169c09b78a87ad3d296f548e27de0bb"
+    },
+    {
+      "filename": "six-1.17.0-py2.py3-none-any.whl",
+      "sha256": "4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274"
+    },
+    {
+      "filename": "soupsieve-2.9.2-py3-none-any.whl",
+      "sha256": "8089a26fd974ca7a1f30276d3d8492ab266ab15af581642dfe8aa162e0c1c823"
+    },
+    {
+      "filename": "stamina-26.1.0-py3-none-any.whl",
+      "sha256": "62e06829bec87c06d4cafde520b32a6097d1017c378a9eb63253c5bf5ebbbb88"
+    },
+    {
+      "filename": "tabulate-0.10.0-py3-none-any.whl",
+      "sha256": "f0b0622e567335c8fabaaa659f1b33bcb6ddfe2e496071b743aa113f8774f2d3"
+    },
+    {
+      "filename": "tenacity-9.1.4-py3-none-any.whl",
+      "sha256": "6095a360c919085f28c6527de529e76a06ad89b23659fa881ae0649b867a9d55"
+    },
+    {
+      "filename": "textdistance-4.6.3-py3-none-any.whl",
+      "sha256": "0cb1b2cc8e3339ddc3e0f8c870e49fb49de6ecc42a718917308b3c971f34aa56"
+    },
+    {
+      "filename": "tqdm-4.70.0-py3-none-any.whl",
+      "sha256": "7f585706bfddbdebf89daac705b2dfcc16890130727d3197ca62c732b4310953"
+    },
+    {
+      "filename": "truststore-0.10.4-py3-none-any.whl",
+      "sha256": "adaeaecf1cbb5f4de3b1959b42d41f6fab57b2b1666adb59e89cb0b53361d981"
+    },
+    {
+      "filename": "typing_extensions-4.16.0-py3-none-any.whl",
+      "sha256": "481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8"
+    },
+    {
+      "filename": "typing_inspection-0.4.4-py3-none-any.whl",
+      "sha256": "65b8397ba37ccbce054456aaccddfc91e6e3083c92824df348d96ca832f3f147"
+    },
+    {
+      "filename": "urllib3-2.7.0-py3-none-any.whl",
+      "sha256": "9fb4c81ebbb1ce9531cce37674bbc6f1360472bc18ca9a553ede278ef7276897"
+    },
+    {
+      "filename": "websockets-17.1-cp314-cp314-macosx_11_0_arm64.whl",
+      "sha256": "96abdecbaae746851b87c3a36cb4a661df93ca3d92f114270f79228bf1d00de6"
+    },
+    {
+      "filename": "xlrd-2.0.2-py2.py3-none-any.whl",
+      "sha256": "ea762c3d29f4cca48d82df517b6d89fbce4db3107f9d78713e48cd321d5c9aa9"
+    },
+    {
+      "filename": "xmltodict-1.0.4-py3-none-any.whl",
+      "sha256": "a4a00d300b0e1c59fc2bfccb53d7b2e88c32f200df138a0dd2229f842497026a"
+    },
+    {
+      "filename": "yfinance-1.7.0-py3-none-any.whl",
+      "sha256": "91281ecd1f71069a37155ff8653aff2d3085f3492bd8721f18b70955da62911a"
+    }
+  ],
+  "note": "发布哈希 = sha256(canonical_json({'dependency_lock_hash':D,'wheel_sha256':W}))；D 是历史上固定的依赖锁哈希，其原始计算方式已不可考，因此在此按值钉住，并用下面的 62 个依赖 wheel 清单作为它所代表的确切依赖集。依赖集一旦变化，必须由人显式更新本文件的 dependency_lock_hash。",
+  "observed_in": "/Users/everflow/Projects/dalton-owner-activation-20260910/workspace-runtime-release-20260914/builds/2fc55611c253225479a9847e68ebec28416e93fa.json",
+  "schema_version": "dalton-release-dependency-lock:0.1"
+}

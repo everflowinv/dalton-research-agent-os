@@ -391,8 +391,13 @@ class ComputedCellCitationTests(DeliverableHarness):
                 "period": "2026Q2"}
 
     def test_the_shape_is_closed_per_kind(self) -> None:
-        self.assertEqual(CELL_SOURCE_KINDS,
-                         ("statement_accession", "forecast_cell"))
+        # P11c-E added the third computed layer: a valuation multiple, which
+        # is arithmetic over a price version and a filed line and which no
+        # Claim will ever carry. Pinned here on purpose -- a fourth kind
+        # should be a deliberate edit to this line, not a surprise.
+        self.assertEqual(
+            CELL_SOURCE_KINDS,
+            ("statement_accession", "forecast_cell", "valuation_metric"))
         with self.assertRaises(MissionDeliverableValidationError):
             validate_cell_citation({"kind": "vibes", "ref": "r"})
         with self.assertRaises(MissionDeliverableValidationError):

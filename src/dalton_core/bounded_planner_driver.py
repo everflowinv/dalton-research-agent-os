@@ -562,7 +562,25 @@ class BoundedPlannerDriver:
             try:
                 lanes[spec.driver_key] = self.client.call(spec.operation, {})
             except Exception as exc:  # noqa: BLE001 - one lane's failure is not the tick's
-                lanes[spec.driver_key] = {"status": f"unavailable:{type(exc).__name__}"}
+                # B1-3: the writer now distinguishes a request its queue never
+                # reached from one that ran out of time while running, and a
+                # RemoteError carries that code.  Recording only the exception
+                # type made every one of them ``unavailable:RemoteError``,
+                # which is how 151 failures in a day came to be indexed by the
+                # least informative fact about them.
+                code = getattr(exc, "code", None)
+                if code is None:
+                    # An exception with no protocol code says nothing more
+                    # than its type; the summary shape stays exactly what it
+                    # was.
+                    lanes[spec.driver_key] = {
+                        "status": f"unavailable:{type(exc).__name__}"
+                    }
+                else:
+                    lanes[spec.driver_key] = {
+                        "status": f"unavailable:{code}",
+                        "reason": f"{type(exc).__name__}: {exc}"[:200],
+                    }
         listing = self.client.call("bounded_planner_active_loops", {})
         loops = listing["loops"]
         executed: list[dict[str, Any]] = []

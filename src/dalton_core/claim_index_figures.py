@@ -717,28 +717,22 @@ def figure_claim_semantics(figure: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def promote_figure(
-    core: Any,
-    staging: Any,
+def build_figure_candidate(
+    connection: Any,
     *,
     figure: Mapping[str, Any],
     actor_ref: str,
-    idempotency_key: str,
     resolver: MissionFigureAuthorityResolver | None = None,
 ) -> dict[str, Any]:
-    """Stage one company-filed figure as a quantitative candidate.
+    """Every record one verified figure needs, derived from Core and nothing else.
 
-    No citation binding, no correction set, no transcript: the material is the
-    figure row and its Core chain, which is what ADR-0007 decided and what lets
-    a SEC-filing figure move at all.
-
-    A spoken figure is refused here as well as in the staging store.  Two
-    guards for one rule is on purpose: the store's is the contract and this one
-    is the sentence a caller reads.
+    Split out of ``promote_figure`` (WP-F) because the auto-commit rule has to
+    rebuild exactly what the promoter staged and compare it byte for byte.  Two
+    functions that agree today are not the same as one function called twice.
     """
 
     figures = resolver if resolver is not None else MissionFigureAuthorityResolver(
-        core.connection)
+        connection)
     held, numeric_bundle = figures.verify_figure(figure)
     if held["source_grade"] not in _ADMISSIBLE_GRADES:
         raise FigureAdmissionError(
@@ -802,26 +796,61 @@ def promote_figure(
     }
     claim["content_hash"] = content_hash(claim)
     claim = validate_candidate_claim(claim)
-    staged = staging.stage(
-        material=material,
-        source_verification=source_verification,
-        evidence=evidence,
-        claim=claim,
-        idempotency_key=idempotency_key,
-        verification_mode=MISSION_FIGURE_AUTHORITY_MODE,
-        figure_admission_policy=FIGURE_ADMISSION_VERIFIED_FIGURE,
-        verified_figure=held,
-        figure_resolver=figures,
-    )
     return {
-        "write_status": staged["write_status"],
+        "figure": held,
         "figure_id": held["figure_id"],
-        "staging": staged,
         "material": material,
         "source_verification": source_verification,
         "claim": claim,
         "evidence": evidence,
         "numeric_verification": numeric_bundle,
+        "resolver": figures,
+    }
+
+
+def promote_figure(
+    core: Any,
+    staging: Any,
+    *,
+    figure: Mapping[str, Any],
+    actor_ref: str,
+    idempotency_key: str,
+    resolver: MissionFigureAuthorityResolver | None = None,
+) -> dict[str, Any]:
+    """Stage one company-filed figure as a quantitative candidate.
+
+    No citation binding, no correction set, no transcript: the material is the
+    figure row and its Core chain, which is what ADR-0007 decided and what lets
+    a SEC-filing figure move at all.
+
+    A spoken figure is refused here as well as in the staging store.  Two
+    guards for one rule is on purpose: the store's is the contract and this one
+    is the sentence a caller reads.
+    """
+
+    bundle = build_figure_candidate(
+        core.connection, figure=figure, actor_ref=actor_ref, resolver=resolver)
+    held = bundle["figure"]
+    staged = staging.stage(
+        material=bundle["material"],
+        source_verification=bundle["source_verification"],
+        evidence=bundle["evidence"],
+        claim=bundle["claim"],
+        idempotency_key=idempotency_key,
+        verification_mode=MISSION_FIGURE_AUTHORITY_MODE,
+        figure_admission_policy=FIGURE_ADMISSION_VERIFIED_FIGURE,
+        verified_figure=held,
+        figure_resolver=bundle["resolver"],
+    )
+    return {
+        "write_status": staged["write_status"],
+        "figure_id": held["figure_id"],
+        "staging": staged,
+        "material": bundle["material"],
+        "source_verification": bundle["source_verification"],
+        "claim": bundle["claim"],
+        "evidence": bundle["evidence"],
+        "numeric_verification": bundle["numeric_verification"],
     }
 
 
@@ -914,6 +943,7 @@ __all__ = [
     "FigureAdmissionError",
     "FigureNotFound",
     "MissionFigureAuthorityResolver",
+    "build_figure_candidate",
     "figure_claim_semantics",
     "promote_figure",
     "promote_verified_figures",

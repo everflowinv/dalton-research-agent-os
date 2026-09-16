@@ -176,9 +176,27 @@ def unavailable_section(aspect, reason="no_canonical_claims"):
             "structure": [], "slots": [], "sources": [], "gaps": [], "profile": None}
 
 
+# D1 added a pre-submission standard the shipped defaults set at "question one
+# classified, at most four unknowns, at least forty refs".  These fixtures are
+# deliberately tiny -- three claims and two sentences -- so every one of them
+# would now be held back, and they are not about that: they are about the
+# drafting contract, the chain and the decision.  So the harness installs a
+# standard that only keeps the structural half, and the tests that are about
+# the standard install none and get the shipped numbers.
+PERMISSIVE_STANDARD = {
+    "max_unknown": 12,
+    "min_evidence_refs": 0,
+    "require_question_one_classified": False,
+    "require_classification_agrees": False,
+    "require_verifier_pass": True,
+    "require_sourced_sentences": True,
+}
+
+
 class Harness:
     def __init__(self, *, may_write=None, screened=True, dossier=True, debate=True,
-                 classification="contract_compounder"):
+                 classification="contract_compounder",
+                 submission_standard=PERMISSIVE_STANDARD):
         self._dir = tempfile.TemporaryDirectory()
         self.state_dir = Path(self._dir.name)
         self.fixture = LedgerFixture(str(self.state_dir / "core.sqlite"))
@@ -214,6 +232,10 @@ class Harness:
         self.policy_path.write_text(json.dumps(policy_document()), encoding="utf-8")
         self.model_config = self.state_dir / "model.json"
         self.model_config.write_text("{}", encoding="utf-8")
+        if submission_standard is not None:
+            from dalton_core.deep_insight_gate_quality import STANDARD_FILE_NAME
+            (self.state_dir / STANDARD_FILE_NAME).write_text(
+                json.dumps(submission_standard), encoding="utf-8")
 
     def pass_screen(self):
         for status in ("entered", "gate_passed"):
@@ -685,13 +707,24 @@ class RedraftTests(unittest.TestCase):
         summary = self.harness.run()
         self.assertEqual(summary["blocked"][ACN], "decided:reject")
 
-    def test_a_returned_gate_waits_for_new_evidence(self):
+    def test_a_return_is_itself_a_reason_to_draft_again_but_only_once(self):
+        # D2 changed this.  The lane used to make a returned gate wait for a
+        # filing, which meant "第七问没有价格材料" did nothing at all until the
+        # world happened to move -- the reviewer's sentence was not treated as
+        # information.  It is now, and the attempt is keyed on the decision, so
+        # a return buys exactly one redraft.
         self.decide("return_for_more_work", reason="第七问没有价格材料")
-        summary = self.harness.run()
-        # Returned, but the file has not moved: ADR-0008 says a redraft that
-        # cites nothing new is not a version, and the lane says so before
-        # spending a model call.
-        self.assertEqual(summary["blocked"][ACN], "nothing_new")
+        first = self.harness.run()
+        self.assertNotIn(ACN, first.get("blocked") or {})
+        self.assertIsNotNone(first["review"])
+        self.assertEqual(first["review"]["reason"], "第七问没有价格材料")
+        # The redraft cited the same rows and said the same things, so it is a
+        # duplicate rather than a version -- and the note it leaves stops the
+        # next tick paying for the same four calls again.
+        self.assertEqual(first["gate_status"], "duplicate")
+        second = self.harness.run()
+        self.assertEqual(second["blocked"][ACN],
+                         "returned_redraft_already_attempted")
 
     def move_the_file(self, name="c-new", aspect="guidance_style"):
         fresh = self.harness.fixture.add_claim(

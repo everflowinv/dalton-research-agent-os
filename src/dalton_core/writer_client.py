@@ -23,8 +23,40 @@ from .writer_protocol import (
 )
 
 
+#: What the writer itself gives up after -- ``writer_server``'s
+#: ``STORE_REQUEST_TIMEOUT``.  Repeated rather than imported: this module
+#: deliberately knows nothing about the store, and a test asserts the two
+#: numbers have not drifted apart.
+SERVER_REQUEST_TIMEOUT = 30.0
+
+#: B1-3.  The client must outlive the server's own deadline, or the two
+#: expire together: the client closes the socket in the same instant the
+#: server is writing the error frame, the server records BrokenPipeError, and
+#: the real reason -- a queue that never reached the request, a lane that ran
+#: long -- is lost.  Live, that is how 151 failures in a day came to be
+#: attributed to a transport fault, 60% of which had never started executing.
+DEFAULT_TIMEOUT = 45.0
+
+
+def _client_timeout(timeout: float) -> float:
+    """Raise a caller's deadline above the writer's, never below it.
+
+    A caller that deliberately waits less than the writer does -- a probe
+    that would rather give up than block a page render -- keeps its number:
+    it has already decided to abandon the request, and nothing is misattributed
+    because the writer's answer was never going to be read.  A caller that
+    waits *as long as* the writer is in the one band that cannot work, and is
+    moved above it.
+    """
+
+    value = float(timeout)
+    if value >= SERVER_REQUEST_TIMEOUT:
+        return max(value, DEFAULT_TIMEOUT)
+    return value
+
+
 class WriterClient:
-    def __init__(self, socket_path: str, token: str, *, timeout: float = 10.0):
+    def __init__(self, socket_path: str, token: str, *, timeout: float = DEFAULT_TIMEOUT):
         if not isinstance(socket_path, str) or not socket_path:
             raise ValueError("socket_path must be a non-empty string")
         if not isinstance(token, str) or not token:
@@ -33,7 +65,7 @@ class WriterClient:
             raise ValueError("timeout must be positive")
         self.socket_path = socket_path
         self._token = token
-        self.timeout = float(timeout)
+        self.timeout = _client_timeout(timeout)
 
     def call(self, operation: str, params: Mapping[str, Any] | None = None, *, request_id: str | None = None) -> Any:
         if not isinstance(operation, str) or not operation:

@@ -1081,6 +1081,13 @@ class FeedEndToEndTests(unittest.TestCase):
             )
             for name, operation in (("enumerator", "list_notes"), ("runner", "get_note"))
         }
+        # B1-2: enumerating this fixture spawns a governed child per window
+        # and per split, which is comfortably more than one production tick
+        # budget now allows -- enumeration must leave room for a read, and a
+        # tick that runs out resumes at the next window.  These two cases are
+        # about what a full sweep finds, not about how many ticks it takes, so
+        # they ask for a budget that fits the whole sweep.
+        overrides.setdefault("tick_budget_seconds", 60.0)
         return FeedDiscoveryCoordinator(
             missions=self.missions, launcher=self.launcher, source_ref=SALES_NOTES,
             plan=load_feed_discovery_plan(PLAN_PATH), **runners, **overrides,

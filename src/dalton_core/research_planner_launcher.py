@@ -27,14 +27,25 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from .child_tickets import adopt_finished_child
+from .lane_child_launcher import (
+    MARKER_NAME, PROCESS_STARTED_AT, read_reconciliation_marker, ticket_identity,
+    write_reconciliation_marker)
 from .lane_registry import LaneSpec, register_lane
-from .launch_drain import _pid_alive
+from .launch_drain import _is_zombie, _pid_alive
 from .store import canonical_json
 
-TICKET_SCHEMA_VERSION = "0.1"
+# 0.2 adds what 0.1 never wrote: the child argv, so a reused pid can be told
+# from the real child, and a settled ``completed_at``/``exit_code`` pair. 1,039
+# of 1,039 tickets under ``research-plans`` were stuck at ``running`` because
+# this lane had its own launcher and only the *current* handle was ever polled.
+TICKET_SCHEMA_VERSION = "0.2"
 TICKET_PREFIX = "research-plan"
 TICKETS_DIRNAME = "research-plans"
-_TICKET_RE = re.compile(r"^initial-screen:[0-9a-f]{24}$")
+# The prefix this lane actually mints. It read ``initial-screen`` -- the
+# lane this launcher was copied from -- so ``status`` rejected every ticket
+# it was ever asked about, the coordinator swallowed that as "no ticket",
+# and no planner ticket was ever settled.
+_TICKET_RE = re.compile(rf"^{re.escape(TICKET_PREFIX)}:[0-9a-f]{{24}}$")
 IDLE_HOLD = timedelta(hours=1)
 
 
@@ -57,6 +68,16 @@ def _wire_time(value: datetime) -> str:
 def _secure_dir(path: Path) -> Path:
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
     return path
+
+
+def _wire_moment(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
 
 
 def _write_owner_only(path: Path, value: Any) -> None:
@@ -83,15 +104,126 @@ class ResearchPlannerLauncher:
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.tickets_dir = _secure_dir(self.state_dir / TICKETS_DIRNAME)
         self._lock = threading.Lock()
+        # Every child, not just the newest: an overwritten handle is never
+        # waited on, and an unwaited child stays a zombie whose pid answers
+        # "alive" to every later liveness question about its ticket.
+        self._children: dict[str, subprocess.Popen[bytes]] = {}
         self._current: tuple[str, subprocess.Popen[bytes]] | None = None
+        self.startup_reconciliation = self.reconcile_startup()
 
     def _ticket_path(self, ticket_id: str) -> Path:
         return self.tickets_dir / ticket_id.split(":", 1)[1] / "ticket.json"
+
+    def reconcile_startup(self) -> dict[str, Any]:
+        """Settle planner tickets left ``running`` by a previous process.
+
+        Only tickets started before this interpreter are judged. A child that
+        finished and left a terminal summary is adopted from it; otherwise a
+        dead or zombie pid, or a pid proved to run something else, is
+        ``orphaned`` with the reason written into the ticket.
+        """
+
+        marker_path = self.tickets_dir / MARKER_NAME
+        marker = read_reconciliation_marker(marker_path)
+        cutoff = marker["checked_through_mtime"]
+        carried = set(marker["running"])
+        checked = 0
+        skipped = 0
+        newest = cutoff
+        seen = 0
+        still_running: list[str] = []
+        settled: list[dict[str, Any]] = []
+        for path in sorted(self.tickets_dir.glob("*/ticket.json")):
+            # A settled ticket is never rewritten; one unchanged since the last
+            # reconciliation and not running then cannot be running now.
+            try:
+                mtime = path.stat().st_mtime
+            except OSError:
+                continue
+            seen += 1
+            newest = max(newest, mtime)
+            ticket_id = f"{TICKET_PREFIX}:{path.parent.name}"
+            if mtime <= cutoff and ticket_id not in carried:
+                skipped += 1
+                continue
+            try:
+                record = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if not isinstance(record, dict) or record.get("status") != "running":
+                continue
+            checked += 1
+            started = _wire_moment(record.get("started_at"))
+            if started is not None and started >= PROCESS_STARTED_AT:
+                still_running.append(ticket_id)
+                continue
+            pid = record.get("pid")
+            if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0 \
+                    and _is_zombie(pid):
+                reason = "子进程已退出但未被回收（僵尸进程），票据不再代表在跑的工作"
+            elif not _pid_alive(pid):
+                reason = "记录的进程号已不存在：写入服务在子进程之后重启"
+            elif ticket_identity(record, path) is False:
+                reason = "进程号已被无关进程复用，票据与该进程不对应"
+            else:
+                still_running.append(ticket_id)
+                continue
+            now = _wire_time(self.clock())
+            if adopt_finished_child(record, path.with_name("summary.json"), now=now):
+                outcome = record["status"]
+            else:
+                record.update({"status": "orphaned", "exit_code": None,
+                               "completed_at": now, "orphaned_reason": reason})
+                outcome = "orphaned"
+            try:
+                _write_owner_only(path, record)
+            except OSError:
+                continue
+            settled.append({"id": record.get("id"), "pid": pid,
+                            "status": outcome, "reason": reason})
+        if seen or marker_path.exists():
+            write_reconciliation_marker(marker_path, newest, still_running,
+                                        at=_wire_time(self.clock()))
+        return {"lane": TICKETS_DIRNAME, "running_tickets_checked": checked,
+                "unchanged_tickets_skipped": skipped,
+                "still_running": len(still_running),
+                "settled_count": len(settled), "settled": settled}
+
+    def _settle_locked(self, ticket_id: str, code: int) -> None:
+        path = self._ticket_path(ticket_id)
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        if not isinstance(record, dict) or record.get("status") != "running":
+            return
+        record.update({"status": "succeeded" if code == 0 else "failed",
+                       "exit_code": code, "completed_at": _wire_time(self.clock())})
+        try:
+            _write_owner_only(path, record)
+        except OSError:
+            pass
+
+    def _reap_locked(self) -> list[str]:
+        reaped: list[str] = []
+        for ticket_id, process in list(self._children.items()):
+            code = process.poll()
+            if code is None:
+                continue
+            self._children.pop(ticket_id, None)
+            self._settle_locked(ticket_id, code)
+            reaped.append(ticket_id)
+        return reaped
+
+    def reap(self) -> list[str]:
+        with self._lock:
+            return self._reap_locked()
 
     def start(self) -> dict[str, Any]:
         if not self.model_config_path.is_file():
             raise PlannerLaunchRejected("the planner model configuration is missing")
         with self._lock:
+            self._reap_locked()
             if self._current is not None and self._current[1].poll() is None:
                 raise PlannerLaunchConflict(f"research plan {self._current[0]} is still running")
             started_at = _wire_time(self.clock())
@@ -125,9 +257,11 @@ class ResearchPlannerLauncher:
             record = {
                 "schema_version": TICKET_SCHEMA_VERSION, "id": ticket_id,
                 "model_config_path": str(self.model_config_path), "started_at": started_at,
-                "pid": process.pid, "status": "running", "exit_code": None, "completed_at": None,
+                "pid": process.pid, "command": command,
+                "status": "running", "exit_code": None, "completed_at": None,
             }
             _write_owner_only(self._ticket_path(ticket_id), record)
+            self._children[ticket_id] = process
             self._current = (ticket_id, process)
             return dict(record)
 
@@ -139,25 +273,34 @@ class ResearchPlannerLauncher:
             raise PlannerLaunchRejected("research plan ticket was not found")
         record = json.loads(path.read_text(encoding="utf-8"))
         with self._lock:
-            current = self._current
-        if current is not None and current[0] == ticket_ref:
-            code = current[1].poll()
-            if code is not None and record["status"] == "running":
-                record.update({
-                    "status": "succeeded" if code == 0 else "failed", "exit_code": code,
-                    "completed_at": _wire_time(self.clock()),
-                })
-                _write_owner_only(path, record)
-        elif record["status"] == "running" and not _pid_alive(record.get("pid")):
-            # A deploy restarted the writer while this child was running.  Its
-            # own summary says how it ended; without this the ticket stays
-            # "running" forever and the lane never starts another one.
-            now = _wire_time(self.clock())
-            if adopt_finished_child(record, path.with_name("summary.json"), now=now):
-                _write_owner_only(path, record)
-            else:
-                record.update({"status": "orphaned", "exit_code": None, "completed_at": now})
-                _write_owner_only(path, record)
+            process = self._children.get(ticket_ref)
+            if process is not None:
+                code = process.poll()
+                if code is not None:
+                    self._children.pop(ticket_ref, None)
+                    if record["status"] == "running":
+                        record.update({
+                            "status": "succeeded" if code == 0 else "failed",
+                            "exit_code": code,
+                            "completed_at": _wire_time(self.clock()),
+                        })
+                        _write_owner_only(path, record)
+            elif record["status"] == "running" and (
+                    not _pid_alive(record.get("pid"))
+                    or ticket_identity(record, path) is False):
+                # A deploy restarted the writer while this child was running.  Its
+                # own summary says how it ended; without this the ticket stays
+                # "running" forever and the lane never starts another one.
+                now = _wire_time(self.clock())
+                if adopt_finished_child(record, path.with_name("summary.json"), now=now):
+                    _write_owner_only(path, record)
+                else:
+                    record.update({
+                        "status": "orphaned", "exit_code": None, "completed_at": now,
+                        "orphaned_reason": "记录的子进程已不存在或进程号被复用，"
+                                           "票据不再代表在跑的工作",
+                    })
+                    _write_owner_only(path, record)
         summary_path = path.with_name("summary.json")
         if summary_path.is_file():
             record["summary"] = json.loads(summary_path.read_text(encoding="utf-8"))
@@ -168,10 +311,24 @@ class ResearchPlannerLauncher:
             return self._current is not None and self._current[1].poll() is None
 
     def close(self) -> None:
+        """Stop and reap every planner child this launcher started."""
+
         with self._lock:
-            current = self._current
-        if current is not None and current[1].poll() is None:
-            current[1].terminate()
+            children = list(self._children.items())
+            self._children.clear()
+            self._current = None
+        for _ticket_id, process in children:
+            if process.poll() is not None:
+                continue
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
 
 
 class ResearchPlannerCoordinator:

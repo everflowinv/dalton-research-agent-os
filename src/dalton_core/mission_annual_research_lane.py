@@ -606,16 +606,83 @@ class MissionAnnualResearchCoordinator:
                 "status": "launched", "ticket_ref": ticket["id"],
                 "admission_ref": admission["id"], "last": settled,
             }
-        return {
-            "status": (
-                "recovery_required"
-                if any(item["disposition"] == "recovery_required"
-                       for item in holds.values())
-                else "idle"
-            ),
+        status = (
+            "recovery_required"
+            if any(item["disposition"] == "recovery_required"
+                   for item in holds.values())
+            else "idle"
+        )
+        result: dict[str, Any] = {
+            "status": status,
             "reason": "no unstarted annual research admission",
             "held": len(holds), "last": settled,
         }
+        if not admissions:
+            # C2-3.  Live on 2026-09-16 every annual-research counter was zero:
+            # no starts, no observations, no admissions.  The lane was not
+            # stuck -- it had never had an input, because nothing in ``src``
+            # calls ``MissionAnnualResearchAuthority.admit`` except its own
+            # replan.  An idle lane that cannot say why it is idle is
+            # indistinguishable from a healthy one, so it says why.
+            result["eligibility"] = self._annual_eligibility()
+            ready = [item for item in result["eligibility"]["candidates"]
+                     if item["annual_report_ready"]]
+            result["reason"] = (
+                f"年报全文研究从未启动：已取得且已读完的 10-K 有 {len(ready)} 份，"
+                "但 mission_annual_research_admissions 一行都没有。"
+                "这条车道只消费 admission，不生产 admission；"
+                "目前 src 里没有任何 CLI、writer 操作或车道会调用 "
+                "MissionAnnualResearchAuthority.admit()，"
+                "它要求一个在册的 Dossier 修复目标加上绑定该目标的已结束 planner inquiry。"
+            )
+        return result
+
+    def _annual_eligibility(self) -> dict[str, Any]:
+        """Which 10-Ks could be researched, and what each one is missing.
+
+        Read-only.  The predicate mirrors ``registered_annual_report.bind_request``:
+        an SEC review whose discovered document is ``acquired`` with a ticket.
+        The read-completion proof is optional there, so it is reported rather
+        than required.
+        """
+
+        candidates: list[dict[str, Any]] = []
+        try:
+            rows = self.store.connection.execute(
+                "SELECT r.review_id, r.company_ref, r.document_ref, r.state, "
+                "d.status AS acquisition_status, d.ticket_ref AS ticket_ref, "
+                "p.proof_id AS read_proof_ref "
+                "FROM coverage_mission_document_reviews r "
+                "LEFT JOIN coverage_mission_discovered_documents d "
+                "ON d.record_id=r.discovered_document_ref "
+                "LEFT JOIN document_read_completion_proofs p ON p.review_id=r.review_id "
+                "WHERE r.source_ref='source:sec-filings' "
+                "AND r.document_ref LIKE 'sec:filing:%' "
+                "ORDER BY r.created_at DESC, r.review_id LIMIT 50"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return {"candidates": [], "reason": "this Core holds no SEC filing reviews"}
+        for row in rows:
+            missing = []
+            if row["acquisition_status"] != "acquired":
+                missing.append(f"acquisition_status={row['acquisition_status']}")
+            if not row["ticket_ref"]:
+                missing.append("no acquisition ticket_ref")
+            candidates.append({
+                "review_id": row["review_id"],
+                "company_ref": row["company_ref"],
+                "document_ref": row["document_ref"],
+                "review_state": row["state"],
+                "read_proof_ref": row["read_proof_ref"],
+                "annual_report_ready": not missing,
+                "missing": missing,
+            })
+        return {"candidates": candidates,
+                "predicate": (
+                    "registered_annual_report.bind_request：review 必须绑定一份 "
+                    "status='acquired' 且有 ticket_ref 的 SEC 文档，且全文能在字节上限内"
+                    "完整渲染；read-completion 收据是可选的加固项。"
+                )}
 
 
 def dispatch(server: Any, _params: Mapping[str, Any]) -> dict[str, Any]:

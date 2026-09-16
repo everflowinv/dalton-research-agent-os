@@ -17,12 +17,17 @@ import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Iterator
 
 from .contracts import WorkOrder
+from .model_profile_bounds import (
+    INPUT_BOUND_SKIP_REASON,
+    exceeds_input_bound,
+)
+from .model_profile_health import COOLDOWN_SKIP_REASON
 from .store import authorization_flag, authorized_flag
 
 
@@ -1278,6 +1283,263 @@ class ModelRouter:
             ).fetchall()
         return [json.loads(row["link_json"]) for row in rows]
 
+    # ------------------------------------------------------------------
+    # WP-A/A2: provider health and cooldown.
+    #
+    # Two tables, one derived from the other. ``model_profile_health_events``
+    # is what the broker returned; ``model_profile_cooldowns`` is the routing
+    # decision taken because of it. Keeping them apart is the difference
+    # between "this model was skipped" and "this model was skipped and here is
+    # the evidence", which is the question a 286 USD morning has to be able to
+    # answer months later.
+    # ------------------------------------------------------------------
+
+    def record_provider_outcome(
+        self,
+        *,
+        profile_id: str,
+        outcome: str,
+        failure_code: str | None = None,
+        route_decision_ref: str | None = None,
+        observed_at: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Record what a provider did, and cool the profile if that is what it means.
+
+        ``outcome`` is ``served`` or ``provider_failure``. A served call ends
+        whatever streak was running: the endpoint is answering again, and the
+        next failure starts counting from one.
+
+        Returns the cooldown this outcome caused, the one already running, or
+        ``None``. Never raises on a merely unhealthy provider -- this runs
+        inside a lane tick, and an accounting write that crashes a mission is a
+        worse failure than the one it was recording.
+        """
+
+        from .model_profile_health import cooldown_decision
+
+        profile_id = _ref(profile_id, "profile_id")  # type: ignore[assignment]
+        if outcome not in {"served", "provider_failure"}:
+            raise ModelRouterValidationError(
+                "a provider outcome is served or provider_failure"
+            )
+        if outcome == "served" and failure_code is not None:
+            raise ModelRouterValidationError("a served call has no failure code")
+        if failure_code is not None:
+            failure_code = _string(failure_code, "failure_code")[:96]
+        if route_decision_ref is not None:
+            route_decision_ref = _ref(route_decision_ref, "route_decision_ref")
+        now_dt = self._now() if observed_at is None else observed_at.astimezone(timezone.utc)
+        now = _timestamp(now_dt)
+        with self._transaction() as cur:
+            event = {
+                "schema_version": SCHEMA_VERSION,
+                "profile_id": profile_id,
+                "outcome": outcome,
+                "failure_code": failure_code,
+                "route_decision_ref": route_decision_ref,
+                "observed_at": now,
+            }
+            event_id = f"model-health-event:{uuid.uuid4().hex}"
+            wire = {**event, "id": event_id}
+            wire["content_hash"] = canonical_hash(wire)
+            cur.execute(
+                "INSERT INTO model_profile_health_events "
+                "(event_id, profile_id, outcome, failure_code, route_decision_ref, "
+                "observed_at, event_hash, event_json, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (event_id, profile_id, outcome, failure_code, route_decision_ref,
+                 now, wire["content_hash"], canonical_json(wire), now),
+            )
+            latest = cur.execute(
+                "SELECT cooldown_json FROM model_profile_cooldowns WHERE profile_id=? "
+                "ORDER BY cooldown_sequence DESC LIMIT 1",
+                (profile_id,),
+            ).fetchone()
+            previous = json.loads(latest["cooldown_json"]) if latest is not None else None
+            if outcome == "served" or previous is not None and previous["until"] > now:
+                # A served call ends the streak by being newer than the last
+                # cooldown; an already-running cooldown is not extended by a
+                # call that was in flight when it started.
+                return {
+                    "event": wire,
+                    "cooldown": previous if (previous is not None
+                                             and previous["until"] > now) else None,
+                    "status": "already_cooling" if (
+                        previous is not None and previous["until"] > now) else "recorded",
+                }
+            served_row = cur.execute(
+                "SELECT observed_at FROM model_profile_health_events "
+                "WHERE profile_id=? AND outcome='served' "
+                "ORDER BY event_sequence DESC LIMIT 1",
+                (profile_id,),
+            ).fetchone()
+            last_served = served_row["observed_at"] if served_row is not None else ""
+            from .model_profile_health import FAILURE_WINDOW_SECONDS
+
+            window_start = _timestamp(
+                now_dt - timedelta(seconds=FAILURE_WINDOW_SECONDS))
+            floor = max(window_start, last_served)
+            previous_streak = 0
+            on_probation = False
+            if previous is not None and previous["started_at"] > last_served:
+                # Failures before the previous cooldown have already been paid
+                # for by that cooldown; they do not count towards this one.
+                floor = max(floor, previous["until"])
+                previous_streak = int(previous["streak"])
+                on_probation = previous["until"] <= now
+            recent = cur.execute(
+                "SELECT COUNT(*) AS failures FROM model_profile_health_events "
+                "WHERE profile_id=? AND outcome='provider_failure' AND observed_at>?",
+                (profile_id, floor),
+            ).fetchone()["failures"]
+            decided = cooldown_decision(
+                failure_code=failure_code,
+                now=now_dt,
+                recent_failures=max(1, int(recent)),
+                previous_streak=previous_streak,
+                on_probation=on_probation,
+            )
+            if decided is None:
+                return {"event": wire, "cooldown": None, "status": "recorded"}
+            cooldown = {
+                "schema_version": SCHEMA_VERSION,
+                "profile_id": profile_id,
+                "reason": decided["reason"],
+                "failure_code": decided["failure_code"],
+                "failure_count": decided["failure_count"],
+                "streak": decided["streak"],
+                "cooldown_seconds": decided["cooldown_seconds"],
+                "started_at": _timestamp(decided["started_at"]),
+                "until": _timestamp(decided["until"]),
+                "route_decision_ref": route_decision_ref,
+            }
+            cooldown_id = f"model-profile-cooldown:{canonical_hash(cooldown)[:32]}"
+            cooldown["id"] = cooldown_id
+            cooldown["content_hash"] = canonical_hash(cooldown)
+            existing = cur.execute(
+                "SELECT cooldown_json FROM model_profile_cooldowns WHERE cooldown_id=?",
+                (cooldown_id,),
+            ).fetchone()
+            if existing is not None:
+                return {"event": wire, "cooldown": json.loads(existing["cooldown_json"]),
+                        "status": "duplicate"}
+            cur.execute(
+                "INSERT INTO model_profile_cooldowns "
+                "(cooldown_id, profile_id, reason, failure_code, failure_count, streak, "
+                "started_at, until, cooldown_hash, cooldown_json, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (cooldown_id, profile_id, cooldown["reason"], cooldown["failure_code"],
+                 cooldown["failure_count"], cooldown["streak"], cooldown["started_at"],
+                 cooldown["until"], cooldown["content_hash"],
+                 canonical_json(cooldown), now),
+            )
+            return {"event": wire, "cooldown": cooldown, "status": "cooled"}
+
+    def profile_cooldowns(
+        self, *, profile_id: str | None = None, limit: int | None = None
+    ) -> list[dict[str, Any]]:
+        """Every cooldown ever decided, newest first. The audit read."""
+
+        sql = "SELECT cooldown_json FROM model_profile_cooldowns"
+        params: list[Any] = []
+        if profile_id is not None:
+            sql += " WHERE profile_id=?"
+            params.append(_string(profile_id, "profile_id"))
+        sql += " ORDER BY cooldown_sequence DESC"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(_positive_int(limit, "limit"))
+        try:
+            rows = self.connection.execute(sql, params).fetchall()
+        except sqlite3.OperationalError:
+            # A read-only handle on a database no writer has opened since this
+            # table existed. "No cooldowns recorded" is the honest answer.
+            return []
+        return [json.loads(row["cooldown_json"]) for row in rows]
+
+    def active_cooldowns(self, *, now: datetime | None = None) -> dict[str, dict[str, Any]]:
+        """The profiles routing must not offer right now, by profile id.
+
+        Latest cooldown per profile, kept only when it has not expired and
+        nothing has served on that profile since it began -- a served call is
+        proof the endpoint came back, and a stale row must not outlive it.
+        """
+
+        moment = _timestamp(self._now() if now is None else now)
+        try:
+            rows = self.connection.execute(
+                "SELECT c.cooldown_json AS cooldown_json, c.profile_id AS profile_id, "
+                "c.started_at AS started_at, c.until AS until "
+                "FROM model_profile_cooldowns c WHERE c.cooldown_sequence=("
+                "  SELECT MAX(d.cooldown_sequence) FROM model_profile_cooldowns d"
+                "  WHERE d.profile_id=c.profile_id) AND c.until>?",
+                (moment,),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return {}
+        live: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            served = self.connection.execute(
+                "SELECT 1 FROM model_profile_health_events WHERE profile_id=? "
+                "AND outcome='served' AND observed_at>=? LIMIT 1",
+                (row["profile_id"], row["started_at"]),
+            ).fetchone()
+            if served is not None:
+                continue
+            live[row["profile_id"]] = json.loads(row["cooldown_json"])
+        return live
+
+    @staticmethod
+    def _active_cooldowns_for_route(cur: sqlite3.Cursor, now: str) -> set[str]:
+        """The profile ids under an unexpired cooldown, read inside route()'s txn.
+
+        Same rule as :meth:`active_cooldowns`, on the cursor already holding the
+        decision's transaction so the snapshot cannot move under it: latest
+        cooldown per profile, unexpired, and not already overtaken by a served
+        call on that profile.
+        """
+
+        try:
+            rows = cur.execute(
+                "SELECT c.profile_id AS profile_id, c.started_at AS started_at "
+                "FROM model_profile_cooldowns c WHERE c.cooldown_sequence=("
+                "  SELECT MAX(d.cooldown_sequence) FROM model_profile_cooldowns d"
+                "  WHERE d.profile_id=c.profile_id) AND c.until>?",
+                (now,),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return set()
+        cooled: set[str] = set()
+        for row in rows:
+            served = cur.execute(
+                "SELECT 1 FROM model_profile_health_events WHERE profile_id=? "
+                "AND outcome='served' AND observed_at>=? LIMIT 1",
+                (row["profile_id"], row["started_at"]),
+            ).fetchone()
+            if served is None:
+                cooled.add(row["profile_id"])
+        return cooled
+
+    def profile_health_events(
+        self, *, profile_id: str | None = None, limit: int | None = None
+    ) -> list[dict[str, Any]]:
+        """The raw provider observations, newest first."""
+
+        sql = "SELECT event_json FROM model_profile_health_events"
+        params: list[Any] = []
+        if profile_id is not None:
+            sql += " WHERE profile_id=?"
+            params.append(_string(profile_id, "profile_id"))
+        sql += " ORDER BY event_sequence DESC"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(_positive_int(limit, "limit"))
+        try:
+            rows = self.connection.execute(sql, params).fetchall()
+        except sqlite3.OperationalError:
+            return []
+        return [json.loads(row["event_json"]) for row in rows]
+
     def record_allow_decision(
         self,
         *,
@@ -1863,6 +2125,12 @@ class ModelRouter:
                     live_chain = live_links(resolved["chain"], by_id)
             required_modality_set = set(modalities) | set(filters["required_modalities"])
             supplied_slots = set(slots)
+            # WP-A/A2 + A3. Both are *selection* refusals: a cooled endpoint and
+            # an oversized prompt are known before anything is dispatched, so
+            # refusing here means no broker call, no day-ledger reservation and
+            # no settlement -- and the reason lands in this decision's own
+            # candidate snapshot, which is where a route audit reads it.
+            cooled = self._active_cooldowns_for_route(cur, now)
             candidates: list[dict[str, Any]] = []
             snapshot: list[dict[str, Any]] = []
             for profile in latest_profiles:
@@ -1932,6 +2200,23 @@ class ModelRouter:
                     reasons.append("context_window_insufficient")
                 if estimated_output_tokens > profile["context"]["max_output_tokens"]:
                     reasons.append("model_output_limit_insufficient")
+                if profile["id"] in cooled and required_profile_version_ref is None:
+                    # Skipped, not tried: see model_profile_health. The cooldown
+                    # row carries why and until when.
+                    #
+                    # Exempt when the caller pinned an exact profile *version*.
+                    # That is not a selection -- it is the bounded, already
+                    # authorized paid provider retry, whose whole purpose is to
+                    # ask this one endpoint once more. Refusing it here would
+                    # not save a call, it would only turn an owner-configured
+                    # retry into an unroutable one. The retry is the probe.
+                    reasons.append(COOLDOWN_SKIP_REASON)
+                if exceeds_input_bound(profile, estimated_input_tokens):
+                    # The declared limit below is what the catalog says; this is
+                    # what the transport has been measured to carry. The smaller
+                    # of the two governs, so a catalog sync cannot reopen a
+                    # ceiling a live gateway has already proved.
+                    reasons.append(INPUT_BOUND_SKIP_REASON)
                 limits = profile["limits"]
                 if estimated_input_tokens > limits["max_input_tokens"]:
                     reasons.append("profile_input_limit_exceeded")

@@ -76,6 +76,8 @@ def _pid_alive(pid: Any) -> bool:
         return False
     except PermissionError:
         return True
+    except (OverflowError, OSError, ValueError):
+        return False
     return not _is_zombie(pid)
 
 
@@ -106,25 +108,43 @@ def _process_command_matches(pid: int, expected: list[Any]) -> bool | None:
         if completed.returncode != 0 or not completed.stdout.strip():
             return None
         rendered = completed.stdout.strip()
-        wanted_rendered = " ".join(str(part) for part in expected)
+        wanted = [str(part) for part in expected]
+        wanted_rendered = " ".join(wanted)
         if rendered == wanted_rendered:
             return True
-        # BSD ps loses argv boundaries and quoting. When the executable or an
-        # argument contains spaces, a non-equal rendering is ambiguous and
-        # cannot prove PID reuse.
-        if any(" " in str(part) for part in expected):
-            return None
-        executable, separator, arguments = rendered.partition(" ")
-        wanted_executable = Path(str(expected[0])).name.lower()
-        actual_executable = Path(executable).name.lower()
-        executable_matches = (
-            actual_executable == wanted_executable
-            or (actual_executable.startswith("python")
-                and wanted_executable.startswith("python"))
-        )
-        if not executable_matches:
-            return False
-        return bool(separator and arguments == " ".join(str(part) for part in expected[1:]))
+        # BSD ps loses argv boundaries and quoting, so a whole rendering that
+        # differs is only ambiguous from the first recorded argument that
+        # itself contains a space. Every argument before that one must render
+        # as exactly one token, and a token that differs there proves the pid
+        # runs something else -- which is the common case for pid reuse, and
+        # the case the old "any space anywhere means unknowable" rule threw
+        # away along with the proof.
+        actual_tokens = rendered.split(" ")
+        for index, part in enumerate(wanted):
+            if " " in part:
+                # From here on argv boundaries are unrecoverable, but the tail
+                # can still *prove a match*: macOS re-execs a venv python as
+                # the framework Python.app a few milliseconds after launch, so
+                # only argv[0] differs and everything after it is identical.
+                if " ".join(actual_tokens[index:]) == " ".join(wanted[index:]):
+                    return True
+                return None
+            if index >= len(actual_tokens):
+                return False
+            actual_part = actual_tokens[index]
+            if index == 0:
+                actual_name = Path(actual_part).name.lower()
+                wanted_name = Path(part).name.lower()
+                if not (actual_name == wanted_name
+                        or (actual_name.startswith("python")
+                            and wanted_name.startswith("python"))):
+                    return False
+                continue
+            if actual_part != part:
+                return False
+        # Every recorded argument rendered exactly and nothing contained a
+        # space, so a longer rendering is a different command line.
+        return len(actual_tokens) == len(wanted)
     except (OSError, UnicodeError, ValueError, subprocess.SubprocessError):
         return None
 

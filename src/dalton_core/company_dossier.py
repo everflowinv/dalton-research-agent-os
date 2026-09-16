@@ -210,6 +210,27 @@ class DossierStructureUnmapped(CompanyDossierError):
     """This Constitution's causal chain has no section mapping in the policy."""
 
 
+class UnitProvenanceDrift(CompanyDossierValidationError):
+    """One unit's recorded model authority does not resolve as claimed.
+
+    A named, catchable business refusal rather than a bare ``ValueError``.
+    The distinction that matters is ``carry_forward``: a unit *drafted on this
+    run* whose binding does not resolve is a defect in this run and refuses it,
+    while a unit *carried forward unchanged* from an earlier version is an
+    already-published fact whose binding was checked on the day it was
+    published.  Re-litigating the second one today is a compatibility check
+    wearing a security check's clothes, and failing the whole run on it means
+    the company's version chain can never advance again -- which is what it
+    did: Accenture's file crashed on ``business_model`` four times a day while
+    every unit drafted in those runs was thrown away.
+    """
+
+    def __init__(self, message: str, *, unit: str, carry_forward: bool = False) -> None:
+        super().__init__(message)
+        self.unit = unit
+        self.carry_forward = carry_forward
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
@@ -488,7 +509,16 @@ def _unit_provenance(value: Any) -> dict[str, Any]:
             continue
         expected = {"input_fingerprint", "producer_input", "producer_prior_version_ref",
                     "resolved_classification", "verified_draft_hash", "producer", "verifier"}
-        if not isinstance(item, Mapping) or set(item) != expected:
+        # ``producer_repair`` is the *first* call of a unit whose reply broke
+        # the closed output contract and was repaired once.  It is optional
+        # because most units never need one and because every version published
+        # before the repair existed has exactly the seven fields.  When it is
+        # present, ``producer`` is the repair call and this is its parent; the
+        # formal replay in ``company_dossier_cli`` rebuilds the repair prompt
+        # from this parent's own recorded reply, so the chain is verifiable
+        # end to end rather than asserted.
+        if (not isinstance(item, Mapping)
+                or set(item) not in (expected, expected | {"producer_repair"})):
             raise CompanyDossierValidationError(
                 f"unit_provenance.{unit} has an invalid closed shape")
         producer_input = item["producer_input"]
@@ -570,6 +600,14 @@ def _unit_provenance(value: Any) -> dict[str, Any]:
             "producer": _call_provenance(item["producer"], f"unit_provenance.{unit}.producer"),
             "verifier": _call_provenance(item["verifier"], f"unit_provenance.{unit}.verifier"),
         }
+        if "producer_repair" in item:
+            out[unit]["producer_repair"] = _call_provenance(
+                item["producer_repair"], f"unit_provenance.{unit}.producer_repair")
+            if (out[unit]["producer_repair"]["work_order_ref"]
+                    == out[unit]["producer"]["work_order_ref"]):
+                raise CompanyDossierValidationError(
+                    f"unit_provenance.{unit}.producer_repair must be a different "
+                    "call from the producer it repaired")
         if content_hash(out[unit]["producer_input"]) != out[unit]["input_fingerprint"]:
             raise CompanyDossierValidationError(
                 f"unit_provenance.{unit}.producer_input fingerprint differs")
@@ -1423,8 +1461,15 @@ class CompanyDossierAuthority:
     def publish_verified(
         self, body: Mapping[str, Any], *, scheduler_db: str | Path,
         router_db: str | Path,
+        carry_forward_drift: list[dict[str, str]] | None = None,
     ) -> dict[str, Any]:
-        """Publish v0.3 only after its formal model authorities replay."""
+        """Publish v0.3 only after its formal model authorities replay.
+
+        ``carry_forward_drift`` is the lane's opt-in to hearing about a unit
+        carried forward from an earlier version whose recorded binding no
+        longer resolves.  Those are recorded into the caller's list and the
+        publication continues; a unit drafted on this run still refuses.
+        """
 
         provenance = body.get("unit_provenance")
         if provenance is None:
@@ -1482,6 +1527,7 @@ class CompanyDossierAuthority:
             current_blocks=changed_blocks,
             current_bindings=body.get("bindings"),
             current_mission_hash=mission_record["content_hash"],
+            carry_forward_drift=carry_forward_drift,
             scheduler_db=scheduler_db, router_db=router_db,
         )
         return self.publish(body, _provenance_verified=True)

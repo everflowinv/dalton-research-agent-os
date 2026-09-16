@@ -133,12 +133,29 @@ class LaneTests(ReopenHarness):
         self.assertEqual(restarted["looked"][0]["status"], "already_proposed")
         self.assertEqual(len(self.reopens.proposals(ACN)), 1)
 
-        # Evidence that thickened again is a different assessment, and a
-        # second proposal is the right answer to it.
+        # D3: evidence that thickened again is a different *assessment* and
+        # the same *question*.  While nobody has answered the first proposal,
+        # asking again is how the live Core reached fourteen undecided
+        # proposals for one company in five days, so the lane says so and
+        # proposes nothing.
         self.thicken(lines=140)
         self.clock.advance(days=8)
         again = self.coordinator().dispatch_once()
-        self.assertEqual(len(again["proposed"]), 1)
+        self.assertEqual(again["proposed"], [])
+        self.assertEqual(again["looked"][0]["status"], "already_waiting")
+        self.assertEqual(again["looked"][0]["proposal_ref"],
+                         self.reopens.proposals(ACN)[0]["id"])
+        self.assertEqual(len(self.reopens.proposals(ACN)), 1)
+
+        # Once a person has answered it, the question is open again.
+        waiting = self.reopens.proposals(ACN)[0]
+        self.reopens.decide(
+            proposal_ref=waiting["id"], proposal_hash=waiting["content_hash"],
+            verdict="decline", reason="保留当前版本", actor_ref=OWNER)
+        self.thicken(lines=90)
+        self.clock.advance(days=8)
+        third = self.coordinator().dispatch_once()
+        self.assertEqual(len(third["proposed"]), 1)
         self.assertEqual(len(self.reopens.proposals(ACN)), 2)
 
     def test_the_dispatch_handler_builds_its_coordinator_once(self):

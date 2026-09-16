@@ -42,10 +42,13 @@ from .cockpit_model import (
     CockpitModel, CockpitModelError, lane_status_for, model_failure_trace,
 )
 from .company_model_spec import (
+    REPAIRABLE_STRUCTURE_RULES,
+    REPAIRABLE_STRUCTURE_RULES_REF,
     TASK_HASH,
     CompanyModelSpecError,
     OUTPUT_SCHEMA,
     build_prompt,
+    financial_line_gaps,
     parse_response,
     spec_from_response,
     spec_template_gaps,
@@ -80,12 +83,26 @@ MAX_OUTPUT_TOKENS = int(DEFAULT_MODEL_SPEC_CALL_BUDGET["max_output_tokens"])
 # structure rather than to look frugal.
 MAX_COST_USD = float(DEFAULT_MODEL_SPEC_CALL_BUDGET["max_cost_usd"])
 TIMEOUT_SECONDS = int(DEFAULT_MODEL_SPEC_CALL_BUDGET["timeout_seconds"])
-REPAIR_CONTRACT_REF = "contract:company-model-spec-structured-output-repair:0.1"
+REPAIR_CONTRACT_REF = "contract:company-model-spec-structured-output-repair:0.2"
 REPAIR_CONTRACT = {
     "ref": REPAIR_CONTRACT_REF,
-    "eligible_error_codes": ["format", "text_length"],
+    # ``structure`` joins the two envelope codes in 0.2.  The deterministic
+    # structure validator refuses for two kinds of reason and only one of them
+    # is a model's to fix: the *wiring* rules -- a derived line that also
+    # claims a filed concept, a filed subtotal without an authority, a diluted
+    # share line without a duration basis, a sum whose roles do not match --
+    # are a choice among shapes the model was already shown, and it picked the
+    # wrong one.  Which rules those are is a closed allow-list in
+    # ``company_model_spec.REPAIRABLE_STRUCTURE_RULES``; arithmetic about the
+    # filings ("this formula does not tie to filed history") stays a whole
+    # refusal, because a repair there is an invitation to make the numbers
+    # agree.  12 live refusals between 2026-09-11 and 09-13 were wiring.
+    "eligible_error_codes": ["format", "structure", "text_length"],
+    "eligible_structure_rules_ref": REPAIRABLE_STRUCTURE_RULES_REF,
+    "eligible_structure_rules": list(REPAIRABLE_STRUCTURE_RULES),
     "validation": "full_spec_from_response_after_every_attempt",
     "text_length_change": "only_overlong_schema_strings_may_change",
+    "structure_change": "only_the_named_rule_may_change",
     "semantic_failure": "whole_refusal",
 }
 REPAIR_CONTRACT_HASH = content_hash(REPAIR_CONTRACT)
@@ -271,13 +288,30 @@ def validate_structured_output_repair_binding(
 
 
 def _repair_prompt(original_text: str, error: CompanyModelSpecError) -> str:
+    if error.code == "structure":
+        head = (
+            "Repair one company-model specification response. Its financial "
+            "statement structure broke one deterministic wiring rule, named "
+            "exactly in VALIDATION_ERROR. Change only what that rule names: the "
+            "authority, the derived/filed flag, the basis, or the formula roles "
+            "of the line it is about. Do not add, remove or rename any line, do "
+            "not change any figure, concept, ref or period, and do not touch any "
+            "other line. If the rule cannot be satisfied with the filed lines "
+            "you were shown, return the original content unchanged rather than "
+            "inventing a line that would satisfy it. Return JSON matching "
+            "OUTPUT_SCHEMA and nothing else.\n\n"
+        )
+    else:
+        head = (
+            "Repair one company-model specification response. Do not add, remove, "
+            "or reinterpret model lines, filed concepts, refs, slots, enum choices, "
+            "statement choices, or horizon values. Fix only the reported JSON format "
+            "or text-length violation. Return JSON matching OUTPUT_SCHEMA and nothing "
+            "else. If that cannot be done without a semantic change, return the original "
+            "content unchanged.\n\n"
+        )
     return (
-        "Repair one company-model specification response. Do not add, remove, "
-        "or reinterpret model lines, filed concepts, refs, slots, enum choices, "
-        "statement choices, or horizon values. Fix only the reported JSON format "
-        "or text-length violation. Return JSON matching OUTPUT_SCHEMA and nothing "
-        "else. If that cannot be done without a semantic change, return the original "
-        "content unchanged.\n\n"
+        head +
         f"REPAIR_CONTRACT:\n{canonical_json(REPAIR_CONTRACT)}\n\n"
         f"VALIDATION_ERROR:\n{canonical_json({'code': error.code, 'message': str(error)})}\n\n"
         f"OUTPUT_SCHEMA:\n{json.dumps(OUTPUT_SCHEMA, ensure_ascii=False, sort_keys=True)}\n\n"
@@ -590,6 +624,7 @@ def run_model_spec(
         "financial_input_hash": None,
         "financial_structure_ref": None,
         "financial_structure_hash": None,
+        "financial_line_gaps": [],
         "formal_authority_writes": 0,
     }
     store = DaltonStore(str(state_dir / "core.sqlite"))
@@ -763,8 +798,19 @@ def run_model_spec(
         except CompanyModelSpecError as exc:
             # Refused whole. A specification with the invented lines stripped
             # out is no longer the model the model meant to describe.
+            #
+            # But say what to go and fetch. Most of these refusals are a rule
+            # about a line that is not in the state at all, and "which company,
+            # which statement, which item" is the difference between a refusal
+            # an operator can act on and one they can only count.
+            gaps = financial_line_gaps(state)
+            summary["financial_line_gaps"] = gaps
             summary.update({"status": "succeeded", "spec_status": "refused",
-                            "failure_reason": f"{type(exc).__name__}: {exc}"})
+                            "failure_reason": (
+                                f"{type(exc).__name__}: {exc}"
+                                + ("" if not gaps else
+                                   "；缺口：" + "；".join(
+                                       item["detail"] for item in gaps[:3])))[:500]})
         finally:
             summary["repair_attempts"] = repairs
             summary["cost_micros"] += sum(

@@ -19,6 +19,9 @@ from pathlib import Path
 from typing import Any
 
 from .research_verification import (
+    MISSION_FIGURE_AUTHORITY_MODE,
+    MISSION_VERIFIED_FIGURE_RULE_REF as _MISSION_VERIFIED_FIGURE_RULE_REF,
+    SEC_STATEMENT_LINE_AUTHORITY_MODE,
     validate_candidate_claim,
     validate_candidate_evidence,
     validate_numeric_verification_spec,
@@ -48,7 +51,22 @@ COMPANY_FACTS_RULE_REFS: dict[str, str] = {
 # under the active policy when this rule is listed.  No number is asserted
 # (value/unit/scale are null); the SEC lanes keep numeric authority.
 DOCUMENT_QUALITATIVE_RULE_REF = "research-auto-commit:mission-document-qualitative:v1"
-KNOWN_RULE_REFS: frozenset[str] = frozenset({RULE_REF, *COMPANY_FACTS_RULE_REFS.values(), DOCUMENT_QUALITATIVE_RULE_REF})
+# ADR-0007, last paragraph of the Decision: a figure whose digits and
+# as-reported label were checked against the exact quote it cites, in a
+# company-filed document, may enter the Ledger as a number when the owner has
+# signed a policy that names this rule.  Defined in ``research_verification``
+# so the staging store and this evaluator cannot drift apart on the spelling.
+MISSION_VERIFIED_FIGURE_RULE_REF = _MISSION_VERIFIED_FIGURE_RULE_REF
+# WP-F: the other filed number.  A row of the filer's own XBRL exhibit, named
+# by accession, statement, ordinal and concept, re-read out of Core and
+# compared field by field against the candidate.  Separate rule ref from the
+# figure rule on purpose: a policy that trusts prose figures has not thereby
+# said anything about statement lines, and vice versa.
+SEC_STATEMENT_LINE_RULE_REF = "research-auto-commit:sec-statement-line:v1"
+KNOWN_RULE_REFS: frozenset[str] = frozenset({
+    RULE_REF, *COMPANY_FACTS_RULE_REFS.values(), DOCUMENT_QUALITATIVE_RULE_REF,
+    MISSION_VERIFIED_FIGURE_RULE_REF, SEC_STATEMENT_LINE_RULE_REF,
+})
 _RULE_FINDINGS: dict[str, str] = {
     RULE_REF: "matched exact deterministic SEC filing-count rule",
     DOCUMENT_QUALITATIVE_RULE_REF: (
@@ -58,6 +76,14 @@ _RULE_FINDINGS: dict[str, str] = {
     COMPANY_FACTS_RULE_REF: "matched exact deterministic SEC company-facts growth rule",
     COMPANY_FACTS_ANNUAL_RULE_REF: (
         "matched exact deterministic SEC company-facts annual-filing quarterly growth rule"
+    ),
+    MISSION_VERIFIED_FIGURE_RULE_REF: (
+        "matched the mission verified-figure rule: company-filed document figure, "
+        "re-verified against the quote it cites and rebuilt from Core field by field"
+    ),
+    SEC_STATEMENT_LINE_RULE_REF: (
+        "matched the SEC statement-line rule: filed XBRL row rebuilt from Core "
+        "field by field, anchored to its accession, statement, ordinal and concept"
     ),
 }
 ACTOR_REF = "system:research-auto-commit"
@@ -263,6 +289,198 @@ def _authorize_document_qualitative(
         policy_version, claim_wire=claim_wire, evidence_wire=evidence_wire,
         rule_ref=DOCUMENT_QUALITATIVE_RULE_REF,
         rationale="Mission automation draft bound to an exact verified raw span of an acquired original (ADR-0005).",
+    )
+
+
+_REPLAYED_SEMANTIC_FIELDS = (
+    "subject_ref", "metric_or_aspect", "period", "basis", "normalized_statement",
+    "claim_kind", "value", "unit", "currency", "scale",
+    "semantic_verification_status", "actor_ref",
+)
+
+
+def _replay_is_exact(name: str, rebuilt: Any, supplied: Any) -> None:
+    """The candidate is what this Core rebuilds, or it does not enter the Ledger.
+
+    Byte equality rather than field equality, because the point of a replay is
+    that nothing about the record was decided by the caller.  The field-level
+    comparison afterwards exists only so a rejection says *which* field moved.
+    """
+
+    if supplied is None:
+        raise ResearchAutoCommitRejected(f"{name} was not staged with this candidate")
+    if canonical_json(json.loads(canonical_json(supplied))) != canonical_json(rebuilt):
+        raise ResearchAutoCommitRejected(
+            f"{name} is not what this Core rebuilds from its own rows"
+        )
+
+
+def _replayed_expected_claim(name: str, rebuilt_claim: Mapping[str, Any],
+                             claim_wire: Mapping[str, Any]) -> None:
+    drifted = [
+        field for field in _REPLAYED_SEMANTIC_FIELDS
+        if claim_wire[field] != rebuilt_claim[field]
+    ]
+    if drifted:
+        raise ResearchAutoCommitRejected(
+            f"{name} semantics do not match the deterministic rule: "
+            + ", ".join(sorted(drifted))
+        )
+
+
+def _authority_material(material: Mapping[str, Any] | None) -> dict[str, Any]:
+    """The staged authority material, or a refusal in this module's vocabulary.
+
+    A candidate whose material no longer validates is a rejected candidate, not
+    an exception from a validator three modules away: the caller of the commit
+    gate has to be able to tell "this did not enter the Ledger" from "the
+    process broke".
+    """
+
+    from .research_verification import ResearchVerificationError
+
+    try:
+        return validate_source_verification_material(material or {})
+    except ResearchVerificationError as exc:
+        raise ResearchAutoCommitRejected(
+            f"candidate authority material is not valid: {exc}"
+        ) from exc
+
+
+def _automation_actor(claim_wire: Mapping[str, Any]) -> str:
+    actor = claim_wire["actor_ref"]
+    if not isinstance(actor, str) or not actor.startswith("automation:"):
+        raise ResearchAutoCommitRejected(
+            "a filed number is staged by mission automation, by name"
+        )
+    return actor
+
+
+def _authorize_mission_verified_figure(
+    *, connection: sqlite3.Connection, policy_version: Mapping[str, Any],
+    rule: Mapping[str, Any], evidence_wire: Mapping[str, Any],
+    claim_wire: Mapping[str, Any], material: Mapping[str, Any] | None,
+    source_verification: Mapping[str, Any] | None,
+    numeric_verification: Mapping[str, Any] | None,
+    numeric_spec: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """ADR-0007: admit one company-filed document figure, replayed from Core."""
+
+    if MISSION_VERIFIED_FIGURE_RULE_REF not in rule["rules"]:
+        raise ResearchAutoCommitRejected(
+            "active governance policy does not list "
+            f"{MISSION_VERIFIED_FIGURE_RULE_REF}; this verified figure stays staged "
+            "until the owner signs a policy that names it"
+        )
+    if numeric_spec is not None:
+        raise ResearchAutoCommitRejected(
+            "a figure-backed candidate carries no numeric spec; the figure row is "
+            "its numeric authority"
+        )
+    from .claim_index_figures import (
+        FigureAdmissionError,
+        MissionFigureAuthorityResolver,
+        build_figure_candidate,
+    )
+    from .research_verification import ResearchVerificationError
+
+    material_wire = _authority_material(material)
+    figure_id = material_wire.get("authority_resolution_ref")
+    actor = _automation_actor(claim_wire)
+    resolver = MissionFigureAuthorityResolver(connection)
+    try:
+        held = resolver.figure(str(figure_id))
+        rebuilt = build_figure_candidate(
+            connection, figure=held, actor_ref=actor, resolver=resolver)
+    except (FigureAdmissionError, ResearchVerificationError, sqlite3.Error) as exc:
+        raise ResearchAutoCommitRejected(
+            f"the figure this candidate rests on cannot be replayed: {exc}"
+        ) from exc
+    _replay_is_exact("figure source material", rebuilt["material"], material)
+    _replay_is_exact("figure source verification", rebuilt["source_verification"],
+                     source_verification)
+    _replay_is_exact("figure numeric verification", rebuilt["numeric_verification"],
+                     numeric_verification)
+    _replay_is_exact("figure candidate evidence", rebuilt["evidence"], evidence_wire)
+    _replayed_expected_claim("figure candidate", rebuilt["claim"], claim_wire)
+    _replay_is_exact("figure candidate claim", rebuilt["claim"], claim_wire)
+    return _decision(
+        policy_version, claim_wire=claim_wire, evidence_wire=evidence_wire,
+        rule_ref=MISSION_VERIFIED_FIGURE_RULE_REF,
+        rationale=(
+            "Company-filed figure re-verified against the quote it cites and rebuilt "
+            "from this Core's own rows, field by field (ADR-0007)."
+        ),
+    )
+
+
+def _authorize_sec_statement_line(
+    *, connection: sqlite3.Connection, policy_version: Mapping[str, Any],
+    rule: Mapping[str, Any], evidence_wire: Mapping[str, Any],
+    claim_wire: Mapping[str, Any], material: Mapping[str, Any] | None,
+    source_verification: Mapping[str, Any] | None,
+    numeric_verification: Mapping[str, Any] | None,
+    numeric_spec: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """WP-F: admit one filed XBRL statement line (or one margin), replayed from Core."""
+
+    if SEC_STATEMENT_LINE_RULE_REF not in rule["rules"]:
+        raise ResearchAutoCommitRejected(
+            "active governance policy does not list "
+            f"{SEC_STATEMENT_LINE_RULE_REF}; this filed statement line stays staged "
+            "until the owner signs a policy that names it"
+        )
+    from .quantitative_claim_promotion import (
+        QuantitativeClaimPromotionError,
+        SecStatementLineAuthorityResolver,
+        build_statement_line_candidate,
+    )
+    from .research_verification import ResearchVerificationError
+
+    material_wire = _authority_material(material)
+    payload = material_wire.get("normalized_payload")
+    if not isinstance(payload, Mapping):
+        raise ResearchAutoCommitRejected("statement line payload is unavailable")
+    actor = _automation_actor(claim_wire)
+    try:
+        rebuilt = build_statement_line_candidate(
+            connection,
+            ingest_id=str(payload.get("ingest_id")),
+            origin_ref=str(material_wire.get("authority_resolution_ref")),
+            actor_ref=actor,
+            resolver=SecStatementLineAuthorityResolver(connection),
+        )
+    except (QuantitativeClaimPromotionError, ResearchVerificationError, sqlite3.Error) as exc:
+        raise ResearchAutoCommitRejected(
+            f"the filed row this candidate rests on cannot be replayed: {exc}"
+        ) from exc
+    _replay_is_exact("statement line source material", rebuilt["material"], material)
+    _replay_is_exact("statement line source verification",
+                     rebuilt["source_verification"], source_verification)
+    if rebuilt["numeric_spec"] is None:
+        if numeric_spec is not None:
+            raise ResearchAutoCommitRejected(
+                "a filed line carries no numeric spec; the row is its numeric authority"
+            )
+    else:
+        _replay_is_exact("derived ratio numeric spec", rebuilt["numeric_spec"], numeric_spec)
+        validate_numeric_verification_spec(numeric_spec or {})
+    _replay_is_exact("statement line numeric verification",
+                     rebuilt["numeric_verification"], numeric_verification)
+    _replay_is_exact("statement line candidate evidence", rebuilt["evidence"], evidence_wire)
+    _replayed_expected_claim("statement line candidate", rebuilt["claim"], claim_wire)
+    _replay_is_exact("statement line candidate claim", rebuilt["claim"], claim_wire)
+    kind = payload.get("kind")
+    rationale = (
+        "Filed XBRL statement line rebuilt from this Core's own rows and anchored to "
+        f"accession {payload.get('accession')} row {material_wire.get('authority_resolution_ref')}."
+        if kind == "statement_line" else
+        "Margin computed deterministically from two filed rows of one filing and one "
+        f"period, both anchored to accession {payload.get('accession')}."
+    )
+    return _decision(
+        policy_version, claim_wire=claim_wire, evidence_wire=evidence_wire,
+        rule_ref=SEC_STATEMENT_LINE_RULE_REF, rationale=rationale,
     )
 
 
@@ -789,6 +1007,26 @@ def authorize_policy_candidate(
     ):
         raise ResearchAutoCommitRejected("candidate verification bindings disagree")
 
+    # The two Core-authority numeric modes are evaluated by replaying the rows
+    # they rest on, not by walking the connector chain: a document figure hangs
+    # off a mission discovery envelope whose operation is a *search*, and a
+    # filed statement line has no connector envelope at all.  Dispatched here,
+    # before the connector lookups, so neither is judged by a chain it was
+    # never part of.
+    provenance_mode = (material or {}).get("provenance_mode") if isinstance(material, Mapping) else None
+    if provenance_mode in (MISSION_FIGURE_AUTHORITY_MODE, SEC_STATEMENT_LINE_AUTHORITY_MODE):
+        branch = (
+            _authorize_mission_verified_figure
+            if provenance_mode == MISSION_FIGURE_AUTHORITY_MODE
+            else _authorize_sec_statement_line
+        )
+        return branch(
+            connection=connection, policy_version=policy_version, rule=rule,
+            evidence_wire=evidence_wire, claim_wire=claim_wire, material=material,
+            source_verification=source_verification,
+            numeric_verification=numeric_verification, numeric_spec=numeric_spec,
+        )
+
     source_row = connection.execute(
         "SELECT record_json,content_hash,connector_invocation_ref FROM connector_source_envelopes "
         "WHERE source_envelope_id=?",
@@ -1065,6 +1303,8 @@ def authorize_policy_candidate(
 
 __all__ = [
     "ACTOR_REF",
+    "MISSION_VERIFIED_FIGURE_RULE_REF",
+    "SEC_STATEMENT_LINE_RULE_REF",
     "COMPANY_FACTS_ANNUAL_RULE_REF",
     "COMPANY_FACTS_RULE_REF",
     "COMPANY_FACTS_RULE_REFS",

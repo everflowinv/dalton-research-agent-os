@@ -91,6 +91,10 @@ class FakeModel:
         if prompt.startswith("You are an independent verifier"):
             text = json.dumps({"verdict": self.verdict, "findings": self.findings})
             return self._envelope(text)
+        if prompt.startswith("Your previous reply broke"):
+            # A model that cannot be repaired.  Subclasses that want to
+            # exercise a successful repair override this.
+            return self._envelope("still not json")
         slots = re.findall(r"^  (\S+)\t", prompt, flags=re.MULTILINE)
         tag = "C1" if "\nC1\t" in prompt else "N1"
         body = self.sentence
@@ -578,6 +582,7 @@ class PublishTests(unittest.TestCase):
                     self.prompts.append(kwargs["prompt"])
                     return self._envelope("not json")
                 return super().call(**kwargs)
+
 
         summary = self.harness.run(model_factory=FirstRefusedModel, max_units=12)
         self.assertEqual(summary["status"], "succeeded")

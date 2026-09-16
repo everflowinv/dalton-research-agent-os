@@ -346,8 +346,16 @@ def build_group_prompt(
     company: Mapping[str, Any],
     prior_answers: Mapping[str, str] | None = None,
     notes: Sequence[str] = (),
+    review: Mapping[str, Any] | None = None,
 ) -> str:
-    """One group's prompt: the questions, the rules, the material, last time's."""
+    """One group's prompt: the questions, the rules, the material, last time's.
+
+    ``review`` (D2) is the reviewer's own sentence, carried in verbatim.  It
+    goes in near the top, above the material, because it is the specification
+    for this draft: a model that reads "the previous version confused bookings
+    with revenue" before it reads the table writes a different third question
+    from one that is told only that there was a previous version.
+    """
 
     refs = list(GROUP_QUESTIONS[group])
     lines = [
@@ -362,6 +370,12 @@ def build_group_prompt(
         f"Company: {company.get('ticker') or ''} ({company.get('company_ref')})",
         f"Part: {group} -- {GROUP_PURPOSE.get(group, group)}",
         "",
+    ]
+    if review:
+        from .deep_insight_gate_review import review_prompt_lines
+
+        lines += review_prompt_lines(review, group_questions=refs)
+    lines += [
         "Answer every question below, in this order, and answer no others:",
     ]
     for ref in refs:
@@ -565,6 +579,85 @@ def parse_group_output(
     return out
 
 
+def group_contract(group: str, *, material: Sequence[Mapping[str, Any]]) -> Any:
+    """The enumerable half of one group's reply contract.
+
+    WP-C1/WP-D, 2026-09-16: across 101 deep-insight-gate runs, 9 of IBM's and
+    CTSH's 12 questions were ``unknown`` for one reason, and it had the same
+    shape every time -- ``q9 has keys ['evidence_that_would_answer', 'gaps',
+    'missing', 'question_ref', 'refs', 'status']`` (thesis group, five times)
+    and the same line for ``q1`` (industry group, three times).  The model put
+    a ``refs`` key on an *unknown* answer, where refs have no meaning because
+    an unknown cites nothing, and ``parse_group_output`` refused all four
+    questions in the group over it.
+
+    An unknown answer with one key too many is not a model that failed to read
+    the table.  It is the shape, and the shape is what a repair fixes.
+    """
+
+    from .draft_contract_repair import Contract
+
+    refs = list(GROUP_QUESTIONS[group])
+    tags = tuple(str(row["tag"]) for row in material)
+    root = {"answers"} | ({"classification"} if "q1" in refs else set())
+    return Contract(
+        name=f"deep-insight-gate-group:{group}",
+        keys={"": (root, frozenset()),
+              "answers[].sentences[]": ({"text", "refs"}, frozenset())},
+        # The two closed shapes an answer may have.  ``keys`` cannot say "these
+        # keys when status is answered and those when it is unknown"; this can,
+        # and the violation it produces names both sets, which is exactly the
+        # information the live refusals were throwing away.
+        shapes={"answers[]": (_ANSWERED_KEYS, _UNKNOWN_KEYS)},
+        max_items={"answers": len(refs)},
+        min_items={"answers": len(refs), "answers[].sentences[].refs": 1},
+        enums={"answers[].question_ref": tuple(refs),
+               "answers[].status": ("answered", "unknown"),
+               "answers[].confidence": tuple(CONFIDENCE_LEVELS)},
+        allowed_refs={"answers[].sentences[].refs": tags},
+    )
+
+
+def group_contract_reminder(group: str) -> str:
+    """The short restatement of the rules a repair call is shown."""
+
+    from .draft_contract_repair import contract_reminder_lines
+
+    refs = list(GROUP_QUESTIONS[group])
+    lines = [
+        ("The only top-level keys are answers"
+         + (" and classification" if "q1" in refs else "")
+         + " -- every one of them, and nothing else."),
+        f"answers holds exactly {len(refs)} objects, one per question, in this "
+        f"order: {refs}.",
+        ("An **answered** question is exactly "
+         f"{sorted(_ANSWERED_KEYS)} and nothing else."),
+        ("An **unknown** question is exactly "
+         f"{sorted(_UNKNOWN_KEYS)} and nothing else. It carries no refs, no "
+         "confidence and no sentences: an unknown cites nothing, which is what "
+         "makes it honest. Drop any extra key rather than inventing a value "
+         "for it, and never turn an unknown into an answer to satisfy a key."),
+        "status is answered or unknown; confidence is "
+        + "/".join(CONFIDENCE_LEVELS) + " and appears only on an answered one.",
+        ("Each sentence is {\"text\": ..., \"refs\": [...]} with at least one "
+         "ref, and every ref is a row tag copied exactly from the table you "
+         "were shown."),
+    ]
+    if "q1" in refs:
+        lines.append(
+            f"classification is one of {list(INDUSTRY_CLASSIFICATIONS)}.")
+    return contract_reminder_lines(lines)
+
+
+def group_repair_context(material: Sequence[Mapping[str, Any]]) -> str:
+    """The row tags, so a repair can fix a citation without the whole table."""
+
+    tags = [str(row["tag"]) for row in material]
+    if not tags:
+        return "CITABLE ROW TAGS: (none were shown; no sentence can cite anything)"
+    return "CITABLE ROW TAGS -- cite only these:\n  " + ", ".join(tags)
+
+
 def draft_group(
     model: Any,
     *,
@@ -575,38 +668,66 @@ def draft_group(
     mission: Mapping[str, Any],
     prior_answers: Mapping[str, str] | None = None,
     notes: Sequence[str] = (),
+    review: Mapping[str, Any] | None = None,
+    budget_remaining_micros: int | None = None,
+    repair_reserve_micros: int = 0,
 ) -> dict[str, Any]:
-    """One bounded call for one group.  Returns its answers or a refusal."""
+    """One bounded call for one group, and at most one repair of its shape.
+
+    The repair goes to the same model on the same purpose out of the same run
+    budget; when it would not fit what is left, it is refused unmade and the
+    reason carries the numbers.
+    """
+
+    from .draft_contract_repair import run_with_contract_repair
 
     prompt = build_group_prompt(
         group=group, questions=questions, material=material, company=company,
-        prior_answers=prior_answers, notes=notes,
+        prior_answers=prior_answers, notes=notes, review=review,
     )
     request_id = content_hash({
         "group": group, "company": company.get("company_ref"),
         "prompt_sha": content_hash(prompt),
     })[:32]
-    try:
-        call = model.call(purpose=DRAFT_PURPOSE, request_id=request_id,
-                          prompt=prompt, mission=mission)
-    except CockpitModelError as exc:
-        return {"status": "unavailable", "group": group,
-                "reason": f"{type(exc).__name__}: {exc}"}
+    seen: list[tuple[str, Mapping[str, Any]]] = []
+
+    def call_model(*, prompt: str, request_id: str) -> Mapping[str, Any]:
+        result = model.call(purpose=DRAFT_PURPOSE, request_id=request_id,
+                            prompt=prompt, mission=mission)
+        seen.append((prompt, result))
+        return result
+
+    outcome = run_with_contract_repair(
+        call=call_model,
+        parse=lambda text: parse_group_output(
+            text, group=group, questions=questions, material=material),
+        prompt=prompt, request_id=request_id,
+        contract=group_contract(group, material=material),
+        refusal_errors=(GateDraftRefused,),
+        unavailable_errors=(CockpitModelError,),
+        contract_reminder=group_contract_reminder(group),
+        repair_context=group_repair_context(material),
+        budget_remaining_micros=budget_remaining_micros,
+        repair_reserve_micros=repair_reserve_micros,
+    )
+    if outcome.status == "unavailable":
+        return {"status": "unavailable", "group": group, "reason": outcome.reason}
+    accepted_prompt, call = seen[-1]
     provenance = {
         "work_order_ref": call.get("work_order_ref"),
         "route_decision_ref": call.get("route_decision_ref"),
         "replayed": bool(call.get("replayed")),
-        "cost_micros": int(call.get("cost_micros") or 0),
+        # Whatever the outcome, the run paid for every call it made.
+        "cost_micros": outcome.cost_micros,
     }
-    try:
-        parsed = parse_group_output(
-            call["text"], group=group, questions=questions, material=material)
-    except GateDraftRefused as exc:
-        return {"status": "refused", "group": group, "reason": str(exc),
-                "model": provenance}
+    if outcome.status in {"refused", "budget_refused"}:
+        return {"status": "refused", "group": group, "reason": outcome.reason,
+                "model": provenance, "contract_repair": outcome.summary()}
+    parsed = outcome.value
     return {"status": "drafted", "group": group, "answers": parsed["answers"],
             "classification": parsed.get("classification"), "model": provenance,
-            "prompt_bytes": len(prompt.encode("utf-8"))}
+            "contract_repair": outcome.summary(),
+            "prompt_bytes": len(accepted_prompt.encode("utf-8"))}
 
 
 # ---------------------------------------------------------------------------
@@ -779,6 +900,9 @@ __all__ = [
     "dossier_gap_notes",
     "dossier_rows",
     "draft_group",
+    "group_contract",
+    "group_contract_reminder",
+    "group_repair_context",
     "draft_hash",
     "independence",
     "independence_precheck",

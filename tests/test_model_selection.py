@@ -255,7 +255,7 @@ class SelectionResolutionTests(RouterCase):
         self.assertEqual(profile["id"], "profile:claude-fable-5-1")
 
     def test_a_model_this_core_has_no_profile_for_cannot_be_chosen(self) -> None:
-        with self.assertRaisesRegex(FallbackChainError, "no profile on this machine"):
+        with self.assertRaisesRegex(FallbackChainError, "没有 profile:not-a-model-we-hold 的模型档案"):
             validate_selection(
                 self.router, purpose=BRAIN_PURPOSE, mode="explicit",
                 chain=["profile:not-a-model-we-hold"],
@@ -1943,6 +1943,40 @@ class CockpitModelPageTests(unittest.TestCase):
                 / "src/dalton_core/cockpit_control.html").read_text("utf-8")
         self.assertIn("out.requires_restart", page)
         self.assertIn("out.reload_note", page)
+
+    def test_a_cooled_model_is_annotated_on_the_row_and_on_its_link(self) -> None:
+        # WP-A/A2 display. The cooldown keeps the chain running on its next
+        # link, which is exactly why it has to be said out loud: a brain chain
+        # quietly serving from position two for six hours looks identical to
+        # one whose first link was never chosen.
+        self.install()
+        head = tier_chain("brain")[0]
+        with ModelRouter(self.router_db) as router:
+            router.record_provider_outcome(
+                profile_id=head, outcome="provider_failure",
+                failure_code="RATE_LIMITED")
+        view = self.plane(with_model_config=True).models()
+        row = next(item for item in view["purposes"]
+                   if item["purpose"] == BRAIN_PURPOSE)
+        link = next(item for item in row["chain"] if item["model"] == head)
+        self.assertIsNotNone(link["cooldown"])
+        self.assertIn("供应商冷却中", link["note"])
+        self.assertIn("连续限流（HTTP 429）", link["note"])
+        self.assertIn("不会为它预留预算", link["note"])
+        self.assertIn("正在供应商冷却中", row["cooldown_note"])
+        self.assertIn("暂时由", row["cooldown_note"])
+        # Display only: the note never leaks a raw profile id into prose.
+        self.assertNotIn("profile:", row["cooldown_note"])
+        other = next(item for item in row["chain"] if item["model"] != head)
+        self.assertIsNone(other["cooldown"])
+
+    def test_a_stage_with_no_cooled_model_carries_no_cooldown_note(self) -> None:
+        self.install()
+        view = self.plane(with_model_config=True).models()
+        row = next(item for item in view["purposes"]
+                   if item["purpose"] == BRAIN_PURPOSE)
+        self.assertIsNone(row["cooldown_note"])
+        self.assertTrue(all(link["cooldown"] is None for link in row["chain"]))
 
     def test_the_page_shows_every_stage_its_chain_and_the_three_diff_sets(self) -> None:
         self.install()

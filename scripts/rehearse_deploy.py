@@ -1232,6 +1232,10 @@ CORE_MIGRATIONS: tuple[MigrationSpec, ...] = (
     MigrationSpec("catalyst_calendar_schema.sql", "dalton_core.catalyst_calendar", "CatalystCalendarAuthority", "core"),
     MigrationSpec("claim_index_schema.sql", "dalton_core.claim_index_authority", "ClaimIndexAuthority", "core"),
     MigrationSpec("claim_retirement_schema.sql", "dalton_core.claim_retirement", "ClaimRetirementAuthority", "core"),
+    # C2-5: the retirement patrol's examination markers.  ``core_sql`` because
+    # ``ClaimReviewDriver`` needs the spool, the missions authority and the
+    # challenge authority, none of which a migration should construct.
+    MigrationSpec("claim_review_schema.sql", "dalton_core.claim_review", "ClaimReviewDriver", "core_sql"),
     MigrationSpec("company_dossier_schema.sql", "dalton_core.company_dossier", "CompanyDossierAuthority", "core"),
     MigrationSpec("connector_schema.sql", "dalton_core.connector", "ConnectorStore", "core"),
     # P11b: what the street expects, from the vendor daily.
@@ -1239,9 +1243,13 @@ CORE_MIGRATIONS: tuple[MigrationSpec, ...] = (
     MigrationSpec("conviction_call_schema.sql", "dalton_core.conviction_call", "ConvictionCallAuthority", "core"),
     MigrationSpec("coverage_mission_schema.sql", "dalton_core.coverage_mission", "CoverageMissionAuthority", "core"),
     MigrationSpec("document_read_completion_schema.sql", "dalton_core.document_read_completion", "DocumentReadCompletionAuthority", "core"),
+    # C2-1: the windows the extraction lane has proved it cannot read.
+    MigrationSpec("document_extraction_window_schema.sql", "dalton_core.document_extraction_windows", "ExtractionWindowLedger", "core"),
     MigrationSpec("credential_authority_schema.sql", "dalton_core.credential_authority", "CredentialAuthorityStore", "core"),
     MigrationSpec("debate_map_schema.sql", "dalton_core.debate_map", "DebateMapAuthority", "core"),
     MigrationSpec("prior_model_schema.sql", "dalton_core.prior_model_import", "PriorModelAuthority", "core"),
+    # C2-4: what the deterministic promoter has already turned into a number.
+    MigrationSpec("quantitative_claim_promotion_schema.sql", "dalton_core.quantitative_claim_promotion", "QuantitativeClaimPromotionLedger", "core"),
     MigrationSpec("deep_insight_gate_schema.sql", "dalton_core.deep_insight_gate", "DeepInsightGateAuthority", "core"),
     MigrationSpec("deliverable_reopen_schema.sql", "dalton_core.deliverable_reopen", "GateReopenAuthority", "core"),
     MigrationSpec("event_judgement_schema.sql", "dalton_core.event_judgement", "EventJudgementAuthority", "core"),
@@ -2565,7 +2573,12 @@ def _rehearsal_raw_spool(directory: Path) -> Any:
 #: Same database, same migration, different constructor -- worth naming rather
 #: than sniffing, so that a class that grows a store argument later fails here
 #: instead of quietly being handed the wrong object.
-_CONNECTION_AUTHORITIES: frozenset[str] = frozenset({"DocumentProvenanceStore", "DocumentReadCompletionAuthority"})
+_CONNECTION_AUTHORITIES: frozenset[str] = frozenset({
+    "DocumentProvenanceStore", "DocumentReadCompletionAuthority",
+    # C2-1 / C2-4: both ledgers own only their own tables on the shared Core
+    # connection, so a migration constructs them exactly as the lane does.
+    "ExtractionWindowLedger", "QuantitativeClaimPromotionLedger",
+})
 
 _RESOLVER_KWARGS: dict[str, tuple[str, ...]] = {
     "CredentialAuthorityStore": ("handle_resolver",),

@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  研究发布 worker 的 LaunchAgent 模板。
+
+  与线上现有 plist 的唯一实质差别是 StandardOutPath / StandardErrorPath：
+  之前两者都缺失，worker 每 5 分钟跑一次、每次都以退出码 1 结束（"还有待办"
+  被当成故障），而任何 traceback 都写进 /dev/null，所以 329 个批次连续失败
+  17 次却没有一行可读的记录。
+
+  占位符（由 scripts/release_switch.py --apply 或安装脚本替换）：
+    @@RELEASE_VENV@@  形如 ~/.dalton/runtime/releases/<sha>/venv
+    @@STATE_DIR@@     形如 ~/Library/Application Support/Dalton/state/dalton-core
+    @@LOG_DIR@@       形如 ~/Library/Logs/Dalton
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.dalton.research-publication-worker</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>@@RELEASE_VENV@@/bin/python</string>
+		<string>-m</string>
+		<string>dalton_core.research_output_preparation</string>
+		<string>run-worker</string>
+		<string>--config</string>
+		<string>@@STATE_DIR@@/research-publication-worker-config.json</string>
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PYTHONDONTWRITEBYTECODE</key>
+		<string>1</string>
+		<key>PYTHONUNBUFFERED</key>
+		<string>1</string>
+	</dict>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StartInterval</key>
+	<integer>300</integer>
+	<key>ProcessType</key>
+	<string>Background</string>
+	<key>StandardOutPath</key>
+	<string>@@LOG_DIR@@/publication-worker.stdout.log</string>
+	<key>StandardErrorPath</key>
+	<string>@@LOG_DIR@@/publication-worker.stderr.log</string>
+</dict>
+</plist>

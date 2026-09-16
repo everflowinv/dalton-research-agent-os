@@ -295,6 +295,7 @@ def build_unit_prompt(
     _analytical_contract: bool = True,
     _final_text_contract: bool = True,
     _positive_research_purpose: bool = True,
+    _quantitative_priority: bool = True,
 ) -> str:
     """One unit's prompt: the slots, the rules, the material, the last version.
 
@@ -341,6 +342,14 @@ def build_unit_prompt(
         ])),
         "- Copy any figure verbatim from the tag that carries it. Do not convert units",
         "  or scales, do not round, do not recompute a percentage.",
+        *(([
+            "- When a Figures row carries the number a sentence is about, cite that row.",
+            "  A statement row saying revenue 'grew strongly' and a figure row carrying the",
+            "  growth rate are not interchangeable: prefer the figure, and cite the",
+            "  statement beside it only for what the figure does not say. A sentence that",
+            "  names a magnitude while citing only prose is the hard check that refuses",
+            "  the whole part.",
+        ] if _quantitative_priority else [])),
         f"- At most {SLOT_SENTENCE_CAP} sentences in a slot and {SECTION_SENTENCE_CAP} in this part.",
         f"- Return at most {MAX_GAPS} gaps. Each gap must be a non-empty string of at most "
         f"{MAX_GAP_CHARS} characters; combine related missing evidence rather than adding "
@@ -419,32 +428,55 @@ def build_unit_prompt(
     return "\n".join(lines)
 
 
+# Every legacy rendering is *immutable*: a golden hash in
+# ``test_foundation_research_prompt_contracts`` pins v0.3 and v0.2 byte for
+# byte, because a work order published under one of them can only be replayed
+# if this tree can still produce the exact bytes.  So every flag added after a
+# version was cut has to be switched off in every version below it.
 def legacy_unit_prompt_v02(**kwargs: Any) -> str:
     """Rebuild an immutable v0.2 producer question for formal replay only."""
 
     return build_unit_prompt(**kwargs, _variant_conclusion_rule=False,
                              _analytical_contract=False,
-                             _positive_research_purpose=False)
+                             _positive_research_purpose=False,
+                             _quantitative_priority=False)
 
 
 def legacy_unit_prompt_v03(**kwargs: Any) -> str:
     """Rebuild an immutable v0.3 producer question for formal replay only."""
 
     return build_unit_prompt(**kwargs, _analytical_contract=False,
-                             _positive_research_purpose=False)
+                             _positive_research_purpose=False,
+                             _quantitative_priority=False)
 
 
 def legacy_unit_prompt_v04(**kwargs: Any) -> str:
     """Rebuild the analytical prompt before final-text rules were appended."""
 
     return build_unit_prompt(**kwargs, _final_text_contract=False,
-                             _positive_research_purpose=False)
+                             _positive_research_purpose=False,
+                             _quantitative_priority=False)
 
 
 def legacy_unit_prompt_v05(**kwargs: Any) -> str:
     """Rebuild the final-text prompt before its research-purpose wording changed."""
 
-    return build_unit_prompt(**kwargs, _positive_research_purpose=False)
+    return build_unit_prompt(**kwargs, _positive_research_purpose=False,
+                             _quantitative_priority=False)
+
+
+def legacy_unit_prompt_v06(**kwargs: Any) -> str:
+    """Rebuild the prompt before figures were preferred over prose.
+
+    P12a/WP-C1: 6,390 Claims carry 22 quantitative facts between them while
+    16,903 filed statement lines sit unreferenced, and ``numbers_without_refs``
+    was the hard check that refused 14 runs between 2026-09-11 and 09-16.  The
+    figures half of that is another work package's; this half is making sure
+    that when a figure row *is* there, the drafter cites it rather than the
+    sentence that gestures at it.
+    """
+
+    return build_unit_prompt(**kwargs, _quantitative_priority=False)
 
 
 # ---------------------------------------------------------------------------
@@ -643,8 +675,25 @@ def draft_unit(
     profile_table: str = "",
     market_view_available: bool = True,
     classification: Any = None,
+    budget_remaining_micros: int | None = None,
+    repair_reserve_micros: int = 0,
 ) -> dict[str, Any]:
-    """One bounded call for one unit.  Returns the drafted block or a refusal."""
+    """One bounded call for one unit, and at most one repair of its shape.
+
+    Until 2026-09 a reply that broke the closed contract ended the unit.  That
+    was written when the drafting models held the shape; on the degraded flash
+    configurations they do not, and whole runs were thrown away over a slot
+    carrying one key too many.  So the deviation is now enumerated
+    deterministically and handed back to the *same* model once -- same purpose,
+    same configuration, same day ledger, no substitution -- and only a reply
+    that fails the second time is refused.
+
+    ``budget_remaining_micros``/``repair_reserve_micros`` are the run's, not
+    this unit's.  A repair that would take the run past its bound is refused
+    before it is made, with the numbers in the reason.
+    """
+
+    from .draft_contract_repair import run_with_contract_repair
 
     prompt = build_unit_prompt(
         unit=unit, structure=structure, material=material, company=company,
@@ -655,30 +704,52 @@ def draft_unit(
         "unit": unit, "company": company.get("company_ref"),
         "prompt_sha": content_hash(prompt),
     })[:32]
-    try:
-        call = model.call(purpose=DRAFT_PURPOSE, request_id=request_id,
-                          prompt=prompt, mission=mission)
-    except CockpitModelError as exc:
-        return {"status": "unavailable", "unit": unit,
-                "reason": f"{type(exc).__name__}: {exc}",
-                "failure_trace": model_failure_trace(exc)}
-    provenance = {
-        "work_order_ref": call.get("work_order_ref"),
-        "result_envelope_ref": call.get("result_envelope_ref"),
-        "invocation_ref": call.get("invocation_ref"),
-        "route_decision_ref": call.get("route_decision_ref"),
-        "request_id": request_id,
-        "prompt_hash": content_hash(prompt),
-        "replayed": bool(call.get("replayed")),
-        "cost_micros": int(call.get("cost_micros") or 0),
-    }
-    try:
-        block = parse_unit_output(
-            call["text"], unit=unit, structure=structure, material=material,
+
+    def provenance_of(call: Mapping[str, Any], prompt_text: str,
+                      called_with: str) -> dict[str, Any]:
+        return {
+            "work_order_ref": call.get("work_order_ref"),
+            "result_envelope_ref": call.get("result_envelope_ref"),
+            "invocation_ref": call.get("invocation_ref"),
+            "route_decision_ref": call.get("route_decision_ref"),
+            "request_id": called_with,
+            "prompt_hash": content_hash(prompt_text),
+            "replayed": bool(call.get("replayed")),
+            "cost_micros": int(call.get("cost_micros") or 0),
+        }
+
+    seen: list[tuple[str, str, Mapping[str, Any]]] = []
+
+    def call_model(*, prompt: str, request_id: str) -> Mapping[str, Any]:
+        result = model.call(purpose=DRAFT_PURPOSE, request_id=request_id,
+                            prompt=prompt, mission=mission)
+        seen.append((prompt, request_id, result))
+        return result
+
+    def parse(text: Any) -> dict[str, Any]:
+        return parse_unit_output(
+            text, unit=unit, structure=structure, material=material,
             market_view_available=market_view_available, profile=profile,
             classification=classification,
         )
+
+    try:
+        outcome = run_with_contract_repair(
+            call=call_model, parse=parse, prompt=prompt, request_id=request_id,
+            contract=unit_contract(unit, structure=structure, material=material),
+            refusal_errors=(DossierDraftRefused,),
+            # "The material does not answer the question" is an answer, not a
+            # broken shape.  Buying a repair to hear it again would be the
+            # expensive way to learn nothing.
+            passthrough_errors=(DossierDraftInsufficientEvidence,),
+            unavailable_errors=(CockpitModelError,),
+            contract_reminder=unit_contract_reminder(unit, structure=structure),
+            repair_context=citable_context(material),
+            budget_remaining_micros=budget_remaining_micros,
+            repair_reserve_micros=repair_reserve_micros,
+        )
     except DossierDraftInsufficientEvidence as exc:
+        prompt_text, called_with, call = seen[-1]
         findings = [
             {"unit": unit, "code": "unsupported_slot",
              "slot_id": slot["slot_id"], "detail": slot["unknown"]}
@@ -689,12 +760,25 @@ def draft_unit(
         ]
         return {"status": "insufficient_evidence", "unit": unit,
                 "reason": str(exc), "repair_targets": findings,
-                "model": provenance}
-    except DossierDraftRefused as exc:
-        return {"status": "refused", "unit": unit, "reason": str(exc),
-                "model": provenance}
-    return {"status": "drafted", "unit": unit, "block": block, "model": provenance,
-            "prompt_bytes": len(prompt.encode("utf-8"))}
+                "model": provenance_of(call, prompt_text, called_with)}
+    if outcome.status == "unavailable":
+        return {"status": "unavailable", "unit": unit, "reason": outcome.reason,
+                "failure_trace": model_failure_trace(outcome.error)}
+    accepted_prompt, accepted_request, accepted_call = seen[-1]
+    provenance = provenance_of(accepted_call, accepted_prompt, accepted_request)
+    # Whatever the outcome, the run paid for every call it made.
+    provenance["cost_micros"] = outcome.cost_micros
+    repair = None
+    if outcome.status == "repaired":
+        original_prompt, original_request, original_call = seen[0]
+        repair = provenance_of(original_call, original_prompt, original_request)
+    if outcome.status in {"refused", "budget_refused"}:
+        return {"status": "refused", "unit": unit, "reason": outcome.reason,
+                "model": provenance, "contract_repair": outcome.summary()}
+    return {"status": "drafted", "unit": unit, "block": outcome.value,
+            "model": provenance, "producer_repair": repair,
+            "contract_repair": outcome.summary(),
+            "prompt_bytes": len(accepted_prompt.encode("utf-8"))}
 
 
 # ---------------------------------------------------------------------------
@@ -961,6 +1045,10 @@ __all__ = [
     "TEMPLATE_UNITS",
     "build_unit_prompt",
     "build_verifier_prompt",
+    "citable_context",
+    "legacy_unit_prompt_v06",
+    "unit_contract",
+    "unit_contract_reminder",
     "draft_hash",
     "draft_contract_fingerprint",
     "verifier_prompt_contract_fingerprint",
@@ -976,3 +1064,94 @@ __all__ = [
     "validate_verifier_output",
     "verify",
 ]
+
+
+# ---------------------------------------------------------------------------
+# the deterministic contract, and one repair
+# ---------------------------------------------------------------------------
+
+def unit_contract(
+    unit: str, *, structure: Sequence[Mapping[str, str]],
+    material: Sequence[Mapping[str, Any]],
+) -> "Contract":
+    """The half of a unit's reply contract a checker can enumerate.
+
+    Every rule here is one the drafting models are actually observed to break
+    on the flash configurations: a slot carrying both ``sentences`` and
+    ``unknown``, a slot carrying a stray ``refs`` or ``counterexample`` key, a
+    fourth sentence where the cap is three, a ``gaps`` key omitted entirely,
+    and a citation to a tag that was never in the table.  Semantic rules --
+    "market_view cites the company talking rather than the market" -- stay in
+    ``parse_unit_output``, whose message is fed back beside these.
+
+    Derived from the same ``structure`` and ``material`` the prompt was built
+    from, so the checker and the prompt cannot disagree about what was shown.
+    """
+
+    from .draft_contract_repair import Contract
+
+    ids = [slot["slot_id"] for slot in structure]
+    tags = {str(row["tag"]) for row in material}
+    root = {"slots", "gaps"} | ({"classification"} if unit == CLASSIFICATION_UNIT
+                                else set())
+    return Contract(
+        name=f"{DRAFT_CONTRACT_VERSION}:{unit}",
+        keys={"": (root, frozenset())},
+        shapes={"slots[]": ({"slot_id", "sentences"}, {"slot_id", "unknown"}),
+                "slots[].sentences[]": ({"text", "refs"},)},
+        max_items={"slots": len(ids) or 1,
+                   "slots[].sentences": SLOT_SENTENCE_CAP,
+                   "gaps": MAX_GAPS},
+        min_items={"slots[].sentences[].refs": 1},
+        max_chars={"slots[].sentences[].text": MAX_SENTENCE_CHARS,
+                   "slots[].unknown": MAX_SENTENCE_CHARS,
+                   "gaps[]": MAX_GAP_CHARS},
+        enums=({"slots[].slot_id": tuple(ids)} if ids else {}) | (
+            {"classification": tuple(INDUSTRY_CLASSIFICATIONS)}
+            if unit == CLASSIFICATION_UNIT else {}),
+        allowed_refs={"slots[].sentences[].refs": frozenset(tags)},
+        nonempty=("slots",),
+    )
+
+
+def unit_contract_reminder(
+    unit: str, *, structure: Sequence[Mapping[str, str]],
+) -> str:
+    """The short restatement of the rules the repair prompt carries.
+
+    Short on purpose.  The repair call does not re-send the drafting prompt --
+    the model is not being asked to draft again -- so this has to be enough to
+    put the reply back in shape and no more.
+    """
+
+    from .draft_contract_repair import contract_reminder_lines
+
+    ids = [slot["slot_id"] for slot in structure]
+    lines = [
+        ("The only top-level keys are slots and gaps"
+         + (", classification" if unit == CLASSIFICATION_UNIT else "")
+         + " -- every one of them, and nothing else."),
+        f"slots answers exactly these slot_ids, in this order: {ids}.",
+        ("Each slot is either {\"slot_id\": ..., \"sentences\": [...]} or "
+         "{\"slot_id\": ..., \"unknown\": \"why the material does not answer "
+         "it\"}. Never both, never another key."),
+        f"Each slot writes at most {SLOT_SENTENCE_CAP} sentences.",
+        ("Each sentence is {\"text\": ..., \"refs\": [...]} with at least one "
+         "ref, and every ref is a row tag copied exactly from the table you "
+         "were shown."),
+        f"Each sentence text is at most {MAX_SENTENCE_CHARS} characters.",
+        f"gaps is a list of at most {MAX_GAPS} strings of at most "
+        f"{MAX_GAP_CHARS} characters; send [] when there are none.",
+    ]
+    if unit == CLASSIFICATION_UNIT:
+        lines.append(f"classification is one of {list(INDUSTRY_CLASSIFICATIONS)}.")
+    return contract_reminder_lines(lines)
+
+
+def citable_context(material: Sequence[Mapping[str, Any]]) -> str:
+    """The row tags, so a repair can fix a citation without the whole table."""
+
+    tags = [str(row["tag"]) for row in material]
+    if not tags:
+        return "CITABLE ROW TAGS: (none were shown; no sentence can cite anything)"
+    return "CITABLE ROW TAGS -- cite only these:\n  " + ", ".join(tags)

@@ -277,6 +277,8 @@ REGISTRY_LANE_LABELS = {
     "mission_model_forecast": "测算财务预测科目与衍生指标",
     "forecast_sensitivity": "核心假设敏感性分析与历史区间回测",
     "mission_sensitivity": "核心假设敏感性分析与历史区间回测",
+    "valuation_snapshot": "计算估值快照（市值、EV、P/E、P/S、自由现金流收益率）",
+    "quantitative_claim_promotion": "把申报财务行与已核验数字提升为带出处的定量结论",
     "claim_index": "构建研究论点与证据索引库",
     "mission_claim_index": "构建研究论点与证据索引库",
     "research_plan": "制定下一步研究计划",
@@ -1606,6 +1608,165 @@ def _gate_answer_line(item: Mapping[str, Any]) -> str:
             f"所需证据：{unknown['evidence_that_would_answer']}")
 
 
+from .initial_screen_reopen_hygiene import (  # noqa: E402 - beside its readers
+    LOW_INFORMATION_NOTE, low_information_call,
+)
+from .deep_insight_gate_review import DECISION_FOLLOW_UP  # noqa: E402
+
+# D2: the reviewer writes in one box, and points at question numbers by
+# starting a line with one.  Parsed rather than made into a twelve-field form:
+# the box is what people already use, "q3：这里把订单和收入搞混了" is what they
+# already type, and a form with twelve textareas is a form nobody fills in.
+_QUESTION_NOTE_RE = re.compile(
+    r"^\s*(q(?:1[0-2]|[1-9]))\s*[:：、.．)）]\s*(.+?)\s*$")
+
+
+def _gate_question_notes(
+    supplied: Any, rationale: str
+) -> dict[str, str]:
+    """Per-question notes: whatever the caller sent, else read off the text.
+
+    A caller that sends the object explicitly is believed (and validated by
+    the authority).  Otherwise the reviewer's own paragraph is scanned for
+    lines that begin with a question number, and those lines become the
+    per-question instruction *as well as* staying in the whole-draft reason --
+    nothing the person wrote is dropped or moved.
+    """
+
+    from .deep_insight_gate_review import validate_question_notes
+
+    if supplied is not None:
+        try:
+            return validate_question_notes(supplied)
+        except Exception as exc:  # noqa: BLE001 - the page is the wrong place to raise internals
+            raise CockpitError(f"按题号的意见格式不对：{exc}") from exc
+    notes: dict[str, str] = {}
+    for line in (rationale or "").splitlines():
+        found = _QUESTION_NOTE_RE.match(line)
+        if found is not None:
+            notes[found.group(1)] = found.group(2)
+    try:
+        return validate_question_notes(notes)
+    except Exception:  # noqa: BLE001 - a malformed guess is simply not a note
+        return {}
+
+# The two card kinds that are information rather than a decision.  They carry
+# no buttons and they do not count towards the badge.
+INFORMATIONAL_APPROVAL_KINDS = frozenset({
+    "deep_insight_gate_held", "gate_reopen_superseded",
+})
+
+GATE_RATIONALE_HINT = (
+    "写清楚哪里不行。可以只写一段整体意见；想点名到具体问题时，"
+    "另起一行写「q3：这里把订单和收入搞混了」——系统会把你的原话原样带进下一版的起草提示，"
+    "只重写你点名的问题，其余保持不动。"
+)
+
+
+def _gate_review_context(
+    core: sqlite3.Connection, record: Mapping[str, Any]
+) -> dict[str, Any]:
+    """"上一版审阅意见" and "本版改了什么", for one gate card.
+
+    Both derived from the chain rather than stored on the draft: the draft is
+    append-only and a fact about two versions does not belong inside one of
+    them.
+    """
+
+    from .deep_insight_gate_review import change_note, review_note, review_of
+
+    prior_ref = record.get("prior_version_ref")
+    if not prior_ref:
+        return {"change_note": change_note(record, None)}
+    prior_row = core.execute(
+        "SELECT record_json FROM deep_insight_gate_versions WHERE version_id=?",
+        (prior_ref,)).fetchone()
+    if prior_row is None:
+        return {"change_note": change_note(record, None)}
+    try:
+        prior = json.loads(prior_row["record_json"])
+    except (TypeError, ValueError):
+        return {"change_note": change_note(record, None)}
+    decision_row = core.execute(
+        "SELECT record_json FROM deep_insight_gate_decisions WHERE gate_version_ref=?",
+        (prior_ref,)).fetchone()
+    decision = None
+    if decision_row is not None:
+        try:
+            decision = json.loads(decision_row["record_json"])
+        except (TypeError, ValueError):
+            decision = None
+    out: dict[str, Any] = {"change_note": change_note(record, prior)}
+    note = review_note(review_of(decision))
+    if note:
+        out["prior_review_note"] = note
+    return out
+
+
+def _auto_returned_items(state_dir: Any) -> list[dict[str, Any]]:
+    """D1's held-back drafts, as information cards with no buttons."""
+
+    from .deep_insight_gate_quality import read_notes
+
+    out: list[dict[str, Any]] = []
+    try:
+        notes = read_notes(state_dir)
+    except OSError:
+        return []
+    for note in notes:
+        assessment = note.get("assessment") or {}
+        counts = assessment.get("counts") or {}
+        gaps = assessment.get("question_gaps") or []
+        out.append({
+            "kind": "deep_insight_gate_held",
+            "company_ref": note.get("company_ref"),
+            "ref": f"deep-insight-gate-held:{note.get('company_ref')}",
+            "hash": None,
+            "at": note.get("created_at") or "",
+            "title": "系统判定这份深度认知评审草稿尚不足以提交",
+            "summary": str(assessment.get("summary") or ""),
+            "details": {
+                "十二问答了": counts.get("answered"),
+                "未答": counts.get("unknown"),
+                "引用材料条数": counts.get("evidence_refs"),
+                **{f"缺口 {index}": f"第 {gap.get('question_number')} 问缺"
+                                     f"{gap.get('missing')}；下一步："
+                                     f"{gap.get('next_step')}"
+                   for index, gap in enumerate(gaps[:12], start=1)},
+            },
+            "detail_labels": {
+                "十二问答了": "十二问答了", "未答": "未答",
+                "引用材料条数": "引用材料条数",
+                **{f"缺口 {index}": f"缺口 {index}"
+                   for index in range(1, min(len(gaps), 12) + 1)},
+            },
+            "actions": [],
+            "needs_rationale": False,
+            "note": "证据变化之前不会重复起草，也不会重复花模型调用。",
+        })
+    return out
+
+
+def superseded_reopen_refs(core: sqlite3.Connection) -> set[str]:
+    """D3's predicate, imported at the call site's own module boundary."""
+
+    from .initial_screen_reopen_hygiene import superseded_refs
+
+    try:
+        return superseded_refs(core)
+    except sqlite3.Error:
+        return set()
+
+
+def superseded_reopen_summary(core: sqlite3.Connection) -> dict[str, Any] | None:
+    from .initial_screen_reopen_hygiene import superseded_summary
+
+    try:
+        return superseded_summary(core)
+    except sqlite3.Error:
+        return None
+
+
 def _gate_decidability(core: sqlite3.Connection, record: Mapping[str, Any]) -> dict[str, Any]:
     """Whether the stage ladder would accept this gate's decision today.
 
@@ -2002,16 +2163,139 @@ def _load_json(path: Path) -> Any:
         return None
 
 
-class _TicketCache:
-    """Ticket and summary JSON per lane directory, re-read only when a file changes."""
+#: B1-5: how long one walk of the lane ticket trees is reused.
+#:
+#: The walk is five ``scandir``s and two ``stat``s per run directory.  Live
+#: that is 6,279 directories -- 12,558 system calls -- and it happens once per
+#: overview build, once per ``_url_map`` and once per log read.  A sampling
+#: profile of the build thread found 98.5% of its time blocked in file reads.
+#: Five seconds is shorter than any human notices and shorter than the
+#: overview's own cache, so no reader ever sees a ticket tree older than one
+#: overview.
+TICKET_SCAN_TTL_SECONDS = 5.0
 
-    def __init__(self, state_dir: Path) -> None:
+#: How many parsed tickets stay in memory.
+#:
+#: The cache had no bound and no eviction: a run directory read once was held,
+#: with its full ``ticket.json`` and ``summary.json``, for the life of the
+#: process, and a directory that was deleted was held forever after that.  A
+#: control process that had been up for two minutes was rebuilding the
+#: overview in 30 s where a fresh one took 5 s.  Four thousand is several
+#: times the newest tickets any view shows and still a bounded number.
+MAX_CACHED_TICKETS = 4000
+
+#: The only summary fields the cockpit reads, and therefore the only ones
+#: kept in memory.
+#:
+#: This is where the 371 MB went.  A summary is whatever its lane wrote, and
+#: the extraction lane writes the extracted text: 126 MB of the 140 MB on this
+#: machine, held in parsed form for the life of the process by a cache with no
+#: bound, to answer questions about nine scalar status fields.  Trimming at the
+#: point of parse takes the retained set to roughly fifteen megabytes without
+#: changing a single thing the page shows.
+#:
+#: ``test_wpb1_cockpit_overview_cache`` re-derives this set from the source of
+#: this module and fails when a reader starts using a field that is no longer
+#: kept.  That check is the reason it is safe to drop anything at all: a
+#: trimmed field that somebody later reads would otherwise be an empty panel
+#: nobody could explain.
+SUMMARY_FIELDS_THE_COCKPIT_READS: frozenset[str] = frozenset({
+    "admitted", "authorization", "canonical_url", "company_ref",
+    "content_chars", "created_at", "discovered_documents", "discovered_urls",
+    "document_refs", "drafted", "error", "failure_reason", "mean", "minimum",
+    "queries", "query", "reviews_complete", "sections", "status",
+    "stop_reason", "title",
+    # The product statuses ``_ticket_event`` reads through a generator, which
+    # the derivation above cannot see.
+    "map_status", "judgement_status", "dossier_status", "memo_status",
+    "framework_status", "gate_status", "deliverable_status", "forecast_status",
+    "sensitivity_status",
+})
+
+
+def _trimmed_summary(summary: Any) -> dict[str, Any] | None:
+    """One lane summary, reduced to what any view of it can ask for."""
+
+    if not isinstance(summary, dict):
+        return None
+    return {
+        key: value for key, value in summary.items()
+        if key in SUMMARY_FIELDS_THE_COCKPIT_READS
+    }
+
+#: B1-5: how long a built overview answers later requests without rebuilding.
+#:
+#: Eight seconds.  The page polls at sixty, the workspace readiness probe
+#: polls in a loop, and the controller tick that changes anything the overview
+#: shows runs at roughly three hundred, so this cannot make a reader see
+#: something stale that they would otherwise have seen fresh -- it only stops
+#: three overlapping readers from each paying for a full rebuild.  Small
+#: enough that a person who clicks refresh after an action still sees it.
+OVERVIEW_TTL_SECONDS = 8.0
+#: ...and the process that serves HTTP opts in, once, where it builds the
+#: plane.  The default is zero so that a plane built in a test, a script or a
+#: one-shot command keeps exact read-after-write: a caller that just wrote
+#: something and then asks sees it.  The long-lived control process turns it
+#: on because it is the only one with overlapping readers, and it invalidates
+#: the snapshot itself on every write it makes (``invalidate_overview``), so
+#: even there a person who acts and then looks sees the result of acting.
+
+
+class _TicketCache:
+    """Ticket and summary JSON per lane directory, re-read only when a file changes.
+
+    Three bounds, none of which existed before.  A scan is reused for
+    ``ttl_seconds`` so three callers in one page render pay for one walk.  An
+    entry whose directory no longer appeared in the last walk is dropped, so
+    deleting a run reclaims its memory.  And the whole map is capped: past
+    ``max_entries`` the oldest tickets by modification time are forgotten and
+    re-read if something asks for them again, which is what keeps a long-lived
+    control process from getting slower every hour it is up.
+    """
+
+    def __init__(self, state_dir: Path, *, ttl_seconds: float = 0.0,
+                 max_entries: int = MAX_CACHED_TICKETS,
+                 monotonic: Any = None) -> None:
         self.state_dir = state_dir
+        self.ttl_seconds = max(0.0, float(ttl_seconds))
+        self.max_entries = max(1, int(max_entries))
+        self._monotonic = monotonic or time.monotonic
         self._entries: dict[str, tuple[float, float, dict[str, Any]]] = {}
         self._lock = threading.Lock()
+        self._scan: list[dict[str, Any]] | None = None
+        self._scanned_at: float | None = None
 
     def tickets(self) -> list[dict[str, Any]]:
+        if self.ttl_seconds:
+            with self._lock:
+                fresh = (
+                    self._scan is not None and self._scanned_at is not None
+                    and self._monotonic() - self._scanned_at < self.ttl_seconds
+                )
+                if fresh:
+                    return self._scan  # type: ignore[return-value]
+        result = self._scan_tickets()
+        with self._lock:
+            self._scan = result
+            self._scanned_at = self._monotonic()
+        return result
+
+    def _prune(self, seen: set[str]) -> None:
+        """Forget deleted runs, then the oldest ones past the cap."""
+
+        with self._lock:
+            for key in [key for key in self._entries if key not in seen]:
+                del self._entries[key]
+            excess = len(self._entries) - self.max_entries
+            if excess <= 0:
+                return
+            oldest = sorted(self._entries, key=lambda key: self._entries[key][0])
+            for key in oldest[:excess]:
+                del self._entries[key]
+
+    def _scan_tickets(self) -> list[dict[str, Any]]:
         result = []
+        seen: set[str] = set()
         for lane in LANES:
             root = self.state_dir / lane
             if not root.is_dir():
@@ -2029,6 +2313,7 @@ class _TicketCache:
                 except OSError:
                     s_m = 0.0
                 key = entry.path
+                seen.add(key)
                 with self._lock:
                     cached = self._entries.get(key)
                 if cached is not None and cached[0] == t_m and cached[1] == s_m:
@@ -2037,13 +2322,14 @@ class _TicketCache:
                 ticket = _load_json(ticket_path)
                 if not isinstance(ticket, dict):
                     continue
-                summary = _load_json(summary_path) if s_m else None
+                summary = _trimmed_summary(_load_json(summary_path) if s_m else None)
                 record = {"lane": lane, "dir": entry.name, "ticket": ticket,
-                          "summary": summary if isinstance(summary, dict) else None,
+                          "summary": summary,
                           "ticket_mtime": datetime.fromtimestamp(t_m, tz=timezone.utc).isoformat(timespec="seconds")}
                 with self._lock:
                     self._entries[key] = (t_m, s_m, record)
                 result.append(record)
+        self._prune(seen)
         return result
 
 
@@ -2058,7 +2344,9 @@ class CockpitPlane:
     def __init__(self, config: CockpitConfig, *, writer_socket: Path, token_config: Path,
                  governance_call: Callable[..., Any] = ephemeral_call, model: CockpitModel | None = None,
                  model_factory: Callable[[Mapping[str, Any]], CockpitModel] | None = None,
-                 clock: Callable[[], datetime] | None = None) -> None:
+                 clock: Callable[[], datetime] | None = None,
+                 overview_ttl_seconds: float = 0.0,
+                 monotonic: Callable[[], float] | None = None) -> None:
         self.config = config
         from .workspace_cockpit import cockpit_workspace_context
         # Validate the process namespace before opening even the local journal.
@@ -2069,7 +2357,10 @@ class CockpitPlane:
         self.governance_call = governance_call
         self.clock = clock or _now
         self.journal = CockpitJournal(config.journal_path)
-        self.tickets = _TicketCache(config.state_dir)
+        self.tickets = _TicketCache(
+            config.state_dir, ttl_seconds=TICKET_SCAN_TTL_SECONDS,
+            monotonic=monotonic,
+        )
         self._model = model
         self._model_factory = model_factory
         self._model_error: str | None = None
@@ -2081,6 +2372,13 @@ class CockpitPlane:
         self._overview_building = False
         self._overview_generation = 0
         self._overview_result: dict[str, Any] | None = None
+        # B1-5: how long a built overview is served without rebuilding.  Eight
+        # seconds, because the page polls at sixty and the controller ticks at
+        # roughly three hundred: nothing a reader can see changes faster than
+        # this, and a rebuild is the most expensive thing this process does.
+        self._overview_ttl_seconds = float(overview_ttl_seconds)
+        self._overview_built_at: float | None = None
+        self._overview_monotonic = monotonic or time.monotonic
         self._lane_governance_cache: dict[tuple[str, str], str | None] = {}
         # Prime the two immutable/read-only indexes while the control service
         # starts.  The first browser request should project current state, not
@@ -3068,18 +3366,37 @@ class CockpitPlane:
     # -- overview ------------------------------------------------------------------
 
     def overview(self) -> dict[str, Any]:
-        """Build one overview at a time and share it with concurrent readers.
+        """Build one overview at a time, share it, and keep it briefly.
 
-        Browsers can overlap the initial request with polling or a retry.  The
-        overview performs several bounded but substantial read projections;
-        running identical projections concurrently makes each one contend for
-        the Python GIL and SQLite page cache.  A caller that arrived while a
-        build was active receives that exact completed snapshot.  A later,
-        sequential request still builds afresh, preserving the existing
-        read-after-write behavior.
+        Two mechanisms, and they answer different questions.
+
+        Singleflight, unchanged: browsers overlap the initial request with a
+        poll or a retry, and the overview runs several bounded but substantial
+        read projections.  Running identical projections concurrently only
+        makes each contend for the GIL and the SQLite page cache, so a caller
+        that arrives while a build is active receives that exact snapshot.
+
+        B1-5, new: a caller that arrives *after* a build still got a fresh
+        rebuild, every time, forever.  The page polls once a minute, the
+        remote tab polls too, the workspace readiness probe polls, and each
+        rebuild reads the Core twice, walks 6,279 run directories and opens
+        four more databases -- 10 to 30 s in a long-lived control process.
+        The snapshot is now reused for ``_overview_ttl_seconds``, which is
+        shorter than the controller's own tick, so nothing observable is
+        older than one tick's work.
+
+        A plane built without the TTL attributes -- the singleflight tests
+        construct one directly -- has a TTL of zero and the exact prior
+        behaviour: every sequential caller rebuilds.
         """
 
+        ttl = float(getattr(self, "_overview_ttl_seconds", 0.0) or 0.0)
+        monotonic = getattr(self, "_overview_monotonic", None) or time.monotonic
         with self._overview_condition:
+            if ttl > 0.0 and self._overview_result is not None:
+                built_at = getattr(self, "_overview_built_at", None)
+                if built_at is not None and monotonic() - built_at < ttl:
+                    return self._overview_result
             observed_generation = self._overview_generation
             while self._overview_building:
                 self._overview_condition.wait()
@@ -3096,10 +3413,22 @@ class CockpitPlane:
             raise
         with self._overview_condition:
             self._overview_result = result
+            self._overview_built_at = monotonic()
             self._overview_generation += 1
             self._overview_building = False
             self._overview_condition.notify_all()
         return result
+
+    def invalidate_overview(self) -> None:
+        """Forget the cached snapshot, so the next reader rebuilds.
+
+        Called by whatever just changed something through this plane.  The TTL
+        exists to stop three pollers rebuilding the same picture; it must not
+        make a person who approved something see the picture from before.
+        """
+
+        with self._overview_condition:
+            self._overview_built_at = None
 
     def _build_overview(self) -> dict[str, Any]:
         # UI translations are a read-only adjunct to authority text. Older
@@ -4637,6 +4966,12 @@ class CockpitPlane:
                 verdict = _gate_decidability(core, record)
                 answered = [item for item in record["answers"]
                             if item["status"] == "answered"]
+                # D2: what the last person who read this company's gate asked
+                # for, and what this version actually changed.  Both are reads
+                # over the chain the Core already holds; a card that showed a
+                # revision without showing the objection it answers is asking
+                # the owner to remember what they typed three days ago.
+                context = _gate_review_context(core, record)
                 items.append({
                     "kind": "deep_insight_gate", "ref": row["version_id"],
                     "hash": row["content_hash"], "at": row["created_at"],
@@ -4644,6 +4979,7 @@ class CockpitPlane:
                     "who": self._label(members, row["company_ref"]),
                     "summary": (f"第 {row['version_number']} 版；十二问答了 "
                                 f"{len(answered)} 问，其余写明缺什么、下一步取什么。"),
+                    **context,
                     # One string per question, keyed by its number. The details
                     # renderer joins an array with 、 and stringifies an object,
                     # so a list of twelve answer objects would arrive as twelve
@@ -4663,9 +4999,21 @@ class CockpitPlane:
                     },
                     "actions": list(GATE_ACTIONS) if verdict["decidable"] else [],
                     "needs_rationale": verdict["decidable"],
+                    # D2: the reviewer may point at question numbers rather
+                    # than at the document.  The page collects both in one
+                    # box, which is how people actually write.
+                    "rationale_hint": GATE_RATIONALE_HINT,
+                    "question_refs": [item["question_ref"] for item in record["answers"]],
                     **({} if verdict["decidable"]
                        else {"note": "暂时不能裁决：" + verdict["reason"]}),
                 })
+            # D1: the drafts the submission standard held back.  Information,
+            # not an approval: there is nothing to press, and the reason the
+            # owner's queue is short belongs beside the queue rather than in a
+            # log nobody opens.
+            for note in _auto_returned_items(self.config.state_dir):
+                company_ref = note.pop("company_ref", None)
+                items.append({**note, "who": self._label(members, company_ref)})
             # Investment Memo reuses MissionDeliverable and the mission stage
             # ledger. Only the active mission's current head is offered; an old
             # version remains readable under documents but cannot receive a
@@ -4774,12 +5122,17 @@ class CockpitPlane:
                     "needs_rationale": False,
                 })
             # P15d: a conviction call the machine proposed and nobody has
-            # answered yet. Listed with no buttons on purpose: the decision op
-            # exists on the writer, but the cockpit's own decide path and the
-            # three buttons are integration work, and INT1's rule is that a
-            # button which errors when pressed is worse than no button. What
-            # the owner needs from this card today is to know the call is
-            # waiting and what it says.
+            # answered yet.
+            #
+            # D3 added the one button this card always needed. A call whose
+            # direction is "avoid", whose risk-reward is "no change" and whose
+            # own confidence is "low" is not a recommendation -- it is the
+            # machine saying it has nothing to say about this company yet --
+            # and asking the owner to write a rationale for declining to act
+            # on nothing is how a page teaches somebody to stop reading it. So
+            # that shape, and only that shape, gets a one-click dismissal and
+            # a sentence saying what it is. Everything else still waits for
+            # the full decision path.
             for row in self._rows(core,
                 "SELECT p.* FROM conviction_call_proposals p "
                 "LEFT JOIN conviction_call_decisions d ON d.proposal_ref=p.proposal_id "
@@ -4787,6 +5140,7 @@ class CockpitPlane:
             ):
                 record = json.loads(row["record_json"])
                 variant = record.get("variant_view") or {}
+                low_information = low_information_call(row)
                 items.append({
                     "kind": "conviction_call", "ref": row["proposal_id"],
                     "hash": row["content_hash"], "at": row["created_at"],
@@ -4805,10 +5159,13 @@ class CockpitPlane:
                             row["risk_reward_status"], row["risk_reward_status"]),
                         "可观察信号": [step.get("signal") for step
                                        in record.get("event_pathway") or []],
-                        "审批状态": "等待正式研究审批流程接入；本页暂不能提交决定",
+                        **({} if low_information else {
+                            "审批状态": "等待正式研究审批流程接入；本页暂不能提交决定"}),
                     },
-                    "actions": [],
+                    "actions": ([{"decision": "reject", "label": "驳回这条提案"}]
+                                if low_information else []),
                     "needs_rationale": False,
+                    **({"note": LOW_INFORMATION_NOTE} if low_information else {}),
                 })
         # INT2 / ADR-0007: the checkpoints the revision loop raises. Rendered
         # from whatever rows exist, with no decision buttons: the ops that
@@ -4839,7 +5196,15 @@ class CockpitPlane:
                        if key in (item.get("details") or {})},
                 }
         items.sort(key=lambda i: i["at"])
-        return {"schema_version": SCHEMA_VERSION, "as_of": _iso(self.clock()), "items": items, "count": len(items)}
+        # The badge counts what is waiting for a person.  D1's held-back drafts
+        # and D3's set-aside proposals are on the page because the owner should
+        # know why their queue is the length it is, not because there is
+        # something to press -- counting them would make the number say the
+        # opposite of what the change was for.
+        return {"schema_version": SCHEMA_VERSION, "as_of": _iso(self.clock()),
+                "items": items,
+                "count": sum(1 for item in items
+                             if item["kind"] not in INFORMATIONAL_APPROVAL_KINDS)}
 
     def workspaces(self, login: str) -> dict[str, Any]:
         from .workspace import WorkspaceError
@@ -4997,6 +5362,15 @@ class CockpitPlane:
                 rows = self._rows(core, sql + "ORDER BY t.created_at,t." + key)
                 superseded_counts: dict[str, int] = {}
                 if kind == "gate_reopen":
+                    # D3: a proposal whose ``passed_version_ref`` is no longer
+                    # the passed version is about a document nobody would
+                    # re-issue.  Approving it changes nothing and declining it
+                    # decides nothing, so it is not offered -- and the count is
+                    # shown below rather than dropped, because a to-do list
+                    # that empties for invisible reasons is a broken page.
+                    stale_refs = superseded_reopen_refs(core)
+                    rows = [candidate_row for candidate_row in rows
+                            if candidate_row[key] not in stale_refs]
                     # A newer assessment of the same company's same passed
                     # gate replaces the older pending card.  The append-only
                     # proposals remain in Core for audit; distinct companies,
@@ -5125,7 +5499,62 @@ class CockpitPlane:
                         "actions": [], "needs_rationale": False,
                         "note": "授予 forecast_line 之后判断层可以直接改，否则要人裁决",
                     })
+            # D3: one line for everything the filter above took out.  It is not
+            # a decision and it carries no buttons; it exists so that "your
+            # to-do list is shorter than yesterday" is a sentence with a
+            # reason attached to it.
+            stale = superseded_reopen_summary(core)
+            if stale is not None:
+                items.append({
+                    "kind": "gate_reopen_superseded", "ref": "gate-reopen:superseded",
+                    "hash": None, "at": stale["at"],
+                    "title": f"已自动收起 {stale['count']} 条过期的重新评估提案",
+                    "who": "研究系统",
+                    "summary": stale["detail"],
+                    "details": {"涉及公司": [self._label(members, company)
+                                             for company in stale["companies"]],
+                                "收起的条数": stale["count"],
+                                "收起的理由": stale["reason"]},
+                    "detail_labels": {"涉及公司": "涉及公司", "收起的条数": "收起的条数",
+                                      "收起的理由": "收起的理由"},
+                    "actions": [], "needs_rationale": False,
+                })
         return items
+
+    # -- D4: 需要你处理 --------------------------------------------------------
+
+    def needs_human(self) -> dict[str, Any]:
+        """One list of everything only a person can unblock, most urgent first.
+
+        A view rather than an authority: every item in it is already a record
+        somewhere -- an undecided gate draft, a governance file still marked
+        ``proposed``, a source the mission's own plan calls not-connected, a
+        lane holding for an authorisation, a provider that has been refusing
+        work for a day, an environment with no research goal.  What this adds
+        is the thing none of those places could add on their own, which is the
+        answer to "and what do I do about it".
+
+        Read-only end to end, including the databases it opens.  The cockpit
+        process holds no write handle to anything (ADR-0006) and this is the
+        page where that is easiest to prove.
+        """
+
+        from .needs_human import collect
+
+        router = self._model_router_db()
+        return {
+            **collect(
+                core_db=self.config.core_db,
+                state_dir=self.config.state_dir,
+                heartbeat_path=self.config.heartbeat_path,
+                scheduler_db=self.config.scheduler_db,
+                model_router_db=None if router is None else Path(router),
+                workspace_manager_config_path=getattr(
+                    self.config, "workspace_manager_config_path", None),
+                clock=self.clock,
+            ),
+            "enabled": True,
+        }
 
     def decide(self, login: str, value: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(value, Mapping):
@@ -5186,9 +5615,22 @@ class CockpitPlane:
             if decision not in {"approve", "return_for_more_work", "reject"}:
                 raise CockpitError(
                     "decision must be approve, return_for_more_work or reject")
+            if decision == "return_for_more_work" and not supplied_rationale:
+                # D2: a return with no words is the one decision that costs
+                # four model calls and teaches the next version nothing.  The
+                # other two verdicts settle the gate and are allowed to be
+                # wordless; this one is an instruction, and an instruction
+                # nobody wrote is not one.
+                raise CockpitError(
+                    "退回补充需要写明理由：哪一问不行、为什么。"
+                    "系统会把你的原话带进下一版的起草提示；没有这句话，下一版只会是"
+                    "同一份草稿换一种说法。")
+            notes = _gate_question_notes(value.get("question_notes"),
+                                         supplied_rationale)
             operation, params = "decide_deep_insight_gate", {
                 "gate_version_ref": ref, "gate_version_hash": digest,
-                "decision": decision, "reason": recorded_rationale}
+                "decision": decision, "reason": recorded_rationale,
+                **({"question_notes": notes} if notes else {})}
             title = {"approve": "通过了深度认知评审", "return_for_more_work": "将深度认知评审退回补充",
                      "reject": "未通过深度认知评审"}[decision]
         elif kind == "investment_memo":
@@ -5217,6 +5659,18 @@ class CockpitPlane:
                 "verdict": decision, "reason": recorded_rationale}
             title = {"accept": "接受了论点修订", "reject": "未接受论点修订",
                      "defer": "暂缓决定论点修订"}[decision]
+        elif kind == "conviction_call":
+            # D3: only the dismissal, and only from this page.  Accepting a
+            # call is a position and belongs in the full decision path that
+            # branch is still building; rejecting a low-information proposal
+            # takes nothing away, which is exactly why it can be one click.
+            if decision != "reject":
+                raise CockpitError("这条提案在本页只能驳回")
+            operation, params = "decide_conviction_call", {
+                "proposal_ref": ref, "proposal_hash": digest,
+                "decision": "reject", "reason": recorded_rationale,
+                "idempotency_key": f"cockpit-conviction:{ref}:{request_id}"}
+            title = "驳回了一条投资 call 提案"
         elif kind == "gate_reopen":
             if decision not in {"approve", "decline"}:
                 raise CockpitError("decision must be approve or decline")
@@ -5237,6 +5691,13 @@ class CockpitPlane:
                                         "decision": decision, "operation": operation,
                                         "rationale_provided": bool(supplied_rationale)})
         return {"status": "decided", "kind": kind, "ref": ref, "decision": decision,
+                # D2: what happens next, in one sentence, at the moment the
+                # owner presses the button.  A reject in particular has to say
+                # what would bring the company back, because "否决" with no
+                # re-entry condition reads as "never again".
+                **({"follow_up": DECISION_FOLLOW_UP[decision]}
+                   if kind == "deep_insight_gate" and decision in DECISION_FOLLOW_UP
+                   else {}),
                 "result": result if isinstance(result, (dict, list)) else None}
 
     def decision_status(self, query: Mapping[str, Any]) -> dict[str, Any]:
@@ -5897,6 +6358,9 @@ class CockpitPlane:
         broker = (None if self.config.openclaw_config_path is None
                   else _load_json(self.config.openclaw_config_path))
         broker = broker if isinstance(broker, Mapping) else None
+        from .cockpit_model_display import (
+            chain_link_note, cooldown_index, purpose_cooldown_note,
+        )
         from .model_fallback_chain import FallbackChainError, routing_overview
         from .model_router import ModelRouter, ModelRouterError
         from .openclaw_model_discovery import discover_models
@@ -5974,6 +6438,12 @@ class CockpitPlane:
                                "family": (bound_catalogue.get(profile_id) or {}).get("family"),
                                "unpriced": bool((bound_catalogue.get(profile_id) or {}).get("unpriced")),
                            } for position, profile_id in enumerate(allowed, 1)]}
+            # WP-A/A2: which of this stage's models routing is refusing to
+            # offer right now, read from the router the stage is actually bound
+            # to. Display only -- the cooldown is a routing decision, not a
+            # setting, so there is nothing to press here.
+            cooling = cooldown_index(
+                (selected or overview).get("cooldowns"))
             chain = [{
                 "position": link["position"], "model": link["profile_id"],
                 "display_name": self._model_display_name(
@@ -5981,11 +6451,15 @@ class CockpitPlane:
                                          if bound_catalogue is not None else catalogue)),
                 "family": link["family"], "unpriced": link["unpriced"],
                 "retired": link["status"] == "retired",
-                "note": (
-                    "这台机器上没有这个模型的档案" if not link["registered"]
-                    else "已退役：网关不再提供" if link["status"] == "retired"
-                    else "未定价：只能当最后的回退" if link["unpriced"]
-                    else None
+                "cooldown": cooling.get(link["profile_id"]),
+                "note": chain_link_note(
+                    (
+                        "这台机器上没有这个模型的档案" if not link["registered"]
+                        else "已退役：网关不再提供" if link["status"] == "retired"
+                        else "未定价：只能当最后的回退" if link["unpriced"]
+                        else None
+                    ),
+                    cooling.get(link["profile_id"]),
                 ),
             } for link in row["chain"]]
             served = row["last_served"]
@@ -6022,6 +6496,12 @@ class CockpitPlane:
                 "call_budget": call_budget_view(self.config.state_dir, purpose, binding=binding),
                 "run_budget": call_budget_view(self.config.state_dir, purpose, binding=binding, kind="run"),
                 "chain": chain,
+                "cooldown_note": purpose_cooldown_note(
+                    row["chain"], cooling,
+                    display_name=lambda profile_id: self._model_display_name(
+                        profile_id, (bound_catalogue
+                                     if bound_catalogue is not None else catalogue)),
+                ),
                 "superseded_chain": row["superseded_chain"],
                 "superseded_display_names": [
                     self._model_display_name(

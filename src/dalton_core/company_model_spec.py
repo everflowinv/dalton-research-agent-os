@@ -326,6 +326,49 @@ class CompanyModelSpecError(ValueError):
         self.code = code
 
 
+# The structure rules a model may be asked to reconsider once, as a closed
+# allow-list rather than a category.
+#
+# ``validate_structure_proposal`` refuses for two very different sorts of
+# reason.  Some are *wiring*: this line is derived so it may not also claim a
+# filed concept; a filed subtotal has to be actual, a tie or unavailable; the
+# diluted-share line needs a duration direct_annual basis; a sum formula's
+# roles have to match the statement it sums.  Every one of those is a choice
+# among shapes the model was already shown, and telling it exactly which rule
+# it broke is enough for it to pick the right one -- 12 live refusals between
+# 2026-09-11 and 09-13 were of exactly this kind, and each one cost a whole
+# specification.
+#
+# Others are *arithmetic about the filings*: "this formula does not tie to
+# filed history", "structure omits expense concepts selected by the company
+# spec".  Handing those back would be inviting the model to make the numbers
+# agree, which is the one thing it must never be asked to do.  So the list is
+# an allow-list keyed on the rule's own message, anything unrecognised stays
+# ``semantic``, and adding to it is a reviewed decision with a version.
+REPAIRABLE_STRUCTURE_RULES_REF = "rule:company-model-spec-repairable-structure:0.1"
+REPAIRABLE_STRUCTURE_RULES: tuple[str, ...] = (
+    "a derived line cannot claim a filed concept",
+    "a filed subtotal may only be actual/tie authority or unavailable",
+    "diluted weighted-average shares require duration direct_annual shares",
+    "only diluted weighted-average shares may carry annual_forecast_method",
+    "Only diluted weighted-average shares may select",
+    "sum formula roles do not match its company statement output",
+    "EPS denominator must be diluted weighted-average shares",
+)
+
+
+def structure_error_code(message: str) -> str:
+    """``structure`` when the refusal is a wiring rule, else ``semantic``.
+
+    Fail-closed on the unknown: a rule this list has not seen is not eligible
+    for a repair, however much it looks like one.
+    """
+
+    return ("structure"
+            if any(rule in message for rule in REPAIRABLE_STRUCTURE_RULES)
+            else "semantic")
+
+
 def _statement_table(state: Mapping[str, Any]) -> str:
     """The filed structure as a table rather than as JSON.
 
@@ -595,6 +638,76 @@ def build_prompt(state: Mapping[str, Any]) -> str:
         f"\nNUMERIC_PERIODS:\n{_numeric_period_table(state)}\n"
         f"\nFINANCIAL_NOTE_EVIDENCE:\n{_financial_note_table(state)}\n"
     )
+
+
+# What a specification cannot be written without, per statement.  Named here
+# rather than discovered from a traceback: "financial_statement_structure is
+# invalid" tells an operator that something is wrong and nothing about what to
+# go and fetch, and the answer is nearly always that one filing has not been
+# read yet.
+REQUIRED_STATEMENT_ROLES: dict[str, tuple[tuple[str, str], ...]] = {
+    "income": (
+        ("revenue", "营业收入"),
+        ("operating income", "营业利润"),
+        ("net income", "净利润"),
+        ("weighted average", "稀释加权平均股数"),
+    ),
+    "balance": (
+        ("total assets", "资产总计"),
+        ("total liabilities", "负债总计"),
+        ("equity", "股东权益"),
+    ),
+    "cash": (
+        ("operating activities", "经营活动现金流"),
+        ("capital expenditure", "资本开支"),
+    ),
+}
+
+
+def financial_line_gaps(state: Mapping[str, Any]) -> list[dict[str, str]]:
+    """Which company, which statement, which line item is not there yet.
+
+    A refusal an operator can act on.  ``financial_statement_structure is
+    invalid: diluted weighted-average shares require duration direct_annual
+    shares`` is true and useless; "Accenture's income statement carries no
+    weighted-average share line -- the 10-K has not been read" is the same
+    fact with the next action attached.
+
+    Matched on the filed *label* rather than on a concept name, because the
+    concept namespace is the filer's and ``us-gaap:Revenues`` versus
+    ``acn:RevenuesNet`` is exactly the sort of near-miss this report exists to
+    stop anyone from papering over.
+    """
+
+    company_ref = str(state.get("company_ref") or "(unknown company)")
+    statements = state.get("statements") or {}
+    gaps: list[dict[str, str]] = []
+    for statement in STATEMENTS:
+        rows = statements.get(statement) or []
+        if not rows:
+            gaps.append({
+                "company_ref": company_ref, "statement": statement,
+                "line": "(the whole statement)",
+                "detail": f"{company_ref} 的{statement}报表在已读的申报里一行也没有；"
+                          "先把这家公司的年报/季报抽取完成，再谈建模",
+            })
+            continue
+        labels = " \n".join(
+            str(row.get("label") or "").lower() for row in rows
+            if isinstance(row, Mapping))
+        concepts = " \n".join(
+            str(row.get("concept") or "").lower() for row in rows
+            if isinstance(row, Mapping))
+        for needle, chinese in REQUIRED_STATEMENT_ROLES[statement]:
+            if needle in labels or needle.replace(" ", "") in concepts.replace(" ", ""):
+                continue
+            gaps.append({
+                "company_ref": company_ref, "statement": statement,
+                "line": needle,
+                "detail": f"{company_ref} 的{statement}报表里找不到「{chinese}」"
+                          f"（匹配词 {needle!r}）；这一行缺失时，依赖它的结构规则只能拒绝",
+            })
+    return gaps
 
 
 def parse_response(text: Any) -> dict[str, Any]:
@@ -1011,7 +1124,8 @@ def spec_from_response(
         )
     except (FinancialStatementStructureError, FinancialNoteContextError) as exc:
         raise CompanyModelSpecError(
-            f"financial_statement_structure is invalid: {exc}"
+            f"financial_statement_structure is invalid: {exc}",
+            code=structure_error_code(str(exc)),
         ) from exc
     cash_companion = _cash_flow_companion(
         body.get("cash_flow_companion"), concepts=concepts,
@@ -1110,6 +1224,11 @@ __all__ = [
     "TASK_HASH",
     "TASK_REF",
     "CompanyModelSpecError",
+    "REPAIRABLE_STRUCTURE_RULES",
+    "REPAIRABLE_STRUCTURE_RULES_REF",
+    "structure_error_code",
+    "REQUIRED_STATEMENT_ROLES",
+    "financial_line_gaps",
     "build_prompt",
     "spec_template_gaps",
     "template_for",

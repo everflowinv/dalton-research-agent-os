@@ -32,11 +32,21 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Mapping, Sequence
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from .cockpit_model import purposes, register_purpose
 from .model_accounting import ModelAccountingError, _route_estimate_micros
+from .model_profile_bounds import INPUT_BOUND_SKIP_REASON
+from .model_profile_health import (
+    BASE_COOLDOWN_SECONDS as COOLDOWN_BASE_SECONDS,
+    COOLDOWN_SKIP_REASON,
+    FAILURE_THRESHOLD as COOLDOWN_FAILURE_THRESHOLD,
+    FAILURE_WINDOW_SECONDS as COOLDOWN_FAILURE_WINDOW_SECONDS,
+    MAX_COOLDOWN_SECONDS as COOLDOWN_MAX_SECONDS,
+    cooldown_message,
+    is_immediate_cooldown_code,
+)
 from .model_router import (
     ModelRouter,
     independent_families,
@@ -442,12 +452,155 @@ def effective_chain(
             "superseded_chain": resolved.get("superseded_chain")}
 
 
+def _suggest_profile_id(
+    wanted: str, held: Mapping[str, Mapping[str, Any]], *, now: datetime
+) -> str | None:
+    """The id the owner almost certainly meant, when the one given cannot serve.
+
+    ``model-profile:claude-opus-5`` is the live case: a profile registered once
+    on 2026-08-14 under the catalog lane's old id shape, never refreshed, so its
+    availability window closed a month ago. The model itself is very much here,
+    under ``profile:claude-opus-5`` at v5. Saving a chain that names the dead id
+    routes nothing and says ``availability_expired`` at three in the morning; a
+    refusal that names the live id costs one edit.
+    """
+
+    tail = wanted.split(":", 1)[-1]
+    for profile_id, profile in sorted(held.items()):
+        if profile_id == wanted or profile_id.split(":", 1)[-1] != tail:
+            continue
+        if _profile_unusable(profile, now=now) is None:
+            return profile_id
+    return None
+
+
+def _profile_unusable(profile: Mapping[str, Any], *, now: datetime) -> str | None:
+    """Why routing could not select this profile version today, or ``None``.
+
+    Only the conditions that are properties of the *catalog entry* -- retired,
+    withdrawn, or an availability window that has closed. A profile that is
+    merely expensive, unpriced or busy is a routing outcome, not a bad choice.
+    """
+
+    if profile.get("status") == "retired":
+        return "retired"
+    availability = profile.get("availability") or {}
+    state = availability.get("state")
+    if state != "available":
+        return "unavailable"
+    valid_until = availability.get("valid_until")
+    if not isinstance(valid_until, str):
+        return "unavailable"
+    try:
+        expires = datetime.fromisoformat(valid_until.replace("Z", "+00:00"))
+    except ValueError:
+        return "unavailable"
+    if expires.tzinfo is None:
+        expires = expires.replace(tzinfo=timezone.utc)
+    if expires <= now:
+        return "expired"
+    return None
+
+
+# WP-A/A4b: purposes whose transport is a contract, not a preference.
+#
+# Most stages will take whatever model the tier offers. A few will not, because
+# something downstream asserts on the exact endpoint that served. The live case
+# is the publication language checker: ``research_output_preparation`` compares
+# the served route decision's provider/model against
+# ``research_language_review.CHECKER_PROVIDER`` / ``CHECKER_MODEL`` and raises
+# "language checker served an unexpected transport or model" when they differ.
+#
+# On 2026-09-16 that assertion was firing on every publication attempt:
+# ``research-language-check-model-config.json`` pinned
+# ``dalton-openclaw-dossier-verifier:46``, that policy carried no override for
+# ``research_language_check``, so the cheap tier's ordered_preferences picked
+# the cheapest link -- ``profile:deepseek-v4-flash``, 849 of 1,176 replays --
+# and the worker threw every time. Zero published products, and nothing on the
+# model page said the chain could not satisfy the contract.
+#
+# So the requirement is declared where the *selection* is checked. A chain whose
+# first link cannot satisfy the contract is refused at save time, with the ids
+# that can.
+_PURPOSE_TRANSPORTS: dict[str, dict[str, str]] = {
+    # Kept in step with research_language_review by a test, rather than by an
+    # import: that module imports cockpit_model, which imports this one.
+    "research_language_check": {
+        "provider": "antigravity-cli-gateway",
+        "model": "antigravity-cli-gateway/gemini-3.8-flash",
+    },
+}
+
+
+def register_purpose_transport(purpose: str, *, provider: str, model: str) -> dict[str, str]:
+    """Declare that this stage's served endpoint is asserted on downstream.
+
+    Registering the same pair twice is a no-op; registering a different one is
+    refused, because two callers disagreeing about which endpoint a stage must
+    use is a contradiction rather than an update.
+    """
+
+    purpose = str(purpose)
+    required = {"provider": str(provider), "model": str(model)}
+    held = _PURPOSE_TRANSPORTS.get(purpose)
+    if held is not None and held != required:
+        raise FallbackChainError(
+            f"{purpose} already requires {held['model']}; one stage cannot "
+            "require two different endpoints"
+        )
+    _PURPOSE_TRANSPORTS[purpose] = required
+    return dict(required)
+
+
+def required_transport(purpose: str) -> dict[str, str] | None:
+    """The provider/model this stage's first link must be, if anything asserts it."""
+
+    held = _PURPOSE_TRANSPORTS.get(str(purpose))
+    return None if held is None else dict(held)
+
+
+def purpose_transports() -> dict[str, dict[str, str]]:
+    """Every declared transport contract, by purpose."""
+
+    return {purpose: dict(value) for purpose, value in _PURPOSE_TRANSPORTS.items()}
+
+
+def profile_transport(profile: Mapping[str, Any]) -> dict[str, str]:
+    """The provider/model identity a served route decision would report.
+
+    The same two fields ``research_output_preparation.selected_identity`` reads
+    back off the decision, composed the same way, so "what the save promises"
+    and "what the assertion checks" cannot drift apart.
+    """
+
+    provider = str(profile.get("provider") or "")
+    return {"provider": provider, "model": f"{provider}/{profile.get('model')}"}
+
+
+def profiles_serving_transport(
+    profiles: Mapping[str, Mapping[str, Any]], required: Mapping[str, str]
+) -> list[str]:
+    """Every profile id in the catalog that satisfies this transport contract."""
+
+    wanted = {"provider": required["provider"], "model": required["model"]}
+    return sorted(
+        profile_id for profile_id, profile in profiles.items()
+        if profile_transport(profile) == wanted
+    )
+
+
+#: WP-A/A4 public name for the check above: "could routing select this profile
+#: version today, or is the catalog entry itself the problem".
+profile_unusable = _profile_unusable
+
+
 def validate_selection(
     router: ModelRouter,
     *,
     purpose: str,
     mode: str,
     chain: Sequence[str] = (),
+    now: datetime | None = None,
 ) -> dict[str, Any]:
     """Refuse a selection that would be dishonest, and say why in one sentence.
 
@@ -481,16 +634,41 @@ def validate_selection(
     if len(set(links)) != len(links):
         raise FallbackChainError("the same model twice in one chain is not a fallback")
     held = profile_families(router)
+    moment = now or router.clock().astimezone(timezone.utc)
     for profile_id in links:
         profile = held.get(profile_id)
         if profile is None:
+            # WP-A/A4: name the live id when one exists. Five routing policies
+            # carried ``model-profile:claude-opus-5`` in position four of their
+            # brain chain for a month; every call through it read
+            # profile_not_allowed and nothing said why.
+            suggestion = _suggest_profile_id(profile_id, held, now=moment)
             raise FallbackChainError(
-                f"{profile_id} has no profile on this machine; the catalog lane "
-                "registers a model before it can be chosen"
+                f"这台机器上没有 {profile_id} 的模型档案，保存后这一环永远不会被选中。"
+                + (f"你要找的多半是 {suggestion}。" if suggestion
+                   else "请先让目录同步登记这个模型，再来选它。")
             )
         if profile.get("status") == "retired":
             raise FallbackChainError(
                 f"{profile_id} has been retired -- the gateway no longer offers it"
+            )
+        # WP-A/A4: "registered" is not the same as "routable". A profile version
+        # whose availability window has closed is refused at route time with
+        # ``availability_expired``, so saving a chain that names one is saving a
+        # link that cannot serve. Refuse it here, where the owner can still fix
+        # it, instead of at three in the morning inside a lane.
+        unusable = _profile_unusable(profile, now=moment)
+        if unusable is not None:
+            suggestion = _suggest_profile_id(profile_id, held, now=moment)
+            checked = (profile.get("availability") or {}).get("valid_until")
+            detail = ("的档案已过期" if unusable == "expired"
+                      else "的档案当前不可用")
+            raise FallbackChainError(
+                f"{profile_id}{detail}"
+                + (f"（有效期至 {checked}）" if unusable == "expired" and checked else "")
+                + "，保存后这一环的每次调用都会被拒。"
+                + (f"目录中现在有效的是 {suggestion}，请改用它。" if suggestion
+                   else "请先让目录同步刷新这个模型的档案，再来选它。")
             )
     for position, profile_id in enumerate(links, start=1):
         if held[profile_id].get("unpriced") and position != len(links):
@@ -499,6 +677,20 @@ def validate_selection(
                     f"{profile_id} has no published price, so it can only be the last "
                     "resort; put it at the end of the chain or leave it out"
                 )
+    contract = required_transport(purpose)
+    if contract is not None and profile_transport(held[links[0]]) != contract:
+        # First link, not "somewhere in the chain": the assertion downstream is
+        # on what actually served, and the chain's whole purpose is that the
+        # first link is what serves unless it fails.
+        capable = profiles_serving_transport(held, contract)
+        raise FallbackChainError(
+            f"「{purpose}」这一环的产物会按供应商和模型逐次核对，必须由 "
+            f"{contract['model']} 提供，链首不能是 {links[0]}"
+            f"（它是 {profile_transport(held[links[0]])['model']}）。"
+            + (f"目录中满足这个要求的是：{', '.join(capable)}，请把其中之一放在第一顺位。"
+               if capable else
+               "目录里现在没有任何档案提供这个模型，请先让目录同步登记它。")
+        )
     if tier == TIER_VERIFIER:
         # 2026-09-16: split out of CHAIN_ELIGIBILITY_ENFORCED. The owner's
         # standing rule lifted the *capability* restrictions, and that flag
@@ -582,6 +774,70 @@ def reserved_micros(route: Mapping[str, Any], profile: Mapping[str, Any]) -> int
         return _route_estimate_micros(route, profile)
     except ModelAccountingError as exc:
         raise FallbackChainError(str(exc)) from exc
+
+
+# WP-A/A2: which failures are evidence about the *provider* rather than about
+# this request. A content refusal says the model read the prompt and declined;
+# a contract violation says Dalton asked wrongly. Neither is a reason to stop
+# offering the endpoint. A provider failure -- and anything the broker labels
+# with a rate-limit code, whatever class it landed in -- is.
+_HEALTH_FAILURE_CLASSES: frozenset[str] = frozenset({"provider_failure"})
+
+
+def _active_cooldowns(router: ModelRouter) -> dict[str, dict[str, Any]]:
+    """The profiles under an active cooldown, or nothing if it cannot be read."""
+
+    try:
+        return router.active_cooldowns()
+    except Exception:  # noqa: BLE001 - health is advisory to the walk, not to routing
+        return {}
+
+
+def _observe_provider_outcome(
+    router: ModelRouter,
+    profile_id: str,
+    outcome: Mapping[str, Any],
+    decision_id: str,
+) -> dict[str, Any] | None:
+    """Tell the router what the provider just did, so selection can learn from it.
+
+    Wrapped in a bare ``except`` on purpose. This is bookkeeping that runs
+    inside a mission tick: a health row that fails to write must lose the
+    health row, never the answer the call just produced.
+    """
+
+    served = outcome.get("outcome") == "served"
+    failure_class = str(outcome.get("failure_class") or "")
+    code = outcome.get("error_code")
+    if not served and not (
+        failure_class in _HEALTH_FAILURE_CLASSES or is_immediate_cooldown_code(code)
+    ):
+        return None
+    try:
+        return router.record_provider_outcome(
+            profile_id=profile_id,
+            outcome="served" if served else "provider_failure",
+            failure_code=None if served else (
+                str(code) if isinstance(code, str) and code else failure_class or None
+            ),
+            route_decision_ref=decision_id,
+        )
+    except Exception:  # noqa: BLE001 - see docstring
+        return None
+
+
+def profile_cooldowns(router: ModelRouter) -> list[dict[str, Any]]:
+    """WP-A/A2 read model: every cooldown ever decided, newest first.
+
+    The cockpit's model page owns its own rendering, so this is the data
+    interface rather than the display: profile id, why, how long, which repeat
+    of it, and the route decision that proved it.
+    """
+
+    try:
+        return router.profile_cooldowns(limit=200)
+    except Exception:  # noqa: BLE001 - an unreadable history is an empty table
+        return []
 
 
 def execute_chain(
@@ -687,6 +943,47 @@ def execute_chain(
             }
     links: list[dict[str, Any]] = []
     failures: list[dict[str, str]] = []
+    # WP-A/A2. A cooled profile is not tried, not admitted against a budget and
+    # not dispatched -- router.route() already refuses it as a candidate, which
+    # is what makes the skip free. Reading the same set here is so the *chain*
+    # can say so in its own link record, next to the links that were tried: a
+    # brain chain silently running on its second link for six hours is exactly
+    # the thing this whole work package exists to make visible.
+    cooled = _active_cooldowns(router)
+    recorded_positions: set[int] = set()
+
+    def _record_link(*, position: int, profile_id: str, decision_id: str,
+                     served: bool, skip_reason: str | None) -> dict[str, Any]:
+        link = router.record_chain_link(
+            work_order_id=work_order.id,
+            capability=capability,
+            attempt_number=attempt_number,
+            purpose=purpose,
+            tier=tier,
+            chain_position=position,
+            profile_id=profile_id,
+            decision_id=decision_id,
+            policy_version_ref=policy_version_ref,
+            served=served,
+            skip_reason=skip_reason,
+        )["link"]
+        recorded_positions.add(position)
+        links.append(link)
+        return link
+
+    def _record_cooldown_skips(decision_id: str, before: int) -> None:
+        """Write the ``provider_cooldown`` links the router refused silently."""
+
+        for index, candidate in enumerate(chain[:max(0, before - 1)], start=1):
+            if candidate not in cooled or index in recorded_positions:
+                continue
+            try:
+                _record_link(position=index, profile_id=candidate,
+                             decision_id=decision_id, served=False,
+                             skip_reason=COOLDOWN_SKIP_REASON)
+            except Exception:  # noqa: BLE001 - an audit row must not stop a call
+                recorded_positions.add(index)
+
     prior_decisions = router.list_decisions(work_order_id=work_order.id)
     previous_decision_ref: str | None = None
     if (prior_decisions
@@ -720,6 +1017,10 @@ def execute_chain(
             raise FallbackChainError(result.get("reason", "route request conflicted"))
         route = result["decision"]
         if route["outcome"] != "selected":
+            # Nothing routed. If cooldowns are why, say which links they were:
+            # "no link of the chain is routable" with the profile ids missing
+            # is how a whole tier goes dark without anybody being told.
+            _record_cooldown_skips(route["id"], len(chain) + 1)
             # No link of the chain is routable right now: retired, unavailable,
             # not independent of the producer, over budget, or already tried.
             # The decision's candidate snapshot names every link and the reason
@@ -749,23 +1050,15 @@ def execute_chain(
                 f"policy selected {profile_id}, which is not in the {tier} chain"
             )
         position = chain.index(profile_id) + 1
+        # Every link the router passed over because it is cooling gets its own
+        # record, pointing at the decision whose candidate snapshot proves it.
+        _record_cooldown_skips(route["id"], position)
 
         def _record(*, served: bool, skip_reason: str | None) -> dict[str, Any]:
-            link = router.record_chain_link(
-                work_order_id=route["work_order_ref"],
-                capability=capability,
-                attempt_number=attempt_number,
-                purpose=purpose,
-                tier=tier,
-                chain_position=position,
-                profile_id=profile_id,
-                decision_id=route["id"],
-                policy_version_ref=policy_version_ref,
-                served=served,
-                skip_reason=skip_reason,
-            )["link"]
-            links.append(link)
-            return link
+            return _record_link(
+                position=position, profile_id=profile_id, decision_id=route["id"],
+                served=served, skip_reason=skip_reason,
+            )
 
         previous_decision_ref = route["id"]
         if profile.get("family") in producer_families:
@@ -791,6 +1084,7 @@ def execute_chain(
         outcome = call(route, profile)
         if not isinstance(outcome, Mapping) or "outcome" not in outcome:
             raise FallbackChainError("a chain call must report an outcome")
+        _observe_provider_outcome(router, profile_id, outcome, route["id"])
         if outcome["outcome"] == "served":
             _record(served=True, skip_reason=None)
             return {
@@ -999,6 +1293,23 @@ def routing_overview(
         "policy_version_ref": policy_version_ref,
         "purpose_overrides": dict((policy or {}).get("purpose_overrides") or {}),
         "purposes": purpose_selection(router, policy=policy, links=links),
+        # WP-A/A2. Two lists, because they answer two questions: which models
+        # routing is refusing to offer *right now*, and what the recent history
+        # of that is. Without the first, a chain quietly running on its second
+        # link looks exactly like a chain whose first link was never chosen.
+        "cooldowns": {
+            "active": [
+                {**item, "message": cooldown_message(item)}
+                for item in _active_cooldowns(router).values()
+            ],
+            "recent": profile_cooldowns(router)[:20],
+            "policy": {
+                "failure_threshold": COOLDOWN_FAILURE_THRESHOLD,
+                "failure_window_seconds": COOLDOWN_FAILURE_WINDOW_SECONDS,
+                "base_cooldown_seconds": COOLDOWN_BASE_SECONDS,
+                "max_cooldown_seconds": COOLDOWN_MAX_SECONDS,
+            },
+        },
     }
     if openclaw_config is not None:
         from .openclaw_catalog_reconcile import catalog_sync_status
@@ -1013,6 +1324,8 @@ def routing_overview(
 
 __all__ = [
     "CHAIN_ELIGIBILITY_ENFORCED",
+    "COOLDOWN_SKIP_REASON",
+    "INPUT_BOUND_SKIP_REASON",
     "FALLBACK_FAILURES",
     "HALTING_FAILURES",
     "TIERS",
@@ -1026,6 +1339,13 @@ __all__ = [
     "purpose_selection",
     "purpose_tiers",
     "effective_chain",
+    "profile_cooldowns",
+    "profile_transport",
+    "profiles_serving_transport",
+    "purpose_transports",
+    "register_purpose_transport",
+    "required_transport",
+    "profile_unusable",
     "profile_families",
     "register_purpose_tier",
     "validate_selection",

@@ -43,6 +43,7 @@ from .model_fallback_chain import (
     FallbackChainError,
     purpose_selection,
     purpose_tiers,
+    required_transport,
     tier_chain,
     tier_for,
     validate_selection,
@@ -574,7 +575,17 @@ def publish_tier_selection(
     overrides = {
         name: entry
         for name, entry in (pinned.get("purpose_overrides") or {}).items()
-        if tier_for(name) != tier
+        # WP-A/A4b: a tier edit means "all of this tier's stages follow the new
+        # chain", and that is right for every stage whose model is a
+        # preference. It is not right for a stage whose served endpoint is
+        # asserted on downstream: dropping that override does not change a
+        # preference, it breaks a contract, silently, on the next call. The
+        # publication language checker is the live one -- the cheap tier's
+        # cheapest link is not antigravity, so a cheap-tier save would send
+        # every publication back to "language checker served an unexpected
+        # transport or model". Contract pins survive a tier edit; the model
+        # page shows them as pins rather than as the owner's choice.
+        if tier_for(name) != tier or required_transport(name) is not None
     }
     chains = dict((pinned.get("fallback_chains") or {}).get("tiers") or {})
     chains[tier] = list(links)

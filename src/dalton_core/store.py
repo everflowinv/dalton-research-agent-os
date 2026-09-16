@@ -268,6 +268,34 @@ class DaltonStore:
         self._migrate_thesis_authority_columns()
         self._backfill_model_execution_links()
         self._ensure_default_policy()
+        self._ensure_projection_indexes()
+
+    def _ensure_projection_indexes(self) -> None:
+        """Build the read-path indexes, and never fail the open over one.
+
+        B1-4.  ``schema.sql`` defines no index at all, so the dashboard
+        projection sorted every model invocation through a TEMP B-TREE on
+        every round.  The statements live in ``dalton_core.migrations``
+        rather than in the schema file for one reason: a missing index is a
+        slow query and a failed ``CREATE INDEX`` would be a writer that does
+        not start.  On the live 1.2 GB Core the two builds measure 0.46 s and
+        0.01 s; a build that cannot take the lock right now is skipped and
+        retried by whatever opens the store next.
+        """
+
+        try:
+            from .migrations import (
+                CORE_PROJECTION_INDEXES,
+                OPEN_BUDGET_SECONDS,
+                ensure_indexes,
+            )
+
+            ensure_indexes(
+                self.connection, CORE_PROJECTION_INDEXES,
+                budget_seconds=OPEN_BUDGET_SECONDS,
+            )
+        except Exception:  # noqa: BLE001 - an index is a speed, not a contract
+            pass
 
     def _ensure_wal(self) -> None:
         """Put the database in WAL, tolerating another process opening it.
@@ -1311,6 +1339,71 @@ class DaltonStore:
         )
         return {**result, "authorization": decision_wire}
 
+    @staticmethod
+    def _statement_line_commit_authority(
+        cur: sqlite3.Cursor, evidence_wire: Mapping[str, Any]
+    ) -> str:
+        """Verify a filed-statement candidate against Core's own filing tables.
+
+        The envelope of this mode is the ingested filing row; the raw artifact
+        is the spool sink the parser read.  Both are named by the evidence and
+        both are checked here against what Core holds, so the commit boundary
+        does its own verification rather than trusting the evaluator that just
+        ran.  Returns the producer execution: the child-process ticket the
+        mission dispatch launched.
+        """
+
+        required = ("coverage_mission_statement_filings",
+                    "coverage_mission_statement_dispatches")
+        present = {
+            row["name"] for row in cur.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name IN (?,?)",
+                required,
+            ).fetchall()
+        }
+        if present != set(required):
+            raise GateRejected(
+                "Core statement filing authority is unavailable; the candidate "
+                "filing cannot be verified"
+            )
+        if (
+            evidence_wire["source_type"] != "official_filing"
+            or evidence_wire["source_ref"] != "source:sec-edgar"
+        ):
+            raise GateRejected("statement line candidate is not SEC filing evidence")
+        filing = cur.execute(
+            "SELECT * FROM coverage_mission_statement_filings WHERE ingest_id=?",
+            (evidence_wire["source_envelope_ref"],),
+        ).fetchone()
+        if filing is None or filing["content_hash"] != evidence_wire["source_envelope_hash"]:
+            raise GateRejected(
+                "candidate statement filing is not exact Core authority")
+        try:
+            records = json.loads(filing["source_record_refs_json"] or "[]")
+        except (TypeError, ValueError):
+            records = []
+        artifact = evidence_wire["artifact_refs"][0]
+        if (
+            len(evidence_wire["artifact_refs"]) != 1
+            or artifact["ref"] not in records
+            or artifact["ref"] != f"raw-sink:{artifact['hash']}"
+        ):
+            raise GateRejected(
+                "candidate raw artifact is not one the filing was parsed from")
+        dispatch = cur.execute(
+            "SELECT * FROM coverage_mission_statement_dispatches WHERE dispatch_id=?",
+            (filing["dispatch_id"],),
+        ).fetchone()
+        if dispatch is None or dispatch["status"] != "succeeded":
+            raise GateRejected(
+                "candidate filing has no settled mission statement dispatch")
+        if dispatch["company_ref"] != filing["company_ref"]:
+            raise GateRejected("candidate filing and dispatch name different companies")
+        ticket = dispatch["ticket_ref"]
+        if not isinstance(ticket, str) or not ticket:
+            raise GateRejected("candidate filing dispatch records no producer execution")
+        return ticket
+
     def _commit_authorized_candidate(
         self,
         *,
@@ -1325,6 +1418,7 @@ class DaltonStore:
         document_source_verification: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Shared atomic Ledger writer for human and policy authorization."""
+        from .research_auto_commit import SEC_STATEMENT_LINE_RULE_REF
         from .research_review import (
             validate_claim_version_v0_2,
             validate_evidence_version_v0_2,
@@ -1453,6 +1547,23 @@ class DaltonStore:
                 if canonical_json(exact_decision) != canonical_json(decision_wire):
                     raise GateRejected("document authorization changed before Ledger commit")
                 producer_execution_ref = document_material["normalized_payload"]["draft_proof"]["model_invocation_ref"]
+            elif (
+                active_policy_binding is not None
+                and decision_wire.get("authorization") == "versioned_governance_policy"
+                and decision_wire.get("rule_ref") == SEC_STATEMENT_LINE_RULE_REF
+            ):
+                # WP-F.  A filed XBRL statement line has no connector
+                # SourceEnvelope and never had one: the SEC financial-statements
+                # lane parses the filer's exhibit in a child process and records
+                # it through CoverageMissionAuthority's append-only,
+                # authority-gated tables.  Manufacturing an envelope for a call
+                # that never went through the connector port would be a
+                # fabricated provenance, so the filing row is verified as the
+                # envelope of this mode instead -- and only under this one
+                # signed rule, whose evaluator has already replayed every digit
+                # of the candidate out of the same two tables.
+                producer_execution_ref = self._statement_line_commit_authority(
+                    cur, evidence_wire)
             else:
                 required_authority_tables = (
                     "connector_invocations", "connector_source_envelopes",

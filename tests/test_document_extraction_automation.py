@@ -375,11 +375,21 @@ class AutomationAdmissionTests(AutomationDraftingTests):
                 )
             self.assertEqual(summary["reviews_complete"], 0)
             self.assertEqual(summary["resolved_reviews"], [])
-            self.assertEqual(
-                {(item["error_code"], item["work_order_ref"])
-                 for item in summary["qualitative_failures"]},
-                {("BUSY", "work:document-extraction:cached-failure")},
-            )
+            if run_number == 1:
+                # First sighting: reported, and written down as a window that
+                # can never succeed (C2-1).
+                self.assertEqual(
+                    {(item["error_code"], item["work_order_ref"])
+                     for item in summary["qualitative_failures"]},
+                    {("BUSY", "work:document-extraction:cached-failure")},
+                )
+                self.assertTrue(summary["isolated_windows"])
+            else:
+                # Second run: stepped over without re-rendering the document.
+                # The review still stays open -- what changed is the I/O, not
+                # the verdict.
+                self.assertEqual(summary["qualitative_failures"], [])
+                self.assertGreaterEqual(summary["windows_skipped_by_exclusion"], 1)
             review = self.h.missions.document_reviews(
                 self.h.missions.active_mission("coverage-mission:us-it-services")["id"]
             )[0]

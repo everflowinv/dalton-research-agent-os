@@ -26,6 +26,14 @@ MANIFEST_SCHEMA = "cockpit-ui-text-batch:0.1"
 RESULT_SCHEMA = "cockpit-ui-text-batch-result:0.1"
 POLL_SCHEMA = "cockpit-ui-text-discovery-poll:0.1"
 
+# How many batches one scheduled pass may pay for, and how many times a batch
+# may fail before it stops being offered. Without the second bound a batch that
+# can never succeed is retried every five minutes forever: 329 batches had
+# reached 17 attempts each against a language checker that was refusing every
+# call, spending the budget on a failure that no retry could fix.
+DEFAULT_BATCHES_PER_RUN = 4
+DEFAULT_MAX_ATTEMPTS = 6
+
 
 def _canonical(value: Any) -> bytes:
     return (json.dumps(value, ensure_ascii=False, sort_keys=True,
@@ -300,6 +308,41 @@ def _product(mission_ref: str, batch_ref: str,
     }
 
 
+def _failure_reason(result: Any) -> str:
+    """The most specific readable sentence a failed prepare left behind."""
+
+    if not isinstance(result, Mapping):
+        return "未记录原因"
+    reason = result.get("reason")
+    if isinstance(reason, str) and reason:
+        return reason
+    receipt = result.get("receipt")
+    if isinstance(receipt, Mapping):
+        failures = receipt.get("failures")
+        if isinstance(failures, list):
+            errors = [item.get("error") for item in failures
+                      if isinstance(item, Mapping) and isinstance(item.get("error"), str)]
+            if errors:
+                return "；".join(dict.fromkeys(errors))[:400]
+    return "未记录原因"
+
+
+def _blocked_reason(result: Mapping[str, Any], max_attempts: int) -> str:
+    return (f"已连续失败 {result.get('attempts')} 次（上限 {max_attempts}），"
+            f"停止重试以免继续消耗预算；最后一次失败原因："
+            f"{_failure_reason(result.get('result'))}")
+
+
+def _seal_blocked(result_path: Path, prior: Mapping[str, Any],
+                  max_attempts: int) -> None:
+    """Record the give-up decision on disk so it survives a restart."""
+
+    unsigned = {"schema_version": RESULT_SCHEMA, "batch_ref": prior["batch_ref"],
+                "manifest_hash": prior["manifest_hash"], "status": "blocked",
+                "attempts": prior["attempts"], "result": prior["result"]}
+    _replace(result_path, {**unsigned, "content_hash": _hash(unsigned)})
+
+
 def _chunks(entries: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
     result: list[list[dict[str, Any]]] = []
     current: list[dict[str, Any]] = []
@@ -332,15 +375,25 @@ def _eligible(manifest: Mapping[str, Any], mission_ref: str,
 
 def poll_ui_texts(connection: Any, mission: Mapping[str, Any], *, state_dir: Path,
                   mapping: Mapping[str, str],
-                  prepare: Callable[[Mapping[str, Any]], Mapping[str, Any]]) -> dict[str, Any]:
-    """Seal newly discovered strings and prepare at most four batches.
+                  prepare: Callable[[Mapping[str, Any]], Mapping[str, Any]],
+                  batches_per_run: int = DEFAULT_BATCHES_PER_RUN,
+                  max_attempts: int = DEFAULT_MAX_ATTEMPTS) -> dict[str, Any]:
+    """Seal newly discovered strings and prepare a bounded number of batches.
 
     ``prepare`` receives the manifest's stable ``ui_text`` product.  Returning
     ``{"status": "completed"}`` records completion; every other result stays
-    retryable and is offered again on the next scheduled poll.
+    retryable and is offered again on the next scheduled poll -- but only until
+    ``max_attempts``.  At that point the batch becomes ``blocked``: it is no
+    longer offered, no longer spends, and carries the last failure reason so an
+    operator can see what has to change before it can be retried.  Deleting the
+    batch's result file is the explicit, owner-only way to retry it.
     """
     if not isinstance(mapping, Mapping):
         raise TypeError("mapping must be an exact source-to-display mapping")
+    for name, value in (("batches_per_run", batches_per_run),
+                        ("max_attempts", max_attempts)):
+        if type(value) is not int or not 1 <= value <= 64:
+            raise ValueError(f"{name} must be an integer between 1 and 64")
     root = Path(state_dir)
     _safe_directory(root)
     manifests = root / "manifests"; results = root / "results"
@@ -392,8 +445,19 @@ def poll_ui_texts(connection: Any, mission: Mapping[str, Any], *, state_dir: Pat
                 summaries.append({"batch_ref": manifest["batch_ref"],
                                   "status": "mapped"})
                 continue
+            attempts = 0 if prior is None else prior["attempts"]
+            if prior is not None and (prior["status"] == "blocked"
+                                      or attempts >= max_attempts):
+                summaries.append({
+                    "batch_ref": manifest["batch_ref"], "status": "blocked",
+                    "attempts": attempts,
+                    "reason": _blocked_reason(prior, max_attempts),
+                })
+                if prior["status"] != "blocked":
+                    _seal_blocked(result_path, prior, max_attempts)
+                continue
             summaries.append({"batch_ref": manifest["batch_ref"], "status": "eligible",
-                              "attempts": 0 if prior is None else prior["attempts"],
+                              "attempts": attempts,
                               "manifest": manifest, "result_path": result_path})
 
         eligible = [row for row in summaries if row["status"] == "eligible"]
@@ -402,7 +466,7 @@ def poll_ui_texts(connection: Any, mission: Mapping[str, Any], *, state_dir: Pat
                 row["status"] = "ineligible"
         queue = sorted((row for row in eligible if row["status"] == "eligible"),
                        key=lambda row: (row["attempts"] != 0, row["attempts"],
-                                        row["batch_ref"]))[:4]
+                                        row["batch_ref"]))[:batches_per_run]
         selected = {row["batch_ref"] for row in queue}
         for row in eligible:
             if row["status"] == "eligible" and row["batch_ref"] not in selected:
@@ -419,19 +483,35 @@ def poll_ui_texts(connection: Any, mission: Mapping[str, Any], *, state_dir: Pat
             except Exception as exc:
                 completed = False
                 result_value = {"reason": f"{type(exc).__name__}: {exc}"}
+            attempts = row["attempts"] + 1
+            if completed:
+                status = "completed"
+            elif attempts >= max_attempts:
+                status = "blocked"
+            else:
+                status = "pending"
             unsigned_result = {"schema_version": RESULT_SCHEMA,
                                "batch_ref": manifest["batch_ref"],
                                "manifest_hash": manifest["content_hash"],
-                               "status": "completed" if completed else "pending",
-                               "attempts": row["attempts"] + 1, "result": result_value}
+                               "status": status,
+                               "attempts": attempts, "result": result_value}
             saved = {**unsigned_result, "content_hash": _hash(unsigned_result)}
             _replace(result_path, saved)
             row["status"] = saved["status"]
             row["attempts"] = saved["attempts"]
+            if status == "blocked":
+                row["reason"] = _blocked_reason(saved, max_attempts)
         for row in summaries:
             row.pop("manifest", None); row.pop("result_path", None)
+        blocked = [row for row in summaries if row["status"] == "blocked"]
         return {"schema_version": POLL_SCHEMA, "discovered": len(discovered),
                 "translation_needed": len(translatable),
                 "already_readable": len(discovered) - len(translatable),
                 "sealed": len(new), "attempted": attempted, "batches": summaries,
+                "batches_per_run": batches_per_run, "max_attempts": max_attempts,
+                "blocked": len(blocked),
+                # A blocked batch is not pending work: nothing will pick it up
+                # again, so counting it as pending kept the worker reporting
+                # "there is more to do" about work it had already given up on.
+                "blocked_reasons": sorted({row["reason"] for row in blocked}),
                 "pending": sum(row["status"] in {"pending", "deferred"} for row in summaries)}

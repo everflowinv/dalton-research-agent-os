@@ -39,6 +39,14 @@ from .document_extraction import (
     HermeticExtractionAdapter,
     validate_model_config,
 )
+from .document_extraction_windows import (
+    PLAN_UNDIRECTED_RANK,
+    ExtractionWindowLedger,
+    classify_window_failure,
+    plan_rank_for,
+    plan_reading_ranks,
+    replayed_window_failure,
+)
 from .document_read_completion import DocumentReadCompletionAuthority
 from .observability import ObservabilityStore
 from .public_web_fetch_launcher import PublicWebFetchLauncher
@@ -51,6 +59,23 @@ SUMMARY_SCHEMA_VERSION = "0.1"
 DEFAULT_MAX_WINDOWS = 2
 # Answers that cost no model call, so they cost no allowance either.
 FREE_STATUSES = frozenset({"nothing_owed", "not_graded", "not_attributed"})
+
+# C2-1: how many windows may fail deterministically, in a row, before the run
+# stops calling the provider anyway.  Isolating a settled failure is safe; a
+# provider that refuses thirty windows in a row is an outage, and reading into
+# an outage one window at a time is thirty ways of learning the same thing.
+CONSECUTIVE_CERTAIN_FAILURE_LIMIT = 5
+
+# C2-2: the share of one tick's windows that belongs to the evidence the
+# README puts first -- filings, then management's own words, then the brokers
+# who cover the name.  It is a reservation, not a quota: if no such document is
+# waiting, the whole tick still goes to whatever is.  Live on 2026-09-16, 60%
+# of 415 read proofs were `management-changes` news pages while five 10-Ks and
+# fifty transcripts sat acquired and unread, which is what a lane with no
+# reservation does once news outnumbers filings a hundred to one.
+HIGH_PRIORITY_WINDOW_SHARE = 0.5
+# Tiers that reservation protects, in ``document_provenance`` terms.
+HIGH_PRIORITY_TIERS = ("filing", "management", "sell_side")
 
 
 def secure_dir(path: Path) -> Path:
@@ -284,6 +309,32 @@ def run_extraction(
         "unreadable_reviews": [],
         "admitted": [],
         "resolved_reviews": [],
+        # C2-1: windows whose failure was settled -- no open reservation, no
+        # unknown send -- so the run isolated them and read on.  The entry
+        # carries the classification, so the summary says why each one was
+        # safe to step over rather than asking the reader to trust it.
+        "isolated_windows": [],
+        # Windows a previous run already proved dead, stepped over without
+        # re-rendering the document.  Live this was 24% of all window reads.
+        "windows_skipped_by_exclusion": 0,
+        # C2-2: how the tick's windows were actually divided.
+        "priority_windows": {"high_tier": 0, "other": 0, "high_tier_reserved": 0},
+        # G1: windows this tick spent on a document the mission's latest
+        # research plan actually named.  Zero on an install with no plan, and
+        # zero is also what every run reported before the planner's reading
+        # directives had a consumer -- which is the number this exists to move.
+        "plan_directed_windows": 0,
+        "plan_directed": {
+            # One entry per mission: which plan was used, or why none was.
+            "plans": [],
+            # Open reviews the plan named, and the ones it wants figures from.
+            "reviews": 0,
+            "figure_reviews": 0,
+            # The resolution itself -- directive to document to review -- for
+            # the first few, so "the plan directed this" is checkable rather
+            # than asserted.
+            "documents": [],
+        },
         "stop_reason": None,
         "status": "failed",
         "failure_reason": None,
@@ -314,9 +365,29 @@ def run_extraction(
                 )
             host._document_extraction_worker_factory = factory
         service = DocumentExtractionService(host)
+        windows = ExtractionWindowLedger(host.store.connection)
+        # The identity the window verdicts are scoped to: swapping the model
+        # re-opens every window a previous model could not answer.
+        window_config_hash = content_hash(config)
         drafted = 0
+        # C2-2: windows this tick keeps for filings, transcripts and covering
+        # brokers.  ``low_tier_budget`` is what everything else may spend.
+        reserved_high = int(max_windows * HIGH_PRIORITY_WINDOW_SHARE)
+        summary["priority_windows"]["high_tier_reserved"] = reserved_high
+        low_tier_budget = max_windows - reserved_high
+        # C2-1: how many settled failures the run has isolated back to back.
+        # Reset by any success, so an outage still stops the run quickly while
+        # a scattering of dead windows never does.
+        consecutive_certain_failures = 0
         lanes: list[tuple[str, list[dict[str, Any]], dict[str, str]]] = []
         held_lanes: list[tuple[str, list[dict[str, Any]], dict[str, str]]] = []
+        # G1: the same held documents, ordered for the figures pass instead --
+        # a plan's ``extract_figures`` directive is an instruction to that pass
+        # and to no other, so it may not reorder the prose or discovery queues.
+        numeric_lanes: list[tuple[str, list[dict[str, Any]], dict[str, str]]] = []
+        # Reviews the plan asked figures from, across every mission, so the
+        # figures sweep can count the windows it spends on them.
+        numeric_directed: set[str] = set()
         stop_reason: str | None = None
         complete_reviews: list[tuple[dict[str, Any], str, str, list[int]]] = []
         pointers = host.store.connection.execute(
@@ -327,7 +398,23 @@ def run_extraction(
                 break
             mission = host.coverage_mission.mission(pointer["mission_version_id"])
             actor = requested_by or mission["autonomy"]["automation_principal"]
-            reviews = host.coverage_mission.document_reviews(mission["id"], state="awaiting_human_extraction", limit=500)
+            # G1: what the mission's newest plan named, read before the queue
+            # so the plan's order can lead the queue's rather than be applied
+            # to whatever survived the slice below.
+            directed = _plan_directed_ranks(host, mission)
+            if directed["plan"] is not None:
+                summary["plan_directed"]["plans"].append(directed["plan"])
+            # C2-2: the 500-row slice has to be the *right* 500.
+            #
+            # ``document_reviews`` orders by ``created_at, review_id`` and then
+            # truncates, so the in-process priority sort below could only ever
+            # reorder the oldest five hundred.  With 1,482 reviews open on
+            # 2026-09-16 that is not a reordering, it is a filter -- and the
+            # thing it filtered out was every filing and transcript queued
+            # after the first five hundred news pages.  Ask the database for
+            # the queue in reading order instead.
+            reviews = _awaiting_reviews_in_reading_order(
+                host, mission, limit=500, plan_ranks=directed["ranks"])
             # P11u/P11y: both secondary passes read documents the queue has
             # already closed, so they share a list of everything held. The
             # prose pass laps them -- 30 windows a tick against their 10 -- and
@@ -349,21 +436,54 @@ def run_extraction(
             rank: dict[str, int] = {}
             summary["provenance"].append(
                 {"mission_version_ref": mission["id"], **_record_provenance(host)})
+
+            def _plan_rank(review: Mapping[str, Any], spec_by_document: Mapping[str, str],
+                           ranks: Mapping[tuple[str, str], int] = directed["ranks"]) -> int:
+                # G1: this mission's ranks are bound at definition, so the
+                # closure cannot be re-read against a later mission's plan.
+                return plan_rank_for(
+                    ranks, company_ref=review.get("company_ref"),
+                    spec_ref=spec_by_document.get(review.get("document_ref")))
+
             try:
                 rank = {ref: index for index, ref in enumerate(company_priority_order(mission))}
                 specs = host.coverage_mission.document_spec_refs(mission["id"])
                 thin = _thinness_ranks(host, mission)
-                reviews = sorted(reviews, key=lambda review: evidence_review_sort_key(
-                    review, company_rank=rank, spec_by_document=specs, thinness_rank=thin,
-                    now=datetime.now(timezone.utc)))
+                reviews = sorted(reviews, key=lambda review: (
+                    _plan_rank(review, specs),
+                    evidence_review_sort_key(
+                        review, company_rank=rank, spec_by_document=specs,
+                        thinness_rank=thin, now=datetime.now(timezone.utc))))
             except Exception:  # noqa: BLE001 - ordering is not a gate
                 thin = {}
                 try:
-                    reviews = sorted(reviews, key=lambda review: review_sort_key(
-                        review, company_rank=rank, spec_by_document=specs))
+                    reviews = sorted(reviews, key=lambda review: (
+                        _plan_rank(review, specs),
+                        review_sort_key(
+                            review, company_rank=rank, spec_by_document=specs)))
                 except Exception:  # noqa: BLE001 - nor is its fallback
                     pass
             lanes.append((actor, reviews, specs))
+            # G1: the directive-to-document-to-review resolution, written down
+            # once here so every later count means the same thing.
+            directed_reviews = {
+                review["review_id"] for review in reviews
+                if _plan_rank(review, specs) < PLAN_UNDIRECTED_RANK
+            }
+            summary["plan_directed"]["reviews"] += len(directed_reviews)
+            for review in reviews:
+                position = _plan_rank(review, specs)
+                if position >= PLAN_UNDIRECTED_RANK:
+                    continue
+                if len(summary["plan_directed"]["documents"]) >= 20:
+                    break
+                summary["plan_directed"]["documents"].append({
+                    "review_id": review["review_id"],
+                    "document_ref": review["document_ref"],
+                    "company_ref": review["company_ref"],
+                    "spec_ref": specs.get(review["document_ref"]),
+                    "plan_rank": position,
+                })
             try:
                 held = sorted(held, key=lambda review: evidence_review_sort_key(
                     review, company_rank=rank, spec_by_document=specs, thinness_rank=thin,
@@ -371,15 +491,60 @@ def run_extraction(
             except Exception:  # noqa: BLE001 - ordering is not a gate
                 pass
             held_lanes.append((actor, held, specs))
+            # G1: the plan's ``extract_figures`` directives, applied to the
+            # figures pass only.  ``sorted`` is stable, so everything the plan
+            # did not ask figures from keeps the evidence order it already had.
+            figures_ranks = directed["numeric"]
+            numeric_held = sorted(held, key=lambda review: plan_rank_for(
+                figures_ranks, company_ref=review.get("company_ref"),
+                spec_ref=specs.get(review.get("document_ref"))))
+            numeric_lanes.append((actor, numeric_held, specs))
+            figure_reviews = {
+                review["review_id"] for review in held
+                if plan_rank_for(figures_ranks, company_ref=review.get("company_ref"),
+                                 spec_ref=specs.get(review.get("document_ref")))
+                < PLAN_UNDIRECTED_RANK
+            }
+            numeric_directed |= figure_reviews
+            summary["plan_directed"]["figure_reviews"] += len(figure_reviews)
+            # The reservation only bites when there is something to reserve
+            # windows *for*.  A queue of nothing but news pages -- or a run
+            # whose spec lookup failed -- must still read at full rate.
+            high_priority_waiting = any(
+                is_high_priority_spec(specs.get(item["document_ref"]))
+                for item in reviews
+            )
             for review in reviews:
                 if stop_reason is not None:
                     break
+                high_priority = is_high_priority_spec(specs.get(review["document_ref"]))
+                if not high_priority and high_priority_waiting and low_tier_budget <= 0:
+                    # The tick's reservation is doing its job: what is left of
+                    # this batch belongs to a filing, a transcript or a
+                    # covering broker's note.  Keep scanning for one.
+                    continue
                 summary["reviews_scanned"] += 1
                 review_hash = content_hash(review)
+                excluded = windows.exclusions(
+                    review["review_id"], review_hash,
+                    model_config_hash=window_config_hash)
                 offset = 0
                 complete = True
                 offsets: list[int] = []
                 while True:
+                    # C2-1: a window a previous run proved dead is stepped over
+                    # without re-deriving its context -- which means without
+                    # re-fetching, re-rendering and re-hashing the whole
+                    # document.  The review cannot complete either way, so the
+                    # only thing the old behaviour bought was the I/O.
+                    dead = excluded.get(offset)
+                    if dead is not None:
+                        summary["windows_skipped_by_exclusion"] += 1
+                        complete = False
+                        if dead["next_offset"] is None:
+                            break
+                        offset = int(dead["next_offset"])
+                        continue
                     try:
                         view = service.view(review_id=review["review_id"], expected_review_hash=review_hash,
                                             offset=offset, actor_ref=actor)
@@ -453,6 +618,10 @@ def run_extraction(
                             expected_context_hash=context["content_hash"], actor_ref=actor,
                         )
                         drafted += 1
+                        if review["review_id"] in directed_reviews:
+                            # G1: a window the plan asked for, paid for. The
+                            # metric to watch after deploy.
+                            summary["plan_directed_windows"] += 1
                         entry = {"review_id": review["review_id"], "source_ref": review["source_ref"],
                                  "document_ref": review["document_ref"], "offset": offset,
                                  "status": result.get("status"),
@@ -465,22 +634,71 @@ def run_extraction(
                         if isinstance(budget, dict) and budget.get("status"):
                             entry["budget"] = budget["status"]
                         summary["drafted"].append(entry)
+                        if high_priority:
+                            summary["priority_windows"]["high_tier"] += 1
+                        else:
+                            summary["priority_windows"]["other"] += 1
+                            low_tier_budget -= 1
                         if result.get("status") != "succeeded":
                             summary["qualitative_failures"].append(dict(entry))
+                        else:
+                            consecutive_certain_failures = 0
                         if result.get("status") == "gated":
                             stop_reason = f"gated:{result.get('reason')}"
                             complete = False
                             break
                         if result.get("status") == "failed":
-                            # The Scheduler has already persisted and settled this
-                            # attempt.  Do not turn one provider-wide failure into
-                            # another 49 sequential calls in the same child.  A
-                            # later run replays this terminal window for free and
-                            # proceeds to unrelated/new windows; it never retries
-                            # an unknown-send call under a new identity.
-                            stop_reason = "systemic_model_failure"
+                            # C2-1.  The 2026-09-14 rule stands where it was
+                            # written: a call whose cost is *unknown* ends the
+                            # batch, keeps its reservation open and is never
+                            # retried under a new identity.  It was applied to
+                            # every failure, which is why one refused window
+                            # cancelled the other twenty-nine -- and live, 565
+                            # of 991 failures never reserved a micro and 66
+                            # more had already settled their exact cost.  Those
+                            # are settled facts about one window; isolate them.
+                            verdict = classify_window_failure(
+                                error_code=entry.get("error_code"),
+                                budget_status=entry.get("budget"),
+                            )
                             complete = False
-                            break
+                            if not verdict["cost_certain"]:
+                                stop_reason = "systemic_model_failure"
+                                summary["blocked_window"] = {**entry, **verdict}
+                                break
+                            consecutive_certain_failures += 1
+                            try:
+                                windows.exclude(
+                                    review_id=review["review_id"],
+                                    source_review_hash=review_hash,
+                                    offset=offset, next_offset=context["next_offset"],
+                                    classification=verdict,
+                                    document_ref=review["document_ref"],
+                                    company_ref=review["company_ref"],
+                                    work_order_ref=entry.get("work_order_ref"),
+                                    model_config_hash=window_config_hash,
+                                )
+                            except Exception as exc:  # noqa: BLE001 - the ledger is not a gate
+                                verdict = {**verdict,
+                                           "not_recorded": f"{type(exc).__name__}: {exc}"}
+                            summary["isolated_windows"].append({**entry, **verdict})
+                            if consecutive_certain_failures >= CONSECUTIVE_CERTAIN_FAILURE_LIMIT:
+                                # Isolating one settled failure is safe;
+                                # walking into an outage one window at a time
+                                # is the same mistake with more steps.
+                                stop_reason = "systemic_model_failure"
+                                summary["blocked_window"] = {
+                                    **entry, **verdict,
+                                    "reason": (
+                                        f"{consecutive_certain_failures} windows failed in a row "
+                                        "with a settled cost; the provider is treated as down"
+                                    ),
+                                }
+                                break
+                            if context["next_offset"] is None:
+                                break
+                            offset = context["next_offset"]
+                            continue
                         if result.get("status") != "succeeded":
                             # A terminal model failure is a statement about the
                             # execution, not about the source window.  Keep the
@@ -510,6 +728,30 @@ def run_extraction(
                                 if isinstance(value, str) and value:
                                     failure[field] = value
                             summary["qualitative_failures"].append(failure)
+                            # C2-1: this window holds a terminal result, and
+                            # the child only ever calls the model for a window
+                            # that holds none.  So it can never succeed, its
+                            # review can never complete, and every later run
+                            # re-rendered the whole document to rediscover
+                            # that -- 24% of live window reads.  Write it down
+                            # once.
+                            verdict = replayed_window_failure(
+                                error_code=view.get("error_code"))
+                            try:
+                                windows.exclude(
+                                    review_id=review["review_id"],
+                                    source_review_hash=review_hash,
+                                    offset=offset, next_offset=context["next_offset"],
+                                    classification=verdict,
+                                    document_ref=review["document_ref"],
+                                    company_ref=review["company_ref"],
+                                    work_order_ref=view.get("work_order_ref"),
+                                    model_config_hash=window_config_hash,
+                                )
+                            except Exception as exc:  # noqa: BLE001 - the ledger is not a gate
+                                verdict = {**verdict,
+                                           "not_recorded": f"{type(exc).__name__}: {exc}"}
+                            summary["isolated_windows"].append({**failure, **verdict})
                     if context["next_offset"] is None:
                         break
                     offset = context["next_offset"]
@@ -527,7 +769,7 @@ def run_extraction(
         secondary_failure = None
         if stop_reason != "systemic_model_failure":
             secondary_failure = _secondary_sweep(
-                service, held_lanes, summary,
+                service, numeric_lanes, summary,
                 limit=max_numeric_windows, entries="numeric",
                 wanted=lambda review, spec: numeric_worthy(spec),
                 call="generate_numeric",
@@ -536,6 +778,7 @@ def run_extraction(
                 total=("figures", "recorded"),
                 spent_key="numeric_fresh",
                 require_open=False,
+                directed_reviews=numeric_directed,
             )
         if stop_reason != "systemic_model_failure" and secondary_failure is None:
             secondary_failure = _secondary_sweep(
@@ -610,6 +853,22 @@ def run_extraction(
         summary["failure_reason"] = f"unexpected {type(exc).__name__}: {exc}"
         raise
     finally:
+        # C2-1: whatever ended the run, say what it actually got done.  A
+        # summary that reports only the window which stopped it reads as a
+        # total loss even when twenty-eight windows were drafted -- which is
+        # how a 4.9% run success rate hid a lane doing most of its work.
+        succeeded = sum(1 for item in summary["drafted"]
+                        if item.get("status") == "succeeded")
+        summary["partial"] = {
+            "windows_succeeded": succeeded,
+            "windows_isolated": len(summary["isolated_windows"]),
+            "windows_skipped_by_exclusion": summary["windows_skipped_by_exclusion"],
+            "reviews_complete": summary["reviews_complete"],
+            # True when the run produced real work despite ending on a stop
+            # reason that used to mark the whole thing a failure.
+            "productive": bool(succeeded or summary["reviews_complete"]
+                               or summary["figures"] or summary["metrics_observed"]),
+        }
         _write_owner_only(out / "summary.json", summary)
         host.close()
 
@@ -685,6 +944,136 @@ def _permanently_unreadable(reason: str, *, offset: int | None = None) -> bool:
     )
 
 
+def spec_reading_rank(spec_ref: Any) -> int:
+    """Where this kind of document sits on the owner's reading ladder.
+
+    The same ladder ``document_provenance`` publishes, resolved here so the
+    database can sort by it: a 10-K or a press release first, then the
+    earnings call, then the brokers who cover the name, then the industry and
+    competitive work, and the news wire last.
+    """
+
+    from .document_provenance import evidence_value, tier_for_spec
+
+    return evidence_value(tier_for_spec(spec_ref))
+
+
+def is_high_priority_spec(spec_ref: Any) -> bool:
+    """Whether this document belongs to the tiers a tick reserves windows for."""
+
+    from .document_provenance import tier_for_spec
+
+    return tier_for_spec(spec_ref) in HIGH_PRIORITY_TIERS
+
+
+def _plan_directed_ranks(
+    host: ExtractionHost, mission: Mapping[str, Any],
+) -> dict[str, Any]:
+    """What the mission's latest research plan asks this lane to read next.
+
+    G1: ``research_planner.document_reading_priorities`` has had no consumer at
+    all -- live on 2026-09-16 the newest plan's ten directives were five
+    ``extract_figures``, three ``read`` and two ``stop``, and the extraction
+    queue could not see any of them.  This is the join that was missing: the
+    plan's (company, checklist item) becomes the (company, document kind) the
+    queue already sorts by, so the planner's order can lead the queue's.
+
+    Fail-open by construction.  No plan, an unreadable plan, a plan naming
+    items nothing is held for -- each returns empty maps and the queue keeps
+    exactly the order C2 gave it.  A plan states a priority; it is never a gate
+    on reading, and a lane that stopped because it could not read one would be
+    strictly worse than a lane that never looked.
+    """
+
+    from .mission_stage import INDUSTRY_BASE_ITEMS, SOURCE_BASE_ITEMS
+    from .research_planner import document_reading_priorities
+
+    empty: dict[str, Any] = {"ranks": {}, "numeric": {}, "plan": None}
+    try:
+        plan = host.coverage_mission.latest_research_plan(mission["id"])
+    except Exception as exc:  # noqa: BLE001 - an unreadable plan is not a decision
+        return {**empty, "plan": {"mission_version_ref": mission["id"],
+                                  "status": "unavailable",
+                                  "reason": f"{type(exc).__name__}: {exc}"}}
+    if not plan:
+        return {**empty, "plan": {"mission_version_ref": mission["id"],
+                                  "status": "no_plan"}}
+    try:
+        priorities = document_reading_priorities(plan)
+        item_specs = {item["item_ref"]: item["spec_refs"]
+                      for item in (*SOURCE_BASE_ITEMS, *INDUSTRY_BASE_ITEMS)}
+        resolved = plan_reading_ranks(
+            priorities, item_specs=item_specs,
+            industry_ref=mission.get("industry_ref"))
+    except Exception as exc:  # noqa: BLE001 - nor is an unusable one
+        return {**empty, "plan": {"mission_version_ref": mission["id"],
+                                  "plan_ref": plan.get("plan_id"),
+                                  "status": "unusable",
+                                  "reason": f"{type(exc).__name__}: {exc}"}}
+    return {
+        **resolved,
+        "plan": {
+            "mission_version_ref": mission["id"],
+            "plan_ref": plan.get("plan_id"),
+            "state_hash": plan.get("state_hash"),
+            "created_at": plan.get("created_at"),
+            "status": "applied" if resolved["ranks"] else "named_nothing_held",
+            "reading_directives": len(priorities),
+            "directed_kinds": len(resolved["ranks"]),
+            "figure_kinds": len(resolved["numeric"]),
+        },
+    }
+
+
+def _awaiting_reviews_in_reading_order(
+    host: ExtractionHost, mission: Mapping[str, Any], *, limit: int = 500,
+    plan_ranks: Mapping[tuple[str, str], int] | None = None,
+) -> list[dict[str, Any]]:
+    """The open extraction queue, plan-named first, then best evidence.
+
+    Ordered inside SQL so ``LIMIT`` takes the head of the reading order rather
+    than the head of the insertion order.  Falls back to the authority's own
+    reader on any failure: an ordering is an optimisation, never a gate.
+
+    G1: ``plan_ranks`` leads the key.  Everything the plan did not name keeps
+    the C2 order underneath it -- evidence tier, then priority company, then
+    age -- so an empty or unreadable plan changes nothing.
+    """
+
+    try:
+        rank = {ref: index for index, ref in enumerate(company_priority_order(mission))}
+    except Exception:  # noqa: BLE001 - ordering is not a gate
+        rank = {}
+    default_company_rank = len(rank)
+    try:
+        rows = host.store.connection.execute(
+            "SELECT r.*, s.spec_ref AS spec_ref FROM coverage_mission_document_reviews r "
+            "LEFT JOIN coverage_mission_discovered_documents d "
+            "ON d.record_id=r.discovered_document_ref "
+            "LEFT JOIN coverage_mission_source_discoveries s ON s.record_id=d.discovery_ref "
+            "WHERE r.mission_version_ref=? AND r.state='awaiting_human_extraction'",
+            (mission["id"],),
+        ).fetchall()
+    except Exception:  # noqa: BLE001
+        return host.coverage_mission.document_reviews(
+            mission["id"], state="awaiting_human_extraction", limit=limit)
+    reviews = []
+    for row in rows:
+        record = host.coverage_mission._review_row(row)
+        record["_spec_ref"] = row["spec_ref"]
+        reviews.append(record)
+    reviews.sort(key=lambda review: (
+        plan_rank_for(plan_ranks, company_ref=review.get("company_ref"),
+                      spec_ref=review.get("_spec_ref")),
+        spec_reading_rank(review.get("_spec_ref")),
+        rank.get(review.get("company_ref") or "", default_company_rank),
+        str(review.get("created_at") or ""),
+        str(review.get("review_id") or ""),
+    ))
+    return [{k: v for k, v in review.items() if k != "_spec_ref"}
+            for review in reviews[:limit]]
+
+
 def _record_provenance(host: ExtractionHost) -> dict[str, Any]:
     """Keep what the searches said about the documents they returned.
 
@@ -742,6 +1131,7 @@ def _secondary_sweep(
     total: tuple[str, str],
     spent_key: str,
     require_open: bool = True,
+    directed_reviews: Any = None,
 ) -> dict[str, Any] | None:
     """Spend one secondary allowance on the documents that pass its own gate.
 
@@ -798,6 +1188,10 @@ def _secondary_sweep(
                 # may be taken from at all.
                 if not result.get("replayed") and status not in FREE_STATUSES:
                     spent += 1
+                    if directed_reviews and review["review_id"] in directed_reviews:
+                        # G1: a figures window the plan asked for, paid for.
+                        summary["plan_directed_windows"] = (
+                            summary.get("plan_directed_windows", 0) + 1)
                 entry = {"review_id": review["review_id"], "source_ref": review["source_ref"],
                          "offset": offset, "status": status,
                          "replayed": bool(result.get("replayed"))}

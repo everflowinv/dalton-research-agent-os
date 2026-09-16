@@ -13,7 +13,7 @@ import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 from .lane_child_launcher import (
     LaneChildConflict,
@@ -29,6 +29,47 @@ LAUNCHER_KWARG = "mission_document_research_launcher"
 DRIVER_KEY = "mission_document_research"
 LATEST_FILE = "latest.json"
 HOLDS_FILE = "holds.json"
+# C2-3: the escape ledger.  Deliberately a second file rather than another key
+# in ``holds.json``: the hold ledger's shape is closed and content-sealed, and
+# an installed writer must be able to read the file it already has.
+ESCAPES_FILE = "recovery-escapes.json"
+
+# How long every admission may be held, with none startable, before the lane
+# reopens the oldest one that provably never sent anything.  Live on
+# 2026-09-16 this state had lasted 557 consecutive ticks -- about two days --
+# with ten held admissions, zero promotions and zero outcomes.
+DEADLOCK_ESCAPE_AFTER = timedelta(hours=6)
+# How many times one admission may be reopened this way, ever.  A second
+# attempt is worth making; a third is a loop.
+MAX_ESCAPES_PER_ADMISSION = 2
+# The exact words the owner needs, for the admissions no automation may touch.
+OWNER_AUTHORIZATION_NOTE = (
+    "这条已经发起过模型调用、但调用是否真的送达/计费无法证明，因此系统不会自动重开。"
+    "需要 owner 授权一次受控恢复："
+    "MissionDocumentResearchExecutor.authorize_paid_contract_recovery("
+    "admission_ref, authorization)，其中 authorization 的 actor_ref 必须是 "
+    "\"operator:owner-authorized-document-recovery\"、stage_ordinal 为 2 或 3、"
+    "max_fresh_work_orders 为 1、max_cost_usd 等于该 WorkOrder 自己的 budget.max_cost_usd。"
+    "目前没有任何 CLI 或 writer 操作可以下发这条授权，只能由 owner 运行脚本。"
+)
+
+
+# G2: the two document kinds a gap-filling inquiry is followed up out of.
+# Both spellings of the annual report are here because both are live: the
+# filings index writes ``annual-report-10k`` and the older search plans wrote
+# ``annual-reports``, and a suggestion that silently skipped half the held
+# 10-Ks would be worse than none.
+PLAN_FOLLOW_UP_SPECS: frozenset[str] = frozenset({
+    "annual-report-10k", "annual-reports", "earnings-call-transcripts",
+})
+PLAN_FOLLOW_UP_LABELS: Mapping[str, str] = {
+    "annual-report-10k": "年报",
+    "annual-reports": "年报",
+    "earnings-call-transcripts": "电话会纪要",
+}
+# How many suggestions one tick shows.  A list nobody finishes reading is a
+# list nobody reads.
+MAX_PLAN_NEXT_STEPS = 5
 
 
 def _sha256(value: Any) -> bool:
@@ -138,6 +179,132 @@ class MissionDocumentResearchCoordinator:
     @property
     def holds_path(self) -> Path:
         return self.launcher.tickets_dir / HOLDS_FILE
+
+    @property
+    def escapes_path(self) -> Path:
+        return self.launcher.tickets_dir / ESCAPES_FILE
+
+    def _read_escapes(self) -> dict[str, Any]:
+        """The lane's own memory of being stuck, and of what it did about it."""
+
+        if not self.escapes_path.is_file():
+            return {"schema_version": "0.1", "stuck_since": None, "escapes": {}}
+        try:
+            value = json.loads(self.escapes_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {"schema_version": "0.1", "stuck_since": None, "escapes": {}}
+        if not isinstance(value, Mapping) or not isinstance(value.get("escapes"), Mapping):
+            return {"schema_version": "0.1", "stuck_since": None, "escapes": {}}
+        return {"schema_version": "0.1",
+                "stuck_since": value.get("stuck_since"),
+                "escapes": {str(key): int(count)
+                            for key, count in value["escapes"].items()
+                            if isinstance(count, int) and not isinstance(count, bool)}}
+
+    def _write_escapes(self, record: Mapping[str, Any]) -> None:
+        write_owner_only(self.escapes_path, {
+            "schema_version": "0.1",
+            "stuck_since": record.get("stuck_since"),
+            "escapes": {key: int(value) for key, value in sorted(
+                (record.get("escapes") or {}).items())},
+        })
+
+    def _hold_detail(
+        self, holds: Mapping[str, Mapping[str, Any]],
+        admissions: Sequence[Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Every held admission and the real reason, for the owner's list.
+
+        The terminal return used to say ``no unstarted document research
+        admission`` and nothing else, so the ten actual reasons --
+        ``fresh_work_recovery_disabled``, ``send_state_unproved``,
+        ``started_without_owned_live_ticket`` -- were written to a file nothing
+        else in the system reads.  A lane that only a person can unblock has to
+        say what the person is being asked to do.
+        """
+
+        order = {admission["id"]: index for index, admission in enumerate(admissions)}
+        detail = []
+        for admission_ref, held in holds.items():
+            started = self._started(admission_ref)
+            detail.append({
+                "admission_ref": admission_ref,
+                "disposition": held["disposition"],
+                "reason": held["reason"],
+                "ticket_ref": held.get("ticket_ref"),
+                "started": started,
+                # An admission that never started sent nothing and cost
+                # nothing, so reopening it is free and the lane may do it.
+                # One that started may have been charged for a send nobody can
+                # prove, and only the owner may authorise that.
+                "needs_owner_authorization": bool(started),
+                "owner_action": OWNER_AUTHORIZATION_NOTE if started else None,
+                "order": order.get(admission_ref, len(order)),
+            })
+        detail.sort(key=lambda item: (item["order"], item["admission_ref"]))
+        return detail
+
+    def _escape_deadlock(
+        self, holds: dict[str, dict[str, Any]], detail: Sequence[Mapping[str, Any]],
+    ) -> dict[str, Any] | None:
+        """Reopen at most one never-started admission after a long deadlock.
+
+        Bounded three ways: only after ``DEADLOCK_ESCAPE_AFTER`` of an
+        unbroken all-held state, only for an admission with no start row (so
+        no model call was ever made and no reservation can be open), and at
+        most ``MAX_ESCAPES_PER_ADMISSION`` times for any one admission.  Every
+        reopen is written down with its reason.
+
+        This is deliberately the *only* automatic escape.  An admission that
+        started is left exactly where it is, because the discipline that keeps
+        this system honest is that a send whose outcome is unknown is never
+        replayed without a person saying so.
+        """
+
+        record = self._read_escapes()
+        now = self.clock().astimezone(timezone.utc)
+        stuck_since = record.get("stuck_since")
+        if not stuck_since:
+            record["stuck_since"] = now.isoformat(timespec="microseconds")
+            self._write_escapes(record)
+            return None
+        try:
+            since = datetime.fromisoformat(str(stuck_since))
+        except ValueError:
+            record["stuck_since"] = now.isoformat(timespec="microseconds")
+            self._write_escapes(record)
+            return None
+        if since.tzinfo is None:
+            since = since.replace(tzinfo=timezone.utc)
+        if now - since < DEADLOCK_ESCAPE_AFTER:
+            return None
+        counts = dict(record.get("escapes") or {})
+        candidate = next(
+            (item for item in detail
+             if not item["started"]
+             and counts.get(item["admission_ref"], 0) < MAX_ESCAPES_PER_ADMISSION),
+            None,
+        )
+        if candidate is None:
+            return None
+        admission_ref = candidate["admission_ref"]
+        holds.pop(admission_ref, None)
+        _write_holds(self.holds_path, holds)
+        counts[admission_ref] = counts.get(admission_ref, 0) + 1
+        self._write_escapes({"stuck_since": now.isoformat(timespec="microseconds"),
+                             "escapes": counts})
+        return {
+            "admission_ref": admission_ref,
+            "prior_reason": candidate["reason"],
+            "attempt": counts[admission_ref],
+            "held_since": stuck_since,
+            "rationale": (
+                "所有 admission 都被 hold 且超过 "
+                f"{int(DEADLOCK_ESCAPE_AFTER.total_seconds() // 3600)} 小时没有任何一条可启动；"
+                "这一条从未写入 start 记录，因此没有发出过模型调用、也没有未结算的预留，"
+                "重开它不会重复计费。"
+            ),
+        }
 
     def _latest(self) -> dict[str, Any] | None:
         if not self.latest_path.is_file():
@@ -256,6 +423,163 @@ class MissionDocumentResearchCoordinator:
                 )
             result.append(wire)
         return result
+
+    def _latest_plan_row(self) -> dict[str, Any] | None:
+        """The newest research plan of a mission this install actually points at."""
+
+        for query in (
+            "SELECT p.plan_id AS plan_id, p.mission_version_ref AS mission_version_ref, "
+            "p.inquiries_json AS inquiries_json, p.created_at AS created_at "
+            "FROM coverage_mission_research_plans p "
+            "JOIN coverage_mission_pointer m ON m.mission_version_id=p.mission_version_ref "
+            "ORDER BY p.created_at DESC, p.plan_id DESC LIMIT 1",
+            "SELECT plan_id, mission_version_ref, inquiries_json, created_at "
+            "FROM coverage_mission_research_plans "
+            "ORDER BY created_at DESC, plan_id DESC LIMIT 1",
+        ):
+            try:
+                row = self.store.connection.execute(query).fetchone()
+            except sqlite3.Error:
+                continue
+            if row is not None:
+                return dict(row)
+        return None
+
+    def _admitted_inquiry_refs(self) -> set[str]:
+        """Every inquiry this install has already bought work for, ever.
+
+        Read straight from the admission table rather than from the open list:
+        an inquiry whose admission has already run and settled is answered, and
+        offering it again as a next step is how a list of suggestions becomes a
+        list nobody trusts.
+        """
+
+        try:
+            rows = self.store.connection.execute(
+                "SELECT record_json FROM mission_document_research_admissions"
+            ).fetchall()
+        except sqlite3.Error:
+            return set()
+        refs: set[str] = set()
+        for row in rows:
+            try:
+                record = json.loads(row["record_json"])
+            except (TypeError, ValueError, RecursionError):
+                continue
+            ref = record.get("inquiry_ref") if isinstance(record, Mapping) else None
+            if isinstance(ref, str) and ref:
+                refs.add(ref)
+        return refs
+
+    def _plan_next_steps(self) -> list[dict[str, Any]]:
+        """What the newest plan asks for that the held material can already answer.
+
+        G2.  ``research_planner.gap_filling_inquiries`` marks an inquiry
+        ``addressable`` when the plan named an exact document for it.  When
+        that document has also been acquired *and* fully read, the question is
+        answerable out of bytes already paid for -- and until now nothing said
+        so anywhere a person looks.
+
+        Read-only, and deliberately so.  Acting on one of these means writing
+        an admission, and an admission is a paid-work authority that needs the
+        owner's whole chain: the exact plan, the exact inquiry, the exact
+        question version, the exact document registration.  This lane holds
+        none of that, so it says what it sees and stops.
+
+        Fail-open at every step: a Core without these tables, an unreadable
+        plan, an inquiry whose identity cannot be computed -- each is silence,
+        never a failed tick.  A suggestion is worth nothing if it can stop the
+        lane it is advising.
+        """
+
+        from .research_planner import gap_filling_inquiries
+
+        plan = self._latest_plan_row()
+        if plan is None:
+            return []
+        try:
+            inquiries = json.loads(plan["inquiries_json"])
+            ranked = gap_filling_inquiries({"inquiries": inquiries})
+        except (TypeError, ValueError, RecursionError):
+            return []
+        admitted = self._admitted_inquiry_refs()
+        steps: list[dict[str, Any]] = []
+        for row in ranked:
+            if len(steps) >= MAX_PLAN_NEXT_STEPS:
+                break
+            if not row["addressable"]:
+                continue
+            strategy = row["directed_document"]
+            document_ref = (strategy or {}).get("document_ref")
+            if not isinstance(document_ref, str) or not document_ref:
+                continue
+            held = self._held_document(plan["mission_version_ref"], document_ref)
+            if held is None or held["spec_ref"] not in PLAN_FOLLOW_UP_SPECS:
+                continue
+            if held["status"] != "acquired" or not held["read_complete"]:
+                continue
+            position = row["plan_position"]
+            raw = (inquiries[position]
+                   if isinstance(inquiries, list) and position < len(inquiries) else None)
+            if isinstance(raw, Mapping) and self._inquiry_ref(raw) in admitted:
+                # Already bought once.  Suggesting it again is how a list of
+                # next steps becomes a list nobody trusts.
+                continue
+            kind = PLAN_FOLLOW_UP_LABELS.get(held["spec_ref"], "原始材料")
+            subject = row["company_ref"] or "全行业"
+            steps.append({
+                "rank": row["rank"],
+                "company_ref": row["company_ref"],
+                "document_ref": document_ref,
+                "spec_ref": held["spec_ref"],
+                "question": row["question"],
+                "suggestion": (
+                    f"计划建议的下一步：{subject}「{row['question']}」——"
+                    f"计划点名的{kind} {document_ref} 已经获取并读完，"
+                    "现在就能从已有材料里回答。"
+                    "本车道只做展示：真要做这条，需要 owner 的授权链写入 admission。"
+                ),
+            })
+        return steps
+
+    def _held_document(
+        self, mission_version_ref: Any, document_ref: str,
+    ) -> dict[str, Any] | None:
+        """Acquisition status, document kind and whether it has been read through."""
+
+        try:
+            row = self.store.connection.execute(
+                "SELECT d.status AS status, s.spec_ref AS spec_ref "
+                "FROM coverage_mission_discovered_documents d "
+                "LEFT JOIN coverage_mission_source_discoveries s "
+                "ON s.record_id=d.discovery_ref "
+                "WHERE d.mission_version_ref=? AND d.document_ref=?",
+                (mission_version_ref, document_ref),
+            ).fetchone()
+        except sqlite3.Error:
+            return None
+        if row is None:
+            return None
+        try:
+            proof = self.store.connection.execute(
+                "SELECT 1 FROM document_read_completion_proofs WHERE document_ref=? LIMIT 1",
+                (document_ref,),
+            ).fetchone()
+        except sqlite3.Error:
+            # No read-completion authority in this Core: "read through" cannot
+            # be proved, so it is not claimed.
+            return None
+        return {"status": row["status"], "spec_ref": row["spec_ref"],
+                "read_complete": proof is not None}
+
+    @staticmethod
+    def _inquiry_ref(inquiry: Mapping[str, Any]) -> str | None:
+        from .research_task import inquiry_content_hash, inquiry_ref_for
+
+        try:
+            return inquiry_ref_for(inquiry_content_hash(inquiry))
+        except Exception:  # noqa: BLE001 - an unhashable inquiry is not a decision
+            return None
 
     def _started(self, admission_ref: str) -> bool:
         try:
@@ -982,18 +1306,63 @@ class MissionDocumentResearchCoordinator:
                 "status": "launched", "ticket_ref": ticket["id"],
                 "admission_ref": admission["id"], "last": settled,
             }
+        detail = self._hold_detail(holds, admissions)
+        status = (
+            "recovery_required"
+            if any(item["disposition"] == "recovery_required"
+                   for item in holds.values())
+            else "waiting"
+            if any(item["disposition"] == "recovery_wait"
+                   for item in holds.values())
+            else "idle"
+        )
+        escaped = None
+        if holds and status in ("recovery_required", "waiting"):
+            # C2-3: nothing is startable and nothing is resumable.  After a
+            # long enough unbroken deadlock, reopen exactly one admission that
+            # provably never sent anything; the next tick starts it.
+            escaped = self._escape_deadlock(holds, detail)
+        elif not holds or status == "idle":
+            # Not stuck: forget the clock, so a later deadlock is timed from
+            # when it actually began.  Written only when there is something to
+            # forget, so a healthy lane does not rewrite a file every tick.
+            record = self._read_escapes()
+            if record.get("stuck_since"):
+                self._write_escapes({"stuck_since": None,
+                                     "escapes": record.get("escapes") or {}})
+        if escaped is not None:
+            return {
+                "status": "recovered", "reason": escaped["rationale"],
+                "escaped": escaped, "held": len(holds), "holds": detail,
+                "last": settled,
+            }
+        needs_owner = [item for item in detail if item["needs_owner_authorization"]]
+        # G2: the lane has nothing it may start.  That is exactly the moment to
+        # say what the plan thinks is worth doing next out of material already
+        # held -- read-only, because creating the work needs an authority chain
+        # this lane does not have.
+        try:
+            next_steps = self._plan_next_steps()
+        except Exception:  # noqa: BLE001 - a suggestion may never fail a tick
+            next_steps = []
+        reason = "no unstarted document research admission"
+        if needs_owner:
+            # The reason a person reads.  It used to be the fixed sentence
+            # above, which told nobody that the lane could only ever be
+            # unblocked by hand.
+            reason = (
+                f"{len(needs_owner)} 条文档研究 admission 停在待恢复状态，"
+                f"最早的一条的原因是「{needs_owner[0]['reason']}」。"
+                + OWNER_AUTHORIZATION_NOTE
+            )
         return {
-            "status": (
-                "recovery_required"
-                if any(item["disposition"] == "recovery_required"
-                       for item in holds.values())
-                else "waiting"
-                if any(item["disposition"] == "recovery_wait"
-                       for item in holds.values())
-                else "idle"
-            ),
-            "reason": "no unstarted document research admission",
-            "held": len(holds), "last": settled,
+            "status": status,
+            "reason": reason,
+            "held": len(holds),
+            "holds": detail,
+            "waiting_on_owner": len(needs_owner),
+            "plan_next_steps": next_steps,
+            "last": settled,
         }
 
 
@@ -1124,6 +1493,10 @@ LANE = register_lane(LaneSpec(
 
 
 __all__ = [
+    "DEADLOCK_ESCAPE_AFTER",
+    "ESCAPES_FILE",
+    "MAX_ESCAPES_PER_ADMISSION",
+    "OWNER_AUTHORIZATION_NOTE",
     "DRIVER_KEY", "LANE", "LANE_CONFIG", "LAUNCHER_KWARG",
     "MissionDocumentResearchCoordinator", "MissionDocumentResearchLaneError",
     "add_arguments", "argv_fragment", "build_launcher", "lane_configuration",

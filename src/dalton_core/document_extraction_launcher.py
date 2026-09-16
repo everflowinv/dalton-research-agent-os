@@ -32,7 +32,13 @@ from .lane_failure_ledger import lane_budget
 TICKET_SCHEMA_VERSION = "0.1"
 TICKET_PREFIX = "document-extraction"
 DEFAULT_MAX_WINDOWS_PER_TICK = 4
+# C2-1: an hour is the right pause for a lane with *nothing to read*.  It was
+# also being applied to a lane with a full queue: live on 2026-09-16 the
+# awaiting count sat at 192 for an hour at a time while the coordinator held,
+# because a run that failed on one window looked exactly like a drained queue.
+# A non-empty queue waits one controller tick, not one hour.
 IDLE_HOLD = timedelta(hours=1)
+BUSY_HOLD = timedelta(minutes=5)
 _TICKET_RE = re.compile(r"document-extraction:[0-9a-f]{24}\Z")
 _AUTOMATION_RE = re.compile(r"automation:[A-Za-z0-9][A-Za-z0-9._/-]*\Z")
 _HUMAN_RE = re.compile(r"human:[A-Za-z0-9._-]+\Z")
@@ -330,6 +336,71 @@ class DocumentExtractionCoordinator:
                 signature.append((None, None))
         return (mission_bindings, policy_bindings, *signature)
 
+    def _hold_window(self, awaiting: int) -> timedelta:
+        """How long a settled run holds the lane before another is launched.
+
+        The long hold exists so a *drained* queue does not spawn a process
+        every five minutes.  It was applied to a full queue as well, which is
+        a different decision nobody made: with 192 reviews waiting, an hour of
+        silence after one refused window is an hour of not reading.
+        """
+
+        return IDLE_HOLD if awaiting == 0 else BUSY_HOLD
+
+    def _daily_read_quota(self) -> tuple[int | None, int]:
+        """The mission's document-per-day reading cap and what today has used.
+
+        Read-only and best effort: an install without the cap, or without the
+        counter table the child creates on first use, simply has no quota to
+        spend up to.
+        """
+
+        cap: int | None = None
+        try:
+            for row in self.missions.connection.execute(
+                "SELECT mission_version_id FROM coverage_mission_pointer ORDER BY mission_ref"
+            ).fetchall():
+                mission = self.missions.mission(row["mission_version_id"])
+                value = (mission.get("budget") or {}).get("max_daily_document_reads")
+                if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                    cap = value if cap is None else min(cap, value)
+        except Exception:  # noqa: BLE001 - a quota is an optimisation, not a gate
+            return None, 0
+        if cap is None:
+            return None, 0
+        day = self.clock().astimezone(timezone.utc).date().isoformat()
+        try:
+            used = int(self.missions.connection.execute(
+                "SELECT COUNT(*) FROM document_extraction_daily_reads WHERE day=?", (day,),
+            ).fetchone()[0])
+        except Exception:  # noqa: BLE001 - the child creates the table on first use
+            used = 0
+        return cap, used
+
+    def _windows_this_tick(self, awaiting: int) -> dict[str, Any]:
+        """The batch size for this tick, never above the configured ceiling.
+
+        Live on 2026-09-16 the lane was configured for 30 windows a tick and
+        spent 246 of the day's 2,000 authorised document reads.  A ceiling is
+        not a plan: when the quota is barely touched there is no reason to read
+        less than the owner authorised, and when it is nearly spent there is
+        every reason not to burn the rest in one tick.
+        """
+
+        from .document_extraction_windows import windows_for_tick
+
+        cap, used = self._daily_read_quota()
+        now = self.clock().astimezone(timezone.utc)
+        elapsed = now.hour * 60 + now.minute
+        ticks_remaining = max(1, (1440 - elapsed) // 5)
+        try:
+            return windows_for_tick(
+                configured=max(1, self.max_windows_per_tick), awaiting=awaiting,
+                daily_cap=cap, used_today=used, ticks_remaining=ticks_remaining,
+            )
+        except Exception:  # noqa: BLE001 - never let arithmetic stop a read
+            return {"windows": self.max_windows_per_tick, "bound_by": "configured"}
+
     def _latest(self) -> dict[str, Any] | None:
         try:
             return json.loads(self._latest_path.read_text(encoding="utf-8"))
@@ -402,6 +473,13 @@ class DocumentExtractionCoordinator:
                 secondary = (int(summary.get("numeric_fresh") or 0)
                              + int(summary.get("discovery_fresh") or 0))
                 result["last"]["secondary_fresh"] = secondary
+                # G1: windows the last run spent on documents the mission's
+                # newest research plan actually named.  Surfaced here because
+                # this dict is what the coordinator's tick reports, and a
+                # planner whose reading directives reach nothing looks exactly
+                # like one whose directives are obeyed unless somebody counts.
+                result["last"]["plan_directed_windows"] = int(
+                    summary.get("plan_directed_windows") or 0)
                 if latest.get("settled") is not True:
                     latest = {**latest, "settled": True, "status": ticket["status"],
                               "drafted": result["last"]["drafted"], "stop_reason": summary.get("stop_reason"),
@@ -419,20 +497,23 @@ class DocumentExtractionCoordinator:
                 and not latest.get("secondary_fresh") \
                 and latest.get("model_config_fingerprint") == config_fingerprint:
             completed = latest.get("completed_at")
-            if completed and self.clock() - datetime.fromisoformat(completed) < IDLE_HOLD:
-                return {**result, "status": "held", "reason": "nothing to draft or read since the last run; queue unchanged"}
+            hold = self._hold_window(result["awaiting"])
+            if completed and self.clock() - datetime.fromisoformat(completed) < hold:
+                return {**result, "status": "held", "hold_seconds": int(hold.total_seconds()),
+                        "reason": "nothing to draft or read since the last run; queue unchanged"}
         if (latest is not None and latest.get("settled")
                 and latest.get("stop_reason") == "all_document_views_failed"
                 and queue_unchanged
                 and not latest.get("secondary_fresh")
                 and latest.get("model_config_fingerprint") == config_fingerprint):
             completed = latest.get("completed_at")
-            if completed and self.clock() - datetime.fromisoformat(completed) < IDLE_HOLD:
+            hold = self._hold_window(result["awaiting"])
+            if completed and self.clock() - datetime.fromisoformat(completed) < hold:
                 return {
-                    **result, "status": "held",
+                    **result, "status": "held", "hold_seconds": int(hold.total_seconds()),
                     "reason": (
                         "all queued document views remain unavailable; unchanged queue "
-                        "will retry after the idle hold"
+                        "will retry after the hold"
                     ),
                 }
         if (not permission_changed and latest is not None and latest.get("settled")
@@ -446,11 +527,14 @@ class DocumentExtractionCoordinator:
                 return {**result, "status": "ungranted", "reason": latest["stop_reason"],
                         "failure_class": decision.classification.failure_class}
             completed = latest.get("completed_at")
-            if completed and self.clock() - datetime.fromisoformat(completed) < IDLE_HOLD:
-                return {**result, "status": "held", "reason": latest["stop_reason"]}
+            hold = self._hold_window(result["awaiting"])
+            if completed and self.clock() - datetime.fromisoformat(completed) < hold:
+                return {**result, "status": "held", "hold_seconds": int(hold.total_seconds()),
+                        "reason": latest["stop_reason"]}
+        batch = self._windows_this_tick(result["awaiting"])
         try:
             ticket = self.launcher.start(
-                max_windows=self.max_windows_per_tick,
+                max_windows=int(batch["windows"]),
                 max_numeric_windows=self.numeric_windows_per_tick,
                 max_discovery_windows=self.discovery_windows_per_tick,
             )
@@ -465,13 +549,15 @@ class DocumentExtractionCoordinator:
             "model_config_fingerprint": ticket["model_config_fingerprint"],
         })
         return {**result, "status": "launched", "ticket_ref": ticket["id"],
-                "max_windows": self.max_windows_per_tick,
+                "max_windows": int(batch["windows"]), "window_budget": batch,
                 "max_numeric_windows": self.numeric_windows_per_tick,
                 "max_discovery_windows": self.discovery_windows_per_tick}
 
 
 __all__ = [
+    "BUSY_HOLD",
     "DEFAULT_MAX_WINDOWS_PER_TICK",
+    "IDLE_HOLD",
     "DocumentExtractionCoordinator",
     "DocumentExtractionLauncher",
     "ExtractionLaunchConflict",

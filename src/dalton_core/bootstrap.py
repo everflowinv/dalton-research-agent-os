@@ -62,12 +62,16 @@ SCHEMA_DATABASES: tuple[tuple[str, str | None], ...] = (
     ("catalyst_calendar_schema.sql", None),
     ("claim_index_schema.sql", None),
     ("claim_retirement_schema.sql", None),
+    # C2-5: the retirement patrol's examination markers.
+    ("claim_review_schema.sql", None),
     ("company_dossier_schema.sql", None),
     ("connector_schema.sql", None),
     ("consensus_estimate_schema.sql", None),
     ("conviction_call_schema.sql", None),
     ("coverage_mission_schema.sql", None),
     ("document_read_completion_schema.sql", None),
+    # C2-1: the windows the extraction lane has proved it cannot read.
+    ("document_extraction_window_schema.sql", None),
     ("credential_authority_schema.sql", None),
     ("debate_map_schema.sql", None),
     ("deep_insight_gate_schema.sql", None),
@@ -88,6 +92,8 @@ SCHEMA_DATABASES: tuple[tuple[str, str | None], ...] = (
     ("mission_document_research_promotion_schema.sql", None),
     ("model_forecast_schema.sql", None),
     ("prior_model_schema.sql", None),
+    # C2-4: what the deterministic promoter has already turned into a number.
+    ("quantitative_claim_promotion_schema.sql", None),
     ("research_constitution_schema.sql", None),
     ("research_cycle_reflection_schema.sql", None),
     ("research_doctrine_schema.sql", None),
@@ -416,7 +422,14 @@ def bootstrap(
         "heartbeat_path": str(paths["heartbeat_path"]),
         "writer_socket": str(paths["writer_socket"]),
         "tick_seconds": 5,
-        "projection_min_interval_seconds": 2,
+        # B1-4: 2 -> 60.  One full dashboard rebuild reads every work order,
+        # every formal result and every model invocation; on the live Core it
+        # takes 7.5 s, so a two second floor installed a controller that
+        # projects continuously.  The page polls once a minute, which is the
+        # freshness this actually has to meet.  The service default
+        # (``service.DEFAULT_PROJECTION_MIN_INTERVAL_SECONDS``) is the same
+        # number for a config that omits the key.
+        "projection_min_interval_seconds": 60,
         "plugin_retry_seconds": 60,
         "plugins": [
             {

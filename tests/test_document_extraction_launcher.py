@@ -214,7 +214,9 @@ class CoordinatorTests(unittest.TestCase):
         self.assertEqual(restarted.dispatch_once()["status"], "launched")
         self.assertEqual(len(self.launcher.starts), 2)
 
-    def test_failed_views_hold_exact_unchanged_queue_but_retry_after_an_hour(self) -> None:
+    def test_failed_views_hold_exact_unchanged_queue_but_retry_next_tick(self) -> None:
+        # C2-1: a queue with work in it waits one controller tick, not an
+        # hour.  The hour belongs to a lane with nothing to read at all.
         self._awaiting_review()
         self.assertEqual(self.coordinator.dispatch_once()["status"], "launched")
         self.launcher.finish({
@@ -223,9 +225,10 @@ class CoordinatorTests(unittest.TestCase):
             "failure_reason": "all queued document views failed before drafting",
             "reviews_complete": 0,
         }, completed_at=self.clock().isoformat())
-        self.clock.advance(minutes=5)
+        self.clock.advance(minutes=3)
         held = self.coordinator.dispatch_once()
         self.assertEqual(held["status"], "held")
+        self.assertEqual(held["hold_seconds"], 300)
         self.assertIn("remain unavailable", held["reason"])
         self.assertEqual(len(self.launcher.starts), 1)
 
@@ -233,7 +236,7 @@ class CoordinatorTests(unittest.TestCase):
             missions=self.missions, launcher=self.launcher, clock=self.clock
         )
         self.assertEqual(restarted.dispatch_once()["status"], "held")
-        self.clock.advance(hours=1, minutes=1)
+        self.clock.advance(minutes=3)
         self.assertEqual(restarted.dispatch_once()["status"], "launched")
         self.assertEqual(len(self.launcher.starts), 2)
 
@@ -375,7 +378,7 @@ class SecondaryWorkHoldTests(unittest.TestCase):
     def test_a_lane_with_nothing_left_anywhere_still_holds(self):
         self.settle({"status": "succeeded", "drafted": [], "stop_reason": "nothing_to_draft",
                      "reviews_complete": 0, "numeric_fresh": 0, "discovery_fresh": 0})
-        self.now += timedelta(minutes=5)
+        self.now += timedelta(minutes=3)
         held = self.coordinator.dispatch_once()
         self.assertEqual(held["status"], "held")
         self.assertIn("nothing to draft or read", held["reason"])
@@ -391,7 +394,7 @@ class SecondaryWorkHoldTests(unittest.TestCase):
         # work", not as "unknown, keep launching forever".
         self.settle({"status": "succeeded", "drafted": [], "stop_reason": "nothing_to_draft",
                      "reviews_complete": 0})
-        self.now += timedelta(minutes=5)
+        self.now += timedelta(minutes=3)
         self.assertEqual(self.coordinator.dispatch_once()["status"], "held")
 
     def test_the_hold_lapses_after_an_idle_hour_either_way(self):

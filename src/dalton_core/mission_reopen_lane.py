@@ -110,6 +110,9 @@ class MissionReopenLaneCoordinator:
 
     def dispatch_once(self) -> dict[str, Any]:
         from .deliverable_reopen import DeliverableReopenError, reopen_assessment
+        from .initial_screen_reopen_hygiene import (
+            DUPLICATE_DETAIL, STAGE_REF as REOPEN_STAGE_REF, already_open_for_current,
+        )
 
         mission = self.mission()
         if mission is None:
@@ -155,6 +158,23 @@ class MissionReopenLaneCoordinator:
                 company_ref=company_ref, assessment_hash=assessment["assessment_hash"]
             ):
                 entry["status"] = "already_proposed"
+                looked.append(entry)
+                continue
+            # D3: the assessment hash carries the evidence *counts*, so every
+            # new filing makes the same "the evidence thickened" proposal a
+            # different proposal and the guard above does not hold.  The live
+            # Core shows what that costs: fourteen undecided proposals for one
+            # company in five days.  While one is still waiting for an answer
+            # against this exact screen version there is no second question to
+            # ask -- and when the screen is re-issued and passes, the passed
+            # version moves and it becomes one again.
+            open_already = already_open_for_current(
+                self.connection, company_ref=company_ref,
+                stage_ref=assessment.get("stage_ref") or REOPEN_STAGE_REF)
+            if open_already is not None:
+                entry["status"] = "already_waiting"
+                entry["proposal_ref"] = open_already["proposal_ref"]
+                entry["reason"] = DUPLICATE_DETAIL
                 looked.append(entry)
                 continue
             try:

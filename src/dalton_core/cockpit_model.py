@@ -187,6 +187,78 @@ _LOCAL_NOT_SENT_PROOF = {
     "state": "definitely_not_sent",
     "version": "0.1",
 }
+# WP-A/A1. The broker's own word that the provider ran and returned a failure.
+# Its protocol also requires such a response to carry null usage and
+# ``cost: {"available": false}`` -- a failed broker response that claimed usage
+# is refused at the adapter -- so "provider completed a failure" and "the
+# provider metered nothing for it" are the same statement.
+_PROVIDER_COMPLETED_FAILURE_PROOF = {
+    "authority": "openclaw-model-adapter",
+    "state": "provider_completed_failure",
+    "version": "0.1",
+}
+# Codes that mean the provider refused the request at its gate. A 429 does not
+# reach a token: nothing was generated, so nothing was billed. This is not an
+# inference about metering, it is what rate limiting *is*.
+_NO_CHARGE_FAILURE_NEEDLES: tuple[str, ...] = (
+    "RATE_LIMIT", "RATE_LIMITED", "TOO_MANY_REQUESTS", "THROTTLED",
+    "QUOTA_EXCEEDED", "RESOURCE_EXHAUSTED",
+)
+
+
+def _billable_usage(invocation: Any) -> bool:
+    """Whether this invocation's telemetry reports anything that could be billed.
+
+    ``True`` only when the provider positively reported tokens or a cost. An
+    absent or all-null usage block is *not* evidence of a charge; it is the
+    shape the broker is required to return for a failed call.
+    """
+
+    usage = dict(getattr(invocation, "usage", {}) or {})
+    for key in ("input_tokens", "output_tokens", "total_tokens",
+                "cache_read_tokens", "cache_write_tokens"):
+        value = usage.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            return True
+    raw = usage.get("raw_provider_telemetry")
+    cost = raw.get("cost") if isinstance(raw, Mapping) else None
+    if isinstance(cost, Mapping) and cost.get("available") is True:
+        amount = cost.get("usd")
+        if isinstance(amount, (int, float)) and not isinstance(amount, bool):
+            return float(amount) > 0
+    return False
+
+
+def no_charge_reason(invocation: Any, envelope: Any) -> str | None:
+    """Why this failed call may be settled at zero, or ``None`` to keep charging.
+
+    Two proofs, and no guesses. Either the provider refused at its gate -- a
+    rate limit, which by definition generated nothing -- or the broker states
+    the provider completed a failure and reports no usage and no cost for it,
+    which is the only shape its protocol permits for such a response.
+
+    Everything else keeps the conservative rule: once bytes may have left and
+    we cannot tell what happened to them, the attempt's reservation stands.
+    That asymmetry is the point. 2026-09-16: six hours of 100% HTTP 429 on
+    ``profile:gpt-6-astra`` moved 286 USD through the day ledger against zero
+    served calls, exhausted every pool, and refused every other lane. The
+    provider charged none of it.
+    """
+
+    error = getattr(envelope, "error", None)
+    error = error if isinstance(error, Mapping) else {}
+    metadata = getattr(envelope, "metadata", None)
+    metadata = metadata if isinstance(metadata, Mapping) else {}
+    code = str(error.get("code") or "").upper()
+    digits = "".join(character for character in code if character.isdigit())
+    if any(needle in code for needle in _NO_CHARGE_FAILURE_NEEDLES) or (
+        len(digits) == 3 and digits == "429"
+    ):
+        return "provider_rate_limited"
+    if (metadata.get("dispatch_proof") == _PROVIDER_COMPLETED_FAILURE_PROOF
+            and not _billable_usage(invocation)):
+        return "provider_completed_without_usage"
+    return None
 
 
 class CockpitModelError(RuntimeError):
@@ -2070,9 +2142,22 @@ class CockpitModel:
                                     } and result.metadata.get(
                                         "dispatch_proof"
                                     ) == _LOCAL_NOT_SENT_PROOF
+                                    free_of_charge = no_charge_reason(
+                                        invocation, result)
                                     if broker_local_not_sent:
                                         cost_micros, cost_status = 0, "failed"
-                                    elif cost_status != "actual":
+                                    elif cost_status == "actual":
+                                        pass
+                                    elif free_of_charge is not None:
+                                        # WP-A/A1, single-shot path. Same rule
+                                        # as the chained one: a provider that
+                                        # refused at its gate, or a broker-
+                                        # attested provider-completed failure
+                                        # with no usage and no cost, billed
+                                        # nothing and must release the whole
+                                        # reservation.
+                                        cost_micros, cost_status = 0, "failed"
+                                    else:
                                         # A provider-completed failure proves a
                                         # paid call happened. It does not prove
                                         # what that call cost. Missing actual
@@ -2080,6 +2165,8 @@ class CockpitModel:
                                         # reservation for this attempt.
                                         cost_micros, cost_status = reserved, "reserved"
                                     failure = str(error.get("message") or "the model call failed")
+                                    if free_of_charge is not None:
+                                        failure += f"（未计费：{free_of_charge}）"
                                     paid_retry = self._paid_retry_result(
                                         work=work, lease=lease, route=route,
                                         profile=profile, invocation=invocation,
@@ -2247,6 +2334,10 @@ class CockpitModel:
         first_route_ref: str | None = None
         spend: dict[str, tuple[int, str]] = {}
         local_dispatch_proofs: dict[str, dict[str, str]] = {}
+        # WP-A/A1: profile id -> why its failed call was settled at zero. It
+        # travels into the chain failure detail, so "this attempt cost nothing"
+        # is never a bare assertion on the ledger side.
+        no_charge: dict[str, str] = {}
         uncertain_spend = False
         refusal: list[str] = []
         pool_rejection: dict[str, Any] | None = None
@@ -2303,8 +2394,20 @@ class CockpitModel:
                         measured = _cost_micros(
                             invocation, route, profile, ceiling
                         )
+                        free = no_charge_reason(invocation, envelope)
                         if measured[1] == "actual":
                             spend[route["id"]] = measured
+                        elif free is not None:
+                            # WP-A/A1. Retry eligibility proves the provider
+                            # executed *the refusal*, not the call. Every code
+                            # this path is eligible for is a gate refusal
+                            # (RATE_LIMITED, PROVIDER_OVERLOADED and friends)
+                            # carrying null usage and cost.available=false --
+                            # the provider produced nothing and billed nothing.
+                            # Reserving the ceiling for it is how a rate-limited
+                            # morning emptied the day's pools.
+                            spend[route["id"]] = (0, "failed")
+                            no_charge[profile["id"]] = free
                         else:
                             # Retry eligibility proves provider execution, not
                             # metering. Preserve the whole attempt reservation
@@ -2357,9 +2460,19 @@ class CockpitModel:
                 # re-drives on. Charging the day ledger its reserved ceiling
                 # for each one is how a quota-walled gateway burned the whole
                 # morning's pools without a single answer.
+                # WP-A/A1: and the third exemption. A rate limit, or any
+                # broker-attested provider-completed failure with no usage and
+                # no cost, is a call the provider positively did not bill. It
+                # reached the provider -- so it is not "not sent" -- but the
+                # reservation must be released all the same, because holding it
+                # charges the day ledger for a refusal at the provider's door.
+                free_of_charge = no_charge_reason(invocation, envelope)
                 may_have_reached_provider = (
                     not broker_local_not_sent and not host_frame_failure
+                    and free_of_charge is None
                 )
+                if free_of_charge is not None:
+                    no_charge[profile["id"]] = free_of_charge
                 if broker_local_not_sent:
                     local_dispatch_proofs[profile["id"]] = dict(dispatch_proof)
                     if code == "REQUIRED_CONTROLS_UNAVAILABLE":
@@ -2482,6 +2595,11 @@ class CockpitModel:
                     if item.get("profile_id") in local_dispatch_proofs
                     else {}
                 ),
+                **(
+                    {"no_charge_reason": no_charge[item["profile_id"]]}
+                    if item.get("profile_id") in no_charge
+                    else {}
+                ),
             }
             for item in (outcome.get("failures") or [])
         ]
@@ -2507,7 +2625,14 @@ class CockpitModel:
                     work, "MODEL_CHAIN_EXHAUSTED", route_ref,
                     message=failure, chain_failures=details,
                     status="retryable" if retryable else "failed",
-                    dispatch_state="unknown" if uncertain_spend else "not_started"),
+                    # WP-A/A1 split two questions that used to share one flag.
+                    # "Might this have been billed" now answers no for a proved
+                    # free failure; "might this have reached the provider" still
+                    # answers yes, and it is the second one this marker means.
+                    # Left joined, a rate-limited chain would have claimed the
+                    # request was never dispatched.
+                    dispatch_state=("unknown" if (uncertain_spend or no_charge)
+                                    else "not_started")),
                 "failure": failure,
                 "cost_micros": ceiling if uncertain_spend else 0,
                 "cost_status": "reserved" if uncertain_spend else "failed",

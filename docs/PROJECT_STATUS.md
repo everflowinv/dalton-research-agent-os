@@ -1,5 +1,21 @@
 # Dalton 项目进度
 
+## 2026-09-16 晚：研究推进卡点的系统性修复（一次合并，8 个并行工作包）
+
+起因是当日的只读审计（[live-ops-and-research-audit-2026-09-16.md](reports/live-ops-and-research-audit-2026-09-16.md)）：五家公司全部停在初筛出口之后、深度认知门之前 3 天；43 小时无正式交付物新版本；writer 单写者队列被注定失败的 lane 独占、tick 从 22s 退化到 188s；账本因 429 失败按上限计费在零成功调用下记了 286 USD；定量事实只有 22 条且全是同一指标。全量测试 **9,147 项全绿（4 跳过）**。按主题：
+
+**模型路由与结算**：可证明未产生费用的失败（429/限流、供应商完成失败且无 usage）按 0 结算；profile 级供应商冷却（任一 429 即冷却，指数退避封顶 6h，选路前跳过、不预留预算，持久化于 model-router.sqlite，模型页可见）；按实测输入上限（antigravity 30k）在选路前跳过；tier/purpose 保存拒绝过期或无档案的 id 并给出正确 id；`scripts/repair_brain_chains.py` 通过 cockpit 同一条 writer 路径修复 brain 链（移除 gpt-6-astra、`model-profile:claude-opus-5` → `profile:claude-opus-5`、结构化用途钉 `claude-opus-5 → deepseek-v4-flash`、语言检查钉 antigravity gemini-3.8-flash）；新环境模板导出 fail-closed 拦住坏链，planner `max_output_tokens` 下限 16000。
+
+**writer / 调度 / cockpit**：治理未批准、配额超出、未配置三类确定性拒绝在连接线程短路（治理文件 status+content_hash 指纹，批准后自动解除）；21 个只读 op 走独立只读副本；lane 5s 软预算；客户端 45s / 服务端 30s 超时分离，`queued_timeout` / `store_timeout` 结构化；feed lane 枚举与读取预算分离 + 窗口游标（不再 launched=0）；投影 `projection_min_interval_seconds` 默认 60、增量读取、37 条索引迁移（幂等、拿不到锁即 deferred）；overview 8s TTL + 写后失效；TicketCache 只保留 cockpit 读的字段（371MB → 43MB）。
+
+**子进程与运维**：LaneChildLauncher 持有全部子进程并 reap、僵尸不再算存活、启动票据对账；research_planner_launcher 修正票据前缀 bug（1,039 张永远 running 的根因）并结算；发布 worker 重试上限 6 次转 blocked、有待办退出码 0、plist 补 stderr；`scripts/build_release.py` / `release_switch.py`（覆盖 com.dalton.* 与所有指针）/ `gc_releases.py` / `rotate_dalton_logs.py` / `migrate_state_dir.py`；备份磁盘预检 + 先清理再写 + `VACUUM INTO`。
+
+**研究内容链**：dossier carry-forward 单元不再要求今日模板逐字节复现历史 prompt（ACN 每日崩 4 次的根因）；`draft_contract_repair` 对 dossier / debate map / model spec / 深度认知门起草做全量契约校验 + 一次修复调用；debate map 输入未变则 held（零调用）、提示词 ≤ 26,000 字节；planner 终局结局按 digest 入队前去重、work order ≤ 64KB、投影第五级阶梯；文档抽取 per-window 隔离（费用不确定的窗口仍保留预留不重试）、`(review_id, offset)` 持久去重、队列非空 hold 5 分钟、按证据等级 × 公司优先级排序并为高等级材料预留一半窗口、计划点名文档优先；`mission_document_research` 死锁 6h 后有界重开未起过的 admission；退役巡检修游标（09-07 后停摆的根因）。
+
+**事实层与估值**：新增确定性 `quantitative_claim_promotion` 车道（SEC 报表行 + 已核验 figure → 规范化、带 accession/line_id 出处的定量 claim，副本实测 ~5,000 条）与 `research-auto-commit:sec-statement-line:v1` / `mission-verified-figure:v1` 两条自动入账规则（需 owner 签署，`scripts/sign_quantitative_auto_commit_policy.py`）；新增 `valuation_snapshot` 车道（Q4 = 全年 − 前九个月的带证据差额季度解决了滚动四季度拼不出的问题），初筛 S6 估值章节与交付物引用词表（`valuation_metric`）接通。
+
+**人机闭环**：深度认知门提交前质量门（q1 分类、unknown ≤ 4、引用 ≥ 40、复核通过），不达标不占用 owner、等证据变化再起草；`return_for_more_work` 的意见逐字进入下一版提示、只重写被点名的题；47 条过期重开提案自动收起；新增「需要你处理」清单（`/v1/cockpit/needs-human`、`python -m dalton_core.needs_human_cli`）；本地化默认只对最终版做，审批卡片直接显示原文。
+
 ## 2026-09-16 当前部署：故障风暴清剿、能力全开与研究环境运维
 
 源码 `05944bae`（自 `3aeab4fe` 起）已部署至全部环境（运行包 `d1f2f06270494580a8b33b96da67d7c1f8fbfcdeec601170ff68d7765835d59f` 起，含可选依赖）。本轮自 09-15 晚起按"自动巡检—修复—全量—部署—再巡检"循环推进，累计 11 个代码批次，全量测试从 8,535 项增至 **8,543 项，各轮全绿**。以下按主题归并。

@@ -12,6 +12,7 @@ import argparse
 import json
 import os
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -90,6 +91,74 @@ def _rows_by_refs(connection: sqlite3.Connection, table: str, json_column: str,
     return sorted(result, key=lambda item: (item.get("id", ""), item["version"]))
 
 
+def _assert_pinned_chains_are_routable(router: ModelRouter,
+                                       pinned: list[dict[str, Any]]) -> None:
+    """WP-A/A6: refuse to bottle a chain a new workspace could not route.
+
+    A runtime template is how a *new* environment starts, and until now it
+    copied whatever the source host's pinned policies happened to say. On
+    2026-09-16 that was: ``profile:gpt-6-astra`` first in five brain chains
+    while it answered 100% HTTP 429, ``model-profile:claude-opus-5`` -- an id
+    whose only profile version expired on 2026-08-15 -- in position four, and
+    ``profile:gemini-3-8-flash-antigravity-high`` in a brain chain its 30k
+    transport ceiling cannot serve. Every new environment would have inherited
+    all three.
+
+    So the export checks the *pinned* versions -- the ones a lane will actually
+    run, not their whole immutable lineage, which necessarily contains every
+    historical mistake -- and fails closed with the names. Repair the policies
+    first (``scripts/repair_brain_chains.py``), then export.
+    """
+
+    from .model_profile_health import cooldown_message
+
+    latest = {profile["id"]: profile for profile in router.latest_profiles()}
+    cooled = router.active_cooldowns()
+    problems: list[str] = []
+    for policy in pinned:
+        named: dict[str, list[str]] = {}
+        for tier, chain in ((policy.get("fallback_chains") or {}).get("tiers")
+                            or {}).items():
+            for profile_id in chain:
+                named.setdefault(profile_id, []).append(f"tiers.{tier}")
+        for purpose, override in (policy.get("purpose_overrides") or {}).items():
+            if isinstance(override, Mapping):
+                for profile_id in override.get("chain", ()):
+                    named.setdefault(profile_id, []).append(f"purpose.{purpose}")
+        for profile_id, where in sorted(named.items()):
+            profile = latest.get(profile_id)
+            place = f"{policy['policy_version_ref']} {', '.join(sorted(set(where)))}"
+            if profile is None:
+                problems.append(f"{place}: {profile_id} 这台机器上没有档案")
+                continue
+            if profile.get("status") == "retired":
+                problems.append(f"{place}: {profile_id} 已退役")
+                continue
+            availability = profile.get("availability") or {}
+            valid_until = availability.get("valid_until")
+            if availability.get("state") != "available":
+                problems.append(f"{place}: {profile_id} 目录里标记为不可用")
+            elif isinstance(valid_until, str):
+                try:
+                    expires = datetime.fromisoformat(valid_until.replace("Z", "+00:00"))
+                except ValueError:
+                    problems.append(f"{place}: {profile_id} 的有效期无法解析")
+                    continue
+                if expires.tzinfo is None:
+                    expires = expires.replace(tzinfo=timezone.utc)
+                if expires <= datetime.now(timezone.utc):
+                    problems.append(
+                        f"{place}: {profile_id} 的档案已过期（有效期至 {valid_until}）")
+            if profile_id in cooled:
+                problems.append(f"{place}: " + cooldown_message(cooled[profile_id]))
+    if problems:
+        raise WorkspaceModelSetupError(
+            "这些被钉住的策略版本里有新环境无法路由的模型，导出会把故障原样带进新环境；"
+            "请先修好线上策略（scripts/repair_brain_chains.py）再导出：\n  - "
+            + "\n  - ".join(problems)
+        )
+
+
 def export_runtime_template(source_state: str | Path,
                             output_path: str | Path) -> dict[str, Any]:
     """Export only the immutable model declarations selected by a host."""
@@ -121,14 +190,24 @@ def export_runtime_template(source_state: str | Path,
     with ModelRouter(router_path, read_only=True) as router:
         policies = _rows_by_refs(router.connection, "model_routing_policy_versions",
                                  "policy_json", "policy_version_ref", policy_refs)
+        pinned = [policy for policy in policies
+                  if policy["policy_version_ref"] in policy_refs]
         profile_ids: set[str] = set()
         for policy in policies:
             profile_ids.update(policy["filters"]["allowed_profile_ids"])
+            # WP-A/A6: the chains, too. Overrides carry ``chain`` -- ``profile_ids``
+            # was never a key of the override wire, so a per-stage selection's
+            # models were silently left out of the bundle, and so were every
+            # tier chain's. A new workspace then installed a policy naming
+            # models its own catalog had no profile for.
             for override in (policy.get("purpose_overrides") or {}).values():
                 if isinstance(override, Mapping):
-                    profile_ids.update(override.get("profile_ids", ()))
+                    profile_ids.update(override.get("chain", ()))
+            for chain in ((policy.get("fallback_chains") or {}).get("tiers")
+                          or {}).values():
+                profile_ids.update(chain)
         profile_refs: set[str] = set()
-        for profile_id in profile_ids:
+        for profile_id in sorted(profile_ids):
             row = router.connection.execute(
                 "SELECT profile_version_ref FROM model_endpoint_profile_versions "
                 "WHERE profile_id=? ORDER BY version DESC LIMIT 1", (profile_id,)
@@ -138,6 +217,7 @@ def export_runtime_template(source_state: str | Path,
             profile_refs.add(row[0])
         profiles = _rows_by_refs(router.connection, "model_endpoint_profile_versions",
                                  "profile_json", "profile_version_ref", profile_refs)
+        _assert_pinned_chains_are_routable(router, pinned)
     budget_refs = {v["budget_policy_ref"] for v in configs.values()}
     with ThesisImpactBudgetStore(budget_path, read_only=True) as budget:
         budget_policies: list[dict[str, Any]] = []

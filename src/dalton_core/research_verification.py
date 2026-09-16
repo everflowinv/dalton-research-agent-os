@@ -160,6 +160,42 @@ STATEMENT_LINE_VERIFIER_HASH = content_hash({
     ],
 })
 
+# WP-F / P12b follow-up: the staging chain a filed XBRL statement line travels.
+#
+# ADR-0007 opened the cited-original door for a *document figure* -- a number
+# read out of prose and checked, digit by digit, against the quote it came
+# from.  A statement line has no quote and never will: it is a row of the
+# filer's own XBRL exhibit, identified by accession, statement, ordinal and
+# concept.  ``DocumentFigureResolver.verify_statement_line`` could already
+# re-check one against the filing it belongs to; what was missing was the
+# provenance mode that lets the re-check become a staged candidate.
+#
+# The authority here is *not* a connector SourceEnvelope.  The SEC financial
+# statements lane parses the filer's exhibit in a child process and records the
+# result through ``CoverageMissionAuthority.record_statement_observation`` into
+# two append-only, authority-gated tables; the filing row carries the
+# accession, the approved connector-governance record it ran under, the raw
+# spool artifacts it was parsed from and its own content hash.  That row is the
+# envelope of this mode, and the verifier below re-derives every number in the
+# material from it rather than trusting one field of what the caller brought.
+SEC_STATEMENT_LINE_AUTHORITY_MODE = "sec_statement_line_authority"
+SEC_STATEMENT_LINE_OPERATION = "get_financial_statements"
+SEC_STATEMENT_LINE_SOURCE_REF = "source:sec-edgar"
+SEC_STATEMENT_LINE_SOURCE_VERIFIER_REF = (
+    "verifier:sec-statement-line-authority-source:0.1"
+)
+SEC_STATEMENT_LINE_SOURCE_VERIFIER_HASH = content_hash({
+    "ref": SEC_STATEMENT_LINE_SOURCE_VERIFIER_REF,
+    "rules": [
+        "filing-row-is-core-authority", "filing-binds-its-dispatch",
+        "dispatch-is-settled-authority", "filing-binds-approved-governance",
+        "line-belongs-to-the-filing", "line-projection-equals-core-row",
+        "raw-spool-artifact-is-named-by-the-filing",
+        "derivation-uses-two-lines-of-one-filing-and-one-period",
+        "payload-equals-the-core-derivation", "lineage-is-source-dispatch-filing-row",
+    ],
+})
+
 
 def figure_candidate_numerics(figure: Mapping[str, Any]) -> dict[str, Any]:
     """The numeric fields a CandidateClaim takes from a verified figure row.
@@ -197,6 +233,7 @@ _AUTHORITY_PROVENANCE_MODES = frozenset({
     "connector_authority", TRANSCRIPT_CORE_AUTHORITY_MODE,
     PUBLIC_WEB_CORE_AUTHORITY_MODE, REGISTERED_ANNUAL_REPORT_AUTHORITY_MODE,
     MISSION_DOCUMENT_AUTHORITY_MODE, "mission_figure_authority",
+    SEC_STATEMENT_LINE_AUTHORITY_MODE,
 })
 PUBLIC_WEB_SOURCE_VERIFIER_REF = "verifier:public-web-core-authority-source:0.1"
 REGISTERED_ANNUAL_REPORT_SOURCE_VERIFIER_REF = (
@@ -647,6 +684,8 @@ def validate_verification_bundle(value: Mapping[str, Any]) -> dict[str, Any]:
             (MISSION_DOCUMENT_SOURCE_VERIFIER_REF,
              MISSION_DOCUMENT_SOURCE_VERIFIER_HASH),
             (MISSION_FIGURE_SOURCE_VERIFIER_REF, MISSION_FIGURE_SOURCE_VERIFIER_HASH),
+            (SEC_STATEMENT_LINE_SOURCE_VERIFIER_REF,
+             SEC_STATEMENT_LINE_SOURCE_VERIFIER_HASH),
         }
         if wire["kind"] == "source"
         else {
@@ -1365,6 +1404,28 @@ def build_candidate_evidence(
         # Read from the Core chain by the resolver, never a caller label: a
         # figure taken from a filed document is official_filing evidence.
         expected_source_type = material_wire["source_type"]
+    elif verification_mode == SEC_STATEMENT_LINE_AUTHORITY_MODE:
+        if (
+            material_wire["schema_version"] != "0.2"
+            or material_wire.get("provenance_mode") != SEC_STATEMENT_LINE_AUTHORITY_MODE
+        ):
+            raise VerificationRejected(
+                f"{SEC_STATEMENT_LINE_AUTHORITY_MODE} evidence requires statement line material"
+            )
+        if (verification["verifier_ref"], verification["verifier_hash"]) != (
+            SEC_STATEMENT_LINE_SOURCE_VERIFIER_REF,
+            SEC_STATEMENT_LINE_SOURCE_VERIFIER_HASH,
+        ):
+            raise VerificationRejected(
+                f"{SEC_STATEMENT_LINE_AUTHORITY_MODE} evidence requires its own Core source verifier"
+            )
+        if material_wire["source_ref"] != SEC_STATEMENT_LINE_SOURCE_REF:
+            raise VerificationRejected(
+                f"{SEC_STATEMENT_LINE_AUTHORITY_MODE} evidence is SEC filing authority only"
+            )
+        # The filer published this number; the source type is read off the
+        # resolver's material, never off a caller label.
+        expected_source_type = material_wire["source_type"]
     elif verification_mode in CITED_CORE_AUTHORITY_MODES:
         expected_verifier = {
             TRANSCRIPT_CORE_AUTHORITY_MODE:
@@ -1643,6 +1704,7 @@ class CandidateStagingStore:
         id_column: str,
         identifier: str,
         wire: Mapping[str, Any],
+        created_at: str | None = None,
     ) -> None:
         encoded = canonical_json(wire)
         existing = cur.execute(
@@ -1655,7 +1717,8 @@ class CandidateStagingStore:
             return
         cur.execute(
             f"INSERT INTO {table}({id_column},record_json,content_hash,created_at) VALUES(?,?,?,?)",
-            (identifier, encoded, wire["content_hash"], wire["created_at"]),
+            (identifier, encoded, wire["content_hash"],
+             wire["created_at"] if created_at is None else created_at),
         )
 
     @staticmethod
@@ -1699,6 +1762,8 @@ class CandidateStagingStore:
         figure_admission_policy: str = FIGURE_ADMISSION_DEFAULT,
         verified_figure: Mapping[str, Any] | None = None,
         figure_resolver: Any | None = None,
+        verified_statement_line: Mapping[str, Any] | None = None,
+        statement_resolver: Any | None = None,
     ) -> dict[str, Any]:
         """Stage one verified candidate pair.
 
@@ -1730,6 +1795,16 @@ class CandidateStagingStore:
                 "a verified figure is admitted only through "
                 f"{MISSION_FIGURE_AUTHORITY_MODE}; the cited-original modes "
                 "stay qualitative"
+            )
+        if (
+            verified_statement_line is not None
+            and verification_mode != SEC_STATEMENT_LINE_AUTHORITY_MODE
+        ):
+            # A filed statement line is numeric authority only inside its own
+            # mode; nothing else may borrow it to carry a number.
+            raise VerificationRejected(
+                "a verified statement line is admitted only through "
+                f"{SEC_STATEMENT_LINE_AUTHORITY_MODE}"
             )
         material_wire = validate_source_verification_material(material)
         source_wire = self._require_clean_pass(source_verification, "source")
@@ -1788,6 +1863,23 @@ class CandidateStagingStore:
                 )
             spec_wire = None
             numeric_wire = None
+        elif verified_statement_line is not None:
+            # A filed line is its own numeric authority, exactly as a figure
+            # row is: there is no JSON-pointer spec to recompute because there
+            # is nothing to compute -- the number is what the filer reported.
+            if numeric_spec is not None or numeric_verification is not None:
+                raise VerificationRejected(
+                    "a statement-line-backed candidate carries no numeric spec; "
+                    "the filed line is its numeric authority"
+                )
+            if statement_resolver is None or not callable(
+                getattr(statement_resolver, "verify_statement_line", None)
+            ):
+                raise VerificationRejected(
+                    "statement line admission requires a Core statement resolver"
+                )
+            spec_wire = None
+            numeric_wire = None
         else:
             if numeric_spec is None or numeric_verification is None:
                 raise VerificationRejected(
@@ -1822,6 +1914,28 @@ class CandidateStagingStore:
                     "mission figure material"
                 )
             recomputed_source = figure_resolver.verify_source_material(material_wire)
+        elif verification_mode == SEC_STATEMENT_LINE_AUTHORITY_MODE:
+            # The material is the filing row and the lines under it, so there
+            # is no checkpoint, no plan and no runner request either.  The
+            # resolver re-derives the whole payload out of Core and this store
+            # demands byte equality with what the caller brought.
+            if qualitative:
+                raise VerificationRejected(
+                    f"{SEC_STATEMENT_LINE_AUTHORITY_MODE} staging is for a filed "
+                    "number; a semantic candidate has no filed line to rest on"
+                )
+            if statement_resolver is None or not callable(
+                getattr(statement_resolver, "verify_source_material", None)
+            ):
+                raise VerificationRejected(
+                    f"{SEC_STATEMENT_LINE_AUTHORITY_MODE} staging requires a Core statement resolver"
+                )
+            if material_wire.get("provenance_mode") != SEC_STATEMENT_LINE_AUTHORITY_MODE:
+                raise VerificationRejected(
+                    f"{SEC_STATEMENT_LINE_AUTHORITY_MODE} staging requires matching "
+                    "statement line material"
+                )
+            recomputed_source = statement_resolver.verify_source_material(material_wire)
         elif verification_mode in CITED_CORE_AUTHORITY_MODES:
             if not qualitative:
                 raise VerificationRejected(
@@ -1897,6 +2011,30 @@ class CandidateStagingStore:
             ):
                 raise ResearchVerificationConflict(
                     "figure numeric verification binds another figure"
+                )
+        line_wire: dict[str, Any] | None = None
+        if verified_statement_line is not None:
+            # Re-verified here rather than trusted: the resolver reads the line
+            # and its filing back out of Core by id and rebuilds the record the
+            # caller claims to hold.  Only then is the caller's copy compared,
+            # byte for byte.
+            identifier = dict(verified_statement_line).get("figure_id")
+            if not isinstance(identifier, str) or not identifier:
+                raise VerificationRejected(
+                    "a verified statement line must name its line id"
+                )
+            line_wire, line_bundle = statement_resolver.verify_statement_line(identifier)
+            if canonical_json(line_wire) != canonical_json(dict(verified_statement_line)):
+                raise ResearchVerificationConflict(
+                    "the supplied statement line is not the line Core holds"
+                )
+            numeric_wire = self._require_clean_pass(line_bundle, "numeric")
+            if (
+                numeric_wire["subject_ref"] != line_wire["figure_id"]
+                or numeric_wire["subject_hash"] != line_wire["content_hash"]
+            ):
+                raise ResearchVerificationConflict(
+                    "statement line numeric verification binds another line"
                 )
         if spec_wire is not None and numeric_wire is not None:
             recomputed_numeric = verify_numeric_spec(
@@ -1993,6 +2131,19 @@ class CandidateStagingStore:
                 == canonical_json(expected_numerics["period"]),
                 claim_wire["subject_ref"] == figure_wire["company_ref"],
             ))
+        elif line_wire is not None and numeric_wire is not None:
+            # The filed line stands where the NumericVerificationSpec stands
+            # for a connector candidate.  The number the claim asserts is
+            # checked against the Core row itself, not against the payload
+            # that quotes it.
+            claim_checks.extend((
+                claim_wire["numeric_spec_ref"] == line_wire["figure_id"],
+                claim_wire["numeric_spec_hash"] == line_wire["content_hash"],
+                claim_wire["numeric_verification_ref"] == numeric_wire["id"],
+                claim_wire["numeric_verification_hash"] == numeric_wire["content_hash"],
+                Decimal(claim_wire["value"]) == Decimal(line_wire["value"]),
+                claim_wire["subject_ref"] == line_wire["company_ref"],
+            ))
         elif spec_wire is not None and numeric_wire is not None:
             claim_checks.extend((
                 claim_wire["numeric_spec_ref"] == spec_wire["id"],
@@ -2014,6 +2165,31 @@ class CandidateStagingStore:
                     "numeric_verification_hash",
                 )
             )
+        if verification_mode == SEC_STATEMENT_LINE_AUTHORITY_MODE:
+            # Every word and every digit of the claim is re-read off the
+            # material's normalized payload, and the payload was just re-derived
+            # from Core by the source verifier above.  A candidate whose
+            # sentence was edited by hand cannot be staged.
+            payload = material_wire["normalized_payload"]
+            if not isinstance(payload, Mapping):
+                raise ResearchVerificationConflict(
+                    "statement line material carries no normalized payload"
+                )
+            try:
+                value_matches = Decimal(claim_wire["value"]) == Decimal(str(payload.get("value")))
+            except (InvalidOperation, TypeError):
+                value_matches = False
+            claim_checks.extend((
+                value_matches,
+                claim_wire["subject_ref"] == payload.get("company_ref"),
+                claim_wire["metric_or_aspect"] == payload.get("metric_or_aspect"),
+                claim_wire["basis"] == payload.get("basis"),
+                claim_wire["normalized_statement"] == payload.get("normalized_statement"),
+                canonical_json(claim_wire["period"]) == canonical_json(payload.get("period")),
+                claim_wire["unit"] == payload.get("unit"),
+                claim_wire["currency"] == payload.get("currency"),
+                claim_wire["scale"] == payload.get("scale"),
+            ))
         if not all(claim_checks):
             raise ResearchVerificationConflict("candidate claim drifted from verified inputs")
 
@@ -2031,6 +2207,11 @@ class CandidateStagingStore:
             # hash that changed shape for existing rows would turn every one of
             # them into a permanent conflict.
             request_identity["figure_hash"] = figure_wire["content_hash"]
+        if line_wire is not None:
+            # Added only on the statement-line path, for the same reason the
+            # figure hash is: an existing idempotency key must keep hashing to
+            # what it hashed to when it was written.
+            request_identity["statement_line_hash"] = line_wire["content_hash"]
         request_hash = content_hash(request_identity)
         self.connection.execute("BEGIN IMMEDIATE")
         try:
@@ -2063,6 +2244,12 @@ class CandidateStagingStore:
                 self._insert_immutable(
                     self.connection, "candidate_figures", "figure_id",
                     figure_wire["figure_id"], figure_wire,
+                )
+            if line_wire is not None:
+                self._insert_immutable(
+                    self.connection, "candidate_statement_lines", "line_id",
+                    line_wire["figure_id"], line_wire,
+                    created_at=claim_wire["created_at"],
                 )
             self._insert_immutable(self.connection, "candidate_verifications", "verification_id", source_wire["id"], source_wire)
             if numeric_wire is not None:
@@ -2105,7 +2292,8 @@ class CandidateStagingStore:
             table: int(self.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
             for table in (
                 "candidate_source_materials", "candidate_numeric_specs",
-                "candidate_figures", "candidate_verifications",
+                "candidate_figures", "candidate_statement_lines",
+                "candidate_verifications",
                 "candidate_evidence_versions", "candidate_claim_versions",
                 "candidate_stage_requests",
             )
@@ -2122,6 +2310,10 @@ __all__ = [
     "MISSION_FIGURE_AUTHORITY_MODE", "MISSION_FIGURE_SOURCE_VERIFIER_HASH",
     "MISSION_FIGURE_SOURCE_VERIFIER_REF", "MISSION_VERIFIED_FIGURE_RULE_REF",
     "STATEMENT_LINE_VERIFIER_HASH", "STATEMENT_LINE_VERIFIER_REF",
+    "SEC_STATEMENT_LINE_AUTHORITY_MODE", "SEC_STATEMENT_LINE_OPERATION",
+    "SEC_STATEMENT_LINE_SOURCE_REF",
+    "SEC_STATEMENT_LINE_SOURCE_VERIFIER_HASH",
+    "SEC_STATEMENT_LINE_SOURCE_VERIFIER_REF",
     "figure_candidate_numerics",
     "TRANSCRIPT_CORE_AUTHORITY_MODE", "TRANSCRIPT_SOURCE_VERIFIER_REF",
     "TRANSCRIPT_SOURCE_VERIFIER_HASH",

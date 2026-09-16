@@ -16,6 +16,12 @@ as good a reason to stay quiet as an idle tick, because the same evidence will
 be refused the same way and the four calls will be paid for again.  A signature
 cannot disagree with the child, because it is not an opinion about what to do.
 
+**A draft the submission standard held back is silence too.**  D1 refuses to
+put a draft in front of a person that answers three of twelve questions; the
+child records why, in a note beside the Core, and this lane treats that like
+every other content refusal -- the same evidence would be drafted the same way
+and refused the same way, so it waits for the evidence to move.
+
 **A pending decision is part of the signature.**  That is what makes the whole
 lane stop while the owner is thinking: the draft is on the chain, no decision
 row exists, nothing about the evidence has moved, so the coordinator is quiet.
@@ -55,6 +61,12 @@ RELAUNCH_STATUSES = frozenset({"submitted", "duplicate"})
 CONTENT_TERMINAL_STATUSES = frozenset({
     "classification_conflict", "verification_failed", "rubric_refused",
     "not_independent", "unverified", "no_new_evidence",
+    # D1: the draft was well formed and well cited and still was not worth a
+    # person's time.  It belongs with the other content refusals rather than
+    # with the idle statuses because the reason is worth showing: "held back
+    # because it answers three of twelve questions" is the one sentence that
+    # tells the owner the gate is not stuck on a bug.
+    "auto_returned",
 })
 
 

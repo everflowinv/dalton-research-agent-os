@@ -71,7 +71,12 @@ def profile() -> dict:
         "availability": {
             "state": "available",
             "checked_at": NOW.isoformat(),
-            "valid_until": "2026-08-24T18:00:00+00:00",
+            # WP-A/A4: the tier/purpose save path now refuses a chain link
+            # whose profile version has fallen out of its availability
+            # window, and it reads the wall clock. This fixture's NOW is
+            # fixed in the past, so the window has to be open-ended for
+            # the selection tests that drive it through the writer.
+            "valid_until": "2099-01-01T00:00:00+00:00",
         },
         "cost": {
             "currency": "USD",

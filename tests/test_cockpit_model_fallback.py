@@ -364,6 +364,63 @@ class CockpitChainTests(unittest.TestCase):
         self.assertEqual(settled.count(0), len(settled) - settled.count(served))
         self.assertLessEqual(sum(settled), served)
 
+    def test_a_rate_limited_link_falls_back_and_moves_nothing_on_the_ledger(self) -> None:
+        # WP-A/A1, 2026-09-16. A 429 is the provider refusing at its gate: it
+        # generates nothing and bills nothing. Charging the attempt's reserved
+        # ceiling for one is what let six hours of rate limiting on
+        # gpt-6-astra book 286 USD against zero served calls and refuse every
+        # other lane out of an exhausted pool.
+        adapter = ChainAdapter({"profile:gpt-6-astra": {
+            "code": "RATE_LIMITED", "message": "429 Too Many Requests"}})
+        answer = self._model(adapter, policy_version_ref=self.chain_policy).call(
+            purpose="plan", request_id="rate-limited-link", prompt="draft",
+            mission=self.mission)
+        self.assertTrue(answer)
+        self.assertEqual(
+            adapter.served, ["profile:gpt-6-astra", "profile:claude-fable-5-1"])
+        with ThesisImpactBudgetStore(self.root / "budget.sqlite") as ledger:
+            admission = json.loads(ledger.connection.execute(
+                "SELECT record_json FROM thesis_impact_day_admissions"
+            ).fetchone()[0])
+            settlement = json.loads(ledger.connection.execute(
+                "SELECT record_json FROM thesis_impact_day_settlements"
+            ).fetchone()[0])
+        # One reservation for the attempt, settled at what the link that
+        # actually answered cost -- not at the ceiling the refusal never used.
+        self.assertGreater(admission["reserved_micros"], 0)
+        self.assertEqual(settlement["actual_micros"], answer["cost_micros"])
+        # The served link's own measured cost, not the attempt's held ceiling:
+        # a reservation released as "reserved" is what the rate-limited link
+        # used to force.
+        self.assertNotEqual(answer["cost_status"], "reserved")
+
+    def test_a_rate_limited_chain_that_exhausts_settles_at_zero_with_its_reason(self) -> None:
+        # Every link rate-limited: nothing served, nothing billed, and the
+        # trace says why each link was free rather than merely asserting it.
+        rate_limited = {"code": "RATE_LIMITED", "message": "429 Too Many Requests"}
+        adapter = ChainAdapter({"profile:gpt-6-astra": rate_limited,
+                                "profile:claude-fable-5-1": rate_limited})
+        with self.assertRaises(CockpitModelError):
+            self._model(adapter, policy_version_ref=self.chain_policy).call(
+                purpose="plan", request_id="rate-limited-chain", prompt="draft",
+                mission=self.mission)
+        with ThesisImpactBudgetStore(self.root / "budget.sqlite") as ledger:
+            settlements = [json.loads(row[0])["actual_micros"] for row in
+                           ledger.connection.execute(
+                               "SELECT record_json FROM thesis_impact_day_settlements"
+                           ).fetchall()]
+        self.assertTrue(settlements)
+        self.assertEqual(set(settlements), {0})
+        with Scheduler(self.root / "scheduler.sqlite") as scheduler:
+            row = scheduler.connection.execute(
+                "SELECT work_order_id FROM scheduler_formal_results "
+                "ORDER BY created_at DESC LIMIT 1").fetchone()
+            envelope = scheduler.formal_result(row["work_order_id"])["result_envelope"]
+        details = (envelope.get("metadata") or {}).get("chain_failures") or []
+        self.assertEqual(len(details), 2)
+        for item in details:
+            self.assertEqual(item["no_charge_reason"], "provider_rate_limited")
+
     def test_broker_budget_failure_is_not_rewritten_as_a_no_send_refusal(self) -> None:
         # 2026-09-15: a budget refusal is per link, so the chain now falls
         # through to the next one. With every link refusing the downstream
@@ -1415,7 +1472,17 @@ class CockpitChainTests(unittest.TestCase):
                 "work_order"]
         self.assertEqual(work["metadata"]["provider_retry"], retry)
 
-    def test_chain_provider_retry_without_actual_cost_retains_reservation(self) -> None:
+    def test_chain_rate_limited_retry_settles_at_zero(self) -> None:
+        # WP-A/A1, 2026-09-16. This used to assert the opposite: a provider
+        # retry without actual cost telemetry kept the whole reservation. That
+        # rule is what turned six hours of 100% HTTP 429 on gpt-6-astra into
+        # 286 USD of day-ledger spend against zero served calls, which emptied
+        # every pool and refused every other lane. A rate limit is the provider
+        # refusing at its gate: it generates nothing and bills nothing, and the
+        # broker's own protocol requires such a response to carry null usage
+        # and cost.available=false. So it settles at zero. The conservative
+        # rule still governs everything we cannot prove was free -- see
+        # test_post_send_timeout_halts_and_keeps_the_full_reservation.
         class MissingFailureCost(ReturnedProviderSequenceAdapter):
             def execute(inner, work, route, profile):
                 invocation, envelope = super().execute(work, route, profile)
@@ -1444,10 +1511,21 @@ class CockpitChainTests(unittest.TestCase):
                 (answer["work_order_ref"],),
             ).fetchall()
         self.assertEqual(len(rows), 2)
-        self.assertEqual(rows[0][2], rows[0][1])
+        self.assertGreater(rows[0][1], 0)
+        self.assertEqual(rows[0][2], 0)
         self.assertEqual(rows[1][2], 1_000)
 
-    def test_single_route_provider_retry_without_actual_cost_retains_reservation(self) -> None:
+    def test_single_route_rate_limited_retry_settles_at_zero(self) -> None:
+        # WP-A/A1, 2026-09-16. This used to assert the opposite: a provider
+        # retry without actual cost telemetry kept the whole reservation. That
+        # rule is what turned six hours of 100% HTTP 429 on gpt-6-astra into
+        # 286 USD of day-ledger spend against zero served calls, which emptied
+        # every pool and refused every other lane. A rate limit is the provider
+        # refusing at its gate: it generates nothing and bills nothing, and the
+        # broker's own protocol requires such a response to carry null usage
+        # and cost.available=false. So it settles at zero. The conservative
+        # rule still governs everything we cannot prove was free -- see
+        # test_post_send_timeout_halts_and_keeps_the_full_reservation.
         class MissingFailureCost(ReturnedProviderSequenceAdapter):
             def execute(inner, work, route, profile):
                 invocation, envelope = super().execute(work, route, profile)
@@ -1476,7 +1554,8 @@ class CockpitChainTests(unittest.TestCase):
                 (answer["work_order_ref"],),
             ).fetchall()
         self.assertEqual(len(rows), 2)
-        self.assertEqual(rows[0][2], rows[0][1])
+        self.assertGreater(rows[0][1], 0)
+        self.assertEqual(rows[0][2], 0)
         self.assertEqual(rows[1][2], 1_000)
 
     def test_single_pin_unproved_busy_is_charged_and_never_paid_retried(self) -> None:
@@ -2606,6 +2685,42 @@ class CockpitChainTests(unittest.TestCase):
             envelope["metadata"]["chain_failures"][0]["message"],
             "the model call failed: connect failed token=[REDACTED]",
         )
+
+    def test_an_unroutable_chain_names_six_reasons_without_a_type_error(self) -> None:
+        # WP-A fixed the formatting of exactly this message and nothing
+        # exercised it: the old code sliced a ``set``, so every walk that ended
+        # with links refused before they were tried raised
+        # ``'set' object is not subscriptable`` instead of saying why -- 33
+        # times live on 2026-09-15. The reasons a router reports are neither
+        # unique nor uniformly typed, and both are true here.
+        reasons = ["r1", "r2", "r3", "r4", "r5", "r6", "r7", "r1", 8]
+
+        def unroutable(router, work_order, **kwargs):
+            return {
+                "status": "exhausted",
+                "tier": kwargs["tier"],
+                "purpose": kwargs["purpose"],
+                "reason": "no link of the chain is routable",
+                "rejection_reasons": list(reasons),
+                "links": [{"profile_id": "profile:gpt-6-astra", "served": False,
+                           "skip_reason": "provider_cooldown"}],
+                "failures": [],
+                "served": None,
+            }
+
+        with patch("dalton_core.model_fallback_chain.execute_chain", unroutable):
+            with self.assertRaises(CockpitModelError) as raised:
+                self._model(ChainAdapter({}), policy_version_ref=self.chain_policy).call(
+                    purpose="plan", request_id="unroutable-chain",
+                    prompt="what next?", mission=self.mission,
+                )
+        failure = str(raised.exception)
+        self.assertIn("未尝试的环节被拒绝", failure)
+        # Six, sorted, de-duplicated, every one of them readable as text.
+        listed = failure.split("未尝试的环节被拒绝：")[1]
+        self.assertEqual(listed.split(", "), ["8", "r1", "r2", "r3", "r4", "r5"])
+        self.assertNotIn("r6", failure)
+        self.assertNotIn("r7", failure)
 
     def test_a_policy_with_no_chain_keeps_routing_exactly_as_before(self) -> None:
         adapter = ChainAdapter({})

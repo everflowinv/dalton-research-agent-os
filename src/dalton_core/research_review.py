@@ -617,6 +617,24 @@ class HumanReviewAuthority:
                 raise ResearchReviewConflict("candidate figure hash binding drifted")
             material_ref = source_verification["subject_ref"]
             material_hash = source_verification["subject_hash"]
+        elif self._staged_statement_line(claim["numeric_spec_ref"]) is not None:
+            # WP-F: the same shape as the figure case.  A filed XBRL row is its
+            # own numeric authority -- there is nothing to compute from it -- so
+            # there is no spec to open and the source verification binds the
+            # material.  A *derived* margin does have a spec and falls through
+            # to the branch below, because a ratio of two rows is a computation
+            # and the Ledger recomputes it.
+            numeric_spec = None
+            line = self._staged_statement_line(claim["numeric_spec_ref"])
+            numeric_verification = validate_verification_bundle(load(
+                "candidate_verifications", "verification_id",
+                claim["numeric_verification_ref"], "candidate numeric verification",
+            ))
+            if claim["numeric_spec_hash"] != line["content_hash"]:
+                raise ResearchReviewConflict(
+                    "candidate statement line hash binding drifted")
+            material_ref = source_verification["subject_ref"]
+            material_hash = source_verification["subject_hash"]
         else:
             numeric_spec = validate_numeric_verification_spec(load(
                 "candidate_numeric_specs", "numeric_spec_id",
@@ -696,6 +714,34 @@ class HumanReviewAuthority:
         wire = json.loads(row["record_json"])
         if row["content_hash"] != wire.get("content_hash"):
             raise ResearchReviewConflict("candidate figure authority drifted")
+        return wire
+
+    def staged_statement_line(self, candidate_claim_ref: str) -> dict[str, Any] | None:
+        """WP-F: the filed XBRL row a candidate's number rests on, if any."""
+
+        claim, _evidence = self._candidate_pair(
+            _text(candidate_claim_ref, "candidate_claim_ref"))
+        return self._staged_statement_line(claim.get("numeric_spec_ref"))
+
+    def _staged_statement_line(self, line_id: Any) -> dict[str, Any] | None:
+        """The re-verified statement line staged beside a candidate, if it has one."""
+
+        if not isinstance(line_id, str) or not line_id:
+            return None
+        try:
+            row = self.connection.execute(
+                "SELECT record_json,content_hash FROM candidate_statement_lines "
+                "WHERE line_id=?", (line_id,),
+            ).fetchone()
+        except sqlite3.Error:
+            # A staging database written before WP-F has no such table; that is
+            # not a drifted candidate, it is an older Core.
+            return None
+        if row is None:
+            return None
+        wire = json.loads(row["record_json"])
+        if row["content_hash"] != wire.get("content_hash"):
+            raise ResearchReviewConflict("candidate statement line authority drifted")
         return wire
 
     @_serialized

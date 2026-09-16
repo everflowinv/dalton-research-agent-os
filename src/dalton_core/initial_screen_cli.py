@@ -34,12 +34,13 @@ from .claim_retirement import ClaimRetirementAuthority
 from .deliverable_reopen import CHANGE_REASON_EVIDENCE, approved_reopen
 from .cockpit_model import CockpitModel, CockpitModelError, lane_status_for
 from .coverage_mission import CoverageMissionAuthority, CoverageMissionError
+from .deep_insight_gate_cli import valuation_rows
 from .initial_screen import (
     KIND,
     SECTION_GUIDANCE,
     TEMPLATE_KEY,
     VALUATION_GAP,
-    VALUATION_TITLE_HINT,
+    valuation_section_held,
     assess_exit_gate,
     build_claim_context,
     build_section_prompt,
@@ -481,9 +482,19 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         company_ref = entry["company_ref"]
         summary["drafted"] = {"company_ref": company_ref, "ticker": entry["ticker"]}
         titles = section_titles(playbook)
-        context = build_claim_context(claims.get(company_ref) or [])
+        # P11c-E: the computed multiples, if this Core has priced the company.
+        # Read through the gate's reader rather than a second one: it already
+        # mints ``valuation-metric:<version>:<metric>``, already drops the
+        # metrics a snapshot published as unavailable, and a second
+        # implementation of that filter would disagree with it eventually.
+        valuation = valuation_rows(store, company_ref)
+        context = build_claim_context(claims.get(company_ref) or [],
+                                      valuation=valuation)
         summary["context"] = {
             "claims": len(context["claims"]), "numbers": len(context["numbers"]),
+            # Reported separately from ``numbers`` because it is the one input
+            # that decides whether the valuation section gets written at all.
+            "valuation_numbers": len(valuation),
             # One series means the screen this drafts will have one numeric
             # series however well it is written; that is a Ledger fact and the
             # summary is where it should be visible.
@@ -516,7 +527,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         invocations: list[str] = []
         for index, title in enumerate(titles):
             guidance = SECTION_GUIDANCE[index] if index < len(SECTION_GUIDANCE) else ""
-            if VALUATION_TITLE_HINT in title and not guidance:
+            # P11c-E: the valuation section is gated on having something to
+            # write it from, not on being the valuation section. With a
+            # published snapshot it is drafted like any other; without one
+            # there is still no figure in this Core that could support it, and
+            # a drafted-but-empty section would read as "we looked and it is
+            # not interesting" rather than "we have not priced this company".
+            if valuation_section_held(title, guidance, valuation):
                 sections.append({"title": title, "body": "", "claim_refs": [], "numbers": [],
                                  "gaps": [VALUATION_GAP]})
                 summary["sections"].append({"title": title, "status": "not_drafted", "reason": "valuation gate"})

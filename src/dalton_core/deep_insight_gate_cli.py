@@ -3,7 +3,7 @@
 Out of process, like every lane that calls a model, because the writer abandons
 a request after 30 seconds and four drafting calls are allowed 180 each.
 
-One run does seven things and stops:
+One run does eight things and stops:
 
 1. check the grant before spending anything -- drafting and then being refused
    costs the mission real model calls;
@@ -18,9 +18,17 @@ One run does seven things and stops:
    whole draft if they disagree;
 6. verify the whole draft once, with a model of a different family, and run the
    gate rubric's deterministic checks and the Constitution's ``output_rubric``;
-7. publish -- where ADR-0008 decides whether this is a version at all -- and,
+7. weigh the whole draft against the submission standard (D1) -- twelve
+   answers that are well cited and say almost nothing are a research plan, not
+   a finding -- and, when it falls short, leave a note saying question by
+   question what is missing instead of publishing anything;
+8. publish -- where ADR-0008 decides whether this is a version at all -- and,
    because publishing is what opens the human checkpoint, stop.  Nothing here
    decides the gate.
+
+When the previous version was returned by a person (D2), the reviewer's own
+words are carried into the prompt, only the questions they named are re-drafted,
+and the new version's ``change_reason`` is ``reviewer_returned``.
 
 Exit 0 when the run completed, including when it decided nothing needed doing.
 
@@ -45,6 +53,7 @@ from .company_dossier_cli import number_material, table_exists
 from .coverage_mission import CoverageMissionAuthority
 from .deep_insight_gate import (
     DELIVERABLE_KIND,
+    REVIEWER_RETURNED,
     DOSSIER_SOURCES,
     EXTRA_SOURCES,
     GROUPS,
@@ -67,6 +76,24 @@ from .deep_insight_gate import (
     new_refs,
     output_rubric_findings,
     questions_hash,
+)
+from .deep_insight_gate_quality import (
+    DeepInsightGateStandardError,
+    assess,
+    clear_note,
+    load_standard,
+    note_is_current,
+    read_note,
+    standard_hash,
+    write_note,
+)
+from .deep_insight_gate_review import (
+    change_note,
+    changed_questions,
+    carried_forward_questions,
+    groups_to_redraft,
+    questions_to_redraft,
+    review_of,
 )
 from .deep_insight_gate_draft import (
     MAX_COST_USD,
@@ -703,8 +730,13 @@ def run_gate(
         "write_scope": None,
         "checkpoint_kind": STAGE_REF,
         "evidence_fingerprint": None,
+        "attempt_fingerprint": None,
         "groups_drafted": [],
         "refused": [],
+        # What each group's reply broke and whether one repair fixed it.  A
+        # group refused whole over a stray key on an unknown answer is the
+        # commonest thing this lane does, and it was invisible here.
+        "contract_repair": [],
         "verification": None,
         "classification": None,
         "rubric": None,
@@ -714,6 +746,14 @@ def run_gate(
         "demoted_refs": [],
         "version_ref": None,
         "version_status": None,
+        # D1/D2: what the pre-submission standard said, and what the person who
+        # returned the previous version asked for.  Always present so that a
+        # run that ended before either was computed is distinguishable from one
+        # where nothing was asked.
+        "quality": None,
+        "review": None,
+        "redrafted_questions": [],
+        "carried_forward_questions": [],
         "answered": 0,
         "unknown": 0,
         "new_refs": 0,
@@ -805,15 +845,27 @@ def run_gate(
                 "status": "held", "gate_status": "no_policy",
                 "failure_reason": f"the output-rubric policy could not be read: {exc}"})
             return summary
+        # D1: the numbers a draft has to clear before it is worth a person's
+        # time.  Read before anything is drafted, and a broken file stops the
+        # lane rather than restoring defaults somebody was trying to change.
+        try:
+            standard = load_standard(state_dir)
+        except DeepInsightGateStandardError as exc:
+            summary.update({
+                "status": "held", "gate_status": "no_submission_standard",
+                "failure_reason": str(exc)})
+            return summary
 
         candidates = screened_companies(missions, mission)
         if company_ref is not None:
             candidates = [company_ref] if company_ref in candidates else []
         chosen = None
         prior = None
+        prior_decision = None
         dossier = None
         map_version = None
         fingerprint = None
+        attempt_fingerprint = None
         blocked: dict[str, str] = {}
         for candidate in candidates:
             file_version = dossiers.latest(candidate)
@@ -824,6 +876,7 @@ def run_gate(
             if head is not None and gates.decision_for(head["id"]) is None:
                 blocked[candidate] = "awaiting_decision"
                 continue
+            decision = None
             if head is not None:
                 decision = gates.decision_for(head["id"])
                 if decision["decision"] != "return_for_more_work":
@@ -835,11 +888,44 @@ def run_gate(
             current_map = debate_map_version(store, candidate)
             digest = evidence_fingerprint(
                 file_version, current_map, questions_hash(questions))
-            if head is not None and fingerprint_of(head) == digest:
+            # D2: a person's return is itself a reason to draft again.
+            #
+            # It was not, and that was the whole defect.  The lane's
+            # idempotency key is the evidence -- the dossier version, the debate
+            # map, the twelve questions -- so a returned gate sat at
+            # ``nothing_new`` until a filing landed, however specific the
+            # reviewer had been about what was wrong.  "Question three confuses
+            # bookings with revenue" is not a request for more evidence; it is a
+            # request to read the evidence again.  So the attempt is keyed on
+            # the evidence *and* the decision, which means exactly one redraft
+            # per return and no loop.
+            #
+            # The standard is in the key too.  It is an input to the decision
+            # rather than only to the judgement of it: an owner who relaxes a
+            # threshold has changed what this run would conclude, and a note
+            # written under the old numbers must not hold the lane quiet
+            # against the new ones.
+            attempt = content_hash([
+                digest, standard_hash(standard),
+                "-" if decision is None else str(decision["id"])])
+            if head is not None and decision is None and fingerprint_of(head) == digest:
                 blocked[candidate] = "nothing_new"
                 continue
-            chosen, prior, dossier, map_version, fingerprint = (
-                candidate, head, file_version, current_map, digest)
+            # D1: the last attempt was drafted and then held back -- as not good
+            # enough to submit, or as a rewrite that changed nothing -- and
+            # nothing it rests on has moved since.  The coordinator's own quiet
+            # signature would catch this too, but it lives in the controller's
+            # memory and a restart is the commonest event on this host: without
+            # a durable note every restart buys four drafting calls to reach the
+            # same refusal.
+            if note_is_current(read_note(state_dir, candidate), attempt):
+                blocked[candidate] = ("auto_returned_awaiting_evidence"
+                                      if decision is None
+                                      else "returned_redraft_already_attempted")
+                continue
+            chosen, prior, prior_decision, dossier, map_version = (
+                candidate, head, decision, file_version, current_map)
+            fingerprint, attempt_fingerprint = digest, attempt
             break
         summary["blocked"] = dict(sorted(blocked.items()))
         if chosen is None:
@@ -853,6 +939,23 @@ def run_gate(
             return summary
         summary["company_ref"] = chosen
         summary["evidence_fingerprint"] = fingerprint
+        # What this exact attempt is keyed on: the evidence, the standard and
+        # the reviewer's decision.  Separate from the evidence fingerprint
+        # above, which is what the draft binds and what ADR-0008 reads.
+        summary["attempt_fingerprint"] = attempt_fingerprint
+        # D2: the person who returned the previous version, and what they said.
+        # Everything below reads this: which groups are re-drafted, what the
+        # prompt is told, and the word the new version carries for why it
+        # exists.
+        review = review_of(prior_decision)
+        if review is not None:
+            summary["review"] = {
+                "returned_version_ref": review["gate_version_ref"],
+                "decided_at": review["decided_at"],
+                "reason": review["reason"],
+                "question_notes": dict(review["question_notes"]),
+            }
+            change_reason = REVIEWER_RETURNED
         numbers = number_material(store, chosen, limit=MAX_NUMBER_ROWS)
         numbers += valuation_rows(store, chosen)
         plan = {
@@ -923,7 +1026,27 @@ def run_gate(
         group_outcomes: dict[str, str] = {}
         spent = 0
         run_bound_blocked = False
-        for group in GROUPS[:max_groups]:
+        # D2: a return rewrites what was named and leaves the rest alone.  The
+        # four calls exist because four groups read the same tables, so a
+        # request to rewrite one question is a request to re-run one group --
+        # and a return that named two questions in one group costs one call
+        # rather than four.
+        wanted = list(GROUPS[:max_groups])
+        if review is not None:
+            targeted = questions_to_redraft(
+                review,
+                assessment=assess(prior, dossier=dossier, verifier_passed=True,
+                                  standard=standard) if prior else None,
+                prior=prior)
+            limited = [group for group in groups_to_redraft(targeted)
+                       if group in wanted]
+            # A return with no handle -- no question numbers, nothing short of
+            # the standard -- is still a return, and the honest reading of it
+            # is "the whole document".
+            if limited:
+                wanted = limited
+            summary["redrafted_questions"] = list(targeted)
+        for group in wanted:
             rows, notes = plan[group]
             if not rows:
                 group_outcomes[group] = "no_material"
@@ -940,8 +1063,16 @@ def run_gate(
                 model, group=group,
                 questions={ref: question_by_ref[ref] for ref in GROUP_QUESTIONS[group]},
                 material=rows, company=company, mission=mission,
-                prior_answers=prior_bodies, notes=notes,
+                prior_answers=prior_bodies, notes=notes, review=review,
+                # WP-C1: one repair of a broken reply shape, on the same model,
+                # out of what is left of *this run's* bound -- and it has to
+                # leave the verifying call its own or it is refused unmade.
+                budget_remaining_micros=run_cost_micros - spent,
+                repair_reserve_micros=producer_reserve + verifier_reserve,
             )
+            if outcome.get("contract_repair") is not None:
+                summary["contract_repair"].append(
+                    {"group": group, **outcome["contract_repair"]})
             spent += int((outcome.get("model") or {}).get("cost_micros") or 0)
             if outcome["status"] != "drafted":
                 group_outcomes[group] = "refused"
@@ -1027,6 +1158,18 @@ def run_gate(
         # nothing; assembling one and having the authority refuse it would leave
         # the summary describing a record nobody can read.
         fresh = fresh_evidence(answers, prior)
+        if not fresh and review is not None:
+            # D2: a reviewer's return is the new information.  The rows are the
+            # same rows -- that is usually the point, "you misread what is
+            # already here" -- so the version names what the rewritten answers
+            # rest on rather than claiming a novelty it does not have, and the
+            # authority lets a ``reviewer_returned`` version through on an
+            # unchanged evidence set provided the body actually moved.
+            fresh = [dict(row) for row in {
+                row["ref"]: row
+                for answer in answers.values()
+                for row in answer.get("sources") or []
+            }.values()]
         if not fresh:
             summary.update({
                 "status": "succeeded", "gate_status": "no_new_evidence",
@@ -1078,12 +1221,38 @@ def run_gate(
                                               + ", ".join(gate_result["failed"])})
             return summary
         findings = output_rubric_findings(record, constitution=constitution,
-                                          policy=policy, prior=prior)
+                                          policy=policy, prior=prior,
+                                          reviewer_returned=review is not None)
         summary["output_rubric_findings"] = findings
         if findings:
             summary.update({"status": "succeeded", "gate_status": "constitution_refused",
                             "failure_reason": "the Constitution's output_rubric was "
                                               "not satisfied"})
+            return summary
+        # D1: the last gate before a person's attention is spent.  Everything
+        # above asked "is this a well-formed, well-cited document"; this asks
+        # "is there anything here to decide".  A draft that answers three of
+        # twelve questions from twenty-six rows is both of the first and none
+        # of the second, and publishing it would put a research plan in the
+        # approvals queue and call it a finding.
+        quality = assess(record, dossier=dossier, verifier_passed=True,
+                         standard=standard)
+        summary["quality"] = quality
+        summary["carried_forward_questions"] = carried_forward_questions(record, prior)
+        if not quality["submittable"]:
+            note = write_note(
+                state_dir, company_ref=chosen,
+                evidence_fingerprint=attempt_fingerprint,
+                body_hash=content_hash(record.get("answers") or []),
+                assessment=quality,
+                reviewer_questions=summary.get("redrafted_questions") or [],
+            )
+            summary.update({
+                "status": "succeeded",
+                "gate_status": "auto_returned",
+                "auto_return_note_at": note["created_at"],
+                "failure_reason": quality["summary"],
+            })
             return summary
         summary["new_refs"] = len(new_refs(record, prior))
         published = gates.publish(record)
@@ -1096,7 +1265,13 @@ def run_gate(
             "duplicate_reason": published.get("duplicate_reason"),
             **summarise_answers(answers),
         })
+        summary["change_note"] = change_note(record, prior)
+        summary["changed_questions"] = changed_questions(record, prior)
         if published["status"] == "fresh":
+            # The company is in front of a person now, so the note that said it
+            # was being held back is no longer true.  A note that outlives its
+            # condition is worse than no note.
+            clear_note(state_dir, chosen)
             summary["deliverable_status"] = _publish_deliverable(
                 store, published, mission=mission, playbook=playbook,
                 actor_ref=actor_ref)
@@ -1109,8 +1284,53 @@ def run_gate(
         summary["failure_reason"] = f"unexpected {type(exc).__name__}: {exc}"
         raise
     finally:
+        _hold_after_return(state_dir, summary)
         _write_owner_only(summary_dir / "summary.json", summary)
         store.close()
+
+
+# What a reviewer-returned run that produced no version leaves behind.  Without
+# it the redraft would be attempted again on the next process, because the
+# in-memory quiet signature dies with the controller and the decision has not
+# changed.  One note, keyed on the same (evidence, decision) attempt the loop
+# above checks, is what makes "one redraft per return" true across restarts.
+_RETURN_HOLD_REASONS: Mapping[str, str] = {
+    "duplicate": "按审阅意见重写后，这一版与上一版说的是同一件事，没有形成新版本。",
+    "no_new_evidence": "按审阅意见重写后，没有引用到任何新的材料，也没有改变结论。",
+    "nothing_drafted": "按审阅意见重写时，一组也没有起草成功。",
+    "unverified": "这一轮的费用上限不够做独立复核，所以没有提交。",
+    "verification_failed": "按审阅意见重写的内容没有通过独立复核。",
+    "not_independent": "复核模型与起草模型同族，这一版的复核不算独立。",
+    "rubric_refused": "按审阅意见重写的内容没有通过发布前的结构检查。",
+    "constitution_refused": "按审阅意见重写的内容不满足宪法的产出标准。",
+    "unresolvable_refs": "按审阅意见重写的内容引用了现在解析不到的材料。",
+    "classification_conflict": "第一问的分类与公司档案不一致，整份草稿被拒绝。",
+}
+
+
+def _hold_after_return(state_dir: Path, summary: Mapping[str, Any]) -> None:
+    status = str(summary.get("gate_status") or "")
+    company_ref = summary.get("company_ref")
+    fingerprint = summary.get("attempt_fingerprint")
+    if (not summary.get("review") or status in ("submitted", "auto_returned")
+            or not company_ref or not fingerprint):
+        return
+    reason = _RETURN_HOLD_REASONS.get(status)
+    if reason is None:
+        return
+    try:
+        write_note(
+            state_dir, company_ref=str(company_ref),
+            evidence_fingerprint=str(fingerprint),
+            body_hash=content_hash([status, str(company_ref)]),
+            assessment={"schema_version": "0.1", "submittable": False,
+                        "summary": reason, "checks": [], "shortfalls": [],
+                        "shortfall_labels": [], "counts": {},
+                        "question_gaps": []},
+            reviewer_questions=summary.get("redrafted_questions") or [],
+        )
+    except OSError:  # a note is a convenience; a run is not failed by one
+        return
 
 
 def _publish_deliverable(

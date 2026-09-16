@@ -120,13 +120,27 @@ PROMPT_PROJECTION_RULE = {
         "aggregate_readable_document_inventory",
     ],
     "readable_keep_per_company": 8,
-    "refusal": "if the state after every stage exceeds the configured input bound, send nothing",
+    # Stage five is a ladder, not one rung.  It was written with a single
+    # retention of eight, and when eight was not enough the call was refused --
+    # which is how 36 ticks in 48 hours reported ``ResearchPlanInputTooLarge``
+    # with a 4,575-to-5,495-byte overshoot that was still growing, while the
+    # projection had four cheaper retentions left in it.  Refusing before
+    # routing is right; refusing while a documented degradation remains
+    # unapplied is not.  Every rung keeps every company identity and records
+    # what it aggregated by hash, exactly as the first rung does.
+    "readable_keep_ladder": [8, 4, 2, 1],
+    "refusal": "if the state after every rung of every stage exceeds the "
+               "configured input bound, send nothing",
 }
 PROMPT_PROJECTION_HASH = content_hash(PROMPT_PROJECTION_RULE)
 
 # Stage five's retention: the newest documents a work order would realistically
 # name, kept in full per company while the rest becomes counts and a hash.
 READABLE_KEEP_PER_COMPANY = 8
+# ...and the tighter retentions tried after it, widest first.  One document per
+# company is the floor: below that no company can be named a next read at all,
+# and a planner that cannot name a document is not worth the call.
+READABLE_KEEP_LADDER: tuple[int, ...] = (READABLE_KEEP_PER_COMPANY, 4, 2, 1)
 
 # Stage three's verification-only fields.  The planner chooses work; these
 # four fields exist so a reader can re-verify a registration, and a work
@@ -466,6 +480,11 @@ def project_state_for_prompt(
     # ``projection_meta`` reads the list at render time, so the disclosure
     # always names exactly what was done.
     stages_applied: list[str] = ["drop_preview_triplets"]
+    # Which rung of stage five is in force.  Named in the disclosure rather
+    # than in the stage name so that "stage five engaged" stays one stable
+    # token for everything that reads this list, while the reader can still
+    # see how hard the fit had to be pushed.
+    readable_keep: list[int] = [READABLE_KEEP_PER_COMPANY]
 
     def projection_meta(retained: set[tuple[int, int]], prompt_bytes: int | None) -> dict[str, Any]:
         omitted = [identities[position] for position in order if position not in retained]
@@ -502,6 +521,7 @@ def project_state_for_prompt(
             "projected_prompt_bytes": prompt_bytes,
             "document_identities_preserved": True,
             "stages_applied": list(stages_applied),
+            "readable_keep_per_company": readable_keep[0],
             "preview_triplets_total": len(order),
             "preview_triplets_retained": len(retained),
             "preview_triplets_omitted": len(omitted),
@@ -577,41 +597,58 @@ def project_state_for_prompt(
         # of the omitted rows.  Preview restoration is skipped when this stage
         # engages: the retention loop indexes the original inventory and would
         # write into the wrong rows of the truncated one.
-        for company in companies:
-            documents = company.get("readable_documents") or []
-            if len(documents) <= READABLE_KEEP_PER_COMPANY:
-                continue
-            ordered = sorted(
-                documents,
-                key=lambda document: (
-                    str(document.get("doc_date") or ""),
-                    str(document.get("document_ref") or ""),
-                ),
-                reverse=True,
-            )
-            keep, omit = ordered[:READABLE_KEEP_PER_COMPANY], ordered[READABLE_KEEP_PER_COMPANY:]
-            by_kind: dict[str, int] = {}
-            for document in omit:
-                kind = str(document.get("doc_kind") or "unknown")
-                by_kind[kind] = by_kind.get(kind, 0) + 1
-            company["readable_documents"] = keep
-            company["readable_documents_summary"] = {
-                "retained_recent": len(keep),
-                "aggregated": len(omit),
-                "by_kind": dict(sorted(by_kind.items())),
-                "earliest_doc_date": min(
-                    (document.get("doc_date") for document in omit
-                     if document.get("doc_date")), default=None),
-                "latest_doc_date": max(
-                    (document.get("doc_date") for document in omit
-                     if document.get("doc_date")), default=None),
-                "omitted_rows_hash": content_hash(omit),
-            }
-        inventory_aggregated = any(
-            "readable_documents_summary" in company for company in companies)
-        if inventory_aggregated:
-            stages_applied.append("aggregate_readable_document_inventory")
+        #
+        # K walks down ``READABLE_KEEP_LADDER`` until the prompt fits.  Each
+        # rung re-aggregates from the *unaggregated* inventory rather than
+        # aggregating an aggregate, so the summary always describes exactly
+        # what it omitted and the omitted-rows hash stays checkable.
+        untouched = {
+            index: json.loads(canonical_json(company.get("readable_documents") or []))
+            for index, company in enumerate(companies)
+        }
+        for keep_per_company in READABLE_KEEP_LADDER:
+            for index, company in enumerate(companies):
+                documents = untouched[index]
+                company.pop("readable_documents_summary", None)
+                company["readable_documents"] = json.loads(canonical_json(documents))
+                if len(documents) <= keep_per_company:
+                    continue
+                ordered = sorted(
+                    documents,
+                    key=lambda document: (
+                        str(document.get("doc_date") or ""),
+                        str(document.get("document_ref") or ""),
+                    ),
+                    reverse=True,
+                )
+                keep, omit = ordered[:keep_per_company], ordered[keep_per_company:]
+                by_kind: dict[str, int] = {}
+                for document in omit:
+                    kind = str(document.get("doc_kind") or "unknown")
+                    by_kind[kind] = by_kind.get(kind, 0) + 1
+                company["readable_documents"] = keep
+                company["readable_documents_summary"] = {
+                    "retained_recent": len(keep),
+                    "aggregated": len(omit),
+                    "by_kind": dict(sorted(by_kind.items())),
+                    "earliest_doc_date": min(
+                        (document.get("doc_date") for document in omit
+                         if document.get("doc_date")), default=None),
+                    "latest_doc_date": max(
+                        (document.get("doc_date") for document in omit
+                         if document.get("doc_date")), default=None),
+                    "omitted_rows_hash": content_hash(omit),
+                }
+            inventory_aggregated = any(
+                "readable_documents_summary" in company for company in companies)
+            if not inventory_aggregated:
+                break
+            readable_keep[0] = keep_per_company
+            if "aggregate_readable_document_inventory" not in stages_applied:
+                stages_applied.append("aggregate_readable_document_inventory")
             projected["prompt_projection"] = projection_meta(retained, None)
+            if _fits():
+                break
 
     base_report = prompt_size_report(projected, max_input_bytes=max_input_bytes)
     if not base_report["fits"]:
@@ -1097,6 +1134,9 @@ __all__ = [
     "PROMPT_PROJECTION_HASH",
     "PROMPT_PROJECTION_REF",
     "PROMPT_PROJECTION_RULE",
+    "READABLE_KEEP_LADDER",
+    "READABLE_KEEP_PER_COMPANY",
+    "READING_ACTIONS",
     "TASK_HASH",
     "TASK_REF",
     "ResearchPlanError",
@@ -1104,9 +1144,84 @@ __all__ = [
     "build_prompt",
     "build_work",
     "directives_for",
+    "document_reading_priorities",
+    "gap_filling_inquiries",
     "parse_response",
     "plan_from_response",
     "project_state_for_prompt",
     "prompt_size_report",
     "wanted_specs",
 ]
+
+
+# ---------------------------------------------------------------------------
+# what a plan asks the reading lanes to do next
+# ---------------------------------------------------------------------------
+
+# The two directive actions that are about documents already held.  ``search``
+# and ``acquire`` are consumed by ``mission_source_discovery``; ``stop`` is a
+# refusal.  These two have had no consumer at all: on 2026-09-16 a grep for
+# ``extract_figures`` across the package found the enum that defines it and the
+# cockpit label that displays it, and nothing else.  439 directives were
+# produced in 48 hours and not one of them became downstream work.
+READING_ACTIONS: tuple[str, ...] = ("read", "extract_figures")
+
+
+def document_reading_priorities(
+    plan: Mapping[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """The plan's reading directives, ranked, as a list a lane can execute.
+
+    Kept deliberately small and pure.  The planner's job is to say what is
+    worth reading next and why; choosing *which* held document satisfies
+    ``extract_figures`` for a company belongs to the extraction lane, which is
+    the only thing that knows what it has and what it costs.  What was missing
+    was not judgement -- the plan already carries it -- but a stable shape for
+    the lane to read it out of, ranked, with the rank preserved.
+
+    The rank is the plan's own order: ``directives`` is a ranked list and its
+    first entry is the most valuable work, so the position is the priority and
+    is carried through rather than recomputed.
+    """
+
+    directives = (plan or {}).get("directives") or []
+    ranked: list[dict[str, Any]] = []
+    for position, directive in enumerate(directives):
+        if not isinstance(directive, Mapping):
+            continue
+        if directive.get("action") not in READING_ACTIONS:
+            continue
+        ranked.append({
+            "rank": len(ranked) + 1,
+            "plan_position": position,
+            "company_ref": directive.get("company_ref"),
+            "item_ref": directive.get("item_ref"),
+            "action": directive.get("action"),
+            "reason": directive.get("reason"),
+        })
+    return ranked
+
+
+def gap_filling_inquiries(plan: Mapping[str, Any] | None) -> list[dict[str, Any]]:
+    """The plan's inquiries, ranked, with the directed document named.
+
+    ``research_task.plan_admissions`` already consumes these; this is the same
+    list in the same order, exported so a summary can say how many of a fresh
+    plan's inquiries are actually addressable (they name a directed document)
+    and how many are questions nobody can route yet.
+    """
+
+    inquiries = (plan or {}).get("inquiries") or []
+    ranked: list[dict[str, Any]] = []
+    for position, inquiry in enumerate(inquiries):
+        if not isinstance(inquiry, Mapping):
+            continue
+        ranked.append({
+            "rank": len(ranked) + 1,
+            "plan_position": position,
+            "company_ref": inquiry.get("company_ref"),
+            "question": inquiry.get("question"),
+            "directed_document": inquiry.get("directed_document"),
+            "addressable": inquiry.get("directed_document") is not None,
+        })
+    return ranked

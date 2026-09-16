@@ -604,7 +604,11 @@ def validate_worker_config(cfg):
              'checker_config', 'brain_config', 'work_dir', 'output_directory'}
     required = paths | {'schema_version', 'workers', 'chunk_chars',
                         'max_cost_per_call', 'draft_attempts', 'publication_gate'}
-    if (not isinstance(cfg, dict) or set(cfg) != required
+    # Optional because every installed config predates them; absent means the
+    # module defaults, which are the values these two knobs used to hard-code.
+    optional = {'ui_text_batches_per_run', 'ui_text_max_attempts'}
+    if (not isinstance(cfg, dict) or not required <= set(cfg)
+            or set(cfg) - required - optional
             or cfg.get('schema_version') != 'research-publication-worker-config:0.1'):
         raise ValueError('unsupported research publication worker configuration')
     for name in paths:
@@ -613,6 +617,9 @@ def validate_worker_config(cfg):
     bounds = {'workers': (1, 8), 'chunk_chars': (100, 50000), 'draft_attempts': (1, 5)}
     for name, (low, high) in bounds.items():
         if type(cfg[name]) is not int or not low <= cfg[name] <= high:
+            raise ValueError('publication worker bounds are invalid')
+    for name in optional:
+        if name in cfg and (type(cfg[name]) is not int or not 1 <= cfg[name] <= 64):
             raise ValueError('publication worker bounds are invalid')
     cost = cfg['max_cost_per_call']
     if type(cost) not in (int, float) or not 0 < cost <= 1:
@@ -676,14 +683,22 @@ def run_worker(config_path):
                 result=poll_once(connection,mission,state_dir=root/'products',prepare=prepare,
                     extra_reader=lambda con,mis,company:final_surface_products(con,mis,company,
                         weekly_renderer=weekly.render_markdown))
-                from .ui_text_discovery import poll_ui_texts
+                from .ui_text_discovery import (
+                    DEFAULT_BATCHES_PER_RUN, DEFAULT_MAX_ATTEMPTS, poll_ui_texts)
                 from .research_localization_store import load_ui_texts
                 ui_result=poll_ui_texts(connection,mission,state_dir=root/'ui-text-products',
                     mapping=load_ui_texts(core),
-                    prepare=lambda product:prepare_ui_batch(args,mission,product))
+                    prepare=lambda product:prepare_ui_batch(args,mission,product),
+                    batches_per_run=int(cfg.get('ui_text_batches_per_run',
+                                                DEFAULT_BATCHES_PER_RUN)),
+                    max_attempts=int(cfg.get('ui_text_max_attempts',
+                                             DEFAULT_MAX_ATTEMPTS)))
                 result['ui_texts']=ui_result
                 result['pending']+=ui_result['pending']
-                result['status']='healthy' if not result['pending'] else 'pending'
+                result['blocked']=ui_result.get('blocked',0)
+                result['blocked_reasons']=ui_result.get('blocked_reasons',[])
+                result['status']=('healthy' if not result['pending']
+                                  else 'pending')
         finally:
             connection.close()
         from datetime import datetime,timezone
@@ -691,7 +706,12 @@ def run_worker(config_path):
         result['checked_at']=datetime.now(timezone.utc).isoformat()
         write_json(root/'worker-last-run.json',result)
         print(json.dumps(result,ensure_ascii=False))
-        return 0 if result['status'] in {'healthy','no_current_mission'} else 1
+        # A backlog is not a fault. This returned 1 whenever anything was still
+        # pending, so launchd recorded a failing service every five minutes for
+        # a worker that was doing exactly what it is supposed to do. A real
+        # fault -- an unreadable config, an unusable gate, an exception -- is
+        # still non-zero, through the gate branch above or by propagating.
+        return 0 if result['status'] in {'healthy','no_current_mission','pending'} else 1
 
 
 def main():

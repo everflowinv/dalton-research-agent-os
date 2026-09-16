@@ -400,7 +400,11 @@ class DraftRunTests(unittest.TestCase):
         model = FakeModel([draft_reply(driver_refs=["driver:invented"]), PASS])
         result = self.run_draft(model)
         self.assertEqual(result["status"], "refused")
-        self.assertEqual(len(model.calls), 1)
+        # One repair of the shape, on the same purpose, and then refused.  The
+        # verifier is never asked about a draft that was never admitted.
+        self.assertEqual([call["purpose"] for call in model.calls],
+                         ["debate_map", "debate_map"])
+        self.assertEqual(result["contract_repair"]["repair_attempts"], 1)
         self.assertEqual(result["debates"], [])
 
     def test_a_candidate_the_gate_refuses_is_kept_and_nothing_is_published(self) -> None:

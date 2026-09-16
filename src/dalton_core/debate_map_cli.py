@@ -33,9 +33,12 @@ from .debate_map_draft import (
     MAX_COST_USD,
     MAX_INPUT_TOKENS,
     MAX_OUTPUT_TOKENS,
+    TARGET_PROMPT_BYTES,
     TIMEOUT_SECONDS,
     build_input_table,
     build_prompt,
+    drafted_from_identical_input,
+    fit_input_table,
     change_evidence,
     change_reason_for,
     draft_debate_map,
@@ -112,6 +115,8 @@ def run_debate_map(
         "rejected": 0,
         "cost_micros": 0,
         "prompt_bytes": 0,
+        "prompt_fit": None,
+        "contract_repair": None,
         "failure_reason": None,
         "policy_ref": POLICY_REF,
         "policy_hash": POLICY_HASH,
@@ -157,7 +162,7 @@ def run_debate_map(
         previous = authority.current(subject_ref)
         current_fingerprint = evidence_fingerprint(
             row["claim_version_ref"] for row in rows)
-        table = build_input_table(
+        table, fit = fit_input_table(
             subject_ref=subject_ref,
             subject_kind=subject_kind_for(subject_ref),
             claim_rows=rows,
@@ -166,10 +171,30 @@ def run_debate_map(
             method=method,
             previous=previous,
             industry_classification=classification,
+            max_bytes=TARGET_PROMPT_BYTES,
         )
-        summary["prompt_bytes"] = len(build_prompt(table).encode("utf-8"))
+        prompt = build_prompt(table)
+        summary["prompt_bytes"] = len(prompt.encode("utf-8"))
+        summary["prompt_fit"] = fit
         if dry_run:
             summary.update({"status": "succeeded", "map_status": "dry_run"})
+            return summary
+        # Held before a single byte is paid for. The lane asks whether the
+        # subject's *claims* moved; what the drafter sees is the bounded table,
+        # and between 2026-09-14 and 09-16 forty-two runs bought a drafting
+        # call and a verifying call to redraw a map from a prompt the current
+        # version had already been drawn from, and published nothing.
+        if not can_rebind(previous, mission, constitution, current_fingerprint) \
+                and drafted_from_identical_input(
+                    scheduler_db or (state_dir / "scheduler.sqlite"), previous, prompt):
+            summary.update({
+                "status": "held", "map_status": "input_unchanged",
+                "version_ref": previous["id"], "version": previous["version"],
+                "debates": len(previous["debates"]),
+                "failure_reason": (
+                    "当前版本就是用这份完全相同的输入表起草的；再问一次只会买到同一张图，"
+                    "所以这一轮不调用模型"),
+            })
             return summary
         rebindable = can_rebind(previous, mission, constitution, current_fingerprint)
         if rebindable:
@@ -214,6 +239,11 @@ def run_debate_map(
                 table=table, method=method, model=model, mission=mission,
                 created_at=created_at, previous=previous,
                 family_of=lambda ref: route_family(config["model_router_db"], ref),
+                # One subject, one run: the whole per-call bound is what a
+                # repair may draw on, and it has to leave the verifying call
+                # its own.
+                budget_remaining_micros=int(float(MAX_COST_USD) * 2_000_000),
+                repair_reserve_micros=int(float(MAX_COST_USD) * 1_000_000),
             )
         except SchedulerError as exc:
             summary.update({"status": "succeeded", "map_status": "busy",
@@ -225,6 +255,7 @@ def run_debate_map(
             return summary
         summary["cost_micros"] = int(drafted.get("cost_micros") or 0)
         summary["rejected"] = len(drafted.get("rejected") or [])
+        summary["contract_repair"] = drafted.get("contract_repair")
         if drafted["status"] != "verified":
             run_status = (
                 "succeeded"

@@ -548,7 +548,7 @@ class MissionAnnualResearchTests(unittest.TestCase):
             "candidate_source_materials": 1, "candidate_verifications": 1,
             "candidate_numeric_specs": 0, "candidate_evidence_versions": 1,
             "candidate_claim_versions": 1, "candidate_stage_requests": 1,
-            "candidate_figures": 0,
+            "candidate_figures": 0, "candidate_statement_lines": 0,
         })
 
     def test_remaining_day_budget_refusal_is_terminal_before_model_adapter(self):
@@ -650,7 +650,7 @@ class MissionAnnualResearchTests(unittest.TestCase):
             "candidate_source_materials": 0, "candidate_verifications": 0,
             "candidate_numeric_specs": 0, "candidate_evidence_versions": 0,
             "candidate_claim_versions": 0, "candidate_stage_requests": 0,
-            "candidate_figures": 0,
+            "candidate_figures": 0, "candidate_statement_lines": 0,
         })
         self.assertEqual(fixture.store.connection.execute(
             "SELECT count(*) FROM mission_annual_research_outcomes"

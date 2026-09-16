@@ -8,8 +8,11 @@ gate asks.  This module turns those into a bounded drafting pass:
 - the model writes one section at a time and may cite only those tags.  A
   figure may appear in the body only if the section cites the ``N`` tag that
   carries it, so the number discipline is structural, not a request;
-- the valuation section is not drafted at all: no market-data connector is
-  admitted, and the Playbook says an unsourced number is worse than a gap;
+- the valuation section is drafted from the valuation snapshot when this Core
+  holds one, tagged ``N`` like every other figure and citing the snapshot cell
+  rather than a Claim, because a multiple is computed and no Claim will ever
+  carry it; with no snapshot the section is still not drafted at all, because
+  the Playbook says an unsourced number is worse than a gap;
 - the exit gate is assessed by structural checks over the mission's own source
   base and the document that was written, never by asking a model whether its
   own work is good.
@@ -52,17 +55,34 @@ SECTION_GUIDANCE: tuple[str, ...] = (
     "并说明市场（street）可能在哪里没有反映它。如果证据不足以支撑一个 thesis，直说不足在哪里。",
     "写风险与 anti-thesis（简版）：完整的反向观点，不是风险清单；逐条说明它成立需要什么条件。",
     "写 relevance to universe：这件事对覆盖范围内其他公司的多空含义。",
-    "",  # valuation: never drafted, see VALUATION_GAP
+    # P11c-E: drafted only when the valuation snapshot supplied N rows; the
+    # caller falls back to VALUATION_GAP when it did not. The guidance is
+    # deliberately about what the held multiples do and do not settle: this
+    # Core computes trailing multiples and their own history, and holds no
+    # target price and no forward multiple at all.
+    "写估值：用已持有的估值快照说明这家公司现在被定价成什么样——哪几个倍数算得出来、"
+    "每个倍数在自己历史区间的什么位置、以及这个位置是被价格推动的还是被申报基本面推动的。"
+    "只能写 N 标签里逐字出现的数字；快照没给出的倍数就明说缺哪一项输入，不要用别的科目替代，"
+    "也不要跨公司套用。本系统不持有目标价与前瞻倍数，所以不要写目标价、上涨空间或 NTM 倍数。"
+    "如果我们读出来的估值与市场预期方向一致，直说这里没有差异化观点——共识一致等于没有观点，"
+    "把它写成观点是这一节最容易犯的错。",
     "写数据跟踪：应该盯住哪些可观察的高频或定期数据来验证或证伪上面的判断。",
 )
 #: How much of one prior section the drafter is shown. Enough to judge, not
 #: enough to copy comfortably, and bounded so a long old memo cannot crowd out
 #: the Claims the new version has to be written from.
 MAX_PRIOR_SECTION_CHARS = 1200
+#: Why the valuation section is empty when it is empty. Accurate as of P11c-E:
+#: the inputs are no longer the problem -- the price series, the share
+#: observation and the filed statement lines are all held -- so the only honest
+#: reason left is that this company has no published valuation snapshot yet.
+#: The old text blamed six absent authorities and would now be a false
+#: statement about this Core on every company the snapshot lane has priced.
 VALUATION_GAP = (
-    "估值一节按 Playbook 的数字纪律留空：本次 Initial Screen 冻结输入没有同时提供可引用的"
-    "价格、股本、汇率、利率、市场预期与估值结果。系统其他流程可能已持有其中部分 authority，"
-    "但本调用看不到的内容不能当作证据；应由估值投影接入后再写倍数或目标价。"
+    "估值一节按 Playbook 的数字纪律留空：这家公司还没有已发布的估值快照（"
+    "valuation_snapshot_versions 里没有它的版本），本次冻结输入里因此没有任何可引用的"
+    "倍数、市值或历史分位。系统其他流程可能已持有价格与申报数据，但本调用看不到的内容"
+    "不能当作证据；等估值快照车道为这家公司发出第一版之后，这一节会自动改为据此起草。"
 )
 GATE_QUESTION_CHECKS = ("source_base", "number_provenance", "key_driver", "street_and_risk")
 #: What one gate item can say about itself. ``passed`` / ``failed`` are the
@@ -356,9 +376,26 @@ def _select_numbers(
 
 
 def build_claim_context(
-    claims: Sequence[Mapping[str, Any]], *, max_claims: int = MAX_CLAIMS_PER_SECTION
+    claims: Sequence[Mapping[str, Any]], *,
+    max_claims: int = MAX_CLAIMS_PER_SECTION,
+    valuation: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
-    """Tag the company's live Claims as C1..Cn (qualitative) and N1..Nk (figures)."""
+    """Tag the company's live Claims as C1..Cn (qualitative) and N1..Nk (figures).
+
+    ``valuation`` is P11c-E's computed layer: the multiples a published
+    valuation snapshot holds, in the shape ``deep_insight_gate_cli``
+    already mints them. They are tagged ``N`` with everything else, because
+    from the drafter's side a figure is a figure and a second vocabulary
+    would be a second way to get the number discipline wrong -- but they
+    carry a ``cell`` instead of a Claim ref, since no Claim will ever carry
+    a computed multiple.
+
+    They are appended *after* the Claim figures rather than competing with
+    them for ``MAX_NUMBERS``: there are at most four of them, they are the
+    only figures the valuation section can be written from at all, and
+    letting a flat tail of revenue rows crowd them out would leave that
+    section with nothing for the sake of one more quarter of revenue.
+    """
 
     qualitative, quantitative = [], []
     for claim in claims:
@@ -397,6 +434,24 @@ def build_claim_context(
             "statement": str(claim.get("statement") or ""),
             "figures": value_tokens(str(claim.get("statement") or "")),
             "period": claim.get("period"), "aspect": claim.get("aspect"),
+            "cell": None,
+        })
+    for row in valuation:
+        ref = str(row.get("ref") or "")
+        version_ref = ref.rsplit(":", 1)[0].split(":", 1)[-1] if ref else ""
+        if not ref or not version_ref:
+            continue
+        statement = str(row.get("text") or "")
+        tagged_numbers.append({
+            "tag": f"N{len(tagged_numbers) + 1}", "ref": ref,
+            "statement": statement,
+            "figures": value_tokens(statement),
+            "period": row.get("period"), "aspect": "valuation",
+            # What this figure cites instead of a Claim. The shape is
+            # ``mission_deliverable.validate_cell_citation``'s, checked there
+            # and resolved against the snapshot at publish time.
+            "cell": {"kind": "valuation_metric", "ref": ref,
+                     "version_ref": version_ref},
         })
     return {
         "claims": tagged_claims, "numbers": tagged_numbers,
@@ -525,6 +580,43 @@ def render_prior_reference(prior_reference: Mapping[str, Any] | None) -> list[st
     return lines
 
 
+def valuation_section_held(
+    title: str, guidance: str, valuation: Sequence[Mapping[str, Any]],
+) -> bool:
+    """Whether the valuation section is left to :data:`VALUATION_GAP`.
+
+    Gated on having something to write it from, not on being the valuation
+    section. Before P11c-E the answer was "always", because the guidance was
+    empty; now it is "only when this Core has not priced the company", and a
+    drafted-but-figureless valuation section -- which is what would happen if
+    this returned False with no rows -- would read as "we looked and it is not
+    interesting" rather than "we have not priced this company".
+    """
+
+    if VALUATION_TITLE_HINT not in title:
+        return False
+    return not guidance or not valuation
+
+
+def _number_entry(tagged: Mapping[str, Any]) -> dict[str, Any]:
+    """One cited figure, citing whichever provenance it actually has.
+
+    Exactly one of the two, never both: the deliverable authority refuses an
+    entry that claims a Claim and a cell, because a figure with two
+    provenances gets checked against the more convenient one.
+    """
+
+    entry: dict[str, Any] = {
+        "text": tagged["statement"], "period": tagged.get("period"),
+    }
+    cell = tagged.get("cell")
+    if cell:
+        entry["cell"] = dict(cell)
+    else:
+        entry["claim_version_ref"] = tagged["ref"]
+    return entry
+
+
 def parse_section_output(
     text: str, *, context: Mapping[str, Any], title: str
 ) -> dict[str, Any]:
@@ -546,9 +638,7 @@ def parse_section_output(
         for tag in (parsed.get("claims") or []) if str(tag).strip() in claims_by_tag
     ]
     numbers = [
-        {"text": numbers_by_tag[str(tag).strip()]["statement"],
-         "claim_version_ref": numbers_by_tag[str(tag).strip()]["ref"],
-         "period": numbers_by_tag[str(tag).strip()]["period"]}
+        _number_entry(numbers_by_tag[str(tag).strip()])
         for tag in (parsed.get("numbers") or []) if str(tag).strip() in numbers_by_tag
     ]
     gaps = [str(gap)[:300] for gap in (parsed.get("gaps") or []) if str(gap).strip()][:20]

@@ -87,6 +87,21 @@ def _positive_number(value: Any, name: str) -> float:
 LEGACY_AGENDA_PLANE_KEY = "legacy_agenda_plane"
 LEGACY_AGENDA_RETIRED_LINE = "legacy agenda plane retired (ADR-0009)"
 
+#: B1-4: how long the controller waits between full dashboard rebuilds.
+#:
+#: Two seconds was the installed default and it is not an interval -- one
+#: rebuild reads every work order, every formal result and every model
+#: invocation and takes 7.5 s on the live Core, so a two second floor means
+#: the projector runs continuously.  Live, the controller sat at 12% CPU in
+#: uninterruptible sleep around the clock, which is also why the WAL never
+#: reached a checkpoint and grew to sixteen times the database.
+#:
+#: Sixty seconds is the dashboard's actual freshness requirement: the page
+#: polls once a minute.  The interval is also now measured from the end of a
+#: rebuild rather than its start, so it is a gap between rebuilds and not a
+#: gap between their beginnings.
+DEFAULT_PROJECTION_MIN_INTERVAL_SECONDS = 60.0
+
 
 @dataclass(frozen=True, slots=True)
 class ServiceConfig:
@@ -145,7 +160,7 @@ class ServiceConfig:
         required = {
             "schema_version", "core_db", "scheduler_db", "projection_db",
             "model_router_db", "capability_catalog_db", "heartbeat_path",
-            "writer_socket", "tick_seconds", "projection_min_interval_seconds",
+            "writer_socket", "tick_seconds",
             "plugin_retry_seconds", "plugins",
         }
         optional = {
@@ -153,6 +168,12 @@ class ServiceConfig:
             "backup", "thesis_impact", "document_extraction",
             "alphaengine_owner_call_cap", "web_search_expected_provider",
             LEGACY_AGENDA_PLANE_KEY, "workspace",
+            # B1-4: optional, with a default that is not two seconds.  A
+            # config that predates this still carries the key and still wins;
+            # one that omits it gets the interval a full rebuild can actually
+            # sustain rather than a required key nobody could have chosen
+            # correctly.
+            "projection_min_interval_seconds",
         }
         if not required.issubset(raw) or set(raw) - required - optional or raw.get("schema_version") != SCHEMA_VERSION:
             raise ServiceConfigError("service config has an invalid shape or schema version")
@@ -420,7 +441,11 @@ class ServiceConfig:
             workspace=workspace,
             tick_seconds=_positive_number(raw["tick_seconds"], "tick_seconds"),
             projection_min_interval_seconds=_positive_number(
-                raw["projection_min_interval_seconds"], "projection_min_interval_seconds"
+                raw.get(
+                    "projection_min_interval_seconds",
+                    DEFAULT_PROJECTION_MIN_INTERVAL_SECONDS,
+                ),
+                "projection_min_interval_seconds",
             ),
             plugin_retry_seconds=_positive_number(raw["plugin_retry_seconds"], "plugin_retry_seconds"),
             plugins=tuple(plugins),
@@ -615,6 +640,7 @@ class DaltonService:
                 "scheduler": config.scheduler_db,
                 **({"model-router": config.model_router_db} if config.model_router_db else {}),
             },
+            keep_latest=config.backup_keep_latest,
         )
         self._backup_executor: concurrent.futures.ThreadPoolExecutor | None = None
         self._backup_future: concurrent.futures.Future[dict[str, Any]] | None = None
@@ -1056,9 +1082,37 @@ class DaltonService:
 
         self._poll_backup()
 
+    def _ensure_projection_indexes(self) -> None:
+        """Build the scheduler's read-path indexes once per process.
+
+        B1-4.  ``scheduler.sqlite`` carries one index outside its primary
+        keys, so the projection's two partitioned reads scanned 26k lease
+        revisions and 26k result envelopes every round.  This runs on the
+        projection thread rather than at start-up, because that is the thread
+        that is allowed to be slow, and it runs once: after the first attempt
+        the indexes are there and every later round pays one lookup in
+        ``sqlite_master``.  A deferred build (a busy writer) is retried by the
+        next process to open the database; it is never an error here, because
+        an index is a speed, not a contract.
+        """
+
+        if getattr(self, "_projection_indexes_applied", False):
+            return
+        self._projection_indexes_applied = True
+        try:
+            from .migrations import apply_projection_indexes
+
+            apply_projection_indexes(
+                core_db=self.config.core_db,
+                scheduler_db=self.config.scheduler_db,
+            )
+        except Exception:  # noqa: BLE001 - a projection never fails over an index
+            pass
+
     def _build_projection(
         self, source_signature: tuple[Any, ...]
     ) -> tuple[dict[str, Any], tuple[Any, ...]]:
+        self._ensure_projection_indexes()
         snapshot = project_dashboard(
             self.config.core_db,
             self.config.scheduler_db,
@@ -1075,6 +1129,9 @@ class DaltonService:
         if executor is None:
             raise RuntimeError("dashboard projection executor is unavailable")
         signature_before = source_signature or self._sources()
+        # Started, not finished.  The interval is applied at completion
+        # (``_poll_projection``); this only records that a rebuild is no
+        # longer "never".
         self._last_projection_monotonic = time.monotonic()
         self._projection_future = executor.submit(
             self._build_projection, signature_before
@@ -1085,6 +1142,12 @@ class DaltonService:
         if future is None or not future.done():
             return
         self._projection_future = None
+        # B1-4: the interval starts when the rebuild ends.  Measured from the
+        # submit instant, a 7.5 s rebuild under a 2 s floor was eligible again
+        # the moment it finished, so "minimum interval" described a gap that
+        # never existed.  Failures restart it too: a projector that raises in
+        # a millisecond must not be retried a thousand times a second.
+        self._last_projection_monotonic = time.monotonic()
         try:
             snapshot, signature_before = future.result()
         except Exception as exc:

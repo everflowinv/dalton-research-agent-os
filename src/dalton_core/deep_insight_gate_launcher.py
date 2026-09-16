@@ -54,6 +54,15 @@ class DeepInsightGateLauncher(LaneChildLauncher):
         self.policy_path = (
             None if policy_path is None
             else Path(policy_path).expanduser().resolve())
+        # D1: the submission standard is an input to what a run concludes, so
+        # the coordinator has to notice when it changes.  Named with ``policy``
+        # in it because that is what ``mission_deep_insight_lane.permission_key``
+        # hashes -- an owner who relaxes a threshold should see the lane look
+        # again on the next tick rather than after the next restart.
+        from .deep_insight_gate_quality import STANDARD_FILE_NAME
+
+        self.submission_standard_policy_path = (
+            Path(state_dir).expanduser().resolve() / STANDARD_FILE_NAME)
         self._adopted_finished: set[str] = set()
 
     @property

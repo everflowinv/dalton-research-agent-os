@@ -50,6 +50,25 @@ def _seed(path: Path, value: Mapping[str, Any]) -> None:
     _write(path, value)
 
 
+#: WP-A/A6. The smallest planner output allowance a new environment starts with.
+#: Not a preference: below this the reasoning models on the brain chain exhaust
+#: the allowance on thinking tokens and the broker refuses the call outright.
+MIN_PLANNER_MAX_OUTPUT_TOKENS = 16_000
+
+
+def _with_output_floor(budget: Any) -> Any:
+    """The planner call budget, with its output allowance raised to the floor."""
+
+    if not isinstance(budget, Mapping):
+        return {"max_output_tokens": MIN_PLANNER_MAX_OUTPUT_TOKENS}
+    value = dict(budget)
+    current = value.get("max_output_tokens")
+    if (not isinstance(current, int) or isinstance(current, bool)
+            or current < MIN_PLANNER_MAX_OUTPUT_TOKENS):
+        value["max_output_tokens"] = MIN_PLANNER_MAX_OUTPUT_TOKENS
+    return value
+
+
 def export_service_template(source_config: str | Path,
                             output_path: str | Path) -> dict[str, Any]:
     """Export model-engine settings, excluding subjects and destinations."""
@@ -69,6 +88,15 @@ def export_service_template(source_config: str | Path,
     planner["config"]["observation_mandate_version_ref"] = None
     planner["config"]["doctrine_pack_version_ref"] = None
     planner["config"]["doctrine_pack_version_hash"] = None
+    # WP-A/A6: a new environment must not start with a planner output cap that
+    # the reasoning models on the brain chain cannot answer inside. The live
+    # source carried 4,000, which every Gemini 3.x endpoint overran on its
+    # thinking tokens alone -- the broker refused each of those calls with
+    # PROVIDER_BUDGET_EXCEEDED, and the chain spent its way down to nothing.
+    # The floor is raised, never lowered: a host that has deliberately set a
+    # larger cap keeps it.
+    planner["config"]["planner_call_budget"] = _with_output_floor(
+        planner["config"].get("planner_call_budget"))
     for key in ("scheduler_db", "writer_socket", "token_config", "model_router_db", "budget_db"):
         thesis["config"].pop(key, None)
     thesis["config"]["company_thesis_refs"] = {}

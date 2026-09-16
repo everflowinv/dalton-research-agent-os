@@ -13,11 +13,12 @@ import json
 import os
 import sqlite3
 import tempfile
+import threading
 from collections import defaultdict
 from contextlib import ExitStack, closing
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import quote
 
 from .dashboard import ProjectionWriter, SCHEMA_VERSION
@@ -151,6 +152,97 @@ def _json(value: Any, name: str) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         raise ProjectionSourceError(f"{name} must be a JSON object")
     return parsed
+
+
+def _json_array(value: Any, name: str) -> list[Any]:
+    """A JSON array read out of SQLite by ``json_extract``, or a refusal.
+
+    ``json_extract`` returns SQL NULL when the path is absent, which is a work
+    order that requested no capability -- an empty list, not a broken row.
+    Anything else that is not an array is a source the projection must not
+    silently reinterpret.
+    """
+
+    if value is None:
+        return []
+    try:
+        parsed = json.loads(value)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ProjectionSourceError(f"{name} is not valid JSON") from exc
+    if not isinstance(parsed, list):
+        raise ProjectionSourceError(f"{name} must be a JSON array")
+    return parsed
+
+
+#: B1-4: what each round has already learned about the scheduler's work
+#: orders, keyed by database path.
+#:
+#: Reading them used to cost 4.4 s of a 7.5 s round: ``SELECT *`` over 26k
+#: rows whose ``work_order_json`` averages 26 KB -- 660 MB read and parsed --
+#: to reach one field (``requested_capabilities``, which becomes a display
+#: label) and one column (``created_at``).  Narrowing the statement halves
+#: it; not re-reading rows that cannot have changed removes the rest.
+#:
+#: A work order is immutable: the schema has triggers that refuse an UPDATE
+#: or a DELETE, so a row this process has read once can only ever be read
+#: again to get the same answer.  The cache is therefore append-only, keyed by
+#: ``created_at`` as a watermark, and validated by row count on every round --
+#: a count that disagrees with the cache is a database that was replaced
+#: underneath us (a restore, a test reusing a path), and the round reloads
+#: from scratch rather than projecting a mixture of two databases.
+_WORK_ORDER_CACHE: dict[str, dict[str, Any]] = {}
+_WORK_ORDER_CACHE_LOCK = threading.Lock()
+
+_WORK_ORDER_COLUMNS = (
+    "SELECT work_order_id, created_at,"
+    " json_extract(work_order_json,'$.requested_capabilities')"
+    " AS requested_capabilities FROM scheduler_work_orders"
+)
+
+
+def _work_order_entry(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "created_at": row["created_at"],
+        "wire": {
+            "requested_capabilities": _json_array(
+                row["requested_capabilities"], "scheduler work order capabilities"
+            ),
+        },
+    }
+
+
+def _scheduled_work_orders(
+    scheduler: sqlite3.Connection, scheduler_db: Path | str
+) -> dict[str, dict[str, Any]]:
+    """Every work order, as the projection needs it, read incrementally."""
+
+    key = str(Path(scheduler_db).resolve())
+    total = scheduler.execute(
+        "SELECT COUNT(*) FROM scheduler_work_orders"
+    ).fetchone()[0]
+    with _WORK_ORDER_CACHE_LOCK:
+        cached = dict(_WORK_ORDER_CACHE.get(key, {}))
+    watermark = ""
+    for entry in cached.values():
+        if entry["created_at"] > watermark:
+            watermark = entry["created_at"]
+    if cached and watermark:
+        # ``>=`` and not ``>``: two work orders may share a timestamp, and one
+        # of them arriving after the previous round read the other would be
+        # invisible forever under a strict comparison.
+        rows = scheduler.execute(
+            _WORK_ORDER_COLUMNS + " WHERE created_at >= ?", (watermark,)
+        )
+        for row in rows:
+            cached[row["work_order_id"]] = _work_order_entry(row)
+    if not cached or len(cached) != total:
+        cached = {
+            row["work_order_id"]: _work_order_entry(row)
+            for row in scheduler.execute(_WORK_ORDER_COLUMNS)
+        }
+    with _WORK_ORDER_CACHE_LOCK:
+        _WORK_ORDER_CACHE[key] = cached
+    return cached
 
 
 def _safe_token(value: Any, fallback: str) -> str:
@@ -337,19 +429,20 @@ class DashboardProjector:
                 )
             ]
 
-            scheduled = {
-                row["work_order_id"]: {
-                    "row": row,
-                    "wire": _json(row["work_order_json"], "scheduler work order"),
-                }
-                for row in scheduler.execute("SELECT * FROM scheduler_work_orders")
-            }
+            scheduled = _scheduled_work_orders(scheduler, self.scheduler_db)
             latest_events = self._latest_rows(
                 scheduler, "scheduler_attempt_events", "work_order_id", "event_seq"
             )
+            # B1-4: the five fields ``_scheduler_state`` reads.  The row also
+            # carries ``result_envelope_json`` and two hashes, which no
+            # projection has ever looked at.
             formal_results = {
                 row["work_order_id"]: row
-                for row in scheduler.execute("SELECT * FROM scheduler_formal_results")
+                for row in scheduler.execute(
+                    "SELECT work_order_id, result_record_id, attempt_number,"
+                    " result_envelope_id, terminal_state, created_at"
+                    " FROM scheduler_formal_results"
+                )
             }
             latest_receipts = self._latest_rows(
                 scheduler,
@@ -357,6 +450,13 @@ class DashboardProjector:
                 "work_order_id",
                 "attempt_number",
                 secondary="created_at",
+                # Only the id is projected; the envelope body stays in the
+                # authority, which is also the only place it is allowed to be
+                # read from.
+                columns=(
+                    "result_envelope_id", "work_order_id", "attempt_number",
+                    "created_at",
+                ),
             )
             latest_leases = self._latest_lease_rows(scheduler)
 
@@ -700,12 +800,26 @@ class DashboardProjector:
         order_field: str,
         *,
         secondary: str | None = None,
+        columns: Sequence[str] | None = None,
     ) -> dict[str, sqlite3.Row]:
+        """The newest row per group, reading only the named columns.
+
+        ``columns`` is a projection, not a filter: every name is a column
+        this module writes literally into the statement, so callers pass
+        identifiers and never caller input.  The default stays ``source.*``
+        because most of these tables are narrow; the ones carrying a JSON
+        envelope name what they need.
+        """
+
         order = f"{order_field} DESC"
         if secondary:
             order += f", {secondary} DESC"
+        selected = (
+            "source.*" if columns is None
+            else ",".join(f"source.{name}" for name in columns)
+        )
         rows = conn.execute(
-            f"SELECT * FROM (SELECT source.*, ROW_NUMBER() OVER ("
+            f"SELECT * FROM (SELECT {selected}, ROW_NUMBER() OVER ("
             f" PARTITION BY {group_field} ORDER BY {order}) AS projection_rank"
             f" FROM {table} AS source) WHERE projection_rank=1"
         ).fetchall()
@@ -714,7 +828,8 @@ class DashboardProjector:
     @staticmethod
     def _latest_lease_rows(conn: sqlite3.Connection) -> dict[tuple[str, int], sqlite3.Row]:
         rows = conn.execute(
-            "SELECT * FROM (SELECT source.*, ROW_NUMBER() OVER ("
+            "SELECT * FROM (SELECT source.work_order_id,source.attempt_number,"
+            "source.lease_revision_id,source.expires_at, ROW_NUMBER() OVER ("
             " PARTITION BY work_order_id,attempt_number ORDER BY lease_version DESC,created_at DESC"
             ") AS projection_rank FROM scheduler_leases AS source) WHERE projection_rank=1"
         ).fetchall()
@@ -838,7 +953,7 @@ class DashboardProjector:
                 warnings.add("存在没有 Scheduler authority 记录的 WorkOrder 引用")
             else:
                 work_wire = scheduled_entry["wire"]
-                created_at = scheduled_entry["row"]["created_at"]
+                created_at = scheduled_entry["created_at"]
                 state = self._scheduler_state(
                     work_ref,
                     latest_events.get(work_ref),

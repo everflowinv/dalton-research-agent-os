@@ -22,6 +22,18 @@ class BackupError(RuntimeError):
     pass
 
 
+class BackupInsufficientSpace(BackupError):
+    """There is not enough free space to write this snapshot safely."""
+
+
+# A snapshot is written next to the ones already kept, so the volume has to
+# hold the new copy as well as the retained ones. Requiring twice the estimate
+# leaves room for the write plus the temporary directory it lands in. On
+# 2026-09-16 the daily pass tried to add 1.7 GB to a volume with 3.6 GB free
+# and no check at all, which is how the whole volume reached 99%.
+DEFAULT_FREE_SPACE_MULTIPLE = 2.0
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
@@ -185,6 +197,35 @@ def _read_completed_snapshot(
     return manifest, total, signatures
 
 
+def _copy_database(source_path: Path, destination: Path) -> None:
+    """Write one consistent, compacted copy of a live SQLite authority.
+
+    ``VACUUM INTO`` reads through a read-only connection at one point in time,
+    so the copy is consistent with the WAL without checkpointing the live
+    database, and it lands as a single file with no ``-wal``/``-shm`` sidecar
+    to verify. It also drops free pages, which is why the scheduler database
+    copies at a fraction of its 672 MB on disk. The backup API is kept as the
+    fallback for a SQLite too old for ``VACUUM INTO`` (3.27).
+    """
+
+    source = sqlite3.connect(f"file:{quote(str(source_path), safe='/')}?mode=ro",
+                             uri=True)
+    try:
+        try:
+            source.execute("VACUUM INTO ?", (str(destination),))
+            return
+        except sqlite3.OperationalError:
+            if destination.exists():
+                destination.unlink()
+        target = sqlite3.connect(destination)
+        try:
+            source.backup(target)
+        finally:
+            target.close()
+    finally:
+        source.close()
+
+
 def _snapshot_matches_signatures(
     snapshot: Path, signatures: Mapping[str, tuple[int, int, int, int, int]],
 ) -> bool:
@@ -198,17 +239,87 @@ def _snapshot_matches_signatures(
 
 
 class DatabaseBackupManager:
-    def __init__(self, backup_root: str | Path, databases: Mapping[str, str | Path]):
+    def __init__(self, backup_root: str | Path, databases: Mapping[str, str | Path],
+                 *, keep_latest: int | None = None,
+                 free_space_multiple: float = DEFAULT_FREE_SPACE_MULTIPLE):
         self.backup_root = Path(backup_root).expanduser().resolve()
         self.databases = {name: Path(path).expanduser().resolve() for name, path in databases.items()}
         if not self.databases or any(not name or "/" in name for name in self.databases):
             raise BackupError("backup database names are invalid")
+        if keep_latest is not None and (isinstance(keep_latest, bool)
+                                        or not isinstance(keep_latest, int)
+                                        or keep_latest < 1):
+            raise BackupError("keep_latest must be a positive integer")
+        if isinstance(free_space_multiple, bool) or free_space_multiple < 1:
+            raise BackupError("free_space_multiple must be at least 1")
+        # When retention is known here, it is applied *before* the new snapshot
+        # rather than after it. Writing first and pruning second needs room for
+        # keep_latest + 1 copies at once, which is the one moment the volume
+        # cannot afford.
+        self.keep_latest = keep_latest
+        self.free_space_multiple = float(free_space_multiple)
+        self.last_retention: dict[str, Any] | None = None
+
+    def estimate_snapshot_bytes(self) -> int:
+        """How large the next snapshot is likely to be.
+
+        The larger of the live database sizes and the newest completed
+        snapshot: ``VACUUM INTO`` usually writes less than the live file, and
+        the previous snapshot is the only measured evidence available.
+        """
+
+        live = 0
+        for path in self.databases.values():
+            try:
+                live += path.stat().st_size
+            except OSError:
+                continue
+        previous = 0
+        latest = self.latest_verified_manifest()
+        if latest is not None:
+            for item in latest.get("files") or []:
+                if isinstance(item, Mapping) and isinstance(item.get("size_bytes"), int):
+                    previous += item["size_bytes"]
+        return max(live, previous)
+
+    def disk_preflight(self) -> dict[str, Any]:
+        """Refuse the snapshot when the volume cannot safely hold it."""
+
+        estimate = self.estimate_snapshot_bytes()
+        required = int(estimate * self.free_space_multiple)
+        try:
+            free = shutil.disk_usage(self.backup_root).free
+        except OSError as exc:
+            raise BackupError("backup volume free space is unreadable") from exc
+        report = {"estimated_snapshot_bytes": estimate, "required_bytes": required,
+                  "free_bytes": free, "free_space_multiple": self.free_space_multiple}
+        if free < required:
+            raise BackupInsufficientSpace(
+                f"磁盘余量不足，已跳过本次备份：需要 {required} 字节"
+                f"（上次快照约 {estimate} 字节的 {self.free_space_multiple:g} 倍），"
+                f"可用 {free} 字节")
+        return report
 
     def snapshot(self, snapshot_id: str | None = None) -> dict[str, Any]:
         snapshot_id = snapshot_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
         snapshot_id = _snapshot_id(snapshot_id)
         self.backup_root.mkdir(mode=0o700, parents=True, exist_ok=True)
         os.chmod(self.backup_root, 0o700)
+        retention = None
+        if self.keep_latest is not None:
+            # One fewer than the policy, because the snapshot about to be
+            # written is the one that brings the count back to keep_latest.
+            # Pruning afterwards instead meant holding keep_latest + 1 copies
+            # at exactly the moment the volume was tightest. At least one
+            # verified snapshot is always kept through the write.
+            try:
+                retention = self.prune_verified(
+                    keep_latest=max(1, self.keep_latest - 1))
+            except BackupError as exc:
+                # Retention failing must not stop the snapshot; the preflight
+                # below is what decides whether there is room for it.
+                retention = {"status": "prune_failed", "reason": str(exc)}
+        self.disk_preflight()
         final = self.backup_root / snapshot_id
         if final.exists():
             with _manifest_lock(final, exclusive=False):
@@ -226,13 +337,7 @@ class DatabaseBackupManager:
                 if not source_path.is_file():
                     raise BackupError(f"authority database is unavailable: {name}")
                 destination = temporary / f"{name}.sqlite"
-                source = sqlite3.connect(f"file:{source_path}?mode=ro", uri=True)
-                target = sqlite3.connect(destination)
-                try:
-                    source.backup(target)
-                finally:
-                    target.close()
-                    source.close()
+                _copy_database(source_path, destination)
                 os.chmod(destination, 0o600)
                 _integrity(destination)
                 files.append({
@@ -252,6 +357,10 @@ class DatabaseBackupManager:
             manifest_path.write_text(json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
             os.chmod(manifest_path, 0o600)
             os.replace(temporary, final)
+            if retention is not None:
+                # Reported, never manifested: the manifest's field set is exact
+                # and is what verification compares against.
+                self.last_retention = retention
             return manifest
         finally:
             if temporary.exists():
@@ -417,6 +526,11 @@ def main(argv: Iterable[str] | None = None) -> int:
     create.add_argument("--backup-root", type=Path, required=True)
     create.add_argument("--database", action="append", required=True, help="NAME=/absolute/path.sqlite")
     create.add_argument("--snapshot-id")
+    create.add_argument("--keep-latest", type=int,
+                        help="prune to this many snapshots before writing the new one")
+    create.add_argument("--free-space-multiple", type=float,
+                        default=DEFAULT_FREE_SPACE_MULTIPLE,
+                        help="refuse when free space is below this multiple of the estimate")
     verify = sub.add_parser("verify-restore")
     verify.add_argument("--backup-root", type=Path, required=True)
     verify.add_argument("--snapshot-id", required=True)
@@ -432,7 +546,10 @@ def main(argv: Iterable[str] | None = None) -> int:
                 raise BackupError("database must use NAME=/absolute/path")
             name, path = item.split("=", 1)
             databases[name] = path
-        result = DatabaseBackupManager(args.backup_root, databases).snapshot(args.snapshot_id)
+        result = DatabaseBackupManager(
+            args.backup_root, databases, keep_latest=args.keep_latest,
+            free_space_multiple=args.free_space_multiple,
+        ).snapshot(args.snapshot_id)
     elif args.command == "verify-restore":
         result = DatabaseBackupManager(args.backup_root, {"placeholder": "/dev/null"}).verify_restore(args.snapshot_id, args.restore_root)
     else:

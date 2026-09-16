@@ -324,10 +324,18 @@ def unsourced_numbers(body: str, numbers: Sequence[Mapping[str, Any]]) -> list[s
 # and a cell is admitted only when it still resolves at publish time.  The
 # discipline is unchanged in the only sense that matters: a figure in the prose
 # that nothing in this Core can produce is still refused.
-CELL_SOURCE_KINDS: tuple[str, ...] = ("statement_accession", "forecast_cell")
+CELL_SOURCE_KINDS: tuple[str, ...] = (
+    "statement_accession", "forecast_cell", "valuation_metric",
+)
 _CELL_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType({
     "statement_accession": frozenset({"kind", "ref", "accession"}),
     "forecast_cell": frozenset({"kind", "ref", "version_ref"}),
+    # P11c-E: the third computed layer the note below anticipated. A multiple
+    # is arithmetic over a price version and a filed line, with the formula
+    # frozen into the snapshot beside it; there is no Claim behind it and
+    # there never will be. ``ref`` is ``valuation-metric:<version>:<metric>``,
+    # which is what the gate reader already mints.
+    "valuation_metric": frozenset({"kind", "ref", "version_ref"}),
 })
 
 
@@ -772,6 +780,25 @@ class MissionDeliverableAuthority:
                         "WHERE accession=? LIMIT 1", (cell["accession"],),
                     ).fetchone()
                     return row is not None
+                if cell["kind"] == "valuation_metric":
+                    # The version has to be held *and* still carry the metric
+                    # the ref names. A snapshot whose inputs went missing
+                    # publishes the metric as ``unavailable`` with no value,
+                    # and a document citing it would be citing a blank.
+                    row = self.connection.execute(
+                        "SELECT record_json FROM valuation_snapshot_versions "
+                        "WHERE version_id=?", (cell["version_ref"],),
+                    ).fetchone()
+                    if row is None:
+                        return False
+                    record = json.loads(row["record_json"])
+                    wanted = str(cell["ref"]).rsplit(":", 1)[-1]
+                    return any(
+                        item.get("metric") == wanted
+                        and item.get("status") == "available"
+                        and item.get("value") is not None
+                        for item in record.get("metrics") or ()
+                    )
                 row = self.connection.execute(
                     "SELECT record_json FROM forecast_model_versions WHERE version_id=?",
                     (cell["version_ref"],),

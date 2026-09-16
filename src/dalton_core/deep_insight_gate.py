@@ -68,6 +68,15 @@ from .store import (
 )
 
 SCHEMA_VERSION = "0.1"
+# One word this chain needs that the shared vocabulary does not carry: a version
+# that exists because a *person* returned the previous one.  It is not
+# ``evidence_thicker`` -- the evidence may not have moved at all -- and it is
+# not ``human_revision``, which means a person edited the output.  Added here
+# rather than to ``CHANGE_REASONS`` because that tuple is a contract over the
+# forecast models and the dossier too, and widening it would change what those
+# authorities accept for the sake of a word only this one uses.
+REVIEWER_RETURNED = "reviewer_returned"
+GATE_CHANGE_REASONS: tuple[str, ...] = CHANGE_REASONS + (REVIEWER_RETURNED,)
 _SCHEMA_PATH = Path(__file__).with_name("deep_insight_gate_schema.sql")
 GENERATOR_REF = "generator:deep-insight-gate:0.1"
 # The gate draft is a deliverable-class output and takes the deliverable grant.
@@ -569,7 +578,8 @@ def validate_gate_version(value: Mapping[str, Any]) -> dict[str, Any]:
     for field in ("id", "created_at", "gate_ref", "company_ref", "generator_ref"):
         wire[field] = _text(wire[field], field, maximum=512)
     wire["actor_ref"] = _principal(wire["actor_ref"])
-    wire["change_reason"] = _one_of(wire["change_reason"], CHANGE_REASONS, "change_reason")
+    wire["change_reason"] = _one_of(
+        wire["change_reason"], GATE_CHANGE_REASONS, "change_reason")
     if type(wire["version"]) is not int or wire["version"] < 1:
         raise DeepInsightGateValidationError("version must be a positive integer")
     if wire["prior_version_ref"] is not None:
@@ -1036,6 +1046,7 @@ def output_rubric_findings(
     constitution: Mapping[str, Any],
     policy: Mapping[str, Any],
     prior: Mapping[str, Any] | None = None,
+    reviewer_returned: bool = False,
 ) -> list[dict[str, Any]]:
     """Run every ``method.output_rubric`` criterion the policy bound to a check.
 
@@ -1078,7 +1089,11 @@ def output_rubric_findings(
                         "section": part["title"], "figure": token,
                     })
         elif check == "not_a_restatement":
-            if prior is not None and not new_refs(record, prior):
+            # Same exception as ``publish``, for the same reason: a version a
+            # person asked for by returning the previous one is not a
+            # restatement, it is an answer to a question the Ledger does not
+            # hold.
+            if prior is not None and not reviewer_returned and not new_refs(record, prior):
                 findings.append({"code": "no_new_evidence", "criterion_index": index})
         elif check == "no_investment_conclusion":
             for part in parts:
@@ -1102,13 +1117,21 @@ _DECISION_FIELDS = frozenset({
     "company_ref", "decision", "reason", "stage_record_ref", "actor_ref",
     "content_hash",
 })
+# D2's addition, and optional on purpose.  A decision written before this
+# existed has no ``question_notes`` key and its content hash was computed
+# without one; injecting a default would make every stored verdict fail its own
+# hash check.  So the field is *allowed* rather than required, present only when
+# the reviewer actually wrote per-question notes, and a decision that carries it
+# hashes it like everything else.
+_DECISION_OPTIONAL = frozenset({"question_notes"})
 
 
 def validate_decision(value: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         raise DeepInsightGateValidationError("a decision must be an object")
     wire = dict(value)
-    if set(wire) != _DECISION_FIELDS or wire.get("schema_version") != SCHEMA_VERSION:
+    if (set(wire) - _DECISION_OPTIONAL != _DECISION_FIELDS
+            or wire.get("schema_version") != SCHEMA_VERSION):
         raise DeepInsightGateValidationError(
             "deep insight gate decision has an invalid closed shape")
     for field in ("id", "created_at", "gate_version_ref", "company_ref"):
@@ -1120,6 +1143,17 @@ def validate_decision(value: Mapping[str, Any]) -> dict[str, Any]:
         None if wire["stage_record_ref"] is None
         else _text(wire["stage_record_ref"], "stage_record_ref", maximum=512))
     wire["actor_ref"] = _human(wire["actor_ref"])
+    if "question_notes" in wire:
+        from .deep_insight_gate_review import validate_question_notes
+
+        notes = validate_question_notes(wire["question_notes"])
+        if not notes:
+            raise DeepInsightGateValidationError(
+                "question_notes is present and empty; omit it instead")
+        if wire["decision"] != "return_for_more_work":
+            raise DeepInsightGateValidationError(
+                "只有「退回补充」才带按题号的意见；通过与否决是对整份草稿的裁决")
+        wire["question_notes"] = notes
     wire["content_hash"] = _sha256(wire["content_hash"], "content_hash")
     base = {key: item for key, item in wire.items() if key != "content_hash"}
     if content_hash(base) != wire["content_hash"]:
@@ -1177,7 +1211,8 @@ class DeepInsightGateAuthority:
         body["gate_ref"] = gate_ref
         body.setdefault("schema_version", SCHEMA_VERSION)
         body.setdefault("generator_ref", GENERATOR_REF)
-        change_reason = _one_of(body.get("change_reason"), CHANGE_REASONS, "change_reason")
+        change_reason = _one_of(
+            body.get("change_reason"), GATE_CHANGE_REASONS, "change_reason")
         if not body.get("evidence_refs"):
             raise DeepInsightGateValidationError(
                 "a version must name the evidence that occasioned it")
@@ -1189,13 +1224,24 @@ class DeepInsightGateAuthority:
         latest = None if latest_row is None else self.gate(latest_row["version_id"])
         if latest is not None and latest["body_hash"] == digest:
             return {**latest, "status": "duplicate", "duplicate_reason": "identical_body"}
-        if latest is not None and not new_refs(body, latest):
+        if (latest is not None and not new_refs(body, latest)
+                and change_reason != REVIEWER_RETURNED):
             return {
                 **latest, "status": "duplicate",
                 "duplicate_reason": "no_new_evidence",
                 "detail": ("this draft cites nothing the current version does not; "
                            "ADR-0008 refuses it rather than storing a rewrite"),
             }
+        # The one exception, and it is the reason ADR-0008's rule exists rather
+        # than an escape from it.  "A version must cite something new" is a
+        # guard against *automation* re-asking the owner the same question on
+        # the same evidence.  A version a person explicitly asked for by
+        # returning the previous one is the opposite of that: the new
+        # information is the review, and it does not live in ``claim_versions``.
+        # The identical-body check above still applies, so a redraft that
+        # changed nothing is still a duplicate -- what is allowed through is a
+        # genuinely different answer to the same rows, which is exactly what
+        # "you misread question three" asks for.
         head = None if latest is None else str(latest["id"])
         if source is not _UNSET and source != head:
             raise DeepInsightGateConflict(
@@ -1321,6 +1367,7 @@ class DeepInsightGateAuthority:
         reason: str,
         actor_ref: str,
         stage_record_ref: str | None = None,
+        question_notes: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
         """One person's verdict on one exact draft.
 
@@ -1329,6 +1376,12 @@ class DeepInsightGateAuthority:
         repeated identical decision returns ``duplicate`` rather than a second
         record, which is what makes the writer operation safe to retry after
         the stage record has already been written.
+
+        ``question_notes`` (D2) is how a return points at question seven rather
+        than at the document.  It is stored with the verdict because the next
+        draft has to read it: a return whose instruction lives only in a page's
+        memory is a return the model never hears, and the version after it is
+        the same version with different words.
         """
 
         gate_version_ref = _text(gate_version_ref, "gate_version_ref", maximum=512)
@@ -1336,6 +1389,12 @@ class DeepInsightGateAuthority:
         decision = _one_of(decision, DECISIONS, "decision")
         reason = _text(reason, "reason", maximum=4000)
         actor_ref = _human(actor_ref)
+        from .deep_insight_gate_review import validate_question_notes
+
+        notes = validate_question_notes(question_notes)
+        if notes and decision != "return_for_more_work":
+            raise DeepInsightGateValidationError(
+                "只有「退回补充」才带按题号的意见；通过与否决是对整份草稿的裁决")
         if stage_record_ref is not None:
             stage_record_ref = _text(stage_record_ref, "stage_record_ref", maximum=512)
         draft = self.gate(gate_version_ref)
@@ -1346,7 +1405,8 @@ class DeepInsightGateAuthority:
         if existing is not None:
             if (existing["decision"] != decision
                     or existing["actor_ref"] != actor_ref
-                    or existing["reason"] != reason):
+                    or existing["reason"] != reason
+                    or (existing.get("question_notes") or {}) != notes):
                 raise DeepInsightGateConflict(
                     "this draft has already been decided; a change of mind is a "
                     "new draft, not a second verdict on the same one")
@@ -1365,6 +1425,7 @@ class DeepInsightGateAuthority:
             "reason": reason,
             "stage_record_ref": stage_record_ref,
             "actor_ref": actor_ref,
+            **({"question_notes": notes} if notes else {}),
         }
         record["content_hash"] = content_hash(record)
         wire = validate_decision(record)
@@ -1451,6 +1512,7 @@ __all__ = [
     "DOSSIER_SOURCES",
     "EXTRA_KINDS",
     "EXTRA_SOURCES",
+    "GATE_CHANGE_REASONS",
     "GENERATOR_REF",
     "GROUPS",
     "GROUP_OF",
@@ -1464,6 +1526,7 @@ __all__ = [
     "QUESTION_SOURCE_MAP_HASH",
     "QUESTION_SOURCE_MAP_REF",
     "REF_KINDS",
+    "REVIEWER_RETURNED",
     "SCHEMA_VERSION",
     "SENTENCES_PER_ANSWER",
     "SOURCE_VERSION_KEY",

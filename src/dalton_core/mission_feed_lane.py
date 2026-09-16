@@ -115,6 +115,59 @@ DISCOVERY_SCOPE = "source_discovery"
 ACQUISITIONS_PER_TICK = 8
 ACQUISITION_WAIT_SECONDS = 30.0
 TICK_BUDGET_SECONDS = 8.0
+
+# 2026-09-16 (B1-2): enumerating and reading get separate budgets, because a
+# shared one is not shared -- it is spent in order, and enumeration goes
+# first.  Live, three feed lanes reported the same tick forever:
+# ``enumerated: 222, launched: 0, out_of_time: true``.  Each enumeration is a
+# governed child process, the lookback splits into up to nine windows, and
+# nine process starts are more than eight seconds; the read budget was always
+# already gone by the time there was anything to read, so the lane did the
+# expensive half of its job every tick and none of the useful half.
+#
+# Two changes, and they only make sense together.  Reading keeps a reserve of
+# the tick that enumeration may not touch -- expressed as a reserve rather
+# than a share because what reading needs is an absolute number of seconds
+# (one child start plus one local read), not a fraction of whatever budget
+# the tick happens to have...
+READ_RESERVE_SECONDS = 3.0
+# ...and, when a caller wants one, at most this many windows per tick.  The
+# default is ``None`` -- no count limit -- because the deadline above is the
+# real bound and a count would change what a fast feed does for no reason.
+# What makes the deadline safe is the cursor: a tick that runs out of
+# enumeration budget resumes at the next window rather than re-enumerating
+# the newest one forever, so the lookback is covered across several ticks
+# instead of starving every one of them.  Newest-first ordering is unchanged;
+# the cursor rotates the list, it does not reverse it.
+ENUMERATIONS_PER_TICK: int | None = None
+# Whatever is left, a document read gets -- but never less than this, or a
+# slow enumeration silently reintroduces the starvation.  A tick that reads
+# one document has made progress; a tick that reads none never will.
+MIN_DOCUMENT_READ_SECONDS = 2.0
+
+# What one governed child may take before it is killed.  This used to be
+# derived from the tick budget (``budget / 2`` = 4 s), which conflated two
+# unrelated questions: how long a *hung* child may hang, and how much of this
+# tick the lane may spend.  A local corpus read is one Python process start
+# plus a directory walk -- rarely under a second, occasionally six -- so a cap
+# derived from a shrinking tick budget kills healthy children, and the lane
+# reports failures that are really its own scheduling.  The tick budget still
+# decides whether a child is *started*; this decides when one has hung.  The
+# ceiling matches the crowd lane's, which is the other host-tool lane and has
+# run at 20 s since S2.
+FEED_CHILD_TIMEOUT_SECONDS = 20.0
+FEED_CHILD_MIN_TIMEOUT_SECONDS = 6.0
+
+
+def feed_child_timeout_seconds(remaining: float | None) -> float:
+    """The child cap for a tick with ``remaining`` seconds of budget left."""
+
+    if remaining is None:
+        return FEED_CHILD_TIMEOUT_SECONDS
+    return min(
+        FEED_CHILD_TIMEOUT_SECONDS,
+        max(FEED_CHILD_MIN_TIMEOUT_SECONDS, float(remaining)),
+    )
 ACQUISITION_RETRY_INTERVAL = timedelta(hours=1)
 # The queue reader's own maximum page. One query per status stays far
 # under it; a status bucket that reaches it is reported, not truncated.
@@ -620,6 +673,8 @@ class FeedDiscoveryCoordinator:
         tick_budget_seconds: float = TICK_BUDGET_SECONDS,
         body_reads_per_tick: int | None = None,
         body_read_cursor_ref: str | None = None,
+        enumerations_per_tick: int | None = ENUMERATIONS_PER_TICK,
+        enumeration_cursor_ref: str | None = None,
     ) -> None:
         if source_ref not in FEED_DISCOVERY_SOURCES:
             raise FeedLaneRejected(f"{source_ref} is not a feed discovery source")
@@ -643,6 +698,33 @@ class FeedDiscoveryCoordinator:
             else body_reads_per_tick
         )
         self.body_read_cursor_ref = body_read_cursor_ref
+        self.enumerations_per_tick = (
+            None if enumerations_per_tick is None
+            else max(1, int(enumerations_per_tick))
+        )
+        self.enumeration_cursor_ref = enumeration_cursor_ref
+
+    def enumeration_order(
+        self, *, since: str | None = None
+    ) -> list[tuple[str, str]]:
+        """This tick's windows, newest first, resumed where the last stopped.
+
+        ``windows()`` is unchanged and still returns the lookback newest
+        first.  This rotates that list so a tick that may enumerate one window
+        does not enumerate the newest one every time and leave the other eight
+        permanently unvisited.  An unknown cursor -- the first tick after a
+        restart, or a lookback that moved past it -- starts at the newest,
+        which is the behaviour this lane had before the rotation existed.
+        """
+
+        spans = self.windows(since=since)
+        if not spans or self.enumeration_cursor_ref is None:
+            return spans
+        for index, (_, window_until) in enumerate(spans):
+            if window_until == self.enumeration_cursor_ref:
+                pivot = (index + 1) % len(spans)
+                return spans[pivot:] + spans[:pivot]
+        return spans
 
     # -- windows --------------------------------------------------------
 
@@ -1265,7 +1347,13 @@ class FeedDiscoveryCoordinator:
             "source_ref": self.source_ref, "settled": [], "launched": [],
             "read": None, "status": "idle",
         }
-        deadline = time.monotonic() + self.tick_budget_seconds
+        started = time.monotonic()
+        deadline = started + self.tick_budget_seconds
+        # The enumeration deadline is the one that moved.  Reading keeps the
+        # whole tick, and is additionally guaranteed a floor, so a slow
+        # enumeration costs this tick a window rather than every document.
+        enumeration_deadline = max(
+            started + 0.5, deadline - READ_RESERVE_SECONDS)
         results["settled"].extend(self.settle_documents())
         if self.runner is not None and universe:
             held = self.documents_in_authority()
@@ -1273,13 +1361,24 @@ class FeedDiscoveryCoordinator:
             enumerated = 0
             windows = 0
             partial_windows = 0
+            enumerations = 0
             reads: list[dict[str, Any]] = []
-            for window_since, window_until in self.windows(since=since):
-                if budget <= 0 or time.monotonic() >= deadline:
+            for window_since, window_until in self.enumeration_order(since=since):
+                if (budget <= 0
+                        or (self.enumerations_per_tick is not None
+                            and enumerations >= self.enumerations_per_tick)
+                        or time.monotonic() >= enumeration_deadline):
                     results["out_of_time"] = time.monotonic() >= deadline
                     break
+                enumerations += 1
+                # Advance before the read, not after: a tick that spends its
+                # whole read budget on this window must still start at the
+                # next one, or the lane re-enumerates the same fortnight
+                # forever and never reaches the rest of the lookback.
+                self.enumeration_cursor_ref = window_until
                 for observation in self.enumerate_window(
-                    since=window_since, until=window_until, deadline=deadline
+                    since=window_since, until=window_until,
+                    deadline=enumeration_deadline,
                 ):
                     if time.monotonic() >= deadline:
                         results["out_of_time"] = True
@@ -1296,7 +1395,10 @@ class FeedDiscoveryCoordinator:
                         queue=triage["read_queue"], universe=universe,
                         headers=headers, header_company=triage["header_company"],
                         since=window_since, known=held, limit=budget,
-                        deadline=deadline,
+                        deadline=max(
+                            deadline,
+                            time.monotonic() + MIN_DOCUMENT_READ_SECONDS,
+                        ),
                     )
                     reads.append(read)
                     budget -= read["read"]
@@ -1308,6 +1410,7 @@ class FeedDiscoveryCoordinator:
             results["enumerated"] = enumerated
             results["windows"] = windows
             results["partial_windows"] = partial_windows
+            results["enumerations"] = enumerations
         else:
             for _ in range(self.acquisitions_per_tick):
                 if time.monotonic() >= deadline:
@@ -1457,9 +1560,17 @@ def _dispatch(server: Any, source_ref: str, launcher_kwarg: str) -> dict[str, An
         return {"status": "unconfigured",
                 "reason": "this writer has no connector spool for feed acquisition"}
     plan = load_feed_discovery_plan(plan_path)
+    from .writer_server import lane_budget_remaining
+
+    # B1-2: the lane's own budget, but never more than the writer is willing
+    # to have the single store thread held for.  Outside the writer -- a test,
+    # a CLI -- there is no writer budget and the lane keeps its own.
     tick_budget_seconds = float(
         getattr(launcher, "feed_tick_budget_seconds", TICK_BUDGET_SECONDS)
     )
+    writer_budget = lane_budget_remaining(server)
+    if writer_budget is not None:
+        tick_budget_seconds = max(0.5, min(tick_budget_seconds, writer_budget))
     from .feed_launcher import FeedLaunchRejected
 
     operations = (
@@ -1483,7 +1594,7 @@ def _dispatch(server: Any, source_ref: str, launcher_kwarg: str) -> dict[str, An
             governance=governance[name],
             store=server.store, connectors=connectors,
             observability=server.observability, spool=spool, source_ref=source_ref,
-            timeout_seconds=max(0.1, tick_budget_seconds / 2.0),
+            timeout_seconds=feed_child_timeout_seconds(tick_budget_seconds),
         )
         for name, operation in operations
     }
@@ -1493,6 +1604,7 @@ def _dispatch(server: Any, source_ref: str, launcher_kwarg: str) -> dict[str, An
         body_reads_per_tick=_feed_body_read_limit(source_ref, plan),
         body_read_cursor_ref=getattr(launcher, "_body_read_cursor_ref", None),
         tick_budget_seconds=tick_budget_seconds,
+        enumeration_cursor_ref=getattr(launcher, "_enumeration_cursor_ref", None),
         **runners,
     )
     try:
@@ -1507,6 +1619,7 @@ def _dispatch(server: Any, source_ref: str, launcher_kwarg: str) -> dict[str, An
             "source_ref": source_ref, "reason": str(exc),
         }
     launcher._body_read_cursor_ref = coordinator.body_read_cursor_ref
+    launcher._enumeration_cursor_ref = coordinator.enumeration_cursor_ref
     return result
 
 

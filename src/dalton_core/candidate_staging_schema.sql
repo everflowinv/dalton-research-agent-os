@@ -64,6 +64,21 @@ CREATE TABLE IF NOT EXISTS candidate_figures (
     created_at TEXT NOT NULL
 );
 
+-- WP-F: the filed XBRL statement line a quantitative candidate rests on.
+--
+-- Same reason `candidate_figures` exists: the line lives in the Core's mission
+-- tables, staging has no Core handle, and a review page that cannot open the
+-- number's authority is a review page that cannot review. The row stored here
+-- is the re-verified projection (line id, accession, concept, period, value,
+-- unit and the filing's own content hash), as it was at admission; a later
+-- restatement is a new candidate rather than a quiet edit of this one.
+CREATE TABLE IF NOT EXISTS candidate_statement_lines (
+    line_id TEXT PRIMARY KEY,
+    record_json TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS candidate_stage_requests (
     idempotency_key TEXT PRIMARY KEY,
     request_hash TEXT NOT NULL,
@@ -100,3 +115,8 @@ CREATE TRIGGER IF NOT EXISTS candidate_figures_no_update
 BEFORE UPDATE ON candidate_figures BEGIN SELECT RAISE(ABORT, 'candidate_figures is immutable'); END;
 CREATE TRIGGER IF NOT EXISTS candidate_figures_no_delete
 BEFORE DELETE ON candidate_figures BEGIN SELECT RAISE(ABORT, 'candidate_figures is immutable'); END;
+
+CREATE TRIGGER IF NOT EXISTS candidate_statement_lines_no_update
+BEFORE UPDATE ON candidate_statement_lines BEGIN SELECT RAISE(ABORT, 'candidate_statement_lines is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS candidate_statement_lines_no_delete
+BEFORE DELETE ON candidate_statement_lines BEGIN SELECT RAISE(ABORT, 'candidate_statement_lines is immutable'); END;

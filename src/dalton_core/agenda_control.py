@@ -16,6 +16,7 @@ import math
 import os
 import re
 import secrets
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -33,6 +34,7 @@ from .cockpit_plane import (
     CockpitConflict,
     CockpitError,
     CockpitPlane,
+    OVERVIEW_TTL_SECONDS,
 )
 from .governance_cli import GovernanceCliError, ephemeral_call
 from .human_intent import (
@@ -811,6 +813,14 @@ class AgendaControlApplication:
         if not isinstance(value, Mapping):
             raise CockpitError("request body must be an object")
         plane = self.cockpit_plane
+        # B1-5: this request is about to change something the overview shows.
+        # Drop the cached snapshot first, so the refetch the page does next
+        # cannot be answered from before the change.  ``getattr`` because a
+        # test may pass a stand-in plane; a plane with no cache has nothing to
+        # invalidate.
+        invalidate = getattr(plane, "invalidate_overview", None)
+        if callable(invalidate):
+            invalidate()
         if action == "workspace_create":
             return plane.create_workspace(login, value)
         if action == "workspace_rename":
@@ -860,6 +870,12 @@ class AgendaControlApplication:
             return {**plane.log(since=query.get("since") or None, limit=int(limit) if limit.isdigit() else 150), "enabled": True}
         if path == "/v1/cockpit/approvals":
             return {**plane.approvals(), "enabled": True}
+        # D4: the same checkpoints the approvals page shows, plus the ones that
+        # are not checkpoints at all -- an unapproved connector, a source the
+        # mission needs, a provider that has been refusing work all day -- each
+        # with the exact action that clears it. Read-only.
+        if path == "/v1/cockpit/needs-human":
+            return plane.needs_human()
         if path == "/v1/cockpit/decision-status":
             return {**plane.decision_status(query), "enabled": True}
         if path == "/v1/cockpit/job":
@@ -1013,8 +1029,23 @@ def _handler(application: AgendaControlApplication) -> type[BaseHTTPRequestHandl
                     f"{application.session_cookie_name}={session_cookie}; "
                     "Path=/; Secure; HttpOnly; SameSite=Strict",
                 )
-            self.end_headers()
-            self.wfile.write(body)
+            try:
+                self.end_headers()
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError) as exc:
+                # B1-3: the page gave up first.  That is a browser closing a
+                # tab or a 30 s fetch timeout on the other end of the
+                # tailnet, not a server fault, and letting it reach
+                # ``BaseHTTPRequestHandler`` prints a full traceback per
+                # abandoned request.  Live, the overview's slow responses
+                # filled the log with them and buried the failures that
+                # mattered.  One line, no stack, and the connection closes.
+                self.close_connection = True
+                print(
+                    f"cockpit client disconnected path={self.path} "
+                    f"status={int(status)} error={type(exc).__name__}",
+                    file=sys.stderr, flush=True,
+                )
 
         def _context(self) -> tuple[str, str, _Session, bool] | None:
             if not self._host_ok():
@@ -1268,7 +1299,15 @@ def serve(config: AgendaControlConfig) -> None:
     cockpit_plane = None
     if config.cockpit is not None:
         cockpit_plane = CockpitPlane(
-            config.cockpit, writer_socket=config.writer_socket, token_config=config.token_config
+            config.cockpit, writer_socket=config.writer_socket,
+            token_config=config.token_config,
+            # B1-5: this is the long-lived process with overlapping readers --
+            # a browser tab polling, a second tab on the tailnet, the
+            # workspace readiness probe -- and it is the one where a full
+            # overview rebuild took 10 to 30 s.  Every other construction of
+            # this plane is a test or a one-shot command and keeps exact
+            # read-after-write by taking the zero default.
+            overview_ttl_seconds=OVERVIEW_TTL_SECONDS,
         )
     application = AgendaControlApplication(
         config, plane, review_plane, intent_plane, cockpit_plane

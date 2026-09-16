@@ -37,7 +37,7 @@ import hashlib
 import json
 import sqlite3
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Collection, Mapping, Sequence
 
 from .cockpit_model import (
     CockpitModelError,
@@ -79,6 +79,27 @@ MAX_PREVIOUS_DEBATES = 12
 # come first out of a reply that was already not answering the question.
 MAX_DEBATES = 12
 MAX_PROMPT_BYTES = 48_000
+# What the drafting prompt is *aimed* at, as opposed to the hard refusal bound
+# above.  Measured live on 2026-09-16: p50 29,346 bytes and p90 30,796 against
+# an antigravity provider input bound of 30,000, which is why 63 of 144 runs in
+# five days came back ``model_unavailable`` without a single byte reaching a
+# model.  The table is therefore fitted to this target before the call, keeping
+# the rows the current map already stands on and the most recent version's
+# debates, and dropping the tail of low-priority claims that a bounded reply
+# was never going to reach anyway.
+TARGET_PROMPT_BYTES = 26_000
+# The ladder the fitter walks, widest first.  Claim rows go before statement
+# width, because a shorter statement still says which way a row points while a
+# missing row says nothing at all.
+_FIT_LADDER: tuple[tuple[int, int], ...] = (
+    (MAX_CLAIM_ROWS, MAX_STATEMENT_CHARS),
+    (48, MAX_STATEMENT_CHARS),
+    (40, MAX_STATEMENT_CHARS),
+    (32, 260),
+    (24, 220),
+    (18, 180),
+    (12, 160),
+)
 MAX_COST_USD = default_call_budget("debate_map")["max_cost_usd"]
 MAX_INPUT_TOKENS = 80_000
 MAX_OUTPUT_TOKENS = 4_000
@@ -162,6 +183,7 @@ def build_input_table(
     max_claim_rows: int = MAX_CLAIM_ROWS,
     max_statement_chars: int = MAX_STATEMENT_CHARS,
     industry_classification: Any = None,
+    pinned_refs: Collection[str] = (),
 ) -> dict[str, Any]:
     """Everything one drafting call may look at, and the ids it may cite.
 
@@ -187,10 +209,24 @@ def build_input_table(
             ref,
         )
 
+    # Which rows survive the bound, and which order they are shown in, are two
+    # different questions.  A claim the *current map already cites* has to
+    # survive -- dropping it is how a redraw silently loses the evidence its
+    # own predecessor rests on, and the version that results cites nothing the
+    # last one did not and is refused as a duplicate.  It is still shown in
+    # contested-priority order, because that order is what makes the top of a
+    # bounded table the place a debate is.
+    ordered = sorted(indexed.items(), key=order)
+    pinned = {str(ref) for ref in pinned_refs}
+    kept = [item for item in ordered if item[0] in pinned][:max_claim_rows]
+    room = max_claim_rows - len(kept)
+    kept += [item for item in ordered if item[0] not in pinned][:max(0, room)]
+    selected = {item[0] for item in kept}
+
     rows: list[dict[str, Any]] = []
-    for ref, row in sorted(indexed.items(), key=order):
-        if len(rows) >= max_claim_rows:
-            break
+    for ref, row in ordered:
+        if ref not in selected:
+            continue
         statement = str(row.get("normalized_statement") or "").strip()
         if row.get("value") is not None:
             statement = f"{row['value']} {row.get('unit') or ''} — {statement}".strip()
@@ -332,8 +368,13 @@ def build_prompt(table: Mapping[str, Any]) -> str:
         "* gaining says which side has been gaining ground since PREVIOUS "
         "DEBATES; use 'neither' when nothing moved or there is no previous "
         "map.\n"
-        "* If a debate below continues one in PREVIOUS DEBATES, reuse that "
-        "debate_ref exactly. Otherwise use a new id of the form new-1, new-2.\n"
+        "* debate_ref is a choice between two closed sets and nothing "
+        "else. To continue an argument already on the map, copy its "
+        "debate_ref out of PREVIOUS DEBATES character for character. "
+        "For anything else, name it new-1, new-2, new-3 in the order you "
+        "write them. A ref you compose yourself -- a slug, a hash, an id "
+        "from another map -- refuses the whole reply; the permanent name "
+        "of a new debate is derived here, not by you.\n"
         "* resolution is null unless the argument is settled, in which case "
         "it names the rows that settled it.\n"
         "* Return one raw JSON object and nothing else. No prose, no code "
@@ -343,8 +384,11 @@ def build_prompt(table: Mapping[str, Any]) -> str:
         f"* Return at most {MAX_DEBATES} debates. Every question is at most "
         f"{MAX_QUESTION_CHARS} characters. Every bull.statement, "
         "bear.statement, market.statement, ours.statement, and "
-        f"resolution.reason is at most {MAX_STATEMENT_OUT_CHARS} characters. "
-        "These character limits include spaces.\n\n"
+        f"resolution.reason is at most {MAX_STATEMENT_OUT_CHARS} characters "
+        "-- count them, spaces included, before you answer. These are "
+        "hard bounds, not guidance: one statement over the bound refuses "
+        "the whole reply, so write the shorter sentence rather than the "
+        "fuller one.\n\n"
         "{\"debates\": [{\"debate_ref\": \"new-1\", \"question\": \"...\",\n"
         "  \"driver_refs\": [\"<driver_ref>\"], \"question_admission_index\": 0,\n"
         "  \"causal_chain_index\": 0,\n"
@@ -850,6 +894,8 @@ def draft_debate_map(
     previous: Mapping[str, Any] | None = None,
     family_of: Callable[[Any], str | None] | None = None,
     policy: Mapping[str, Any] = DEBATE_POLICY,
+    budget_remaining_micros: int | None = None,
+    repair_reserve_micros: int = 0,
 ) -> dict[str, Any]:
     """One drafting call, one verifying call, and a publishable result or not.
 
@@ -870,30 +916,51 @@ def draft_debate_map(
         "reason": None,
         "drafted_by": None,
         "verified_by": None,
+        "contract_repair": None,
     }
     if result["prompt_bytes"] > MAX_PROMPT_BYTES:
         result.update({"status": "refused",
                        "reason": f"the input table is {result['prompt_bytes']} bytes, "
                                  f"over the {MAX_PROMPT_BYTES} bound"})
         return result
-    try:
-        call = model.call(
-            purpose=PURPOSE,
-            request_id=prompt_drafter("", prompt)[1][:32],
-            prompt=prompt, mission=mission,
-        )
-    except CockpitModelError as exc:
-        result.update({"status": "model_unavailable",
-                       "reason": f"{type(exc).__name__}: {exc}"})
+    from .draft_contract_repair import run_with_contract_repair
+
+    calls: list[Mapping[str, Any]] = []
+
+    def call_model(*, prompt: str, request_id: str) -> Mapping[str, Any]:
+        outcome = model.call(purpose=PURPOSE, request_id=request_id,
+                             prompt=prompt, mission=mission)
+        calls.append(outcome)
+        return outcome
+
+    # One repair, on the same model, out of the same run budget.  A statement
+    # eleven characters over a 600-character bound, or a ``lean`` spelled
+    # ``bullish``, threw away a drafting call, a verifying call and a redraw
+    # every time it happened; it is a shape problem and the model that made it
+    # is the cheapest thing that can fix it.
+    repaired = run_with_contract_repair(
+        call=call_model, parse=lambda text: parse_draft(text, table),
+        prompt=prompt, request_id=prompt_drafter("", prompt)[1][:32],
+        contract=draft_contract(table),
+        refusal_errors=(DebateDraftError,),
+        unavailable_errors=(CockpitModelError,),
+        contract_reminder=draft_contract_reminder(table),
+        repair_context=draft_repair_context(table),
+        budget_remaining_micros=budget_remaining_micros,
+        repair_reserve_micros=repair_reserve_micros,
+    )
+    result["cost_micros"] += repaired.cost_micros
+    result["contract_repair"] = repaired.summary()
+    if repaired.status == "unavailable":
+        result.update({"status": "model_unavailable", "reason": repaired.reason})
         return result
-    result["cost_micros"] += int(call.get("cost_micros") or 0)
+    call = calls[-1]
     drafted_by = _provenance(call, resolve(call.get("route_decision_ref")))
     result["drafted_by"] = drafted_by
-    try:
-        candidates = parse_draft(call.get("text"), table)
-    except DebateDraftError as exc:
-        result.update({"status": "refused", "reason": f"{type(exc).__name__}: {exc}"})
+    if repaired.status in {"refused", "budget_refused"}:
+        result.update({"status": "refused", "reason": repaired.reason})
         return result
+    candidates = repaired.value
 
     from .debate_map import cited_refs
 
@@ -1223,6 +1290,8 @@ __all__ = [
     "MAX_OUTPUT_TOKENS",
     "MAX_PROMPT_BYTES",
     "MAX_STATEMENT_CHARS",
+    "MAX_STATEMENT_OUT_CHARS",
+    "MAX_QUESTION_CHARS",
     "PURPOSE",
     "VERIFIER_PURPOSE",
     "SCHEMA_VERSION",
@@ -1241,8 +1310,14 @@ __all__ = [
     "build_verifier_prompt",
     "change_evidence",
     "change_reason_for",
+    "TARGET_PROMPT_BYTES",
     "debate_ref_for",
+    "draft_contract",
+    "draft_contract_reminder",
     "draft_debate_map",
+    "draft_repair_context",
+    "drafted_from_identical_input",
+    "fit_input_table",
     "independent",
     "parse_draft",
     "parse_verdict",
@@ -1253,3 +1328,213 @@ __all__ = [
     "subject_claim_rows",
     "subject_driver_rows",
 ]
+
+
+# ---------------------------------------------------------------------------
+# fitting the table to what a model will actually accept
+# ---------------------------------------------------------------------------
+
+def fit_input_table(
+    *, max_bytes: int = TARGET_PROMPT_BYTES, previous: Mapping[str, Any] | None = None,
+    **kwargs: Any,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """The widest table whose prompt fits, and a record of what was given up.
+
+    Built rather than trimmed.  Cutting bytes off a rendered prompt would leave
+    row ids pointing at rows that are no longer there, and a drafter that cites
+    ``C57`` out of a table that stops at ``C40`` has its whole reply refused.
+    So the *table* is rebuilt at successively tighter bounds until its prompt
+    fits, which keeps the row ids, the citable map and the prompt in agreement
+    by construction.
+
+    Nothing the current map cites is ever dropped: those refs are pinned into
+    every rung of the ladder.  If even the narrowest rung does not fit, the
+    widest table is returned with ``fits: false`` and the caller refuses before
+    routing -- a silently truncated table is a table whose citations lie.
+    """
+
+    from .debate_map import cited_refs
+
+    pinned = sorted(cited_refs(previous or {})) if previous else []
+    first: dict[str, Any] | None = None
+    first_bytes = 0
+    for rows, chars in _FIT_LADDER:
+        table = build_input_table(
+            **kwargs, previous=previous, max_claim_rows=rows,
+            max_statement_chars=chars, pinned_refs=pinned)
+        size = len(build_prompt(table).encode("utf-8"))
+        if first is None:
+            first, first_bytes = table, size
+        if size <= max_bytes:
+            return table, {
+                "fits": True,
+                "prompt_bytes": size,
+                "target_bytes": max_bytes,
+                "max_claim_rows": rows,
+                "max_statement_chars": chars,
+                "claim_rows_shown": len(table["claims"]),
+                "claim_rows_available": len(table["claim_index"]),
+                "pinned_refs_kept": sum(
+                    1 for row in table["claims"] if row["claim_version_ref"] in set(pinned)),
+                "pinned_refs_total": len(pinned),
+            }
+    assert first is not None
+    return first, {
+        "fits": False,
+        "prompt_bytes": first_bytes,
+        "target_bytes": max_bytes,
+        "max_claim_rows": _FIT_LADDER[0][0],
+        "max_statement_chars": _FIT_LADDER[0][1],
+        "claim_rows_shown": len(first["claims"]),
+        "claim_rows_available": len(first["claim_index"]),
+        "pinned_refs_kept": sum(
+            1 for row in first["claims"] if row["claim_version_ref"] in set(pinned)),
+        "pinned_refs_total": len(pinned),
+    }
+
+
+def drafted_from_identical_input(
+    scheduler_db: str | Path | None, previous: Mapping[str, Any] | None, prompt: str,
+) -> bool:
+    """Whether the current version was drafted from exactly this prompt.
+
+    The lane's "has the evidence moved" question is asked of the *claim set*,
+    which moves whenever any claim about the subject is re-versioned or a
+    sixty-first claim arrives.  What the drafter is shown is the bounded table,
+    and the bounded table very often does not move at all: forty-two runs
+    between 2026-09-14 and 09-16 paid for a drafting call and a verifying call
+    and came back ``duplicate``, several of them re-deriving version 7 of the
+    same subject from prompts of identical length.
+
+    So the exact prompt the current version's drafting WorkOrder carries is
+    read back -- read-only, one indexed lookup -- and compared.  Equal means
+    the model would be shown, byte for byte, what it was shown last time, and
+    the only thing another call can buy is the same answer.
+
+    Fails **open**: an unreadable scheduler, a missing work order or a version
+    with no model attribution all mean "we do not know", and not knowing is a
+    reason to draft rather than a reason to stay silent.
+    """
+
+    reference = ((previous or {}).get("drafted_by") or {}).get("work_order_ref")
+    if not reference or scheduler_db is None:
+        return False
+    try:
+        connection = sqlite3.connect(
+            Path(scheduler_db).expanduser().resolve().as_uri() + "?mode=ro", uri=True)
+    except Exception:  # noqa: BLE001 - no scheduler to read is "we do not know"
+        return False
+    try:
+        connection.execute("PRAGMA query_only=ON")
+        row = connection.execute(
+            "SELECT work_order_json FROM scheduler_work_orders WHERE work_order_id=?",
+            (str(reference),)).fetchone()
+        if row is None:
+            return False
+        return json.loads(row[0]).get("question") == prompt
+    except Exception:  # noqa: BLE001 - same reading: unknown, so draft
+        return False
+    finally:
+        connection.close()
+
+
+# ---------------------------------------------------------------------------
+# the deterministic contract, and one repair
+# ---------------------------------------------------------------------------
+
+def draft_contract(table: Mapping[str, Any]) -> "Contract":
+    """The enumerable half of the draft contract, built from this table.
+
+    Every rule here is one the live drafts broke between 2026-09-14 and 09-16:
+    a 600-character bound written as a 900-character statement, a ``lean`` that
+    is not one of the three leans, a ``debate_ref`` that is neither a previous
+    debate nor a ``new-<n>``, and a reply that was not one JSON object.
+    """
+
+    from .draft_contract_repair import Contract
+
+    citable = tuple(table["citable"])
+    previous = tuple(row["debate_ref"] for row in table["previous_debates"])
+    # ``new-1`` .. ``new-<MAX_DEBATES>`` are the only names a *new* debate may
+    # be proposed under.  The real ref is content addressed from the subject,
+    # the drivers and the question once the draft is admitted; the drafter has
+    # no way to compute it and must not try.
+    proposable = previous + tuple(f"new-{index}" for index in range(1, MAX_DEBATES + 1))
+    statements = ("bull", "bear", "market", "ours")
+    return Contract(
+        name=DRAFT_CONTRACT_VERSION,
+        keys={"": ({"debates"}, frozenset()),
+              "debates[]": (_CANDIDATE_KEYS, frozenset()),
+              "debates[].bull": (_SIDE_KEYS, frozenset()),
+              "debates[].bear": (_SIDE_KEYS, frozenset()),
+              "debates[].market": (_MARKET_KEYS, frozenset()),
+              "debates[].ours": (_OURS_KEYS, frozenset())},
+        max_items={"debates": MAX_DEBATES},
+        min_items={"debates": 1,
+                   "debates[].bull.claim_refs": 1,
+                   "debates[].bear.claim_refs": 1},
+        max_chars={"debates[].question": MAX_QUESTION_CHARS,
+                   **{f"debates[].{side}.statement": MAX_STATEMENT_OUT_CHARS
+                      for side in statements},
+                   "debates[].resolution.reason": MAX_STATEMENT_OUT_CHARS},
+        enums={"debates[].debate_ref": proposable,
+               "debates[].gaining": ("bull", "bear", "neither"),
+               # ``null`` is the right answer when ``available`` is false, so
+               # it belongs in the allowed set; ``bullish`` for ``bull`` does
+               # not, and that is the live refusal.
+               "debates[].market.lean": ("bull", "bear", "split", None),
+               "debates[].ours.state": ("held", "none_yet")},
+        allowed_refs={
+            "debates[].bull.claim_refs": citable,
+            "debates[].bear.claim_refs": citable,
+            "debates[].market.refs": citable,
+            "debates[].ours.refs": citable,
+            "debates[].resolution.refs": citable,
+            "debates[].driver_refs": tuple(
+                row["driver_ref"] for row in table["drivers"]),
+        },
+    )
+
+
+def draft_contract_reminder(table: Mapping[str, Any]) -> str:
+    """The short restatement of the rules a repair call is shown."""
+
+    from .draft_contract_repair import contract_reminder_lines
+
+    previous = [row["debate_ref"] for row in table["previous_debates"]]
+    return contract_reminder_lines([
+        "The reply is exactly {\"debates\": [...]} -- one raw JSON object, no "
+        "other top-level key.",
+        f"At most {MAX_DEBATES} debates, at least one.",
+        ("debate_ref is either one of the PREVIOUS DEBATES ids "
+         + (", ".join(previous) if previous else "(there are none)")
+         + ", when this debate continues that argument, or a fresh proposal "
+           "named new-1, new-2, ... . Never any other string, and never an id "
+           "you have invented or copied from elsewhere."),
+        f"question is at most {MAX_QUESTION_CHARS} characters.",
+        ("bull.statement, bear.statement, market.statement, ours.statement and "
+         f"resolution.reason are each at most {MAX_STATEMENT_OUT_CHARS} "
+         "characters, spaces included. Shorten the prose; do not drop the "
+         "evidence or change the judgement."),
+        "market.lean is exactly one of bull, bear, split when market.available "
+        "is true, and market is {\"available\": false, \"lean\": null, "
+        "\"statement\": null, \"refs\": []} when it is false.",
+        "ours.state is held or none_yet; gaining is bull, bear or neither.",
+        "Every claim_refs / refs entry is a row id copied exactly from the "
+        "table you were shown, and every driver_refs entry is a driver_ref "
+        "copied exactly from DRIVERS.",
+    ])
+
+
+def draft_repair_context(table: Mapping[str, Any]) -> str:
+    """The ids a repair may need, without re-sending the whole table."""
+
+    previous = [row["debate_ref"] for row in table["previous_debates"]]
+    return (
+        "CITABLE ROW IDS -- cite only these:\n  "
+        + (", ".join(sorted(table["citable"])) or "(none)")
+        + "\nDRIVER REFS -- bind only these:\n  "
+        + (", ".join(row["driver_ref"] for row in table["drivers"]) or "(none)")
+        + "\nPREVIOUS DEBATE IDS -- reuse one only to continue that argument:\n  "
+        + (", ".join(previous) or "(no previous map)")
+    )

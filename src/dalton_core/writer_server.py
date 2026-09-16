@@ -27,10 +27,10 @@ import time
 import traceback
 from contextlib import ExitStack
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from .lane_registry import (
     LaneRegistryError,
@@ -374,6 +374,324 @@ class Principal:
 MAX_CONNECTIONS = 8
 CONNECTION_IDLE_TIMEOUT = 1.0
 STORE_REQUEST_TIMEOUT = 30.0
+
+# B1-3: the writer gives up before the client does, on purpose.  Both ends
+# used to wait exactly 30 s, so they expired in the same instant: the client
+# closed the socket while the server was still writing the error frame, the
+# server saw BrokenPipeError, and every real reason -- a queue that never
+# reached the request, a lane that ran long -- was recorded as a transport
+# fault.  The client's default now sits above this value so the structured
+# answer always arrives first.  ``writer_client.DEFAULT_TIMEOUT`` asserts the
+# gap; do not narrow one without the other.
+CLIENT_REQUEST_TIMEOUT = 45.0
+
+# B1-2: how long one lane tick may hold the single store thread before it is
+# expected to hand it back.  A lane that needs longer settles on the next
+# tick -- the crowd and feed lanes already work that way -- so the budget is
+# a deadline the handler reads (``lane_budget_remaining``), not a signal that
+# can interrupt one.  Five seconds times thirty-nine lanes is a tick that
+# still fits inside one controller interval even when every lane is busy.
+LANE_SOFT_BUDGET_SECONDS = 5.0
+
+# B1-1: how long a deterministic lane refusal is believed without re-checking
+# the world.  A governance record that is not approved and a connector quota
+# that is spent are facts about a file and a calendar day, not transient
+# faults, so the lane is held until that file or that day changes.  The
+# ceiling exists only so that a fingerprint this code failed to notice cannot
+# hold a lane forever: worst case the lane pays its budget once an hour.
+LANE_HOLD_MAX_SECONDS = 3600.0
+
+
+#: B1-2: the operations that read and never write, audited one by one.
+#:
+#: Membership is a claim about a handler's body, not about its name, so the
+#: list is explicit and a new read operation joins it deliberately.  The
+#: accompanying test re-derives the name-shape rule and fails when an
+#: operation here stops looking like a read, which is the cheap half of the
+#: check; the expensive half is that every handler below resolves to a single
+#: authority method that only SELECTs.
+#:
+#: ``mission_source_discovery_status`` is deliberately absent: it reads a
+#: launcher's on-disk ticket, not the store, and a launcher belongs to the
+#: thread that spawns its children.
+READ_ONLY_OPERATIONS = frozenset({
+    "active_agenda_policy",
+    "active_capability",
+    "answer_subjects",
+    "current_model_input",
+    "current_pointer",
+    "get_active_research_constitution",
+    "get_active_research_playbook",
+    "get_agenda_mandate_version",
+    "get_capability_evaluation",
+    "get_coverage_mission",
+    "get_doctrine_pack",
+    "get_forecast_reconciliation",
+    "get_model_input_decision",
+    "get_model_reconciliations",
+    "get_perception_snapshot",
+    "get_weekly_brief_issue",
+    "industry_research_integrity_report",
+    "intent_context_bindings",
+    "list_agenda_feedback_targets",
+    "list_events",
+    "weekly_brief_integrity_report",
+})
+
+#: How many threads answer reads.  Two, not more: each carries its own SQLite
+#: connection and its own authority objects, and the point is only that a read
+#: never queues behind a lane tick.
+READ_EXECUTOR_WORKERS = 2
+
+
+# B1-1: the exception type names a lane raises when the refusal is a fact
+# about an owner decision rather than a fault.  Matched by name because the
+# modules that define them are lane modules, and importing one here would
+# close the import cycle the lane registry exists to keep open.
+_DETERMINISTIC_LANE_EXCEPTIONS = frozenset({
+    "FeedLaunchRejected", "LaneLaunchRejected", "AcquisitionLaunchRejected",
+    "DiscoveryLaunchRejected", "FetchLaunchRejected", "LaneChildRejected",
+})
+_QUOTA_LANE_EXCEPTIONS = frozenset({"ConnectorQuotaExceeded"})
+
+# The reason codes a lane already reports for the two refusals that repeat
+# every tick until a person does something.  They are the lanes' own words --
+# ``mission_feed_lane`` has returned them since S1 -- and are listed here so
+# the short circuit recognises a hold without each lane having to learn about
+# it.
+_GOVERNANCE_REASON_CODES = frozenset({
+    "connector_governance_rejected", "connector_governance_missing",
+    "lane_governance_rejected",
+})
+_QUOTA_REASON_CODES = frozenset({
+    "connector_quota_exhausted", "alphaengine_quota_window_exhausted",
+})
+
+
+def _lane_hold_kind(payload: Any) -> str | None:
+    """Classify one lane outcome as a deterministic hold, or not at all.
+
+    Three kinds, and they differ only in what makes them stale:
+    ``governance`` until the approved record on disk changes, ``quota`` until
+    the calendar day does, ``unconfigured`` until the writer is restarted with
+    different arguments.  Anything else -- a timeout, a parse error, a network
+    fault -- is not a hold: it may succeed on the next tick and must be
+    retried.
+    """
+
+    if isinstance(payload, BaseException):
+        name = type(payload).__name__
+        if name in _QUOTA_LANE_EXCEPTIONS:
+            return "quota"
+        if name in _DETERMINISTIC_LANE_EXCEPTIONS:
+            text = str(payload)
+            if "governance record" in text and (
+                "not approved" in text or "is missing" in text
+                or "must be approved by a human" in text
+            ):
+                return "governance"
+        return None
+    if not isinstance(payload, Mapping):
+        return None
+    reason_code = payload.get("reason_code")
+    if isinstance(reason_code, str):
+        if reason_code in _GOVERNANCE_REASON_CODES:
+            return "governance"
+        if reason_code in _QUOTA_REASON_CODES:
+            return "quota"
+    if payload.get("status") == "unconfigured":
+        return "unconfigured"
+    return None
+
+
+#: What the owner has to do, in the owner's language.  The cockpit prints the
+#: lane's ``owner_action`` verbatim, so a hold that cannot name an action is
+#: worse than no hold at all: the lane goes quiet and nobody learns why.
+_LANE_HOLD_ACTIONS = {
+    "governance": "需要 owner 批准治理记录（connector governance record）后该通道才会重新运行",
+    "quota": "连接器当日配额已用尽，等待下一个配额窗口（UTC 次日零点）自动恢复",
+    "unconfigured": "该通道未在本机安装/配置，需要 owner 补齐配置后重启 writer",
+}
+
+
+@dataclass(frozen=True)
+class LaneHold:
+    """One lane's remembered refusal, and what makes it stale."""
+
+    operation: str
+    kind: str
+    reason: str
+    owner_action: str
+    fingerprint: str
+    recorded_at: str
+    expires_at: float
+    detail: dict[str, Any] = field(default_factory=dict)
+
+    def payload(self, *, hits: int) -> dict[str, Any]:
+        """The frame a short-circuited tick receives.
+
+        ``held`` rather than the lane's original ``blocked``/``unavailable``
+        so that a reader can tell a lane that just refused from a lane that
+        was not run at all, and ``short_circuit`` carries enough for the tick
+        ledger to show how long this has been true.
+        """
+
+        return {
+            **self.detail,
+            "status": "held",
+            "reason_code": f"lane_{self.kind}_hold",
+            "reason": self.reason,
+            "owner_action": self.owner_action,
+            "short_circuit": {
+                "kind": self.kind,
+                "since": self.recorded_at,
+                "hits": hits,
+                "fingerprint": self.fingerprint,
+            },
+        }
+
+
+class LaneShortCircuit:
+    """Remember why a lane refused, so the next tick does not pay for it again.
+
+    Live, two feed lanes whose governance records were never approved cost the
+    controller thirty seconds each, every tick, for weeks: the refusal was
+    deterministic and the tick rediscovered it three hundred times a day, on
+    the single store thread, ahead of every read the cockpit was waiting for.
+
+    The refusal is now a fact with an expiry.  It is keyed by the lane
+    operation and by a fingerprint of what would have to change for the answer
+    to change -- the mtime and size of the approved records for a governance
+    hold, the UTC day for a quota hold.  A fingerprint that moves clears the
+    hold on the spot, so approving a record unblocks the lane on the next tick
+    without a restart.
+    """
+
+    def __init__(self, *, monotonic: Callable[[], float] | None = None,
+                 now: Callable[[], datetime] | None = None) -> None:
+        self._lock = threading.Lock()
+        self._holds: dict[str, LaneHold] = {}
+        self._hits: dict[str, int] = {}
+        self._monotonic = monotonic or time.monotonic
+        self._now = now or (lambda: datetime.now(timezone.utc))
+
+    def held(self, operation: str, fingerprint: str) -> dict[str, Any] | None:
+        """This lane's hold as a tick result, or ``None`` to run the lane."""
+
+        with self._lock:
+            hold = self._holds.get(operation)
+            if hold is None:
+                return None
+            if hold.fingerprint != fingerprint or self._monotonic() >= hold.expires_at:
+                self._holds.pop(operation, None)
+                self._hits.pop(operation, None)
+                return None
+            hits = self._hits.get(operation, 0) + 1
+            self._hits[operation] = hits
+            return hold.payload(hits=hits)
+
+    def record(self, operation: str, kind: str, *, reason: str,
+               fingerprint: str, detail: Mapping[str, Any] | None = None,
+               ttl_seconds: float | None = None) -> LaneHold:
+        """Remember one deterministic refusal."""
+
+        ceiling = LANE_HOLD_MAX_SECONDS if ttl_seconds is None else min(
+            LANE_HOLD_MAX_SECONDS, max(0.0, float(ttl_seconds)))
+        hold = LaneHold(
+            operation=operation, kind=kind, reason=reason,
+            owner_action=_LANE_HOLD_ACTIONS.get(kind, _LANE_HOLD_ACTIONS["governance"]),
+            fingerprint=fingerprint,
+            recorded_at=self._now().isoformat(timespec="seconds"),
+            expires_at=self._monotonic() + ceiling,
+            detail={
+                key: value for key, value in (detail or {}).items()
+                if key in {"source_ref", "operation", "reason_code"}
+            },
+        )
+        with self._lock:
+            previous = self._holds.get(operation)
+            if previous is not None and previous.fingerprint == fingerprint:
+                # Same fact, re-observed: keep the original ``since`` so the
+                # cockpit can say how long this has been waiting on a person.
+                hold = LaneHold(
+                    operation=operation, kind=kind, reason=reason,
+                    owner_action=hold.owner_action, fingerprint=fingerprint,
+                    recorded_at=previous.recorded_at,
+                    expires_at=hold.expires_at, detail=hold.detail,
+                )
+            else:
+                self._hits.pop(operation, None)
+            self._holds[operation] = hold
+        return hold
+
+    def clear(self, operation: str) -> None:
+        with self._lock:
+            self._holds.pop(operation, None)
+            self._hits.pop(operation, None)
+
+    def snapshot(self) -> dict[str, dict[str, Any]]:
+        """Every live hold, for the heartbeat and for a test."""
+
+        with self._lock:
+            now = self._monotonic()
+            return {
+                operation: {
+                    **hold.payload(hits=self._hits.get(operation, 0)),
+                    "expires_in_seconds": round(max(0.0, hold.expires_at - now), 1),
+                }
+                for operation, hold in self._holds.items()
+            }
+
+
+def _governance_signature(path: Any) -> str:
+    """One approved record, described by what an owner decision changes.
+
+    ``status`` and ``content_hash`` are the record's own fields and are what
+    the launcher checks, so a hold keyed on them is released by exactly the
+    act that would unblock the lane -- an owner approving the record -- and by
+    nothing else.  A record that will not parse is described by its size and
+    mtime instead: still a fingerprint, still moves when somebody edits it,
+    and it does not pretend to know the status.
+    """
+
+    try:
+        candidate = Path(str(path))
+        raw = json.loads(candidate.read_text(encoding="utf-8"))
+        if isinstance(raw, Mapping):
+            return "{}|{}".format(
+                str(raw.get("status", "?")), str(raw.get("content_hash", "?")),
+            )
+    except (OSError, ValueError, TypeError):
+        pass
+    try:
+        info = Path(str(path)).stat()
+        return f"stat|{info.st_size}|{info.st_mtime_ns}"
+    except OSError:
+        return "absent"
+
+
+def _quota_window_seconds(now: datetime) -> float:
+    """Seconds until the next UTC day, which is when a daily quota resets."""
+
+    moment = now.astimezone(timezone.utc)
+    tomorrow = datetime.combine(
+        moment.date() + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc
+    )
+    return max(1.0, (tomorrow - moment).total_seconds())
+
+
+def lane_budget_remaining(server: Any, *, default: float | None = None) -> float | None:
+    """Seconds this lane tick may still spend on the single store thread.
+
+    A lane handler calls this to size its own deadline.  ``None`` means the
+    caller set no budget -- a direct call in a test, or a lane invoked outside
+    the writer -- and the handler keeps whatever bound it had.
+    """
+
+    deadline = getattr(server, "_lane_deadline", None)
+    if deadline is None:
+        return default
+    return max(0.0, float(deadline) - time.monotonic())
 
 
 WORKER_OPERATIONS = frozenset({"stage_change", "propose_model_input"})
@@ -1565,6 +1883,20 @@ class WriterServer:
         # usually.  Cleared when the store closes, so nothing outlives the
         # handle it was built against.
         self.lane_state: dict[str, Any] = {}
+        # B1-1: why each lane last refused, and what would have to change for
+        # the answer to differ.  Lives on the server rather than in a lane so
+        # that one tick's discovery is every later tick's shortcut, and so a
+        # reader (heartbeat, tick ledger) has one place to look.
+        self.lane_holds = LaneShortCircuit()
+        # B1-2: one store handle per read thread, opened on first use and
+        # closed with the server.
+        self._read_local = threading.local()
+        self._read_replicas: list[Any] = []
+        self._read_replica_lock = threading.Lock()
+        self._read_executor: concurrent.futures.ThreadPoolExecutor | None = None
+        # B1-2: the monotonic instant the lane currently on the store thread
+        # is expected to hand it back.  ``None`` between lanes.
+        self._lane_deadline: float | None = None
         if not principals:
             raise WriterServerError("at least one principal is required")
         # Explicit local installation only; never derive authority from an
@@ -1926,6 +2258,8 @@ class WriterServer:
             socket_path.unlink()
         self._store_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="dalton-store")
         self._connection_executor = concurrent.futures.ThreadPoolExecutor(max_workers=MAX_CONNECTIONS, thread_name_prefix="dalton-rpc")
+        self._read_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=READ_EXECUTOR_WORKERS, thread_name_prefix="dalton-read")
         try:
             self._store_executor.submit(self._open_store).result(timeout=STORE_REQUEST_TIMEOUT)
         except BaseException:
@@ -2325,6 +2659,13 @@ class WriterServer:
         connection_executor, self._connection_executor = self._connection_executor, None
         if connection_executor is not None:
             connection_executor.shutdown(wait=True, cancel_futures=True)
+        # B1-2: the read threads go before the store thread and take their
+        # store handles with them, so a stopping writer leaves no open
+        # connection behind to hold the WAL from checkpointing.
+        read_executor, self._read_executor = getattr(self, "_read_executor", None), None
+        if read_executor is not None:
+            read_executor.shutdown(wait=True, cancel_futures=True)
+            self._close_read_replicas()
         store_executor, self._store_executor = self._store_executor, None
         if store_executor is not None:
             try:
@@ -2431,10 +2772,20 @@ class WriterServer:
                         request_id = candidate
                     request = parse_request(raw)
                     operation = request.operation
-                    executor = self._store_executor
+                    # B1-1: a lane whose refusal is a fact about an owner
+                    # decision is answered here, on the connection thread,
+                    # without the store thread ever seeing the request.  That
+                    # is the whole point: the refusal used to cost thirty
+                    # seconds of the one thread every lane and every read
+                    # share.
+                    held = self._short_circuited(request)
+                    if held is not None:
+                        conn.sendall(success_frame(request.request_id, held))
+                        continue
+                    executor, handler = self._executor_for(operation)
                     if executor is None:
                         raise WriterServerError("writer server is stopping")
-                    future = executor.submit(self._handle, request)
+                    future = executor.submit(handler, request)
                     try:
                         result = future.result(timeout=STORE_REQUEST_TIMEOUT)
                     except concurrent.futures.TimeoutError as exc:
@@ -2448,9 +2799,17 @@ class WriterServer:
                             request_id, exc, operation=operation,
                             queued_cancelled=queued_cancelled,
                         )
+                        # B1-3: say which of the two it was.  A request the
+                        # queue never reached did not run and is safe to
+                        # retry; one that started may have written.  Both used
+                        # to arrive as the same sanitized sentence, and 60% of
+                        # the live failures were the first kind.
                         conn.sendall(error_frame(
-                            request_id, self._error_code(exc),
-                            self._error_message(exc),
+                            request_id,
+                            "queued_timeout" if queued_cancelled else "store_timeout",
+                            "writer queue did not reach the request in time"
+                            if queued_cancelled else
+                            "writer did not finish the request in time",
                         ))
                         continue
                     conn.sendall(success_frame(request.request_id, result))
@@ -2474,6 +2833,159 @@ class WriterServer:
             pass
         finally:
             reader.close()
+
+    def _short_circuited(self, request: Any) -> dict[str, Any] | None:
+        """This lane's remembered refusal, or ``None`` to do the real work.
+
+        Deliberately conservative.  Anything the normal path would answer
+        differently -- an unknown operation, a principal that may not call it,
+        a parameter the operation does not take -- falls through so that the
+        refusal comes from the one place that decides refusals.  The short
+        circuit only ever replaces work the writer already knows the answer
+        to.
+        """
+
+        holds = getattr(self, "lane_holds", None)
+        if holds is None:
+            return None
+        operation = getattr(request, "operation", None)
+        if not isinstance(operation, str) or lane_for_operation(operation) is None:
+            return None
+        try:
+            principal = self._principal(request.auth_token)
+        except PermissionError:
+            return None
+        if operation not in principal.operations:
+            return None
+        if set(request.params) - OPERATION_FIELDS.get(operation, frozenset()):
+            return None
+        try:
+            fingerprint = self.lane_fingerprint(operation)
+        except Exception:  # noqa: BLE001 - an unreadable record runs the lane
+            return None
+        return holds.held(operation, fingerprint)
+
+    def _executor_for(
+        self, operation: str | None
+    ) -> tuple[concurrent.futures.Executor | None, Any]:
+        """Which thread answers this operation.
+
+        B1-2.  A read does not have to wait behind a lane tick.  The store
+        thread stays single -- one writer, one connection, unchanged -- and
+        the read-only operations get their own threads with their own store
+        handles, because a cockpit that cannot list its feedback targets while
+        a feed lane is enumerating is a cockpit that looks broken.
+
+        The fallback is always the store thread: a replica that could not be
+        opened, an operation nobody has audited as a read, a server built
+        without a read executor (the queue tests do exactly that) all take the
+        path they always took.
+        """
+
+        read_executor = getattr(self, "_read_executor", None)
+        if (read_executor is not None and isinstance(operation, str)
+                and operation in READ_ONLY_OPERATIONS):
+            return read_executor, self._handle_read
+        return getattr(self, "_store_executor", None), self._handle
+
+    def _handle_read(self, request: Any) -> Any:
+        """Answer a read-only operation against this thread's own store.
+
+        The replica is a second handle on the same database, opened lazily on
+        the thread that will use it -- SQLite connections belong to one thread
+        and the authorities are built on top of one connection, so the handle
+        and the thread are one thing.  WAL is what makes this safe: the
+        replica reads a snapshot while the store thread writes, and neither
+        blocks the other.
+
+        A replica that will not open is not an outage.  The read falls back to
+        the store thread, which is where it ran before this existed.
+        """
+
+        replica = self._read_replica()
+        if replica is None:
+            return self._handle(request)
+        return replica._handle(request)
+
+    def _read_replica(self) -> Any | None:
+        local = getattr(self, "_read_local", None)
+        if local is None:
+            return None
+        replica = getattr(local, "replica", None)
+        if replica is not None:
+            return replica
+        if getattr(local, "failed", False):
+            return None
+        try:
+            replica = self._open_read_replica()
+        except BaseException as exc:  # noqa: BLE001 - a read never fails to open
+            local.failed = True
+            print(
+                "writer read replica unavailable, reads share the store thread "
+                f"error={type(exc).__name__}: {exc}",
+                file=sys.stderr, flush=True,
+            )
+            return None
+        local.replica = replica
+        with self._read_replica_lock:
+            self._read_replicas.append(replica)
+        return replica
+
+    def _open_read_replica(self) -> Any:
+        """A shadow writer bound to its own store handle.
+
+        It is the same object with the same operation table, the same
+        principals and the same authorization, differing only in which SQLite
+        connection its authorities sit on.  Copying the instance dictionary
+        rather than re-running the constructor is what keeps the two from
+        drifting: a new read operation needs no second wiring here, and a
+        launcher or coordinator the replica must never touch is shared by
+        reference and never reached, because only ``READ_ONLY_OPERATIONS``
+        arrive.
+        """
+
+        replica = object.__new__(WriterServer)
+        replica.__dict__.update(self.__dict__)
+        replica._read_local = None
+        replica._read_executor = None
+        replica._store_executor = None
+        replica._connection_executor = None
+        replica._listener = None
+        replica._model_router_owners = []
+        store = DaltonStore(self.db_path)
+        replica._store = store
+        replica._registry = CapabilityRegistry(store)
+        replica._observability = ObservabilityStore(store)
+        replica._connectors = ConnectorStore(store)
+        replica._agenda = AgendaStore(store)
+        replica._coverage_admission = CoverageAdmissionAuthority(store)
+        replica._model_input = ModelInputLedger(store)
+        replica._industry_research = IndustryResearchAuthority(store)
+        replica._weekly_brief = WeeklyBriefAuthority(
+            store, replica._industry_research)
+        replica._research_doctrine = ResearchDoctrineAuthority(store)
+        replica._research_constitution = ResearchConstitutionAuthority(store)
+        replica._research_playbook = ResearchPlaybookAuthority(store)
+        replica._coverage_mission = CoverageMissionAuthority(store)
+        replica._forecast_reconciliation = ForecastReconciliationAuthority(store)
+        replica._backlog = ResearchQuestionBacklog(store)
+        replica._bounded_planner = BoundedPlannerAuthority(store)
+        replica._intent_writer = IntentWriterAuthority(
+            replica._agenda, replica._backlog, replica._bounded_planner)
+        replica._answer_routing = AnswerRoutingAuthority(
+            store, replica._agenda, replica._backlog, replica._bounded_planner,
+            replica._industry_research)
+        return replica
+
+    def _close_read_replicas(self) -> None:
+        with self._read_replica_lock:
+            replicas, self._read_replicas = self._read_replicas, []
+        for replica in replicas:
+            try:
+                if replica._store is not None:
+                    replica._store.close()
+            except Exception:  # noqa: BLE001 - closing a reader never fails a stop
+                pass
 
     def _principal(self, token: str) -> Principal:
         if self._token_config_path is not None:
@@ -2505,8 +3017,111 @@ class WriterServer:
             lane = lane_for_operation(operation)
             if lane is None or lane.handler is None:
                 raise WriterServerError(f"{operation} has no handler")
-            return lane.handler(self, params)
+            return self._run_lane(lane, params)
         return method(params)
+
+    # -- lanes: one budget, one memory of why a lane refused ---------------
+
+    def _lane_launcher(self, lane: Any) -> Any:
+        init_kwarg = getattr(lane, "init_kwarg", None)
+        if init_kwarg is None:
+            return None
+        return self._lane_launchers.get(init_kwarg)
+
+    def lane_fingerprint(self, operation: str) -> str:
+        """What would have to change for this lane's refusal to change.
+
+        Governance records first, because that is what a held lane is almost
+        always waiting for and because it is the one the owner can act on: the
+        record's own ``status`` and ``content_hash``, read from the file, so
+        approving a record clears the hold on the next tick without a restart
+        and without this code trusting a timestamp.  A record that cannot be
+        read contributes its size and mtime instead, which still moves when
+        somebody rewrites it.
+
+        The UTC day is always part of the fingerprint, which is what expires a
+        spent daily quota at the window boundary and nowhere else.
+        """
+
+        lane = lane_for_operation(operation)
+        parts: list[str] = [self._now().astimezone(timezone.utc).date().isoformat()]
+        launcher = None if lane is None else self._lane_launcher(lane)
+        if launcher is None:
+            parts.append("launcher:absent")
+            return content_hash({"lane": operation, "parts": parts})
+        paths = getattr(launcher, "governance_paths", None)
+        if isinstance(paths, Mapping):
+            for name in sorted(paths):
+                parts.append(f"{name}={_governance_signature(paths[name])}")
+        return content_hash({"lane": operation, "parts": parts})
+
+    def _run_lane(self, lane: Any, params: Mapping[str, Any]) -> Any:
+        """Run one lane tick inside a budget, and remember a refusal.
+
+        The budget is a deadline the handler reads rather than a timer that
+        can stop it: nothing here may interrupt a lane mid-write.  A lane that
+        overruns it still finishes, and the overrun is reported -- as
+        ``busy``, because the honest description of a lane that could not
+        finish inside one tick's share of the single store thread is that it
+        is still working, not that it failed.
+        """
+
+        operation = lane.operation
+        started = time.monotonic()
+        self._lane_deadline = started + LANE_SOFT_BUDGET_SECONDS
+        try:
+            result = lane.handler(self, params)
+        except BaseException as exc:
+            kind = _lane_hold_kind(exc)
+            if kind is not None:
+                hold = self._hold_lane(
+                    operation, kind, reason=f"{type(exc).__name__}: {exc}"[:400],
+                )
+                return hold.payload(hits=0)
+            raise
+        finally:
+            self._lane_deadline = None
+        kind = _lane_hold_kind(result)
+        if kind is not None:
+            reason = ""
+            if isinstance(result, Mapping):
+                reason = str(result.get("reason") or result.get("status") or "")[:400]
+            self._hold_lane(operation, kind, reason=reason, detail=result)
+        else:
+            self.lane_holds.clear(operation)
+        elapsed = time.monotonic() - started
+        if elapsed > LANE_SOFT_BUDGET_SECONDS and isinstance(result, Mapping):
+            result = {
+                **result,
+                "status": "busy",
+                "lane_status": result.get("status"),
+                "over_budget_seconds": round(elapsed, 2),
+                "budget_seconds": LANE_SOFT_BUDGET_SECONDS,
+            }
+        return result
+
+    def _hold_lane(self, operation: str, kind: str, *, reason: str,
+                   detail: Mapping[str, Any] | None = None) -> LaneHold:
+        ttl = (
+            _quota_window_seconds(self._now()) if kind == "quota" else None
+        )
+        hold = self.lane_holds.record(
+            operation, kind, reason=reason,
+            fingerprint=self.lane_fingerprint(operation),
+            detail=detail, ttl_seconds=ttl,
+        )
+        try:
+            print(
+                f"writer lane held operation={operation} kind={kind} "
+                f"until_fingerprint={hold.fingerprint[:16]} reason={reason[:160]}",
+                file=sys.stderr, flush=True,
+            )
+        except Exception:  # noqa: BLE001 - a closed stderr never fails a tick
+            pass
+        return hold
+
+    def _now(self) -> datetime:
+        return datetime.now(timezone.utc)
 
     def _authorized_params(self, principal: Principal, operation: str, params: Mapping[str, Any]) -> dict[str, Any]:
         """Bind actor and invocation provenance to the authenticated principal."""

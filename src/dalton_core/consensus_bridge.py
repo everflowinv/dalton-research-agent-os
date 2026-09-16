@@ -447,8 +447,7 @@ def build_bridge(
                 continue
             ours_row = _valuation_target(valuation)
             if ours_row is None:
-                skipped.append(
-                    "target_price: the valuation snapshot holds no target price")
+                skipped.append(_valuation_anchor(valuation))
                 continue
         try:
             ours = Decimal(str(ours_row["value"]))
@@ -497,20 +496,93 @@ def build_bridge(
     return {"bridge": bridge, "detail": detail}
 
 
+#: What a forward target would be called if a snapshot ever carried one, and
+#: the statuses a snapshot actually publishes. ``available`` is the live
+#: vocabulary (``valuation_snapshot.compute_metrics`` emits ``available`` or
+#: ``unavailable``); ``computed`` is kept because it was what this function
+#: originally demanded, and a snapshot written under that word should still be
+#: readable rather than silently skipped.
+_TARGET_METRICS: tuple[str, ...] = ("target_price", "price_target")
+_TARGET_STATUSES: tuple[str, ...] = ("available", "computed")
+
+
 def _valuation_target(valuation: Mapping[str, Any]) -> dict[str, Any] | None:
-    """Our price target out of a valuation snapshot, if it holds one."""
+    """Our price target out of a valuation snapshot, if it holds one.
+
+    Today it never does, and that is a fact about the formula rather than
+    about this company: P11c's frozen arithmetic computes four *trailing*
+    multiples and no forward anything. The lookup is kept -- rather than the
+    whole leg being deleted -- because the shape a target would arrive in is
+    known, and because deleting it would hide from the next reader that the
+    conviction call is built to compare one and cannot yet.
+
+    What it does not do any more is demand ``status == "computed"``, a word no
+    snapshot has ever written; that check alone made this unreachable even for
+    a snapshot that did hold a target.
+    """
 
     for row in valuation.get("metrics") or []:
         if not isinstance(row, Mapping):
             continue
-        if str(row.get("metric")) not in ("target_price", "price_target"):
+        if str(row.get("metric")) not in _TARGET_METRICS:
             continue
-        if row.get("value") is None or str(row.get("status") or "computed") != "computed":
+        if row.get("value") is None:
+            continue
+        if str(row.get("status") or "available") not in _TARGET_STATUSES:
             continue
         return {"value": str(row["value"]),
-                "ref": str(valuation.get("id") or valuation.get("version_ref")),
+                # ``id`` is the version ref; ``snapshot_ref`` is the chain.
+                # The old fallback named ``version_ref``, which no snapshot
+                # record has ever carried -- it would have produced the string
+                # "None" as a citation had ``id`` ever been absent.
+                "ref": str(valuation.get("id") or valuation.get("snapshot_ref")
+                           or "valuation-snapshot"),
                 "unit": str(row.get("unit") or valuation.get("currency") or "USD")}
     return None
+
+
+def _valuation_anchor(valuation: Mapping[str, Any]) -> str:
+    """Why there is no target row, and what the snapshot holds instead.
+
+    The pricing anchor is named but deliberately **not** bridged. A market
+    capitalisation or a trailing P/E put on the ``ours`` side of a
+    ``target_price`` row would be compared against the street's target and
+    produce a gap percent in the billions, or -- worse, because it looks
+    plausible -- a last close read as "our target", which manufactures a
+    variant view out of the fact that the shares have a price. This module's
+    first rule is that a street number is never invented; inventing our side
+    of the comparison is the same error facing the other way.
+    """
+
+    formula = str(valuation.get("formula_version") or "the frozen formula")
+    price = valuation.get("price") or {}
+    basis = valuation.get("basis") or {}
+    held = [str(row.get("metric")) for row in (valuation.get("metrics") or ())
+            if isinstance(row, Mapping) and row.get("status") == "available"
+            and row.get("value") is not None]
+    ref = str(valuation.get("id") or valuation.get("snapshot_ref") or "")
+    parts = [
+        "target_price: the valuation snapshot holds no forward target price -- "
+        f"{formula} computes trailing multiples only, so there is nothing on "
+        "our side to compare with the street's target"
+    ]
+    anchor: list[str] = []
+    if price.get("close") is not None:
+        anchor.append(
+            f"a close of {price['close']} {valuation.get('currency') or ''}".strip()
+            + f" on {valuation.get('as_of')}")
+    if basis.get("market_cap") is not None:
+        anchor.append(f"a market capitalisation of {basis['market_cap']}")
+    if basis.get("enterprise_value") is not None:
+        anchor.append(f"an enterprise value of {basis['enterprise_value']}")
+    if held:
+        anchor.append("computed multiples " + ", ".join(sorted(held)))
+    if anchor:
+        parts.append(
+            "what it does hold, citable at " + (ref or "the snapshot") + ": "
+            + "; ".join(anchor)
+            + " -- a priced anchor, not a target, and not bridged here")
+    return ". ".join(parts)
 
 
 __all__ = [

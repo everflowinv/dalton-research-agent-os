@@ -512,6 +512,10 @@ class MigrationCoverageTests(unittest.TestCase):
                 "mission_document_research_schema.sql",
                 "mission_document_research_executor_schema.sql",
                 "mission_document_research_promotion_schema.sql",
+                # C2-5: ``ClaimReviewDriver`` takes the spool, the missions
+                # authority and the challenge authority, none of which a
+                # migration should construct; its schema is applied directly.
+                "claim_review_schema.sql",
             },
         )
         self.assertTrue(all(spec.kind in {"root", "core", "core_sql"}

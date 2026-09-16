@@ -48,7 +48,7 @@ import json
 import re
 import sqlite3
 from collections.abc import Mapping, Sequence
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN
 from pathlib import Path
 from typing import Any
@@ -62,7 +62,14 @@ ACTOR_REF = "core:valuation-snapshot-worker"
 # published under 0.1 stays readable as 0.1 arithmetic no matter what this
 # module does later, and two snapshots under different formula versions are
 # never compared as if they were the same measurement.
-FORMULA_VERSION = "valuation-formula:p11c:0.1"
+# 0.2 rather than 0.1 because the admissible *inputs* changed, not because a
+# ratio did: a trailing year may now rest on a quarter the filer never stated
+# on its own -- the fourth, for every filer this system covers -- carried as a
+# labelled difference of two cumulative figures it did state. A reader
+# comparing a 0.1 record with a 0.2 record is comparing two input contracts,
+# and the version string is what tells them so. Nothing was published under
+# 0.1 on any Core, so nothing is being reinterpreted.
+FORMULA_VERSION = "valuation-formula:p11c:0.2"
 
 # Where a filed figure may come from. Yahoo is not on this list and will not be:
 # see the module docstring.
@@ -151,8 +158,46 @@ PERCENTILE_METHOD = "share_of_history_at_or_below"
 # Below this many usable bars a percentile is noise wearing a number's clothes.
 MIN_PERCENTILE_SAMPLE = 30
 
+# What a component may say about where it came from.
+#
+# ``reported``: the filing states this quarter, and the component is that row.
+#
+# ``derived_from_cumulative``: the filing never states this quarter and the
+# company's own cumulative figures imply it -- a fiscal year minus the nine
+# months inside it is the fourth quarter, and no filer this system covers
+# states a fourth quarter any other way. Refusing the difference would mean
+# refusing every trailing year these filings can support, which is not
+# caution, it is a permanent blank. It is admitted *labelled*, carrying both
+# filed figures and both accessions, and the subtraction is re-checked here
+# rather than trusted: a reader can redo it from the record.
+COMPONENT_REPORTED = "reported"
+COMPONENT_DERIVED = "derived_from_cumulative"
+COMPONENT_BASES = (COMPONENT_REPORTED, COMPONENT_DERIVED)
+_COMPONENT_FIELDS = {"period_start", "period_end", "value", "accession"}
+_DERIVED_FIELDS = _COMPONENT_FIELDS | {"basis", "derived_from"}
+
 MAX_METRIC_INPUT_COMPONENTS = 8
 MAX_FUNDAMENTAL_WINDOWS = 40
+
+# P11c-E. What the producer looked for and what it found, one line per input.
+#
+# A metric that could not be computed already says so, but it says it from
+# inside the arithmetic: "the filings held carry no operating cash flow". That
+# is the right sentence for a reader of the metric and the wrong one for
+# whoever has to fix it, who needs to know *which* input was looked for, under
+# which concept, and whether the gap is the price, the share count or a line
+# of a statement. Carrying it on the record rather than only in the producer's
+# log is what makes a half-empty snapshot actionable instead of merely honest:
+# a company keeps its snapshot, and the snapshot names its own holes.
+#
+# Chinese, deliberately, and unlike the metric reasons around it: this is the
+# one field written for the operator reading the cockpit rather than for the
+# reader of a number.
+INPUT_COVERAGE_HELD = "held"
+INPUT_COVERAGE_MISSING = "missing"
+INPUT_COVERAGE_STATUSES = (INPUT_COVERAGE_HELD, INPUT_COVERAGE_MISSING)
+MAX_INPUT_COVERAGE_ROWS = 24
+MAX_INPUT_COVERAGE_DETAIL_CHARS = 300
 
 _SCHEMA_PATH = Path(__file__).with_name("valuation_snapshot_schema.sql")
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -349,6 +394,99 @@ def _shares_binding(value: Any) -> tuple[dict[str, Any], Decimal]:
     return wire, shares
 
 
+def _filed_figure(value: Any, name: str) -> tuple[dict[str, Any], Decimal]:
+    """One figure as a filing states it: a period, a number, an accession."""
+
+    wire = _closed(value, set(_COMPONENT_FIELDS), name)
+    start = wire["period_start"]
+    if start is not None:
+        start = _iso_date(start, f"{name}.period_start")
+    end = _iso_date(wire["period_end"], f"{name}.period_end")
+    accession = _text(wire["accession"], f"{name}.accession")
+    if _ACCESSION_RE.fullmatch(accession) is None:
+        raise ValuationSnapshotValidationError(
+            f"{name}.accession must be a canonical SEC accession"
+        )
+    total = _decimal(wire["value"], f"{name}.value")
+    return {
+        "period_start": start, "period_end": end,
+        "value": wire["value"], "accession": accession,
+    }, total
+
+
+def _component(value: Any, name: str) -> tuple[dict[str, Any], Decimal]:
+    """One figure behind a role: filed, or implied by two figures that were.
+
+    The subtraction is re-done here rather than believed. A caller handing in
+    a fourth quarter it computed elsewhere would otherwise be asserting a
+    number, which is the one thing this module exists to refuse; checking it
+    against the two cumulative figures named beside it keeps the derived
+    quarter exactly as auditable as a filed one.
+    """
+
+    if not isinstance(value, Mapping):
+        raise ValuationSnapshotValidationError(f"{name} must be an object")
+    if "basis" not in value and "derived_from" not in value:
+        row, total = _filed_figure(value, name)
+        return {**row, "basis": COMPONENT_REPORTED, "derived_from": None}, total
+    wire = _closed(value, set(_DERIVED_FIELDS), name)
+    basis = _text(wire["basis"], f"{name}.basis")
+    if basis not in COMPONENT_BASES:
+        raise ValuationSnapshotValidationError(
+            f"{name}.basis must be one of {', '.join(COMPONENT_BASES)}"
+        )
+    row, total = _filed_figure(
+        {key: wire[key] for key in _COMPONENT_FIELDS}, name)
+    if basis == COMPONENT_REPORTED:
+        if wire["derived_from"] not in (None, [], ()):
+            raise ValuationSnapshotConflict(
+                f"{name} is labelled reported and carries a derivation; one of "
+                "the two is wrong and there is no way to tell which"
+            )
+        return {**row, "basis": COMPONENT_REPORTED, "derived_from": None}, total
+    parts = wire["derived_from"]
+    if not isinstance(parts, (list, tuple)) or len(parts) != 2:
+        raise ValuationSnapshotValidationError(
+            f"{name}.derived_from must name the two cumulative figures whose "
+            "difference this is"
+        )
+    figures = sorted(
+        (_filed_figure(part, f"{name}.derived_from[{index}]")
+         for index, part in enumerate(parts)),
+        key=lambda item: item[0]["period_end"],
+    )
+    (shorter, shorter_total), (longer, longer_total) = figures
+    if shorter["period_start"] is None or longer["period_start"] is None:
+        raise ValuationSnapshotConflict(
+            f"{name} is the difference of two cumulative figures; an instant "
+            "is not one of them"
+        )
+    if shorter["period_start"] != longer["period_start"]:
+        raise ValuationSnapshotConflict(
+            f"{name} subtracts two figures that do not start on the same day, "
+            "so their difference is not a period"
+        )
+    if longer["period_end"] != row["period_end"]:
+        raise ValuationSnapshotConflict(
+            f"{name} does not end where the longer figure it is taken from ends"
+        )
+    if row["period_start"] is None or (
+        date.fromisoformat(shorter["period_end"]) + timedelta(days=1)
+        != date.fromisoformat(row["period_start"])
+    ):
+        raise ValuationSnapshotConflict(
+            f"{name} does not begin the day after the shorter figure it is "
+            "taken from ends; the gap or the overlap would be counted"
+        )
+    if longer_total - shorter_total != total:
+        raise ValuationSnapshotConflict(
+            f"{name} is not the difference of the two figures it names"
+        )
+    return {
+        **row, "basis": COMPONENT_DERIVED, "derived_from": [shorter, longer],
+    }, total
+
+
 def _role_input(
     role: str, value: Any, name: str, *, currency: str
 ) -> tuple[dict[str, Any], Decimal]:
@@ -392,15 +530,10 @@ def _role_input(
     total = Decimal(0)
     seen: set[tuple[str | None, str]] = set()
     for index, raw in enumerate(components):
-        component = _closed(
-            raw,
-            {"period_start", "period_end", "value", "accession"},
-            f"{name}.components[{index}]",
-        )
+        component, value_decimal = _component(
+            raw, f"{name}.components[{index}]")
         start = component["period_start"]
-        if start is not None:
-            start = _iso_date(start, f"{name}.components[{index}].period_start")
-        end = _iso_date(component["period_end"], f"{name}.components[{index}].period_end")
+        end = component["period_end"]
         if aggregation == "trailing_sum" and start is None:
             raise ValuationSnapshotConflict(
                 f"{name} is a flow; a component with no period_start is an "
@@ -416,21 +549,13 @@ def _role_input(
                 f"{name} counts the same period twice"
             )
         seen.add((start, end))
-        accession = _text(component["accession"], f"{name}.components[{index}].accession")
-        if _ACCESSION_RE.fullmatch(accession) is None:
-            raise ValuationSnapshotValidationError(
-                f"{name}.components[{index}].accession must be a canonical SEC accession"
+        if aggregation == "instant" and component["basis"] == COMPONENT_DERIVED:
+            raise ValuationSnapshotConflict(
+                f"{name} is a balance; a point in time is read off a balance "
+                "sheet, never taken as the difference of two others"
             )
-        value_decimal = _decimal(
-            component["value"], f"{name}.components[{index}].value"
-        )
         total += value_decimal
-        rows.append({
-            "period_start": start,
-            "period_end": end,
-            "value": component["value"],
-            "accession": accession,
-        })
+        rows.append(component)
     if role in NON_NEGATIVE_ROLES and total < 0:
         raise ValuationSnapshotConflict(
             f"{name} totals below zero; check the sign convention for {role}"
@@ -446,6 +571,43 @@ def _role_input(
         "components": rows,
         "value": _format(total),
     }, total
+
+
+def _input_coverage(value: Any) -> list[dict[str, Any]]:
+    """Which inputs were found and which were not, as the producer saw it."""
+
+    if not isinstance(value, (list, tuple)):
+        raise ValuationSnapshotValidationError("input_coverage must be a list")
+    if len(value) > MAX_INPUT_COVERAGE_ROWS:
+        raise ValuationSnapshotValidationError("input_coverage is too long")
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, raw in enumerate(value):
+        wire = _closed(
+            raw, {"input", "status", "concept", "detail"},
+            f"input_coverage[{index}]")
+        name = _text(wire["input"], f"input_coverage[{index}].input")
+        if name in seen:
+            raise ValuationSnapshotConflict(
+                f"input_coverage answers for {name} twice")
+        seen.add(name)
+        status = _text(wire["status"], f"input_coverage[{index}].status")
+        if status not in INPUT_COVERAGE_STATUSES:
+            raise ValuationSnapshotValidationError(
+                f"input_coverage[{index}].status must be one of "
+                + ", ".join(INPUT_COVERAGE_STATUSES)
+            )
+        concept = wire["concept"]
+        if concept is not None:
+            concept = _text(concept, f"input_coverage[{index}].concept")
+        detail = _text(wire["detail"], f"input_coverage[{index}].detail")
+        if len(detail) > MAX_INPUT_COVERAGE_DETAIL_CHARS:
+            raise ValuationSnapshotValidationError(
+                f"input_coverage[{index}].detail is too long")
+        rows.append({"input": name, "status": status,
+                     "concept": concept, "detail": detail})
+    rows.sort(key=lambda row: row["input"])
+    return rows
 
 
 def _fundamental_windows(value: Any, *, currency: str) -> list[dict[str, Any]]:
@@ -685,9 +847,36 @@ def compute_metrics(
             "inputs": list(roles),
             "percentile": percentile,
         })
+    # Enterprise value sits in the basis rather than in ``metrics`` because it
+    # is not a multiple: it is the other side of the market capitalisation,
+    # and a reader who wants EV/EBITDA already has it below. It is stated
+    # anyway because three readers -- the workbook, the screen and the memo --
+    # were each deriving it from three fields and could each get the sign of
+    # net cash wrong on their own. When the balance sheet this rests on is not
+    # held, the field is ``None`` with the reason beside it rather than a
+    # market capitalisation quietly standing in for an enterprise value.
+    if {"total_debt", "cash_and_equivalents"} <= set(current_totals):
+        enterprise_value: str | None = _quantise(
+            market_cap + current_totals["total_debt"]
+            - current_totals["cash_and_equivalents"], "0.01")
+        enterprise_value_reason = None
+    else:
+        enterprise_value = None
+        enterprise_value_reason = (
+            "the filings held carry no "
+            + " and no ".join(
+                role.replace("_", " ") for role in
+                ("total_debt", "cash_and_equivalents")
+                if role not in current_totals)
+            + ", so this company's enterprise value is not something we know"
+        )
     basis = {
         "market_cap": _quantise(market_cap, "0.01"),
         "market_cap_formula": "close * shares_outstanding",
+        "enterprise_value": enterprise_value,
+        "enterprise_value_formula": (
+            "market_cap + total_debt - cash_and_equivalents"),
+        "enterprise_value_reason": enterprise_value_reason,
         "fundamental_window_count": len(windows),
         "fundamental_window_as_ofs": [window["as_of"] for window in windows],
         "share_observation_count": len(dated_shares),
@@ -728,6 +917,7 @@ class ValuationSnapshotAuthority:
         fundamental_windows: Sequence[Mapping[str, Any]],
         price_history: Sequence[Mapping[str, Any]] = (),
         share_history: Sequence[Mapping[str, Any]] = (),
+        input_coverage: Sequence[Mapping[str, Any]] = (),
         statement_rows: Sequence[Mapping[str, Any]] = (),
         solver_results: Sequence[Mapping[str, Any]] = (),
         actor_ref: str = ACTOR_REF,
@@ -740,6 +930,7 @@ class ValuationSnapshotAuthority:
         shares_wire, share_count = _shares_binding(shares)
         windows = _fundamental_windows(
             fundamental_windows, currency=price_wire["currency"])
+        coverage = _input_coverage(input_coverage)
 
         dated_shares: list[dict[str, str]] = []
         seen_share_dates: set[str] = set()
@@ -801,6 +992,12 @@ class ValuationSnapshotAuthority:
             "fundamental_windows": public_windows,
             "price_history_dates": [bar["date"] for bar in bars],
             "share_history": dated_shares,
+            # In the binding, not beside it. A snapshot whose coverage note
+            # changed while its figures did not is a different statement about
+            # this company -- "we now know why the cash flow is absent" -- and
+            # a duplicate rule that ignored it would keep the old sentence on
+            # the record forever.
+            "input_coverage": coverage,
         }
         binding_hash = content_hash(binding)
 
@@ -838,6 +1035,7 @@ class ValuationSnapshotAuthority:
             "share_history": dated_shares,
             "fundamental_windows": public_windows,
             "basis": basis,
+            "input_coverage": coverage,
             "metrics": metrics,
             "binding_hash": binding_hash,
             "actor_ref": actor_ref,
@@ -879,7 +1077,13 @@ class ValuationSnapshotAuthority:
 __all__ = [
     "ACTOR_REF",
     "ALLOWED_FUNDAMENTAL_SOURCES",
+    "COMPONENT_BASES",
+    "COMPONENT_DERIVED",
+    "COMPONENT_REPORTED",
     "FORMULA_VERSION",
+    "INPUT_COVERAGE_HELD",
+    "INPUT_COVERAGE_MISSING",
+    "INPUT_COVERAGE_STATUSES",
     "METRICS",
     "METRIC_DEFINITIONS",
     "MIN_PERCENTILE_SAMPLE",

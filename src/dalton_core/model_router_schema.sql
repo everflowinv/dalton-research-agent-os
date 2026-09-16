@@ -275,3 +275,83 @@ CREATE TRIGGER IF NOT EXISTS model_profile_metadata_declaration_no_delete
 BEFORE DELETE ON model_profile_metadata_declarations BEGIN
     SELECT RAISE(ABORT, 'model profile metadata declarations are append-only');
 END;
+
+-- WP-A / 2026-09-16: provider health, so one dead endpoint stops costing money.
+--
+-- ``profile:gpt-6-astra`` answered 100% HTTP 429 from 09-14T19:58 while sitting
+-- first in five brain chains. Every call still routed to it, still reserved the
+-- chain ceiling, and -- because a rate-limited attempt was settled at that
+-- ceiling -- still moved the day ledger. Six hours of that burned 286 USD with
+-- zero served calls and left every other lane refused by a spent pool.
+--
+-- The fix that makes it systematic is a *selection-layer* cooldown: once a
+-- profile has proved it is not answering, routing stops offering it at all, so
+-- no reservation is taken and no call is made. Both halves are recorded:
+-- ``model_profile_health_events`` is the evidence (what the broker returned,
+-- when, against which route decision) and ``model_profile_cooldowns`` is the
+-- decision derived from it (how long, why, which repeat of it this is).
+--
+-- Append-only like every other table here. A cooldown is never updated or
+-- deleted; it simply expires, and the next one is a new row whose ``streak``
+-- carries the exponential backoff forward.
+CREATE TABLE IF NOT EXISTS model_profile_health_events (
+    event_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id TEXT NOT NULL UNIQUE,
+    profile_id TEXT NOT NULL,
+    outcome TEXT NOT NULL CHECK (outcome IN ('served', 'provider_failure')),
+    failure_code TEXT,
+    route_decision_ref TEXT,
+    observed_at TEXT NOT NULL,
+    event_hash TEXT NOT NULL UNIQUE,
+    event_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    CHECK ((outcome = 'served' AND failure_code IS NULL)
+           OR (outcome = 'provider_failure'))
+);
+CREATE INDEX IF NOT EXISTS model_profile_health_events_by_profile
+    ON model_profile_health_events(profile_id, observed_at);
+
+CREATE TRIGGER IF NOT EXISTS model_profile_health_event_insert_authorized
+BEFORE INSERT ON model_profile_health_events
+WHEN dalton_model_router_authorized() != 1 BEGIN
+    SELECT RAISE(ABORT, 'model profile health events require ModelRouter');
+END;
+CREATE TRIGGER IF NOT EXISTS model_profile_health_event_no_update
+BEFORE UPDATE ON model_profile_health_events BEGIN
+    SELECT RAISE(ABORT, 'model profile health events are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS model_profile_health_event_no_delete
+BEFORE DELETE ON model_profile_health_events BEGIN
+    SELECT RAISE(ABORT, 'model profile health events are append-only');
+END;
+
+CREATE TABLE IF NOT EXISTS model_profile_cooldowns (
+    cooldown_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    cooldown_id TEXT NOT NULL UNIQUE,
+    profile_id TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    failure_code TEXT,
+    failure_count INTEGER NOT NULL CHECK (failure_count > 0),
+    streak INTEGER NOT NULL CHECK (streak > 0),
+    started_at TEXT NOT NULL,
+    until TEXT NOT NULL,
+    cooldown_hash TEXT NOT NULL UNIQUE,
+    cooldown_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS model_profile_cooldowns_by_profile
+    ON model_profile_cooldowns(profile_id, started_at);
+
+CREATE TRIGGER IF NOT EXISTS model_profile_cooldown_insert_authorized
+BEFORE INSERT ON model_profile_cooldowns
+WHEN dalton_model_router_authorized() != 1 BEGIN
+    SELECT RAISE(ABORT, 'model profile cooldowns require ModelRouter');
+END;
+CREATE TRIGGER IF NOT EXISTS model_profile_cooldown_no_update
+BEFORE UPDATE ON model_profile_cooldowns BEGIN
+    SELECT RAISE(ABORT, 'model profile cooldowns are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS model_profile_cooldown_no_delete
+BEFORE DELETE ON model_profile_cooldowns BEGIN
+    SELECT RAISE(ABORT, 'model profile cooldowns are append-only');
+END;

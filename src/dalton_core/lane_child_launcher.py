@@ -32,7 +32,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from .launch_drain import _is_zombie, _ticket_process_matches
+
 TICKET_SCHEMA_VERSION = "0.1"
+
+# When this interpreter started. A ``running`` ticket written before this
+# moment belongs to a previous writer process and is this process's to settle;
+# one written after it belongs to a live launcher in this process and is not.
+PROCESS_STARTED_AT = datetime.now(timezone.utc)
 
 
 class LaneChildError(RuntimeError):
@@ -94,7 +101,16 @@ def _write_all(descriptor: int, payload: bytes) -> None:
 
 
 def pid_alive(pid: Any) -> bool:
-    if not isinstance(pid, int) or pid <= 0:
+    """Whether the pid names a process that can still be doing work.
+
+    A zombie is **not** alive here. ``kill(pid, 0)`` succeeds on an exited
+    child whose parent has not reaped it, and taking that as liveness is what
+    kept 1,049 tickets reading ``running`` forever: the writer only reaped the
+    most recent child, so every earlier one stayed a ``<defunct>`` entry that
+    answered "yes, still running" to every later question about it.
+    """
+
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         return False
     try:
         os.kill(pid, 0)
@@ -103,7 +119,41 @@ def pid_alive(pid: Any) -> bool:
     except PermissionError:
         # Someone else's process with that id: alive, just not ours to signal.
         return True
-    return True
+    except (OverflowError, OSError, ValueError):
+        # A pid the kernel cannot even be asked about is not a live child.
+        return False
+    return not _is_zombie(pid)
+
+
+def _wire_moment(value: Any) -> datetime | None:
+    """Parse a ticket timestamp, or None when it cannot be trusted."""
+
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
+def ticket_identity(record: Mapping[str, Any], ticket_path: Path) -> bool | None:
+    """True/False for a proved identity, None when the OS cannot prove it.
+
+    ``False`` means the recorded pid demonstrably runs something else (or
+    nothing). ``None`` means BSD ``ps`` could not render argv unambiguously,
+    and an unknown identity conservatively holds the slot rather than
+    orphaning a child that may still be writing.
+    """
+
+    pid = record.get("pid")
+    if not pid_alive(pid):
+        return False
+    try:
+        mtime = ticket_path.stat().st_mtime
+    except OSError:
+        mtime = None
+    return _ticket_process_matches(dict(record), mtime)
 
 
 def process_matches(pid: Any, expected: Any) -> bool:
@@ -142,6 +192,41 @@ def process_matches(pid: Any, expected: Any) -> bool:
         and actual[1:] == expected[1:]
 
 
+MARKER_NAME = ".reconciliation.json"
+MARKER_SCHEMA = "lane-reconciliation:0.1"
+
+
+def read_reconciliation_marker(path: Path) -> dict[str, Any]:
+    """What the last startup reconciliation of this lane had already judged."""
+
+    empty: dict[str, Any] = {"checked_through_mtime": float("-inf"), "running": []}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return empty
+    if (not isinstance(value, Mapping)
+            or value.get("schema_version") != MARKER_SCHEMA
+            or isinstance(value.get("checked_through_mtime"), bool)
+            or not isinstance(value.get("checked_through_mtime"), (int, float))
+            or not isinstance(value.get("running"), list)):
+        return empty
+    return {"checked_through_mtime": float(value["checked_through_mtime"]),
+            "running": [item for item in value["running"] if isinstance(item, str)]}
+
+
+def write_reconciliation_marker(path: Path, newest: float,
+                                running: Any, *, at: str) -> None:
+    if newest == float("-inf"):
+        newest = 0.0
+    try:
+        write_owner_only(path, {
+            "schema_version": MARKER_SCHEMA, "at": at,
+            "checked_through_mtime": newest, "running": sorted(running),
+        })
+    except OSError:
+        pass
+
+
 class LaneChildLauncher:
     """One child at a time for one lane, with tickets a restart cannot confuse.
 
@@ -171,9 +256,197 @@ class LaneChildLauncher:
         self.python_executable = python_executable or sys.executable
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self._lock = threading.Lock()
+        # Every child this launcher started, not just the newest. Holding only
+        # the newest handle meant an overwritten Popen was never waited on, so
+        # each replaced child stayed a zombie for the life of the writer.
+        self._children: dict[str, subprocess.Popen[bytes]] = {}
         self._current: tuple[str, subprocess.Popen[bytes]] | None = None
         self.tickets_dir = secure_dir(self.state_dir / self.TICKETS_DIRNAME)
         self._ticket_re = re.compile(rf"^{re.escape(self.TICKET_PREFIX)}:[0-9a-f]{{24}}$")
+        # The set of tickets that may still be running, by ticket id. Built
+        # once here and maintained in memory afterwards: ``spawn`` used to
+        # glob and parse every ticket in the lane directory and fork one ``ps``
+        # per running ticket, which is 3,777 files and one fork each on the
+        # fetch lane alone.
+        self._running_index: dict[str, Path] = {}
+        self.startup_reconciliation = self.reconcile_startup()
+
+    # -- startup reconciliation -------------------------------------------
+
+    def reconcile_startup(self) -> dict[str, Any]:
+        """Settle tickets left ``running`` by a previous writer process.
+
+        Only tickets started before this interpreter are judged: one started
+        after it belongs to a launcher in this process, which owns its handle.
+        A ticket is orphaned when its pid is gone, when it is a zombie, or when
+        the pid demonstrably runs something else; an identity the OS cannot
+        prove conservatively keeps the slot.
+        """
+
+        marker = self._read_marker()
+        cutoff = marker["checked_through_mtime"]
+        carried = set(marker["running"])
+        checked = 0
+        skipped = 0
+        settled: list[dict[str, Any]] = []
+        running: dict[str, Path] = {}
+        newest = cutoff
+        seen = 0
+        for path in sorted(self.tickets_dir.glob("*/ticket.json")):
+            # A settled ticket is never rewritten, so one that has not changed
+            # since the last reconciliation and was not running then cannot be
+            # running now. Skipping those on a stat turns a 20-second cold scan
+            # of 11,540 tickets into about a fifth of a second.
+            try:
+                mtime = path.stat().st_mtime
+            except OSError:
+                continue
+            seen += 1
+            newest = max(newest, mtime)
+            ticket_id = f"{self.TICKET_PREFIX}:{path.parent.name}"
+            if mtime <= cutoff and ticket_id not in carried:
+                skipped += 1
+                continue
+            try:
+                record = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if not isinstance(record, Mapping) or record.get("status") != "running":
+                continue
+            checked += 1
+            ticket_id = record.get("id")
+            started = _wire_moment(record.get("started_at"))
+            if started is not None and started >= PROCESS_STARTED_AT:
+                if isinstance(ticket_id, str):
+                    running[ticket_id] = path
+                continue
+            pid = record.get("pid")
+            if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0 \
+                    and _is_zombie(pid):
+                reason = "子进程已退出但未被回收（僵尸进程），票据不再代表在跑的工作"
+            elif not pid_alive(pid):
+                reason = "记录的进程号已不存在：写入服务在子进程之后重启"
+            else:
+                identity = ticket_identity(record, path)
+                if identity is False:
+                    reason = "进程号已被无关进程复用，票据与该进程不对应"
+                else:
+                    # True or unprovable: the slot stays held.
+                    if isinstance(ticket_id, str):
+                        running[ticket_id] = path
+                    continue
+            record = dict(record)
+            record["status"] = "orphaned"
+            record["completed_at"] = wire_time(self.clock())
+            record["orphaned_reason"] = reason
+            try:
+                write_owner_only(path, record)
+            except OSError:
+                continue
+            settled.append({"id": ticket_id, "pid": record.get("pid"),
+                            "reason": reason})
+        self._running_index = running
+        # A lane that has never run leaves nothing on disk; the marker is an
+        # optimisation and must not be the first file a lane directory gets.
+        if seen or self._marker_path().exists():
+            self._write_marker(newest, running)
+        return {
+            "lane": self.TICKETS_DIRNAME,
+            "running_tickets_checked": checked,
+            "unchanged_tickets_skipped": skipped,
+            "orphaned": len(settled),
+            "still_running": len(running),
+            "settled": settled,
+        }
+
+    # -- reconciliation marker --------------------------------------------
+
+    def _marker_path(self) -> Path:
+        return self.tickets_dir / ".reconciliation.json"
+
+    def _read_marker(self) -> dict[str, Any]:
+        return read_reconciliation_marker(self._marker_path())
+
+    def _write_marker(self, newest: float, running: Mapping[str, Any]) -> None:
+        write_reconciliation_marker(self._marker_path(), newest, running,
+                                    at=wire_time(self.clock()))
+
+    # -- child reaping -----------------------------------------------------
+
+    def _settle_locked(self, ticket_id: str, code: int) -> None:
+        """Write the exit of a child this process started. Caller holds lock."""
+
+        path = self._ticket_path(ticket_id)
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        if not isinstance(record, dict) or record.get("status") != "running":
+            return
+        record["exit_code"] = code
+        record["completed_at"] = wire_time(self.clock())
+        record["status"] = "succeeded" if code == 0 else "failed"
+        try:
+            write_owner_only(path, record)
+        except OSError:
+            pass
+
+    def reap(self) -> list[str]:
+        """Wait on every finished child and settle its ticket."""
+
+        with self._lock:
+            return self._reap_locked()
+
+    def _reap_locked(self) -> list[str]:
+        reaped: list[str] = []
+        for ticket_id, process in list(self._children.items()):
+            code = process.poll()
+            if code is None:
+                continue
+            # poll() has already reaped the handle; the entry only has to go.
+            self._children.pop(ticket_id, None)
+            self._running_index.pop(ticket_id, None)
+            self._settle_locked(ticket_id, code)
+            reaped.append(ticket_id)
+        return reaped
+
+    def _live_ticket_locked(self, ticket_id: str) -> dict[str, Any] | None:
+        """The one ticket still holding this lane's slot, if any.
+
+        Reads only the in-memory running set rather than the whole lane
+        directory, and settles entries whose child has demonstrably gone.
+        """
+
+        for candidate, path in list(self._running_index.items()):
+            owned = self._children.get(candidate)
+            if owned is not None and owned.poll() is not None:
+                # Finished but not yet reaped; ``_reap_locked`` settles it.
+                continue
+            try:
+                record = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                self._running_index.pop(candidate, None)
+                continue
+            if not isinstance(record, dict) or record.get("status") != "running":
+                self._running_index.pop(candidate, None)
+                continue
+            if owned is not None:
+                # This process holds the handle: it is running, full stop, and
+                # no ``ps`` is needed to say so.
+                return record
+            if ticket_identity(record, path) is not False:
+                return record
+            record["status"] = "orphaned"
+            record["completed_at"] = wire_time(self.clock())
+            record.setdefault(
+                "orphaned_reason",
+                "记录的子进程已不存在或进程号被复用，票据不再代表在跑的工作")
+            try:
+                write_owner_only(path, record)
+            except OSError:
+                pass
+            self._running_index.pop(candidate, None)
+        return None
 
     # -- subclass seam -----------------------------------------------------
 
@@ -197,18 +470,11 @@ class LaneChildLauncher:
         """Persist one exact child attempt. Caller holds ``self._lock``."""
         if not isinstance(authorization, str) or not authorization:
             raise LaneChildRejected("controlled reentry needs exact authorization")
+        self._reap_locked()
         if self._current is not None and self._current[1].poll() is None:
             raise LaneChildConflict(f"{self.TICKET_PREFIX} child is already running")
-        for path in sorted(self.tickets_dir.glob("*/ticket.json")):
-            try:
-                persisted = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                continue
-            if (isinstance(persisted, Mapping)
-                    and persisted.get("status") == "running"
-                    and process_matches(persisted.get("pid"),
-                                        persisted.get("command"))):
-                raise LaneChildConflict(f"{self.TICKET_PREFIX} child is already running")
+        if self._live_ticket_locked(ticket_id) is not None:
+            raise LaneChildConflict(f"{self.TICKET_PREFIX} child is already running")
         ticket_path = self._ticket_path(ticket_id)
         try:
             ticket = json.loads(ticket_path.read_text(encoding="utf-8"))
@@ -287,23 +553,18 @@ class LaneChildLauncher:
             raise LaneChildRejected("ticket digest must be 24 hex characters")
         ticket_id = f"{self.TICKET_PREFIX}:{digest}"
         with self._lock:
+            # Reaping first is what keeps ``<defunct>`` children from piling
+            # up: a handle is only waited on when someone asks this launcher
+            # for something, and spawning is the question it is asked most.
+            self._reap_locked()
             if self._current is not None and self._current[1].poll() is None:
                 raise LaneChildConflict(f"{self.TICKET_PREFIX} child is already running")
-            for path in sorted(self.tickets_dir.glob("*/ticket.json")):
-                try:
-                    persisted = json.loads(path.read_text(encoding="utf-8"))
-                except (OSError, ValueError):
-                    continue
-                if persisted.get("status") != "running":
-                    continue
-                if process_matches(persisted.get("pid"), persisted.get("command")):
-                    if persisted.get("id") == ticket_id:
-                        return dict(persisted)
-                    raise LaneChildConflict(
-                        f"{self.TICKET_PREFIX} child is already running")
-                persisted["status"] = "orphaned"
-                persisted["completed_at"] = wire_time(self.clock())
-                write_owner_only(path, persisted)
+            live = self._live_ticket_locked(ticket_id)
+            if live is not None:
+                if live.get("id") == ticket_id and "status" in live:
+                    return dict(live)
+                raise LaneChildConflict(
+                    f"{self.TICKET_PREFIX} child is already running")
             # Constructing argv must be pure. Validate its workspace binding
             # before making the per-run directory or truncating its log.
             ticket_dir = self.tickets_dir / digest
@@ -345,6 +606,8 @@ class LaneChildLauncher:
                 "completed_at": None,
             }
             write_owner_only(self._ticket_path(ticket_id), ticket)
+            self._children[ticket_id] = process
+            self._running_index[ticket_id] = self._ticket_path(ticket_id)
             self._current = (ticket_id, process)
             return dict(ticket)
 
@@ -366,29 +629,28 @@ class LaneChildLauncher:
         except FileNotFoundError as exc:
             raise LaneChildTicketNotFound(ticket_ref) from exc
         with self._lock:
-            process = None
-            if self._current is not None and self._current[0] == ticket_ref:
-                process = self._current[1]
+            process = self._children.get(ticket_ref)
             if record["status"] == "running":
                 if process is not None:
                     code = process.poll()
                     if code is not None:
+                        self._children.pop(ticket_ref, None)
+                        self._running_index.pop(ticket_ref, None)
                         record["exit_code"] = code
                         record["completed_at"] = wire_time(self.clock())
                         record["status"] = "succeeded" if code == 0 else "failed"
                         write_owner_only(path, record)
                 else:
-                    command = record.get("command")
-                    # New tickets carry enough identity to distinguish their
-                    # child from an unrelated process that reused the PID.
-                    # Legacy tickets did not; retain their historical liveness
-                    # rule rather than retroactively orphaning a real child.
-                    alive = (process_matches(record.get("pid"), command)
-                             if isinstance(command, list)
-                             else pid_alive(record.get("pid")))
-                    if not alive:
+                    # An identity the OS cannot prove conservatively keeps the
+                    # ticket running; only a proved mismatch, a missing pid or
+                    # a zombie settles it as orphaned.
+                    if ticket_identity(record, path) is False:
                         record["status"] = "orphaned"
                         record["completed_at"] = wire_time(self.clock())
+                        record.setdefault(
+                            "orphaned_reason",
+                            "记录的子进程已不存在或进程号被复用，票据不再代表在跑的工作")
+                        self._running_index.pop(ticket_ref, None)
                         write_owner_only(path, record)
         summary_path = path.with_name("summary.json")
         summary = None
@@ -412,18 +674,29 @@ class LaneChildLauncher:
             return None
 
     def close(self) -> None:
+        """Stop and reap every child this launcher started."""
+
         with self._lock:
-            current, self._current = self._current, None
-        if current is None or current[1].poll() is not None:
-            return
-        current[1].terminate()
-        try:
-            current[1].wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            current[1].kill()
+            children = list(self._children.items())
+            self._children.clear()
+            self._running_index.clear()
+            self._current = None
+        for _ticket_id, process in children:
+            if process.poll() is not None:
+                continue
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
 
 
 __all__ = [
+    "PROCESS_STARTED_AT",
     "LaneChildConflict",
     "LaneChildError",
     "LaneChildLauncher",
@@ -432,6 +705,9 @@ __all__ = [
     "TICKET_SCHEMA_VERSION",
     "pid_alive",
     "process_matches",
+    "read_reconciliation_marker",
+    "ticket_identity",
+    "write_reconciliation_marker",
     "secure_dir",
     "wire_time",
     "write_owner_only",
