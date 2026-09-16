@@ -653,6 +653,7 @@ const rid=()=>crypto.randomUUID?crypto.randomUUID():Math.random().toString(16).s
 function toast(text,ms=3200){const t=$("toast");t.textContent=text;t.classList.add("show");clearTimeout(t._h);t._h=setTimeout(()=>t.classList.remove("show"),ms)}
 function ago(iso){if(!iso)return"";const d=(Date.now()-new Date(iso).getTime())/1000;if(d<60)return"刚刚";if(d<3600)return`${Math.floor(d/60)} 分钟前`;if(d<86400)return`${Math.floor(d/3600)} 小时前`;return`${Math.floor(d/86400)} 天前`}
 function clock(iso){if(!iso)return"";const d=new Date(iso);return d.toLocaleTimeString("zh-CN",{hour:"2-digit",minute:"2-digit"})}
+function fmtTime(iso){if(!iso)return"";return new Date(iso).toLocaleTimeString("zh-CN",{hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false})}
 function day(iso){if(!iso)return"";const d=new Date(iso),t=new Date();return d.toDateString()===t.toDateString()?"今天":d.toLocaleDateString("zh-CN",{month:"numeric",day:"numeric"})}
 function fmtDate(iso){return iso?new Date(iso).toLocaleString("zh-CN",{month:"numeric",day:"numeric",hour:"2-digit",minute:"2-digit"}):""}
 
@@ -875,7 +876,7 @@ function renderOverview(o){
   renderOpsPanels(o.ops);
   const t=o.totals,b=o.budgets;
   $("totals").replaceChildren(stat(t.found,"找到的资料","网页、研报、电话会"),stat(t.read,"已读完的资料",`还有 ${t.waiting} 份排队`),stat(t.claims,"入库的结论",t.claims_today?`今天新增 ${t.claims_today} 条`:"今天还没有新增"),
-    stat(b.model_calls?`${b.model_calls.used}/${b.model_calls.cap}`:"—","今天的模型调用",b.model_calls?`已花 $${b.model_calls.cost_usd}，上限 $${b.model_calls.cost_cap_usd}`:"未接入"));
+    stat(b.model_calls?`${b.model_calls.used} 次调用`:"—","今天的模型调用",b.model_calls?`已花 $${b.model_calls.cost_usd}`:"未接入"));
   const budgetEntry=node("button","模型与预算","ghost");
   budgetEntry.onclick=openModels;
   $("totals").append(budgetEntry);
@@ -1283,14 +1284,14 @@ async function renderTrajectory(sheet,before,reset){
     const title=node("span",null,"t");
     title.append(node("span",null,"st "+(e.status==="ok"?"on":e.status==="warn"?"hold":e.status==="failed"?"err":"")));
     title.append(rawNode("span",displayText(e.title)));
-    row.append(node("time",e.at.slice(11,19)),node("span",TRAJ_KIND_LABELS[e.kind]||e.kind,"traj-kind"),title);
+    row.append(node("time",fmtTime(e.at)),node("span",TRAJ_KIND_LABELS[e.kind]||e.kind,"traj-kind"),title);
     if(e.cost_usd)row.append(node("span",`$${e.cost_usd}`,"c"));
     row.onclick=()=>{
       const existing=list.querySelector(".traj-inspect[data-for]");
       if(existing&&existing.dataset.for===e.at+e.title){existing.remove();return}
       if(existing)existing.remove();
       const panel=node("div",null,"traj-inspect");panel.dataset.for=e.at+e.title;
-      panel.append(node("div",`${TRAJ_KIND_LABELS[e.kind]||e.kind} · ${fmtDate(e.at)} ${e.at.slice(11,19)} · 状态 ${e.status}`,"raw"));
+      panel.append(node("div",`${TRAJ_KIND_LABELS[e.kind]||e.kind} · ${fmtDate(e.at)} ${fmtTime(e.at)} · 状态 ${e.status}`,"raw"));
       if(e.actor)panel.append(node("div",`环节：${e.actor}`,"raw"));
       if(e.detail)panel.append(node("div",displayText(e.detail),"raw"));
       const tech=technicalDetails({at:e.at,kind:e.kind,status:e.status,actor:e.actor,cost_usd:e.cost_usd,detail:e.detail});
@@ -1308,7 +1309,7 @@ async function renderTrajectory(sheet,before,reset){
       const spanEl=node("span",null,"traj-span "+e.status);
       const t=Date.parse(e.at);
       spanEl.style.left=`${((t-min)/span)*96}%`;spanEl.style.width="4px";
-      spanEl.title=`${e.at.slice(11,19)} ${e.title}`;
+      spanEl.title=`${fmtTime(e.at)} ${e.title}`;
       waterfall.append(spanEl)}
     const tl=node("span",null,"traj-kind");tl.style.cssText="position:absolute;right:8px;bottom:3px;font-size:11px";
     tl.textContent="← 早 · 晚 →";waterfall.append(tl)}

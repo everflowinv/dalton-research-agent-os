@@ -349,6 +349,27 @@ _DISCOVERY_AUTHORIZATION_FIELDS = frozenset({
     "max_alphaengine_calls_24h",
 })
 
+# The closed shape of a research_budget block on the mandate and governance
+# authorities.  The three legacy money/call caps are required; the
+# 2026-09-15 owner simplification added two optional fields (pools may report
+# spend without refusing, and reading carries its own per-day stopper).
+# Authorities published before that day carry exactly the three; verifiers
+# must accept both shapes and reject anything else.
+RESEARCH_BUDGET_REQUIRED_FIELDS = frozenset({
+    "max_daily_paid_calls", "max_daily_cost_usd", "max_alphaengine_calls_24h",
+})
+RESEARCH_BUDGET_OPTIONAL_FIELDS = frozenset({
+    "pools_enforcement", "max_daily_document_reads",
+})
+
+
+def research_budget_shape_valid(cap: Any) -> bool:
+    """Closed enough for a verifier: every required field, nothing unknown."""
+
+    return (isinstance(cap, Mapping)
+            and RESEARCH_BUDGET_REQUIRED_FIELDS <= set(cap)
+            and not set(cap) - RESEARCH_BUDGET_REQUIRED_FIELDS - RESEARCH_BUDGET_OPTIONAL_FIELDS)
+
 
 # P11w: the check every stored figure has passed -- its digits and its
 # as-reported label were both found in the exact quote it cites.

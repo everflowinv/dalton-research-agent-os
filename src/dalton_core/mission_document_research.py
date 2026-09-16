@@ -329,11 +329,15 @@ class MissionDocumentResearchAuthority:
         constraints = mandate["constraints"]
         if constraints.get("research_execution") is False:
             raise MissionDocumentResearchError("mandate forbids research execution")
-        budget_fields = {"max_daily_paid_calls", "max_daily_cost_usd", "max_alphaengine_calls_24h"}
+        # Same closed shape as every other research-budget verifier: the
+        # three legacy caps required, the two simplification fields optional,
+        # nothing else.
+        from .coverage_mission import RESEARCH_BUDGET_REQUIRED_FIELDS, research_budget_shape_valid
+        budget_fields = set(RESEARCH_BUDGET_REQUIRED_FIELDS)
         caps = []
         for name, parent in (("mandate", constraints), ("governance", policy["policy"])):
             cap = parent.get("research_budget")
-            if not isinstance(cap, Mapping) or set(cap) != budget_fields:
+            if not research_budget_shape_valid(cap):
                 raise MissionDocumentResearchError(f"{name} lacks closed research budget authority")
             for key in budget_fields:
                 if mission["budget"][key] > cap[key]:

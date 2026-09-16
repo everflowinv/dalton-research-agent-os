@@ -3599,11 +3599,17 @@ class CockpitPlane:
 
         A day's cap split four ways is the difference between "the system
         stopped" and "the cheap half of the system stopped"; the owner cannot
-        tell those apart from one total. Read from the day ledger, not from
-        the Core, and empty on a ledger that has not been migrated -- a
-        read-only copy from before C2 has no ``pool`` column at all.
+        tell those apart from one total. Read from the day ledger, not from the
+        Core, and empty on a ledger that has not been migrated -- a read-only
+        copy from before C2 has no ``pool`` column at all.
+
+        2026-09-16: pools the owner has switched off are not reported at all.
+        They kept rendering "上限/还剩" numbers that no longer refuse anything,
+        which reads as a live budget the system is ignoring.
         """
 
+        if str((mission.get("budget") or {}).get("pools_enforcement") or "on") == "off":
+            return None
         path = self._budget_db()
         if path is None:
             return None

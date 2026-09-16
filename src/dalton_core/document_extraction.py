@@ -1126,11 +1126,17 @@ class DocumentExtractionService:
         constraints = mandate["constraints"]
         if constraints.get("research_execution") is False:
             raise ResearchVerificationError("mandate explicitly forbids research execution")
-        fields = {"max_daily_paid_calls", "max_daily_cost_usd", "max_alphaengine_calls_24h"}
+        # 2026-09-16: the closed shape is the three legacy caps plus the two
+        # optional simplification fields (see coverage_mission).  Requiring
+        # exactly the three refused every view on authorities published since
+        # the budget simplification, which is how 344 documents queued behind
+        # "all_document_views_failed" in a day.
+        from .coverage_mission import RESEARCH_BUDGET_REQUIRED_FIELDS, research_budget_shape_valid
+        fields = set(RESEARCH_BUDGET_REQUIRED_FIELDS)
         caps = []
         for name, parent in (("mandate", constraints), ("governance", policy["policy"])):
             cap = parent.get("research_budget")
-            if not isinstance(cap, dict) or set(cap) != fields:
+            if not research_budget_shape_valid(cap):
                 raise ResearchVerificationError(name + " lacks explicit closed research_budget authority")
             for key in fields:
                 value = cap[key]
