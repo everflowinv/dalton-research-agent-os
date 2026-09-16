@@ -2491,6 +2491,14 @@ class CockpitModel:
             failure = f"the {tier} chain halted on {outcome.get('reason')}: {skipped}"
         else:
             failure = f"every model in the {tier} chain failed: {skipped}"
+        unroutable = outcome.get("rejection_reasons") or []
+        if unroutable:
+            # 2026-09-15: the walk that ends in "no link of the chain is
+            # routable" names why the links it never reached were refused --
+            # excluded by provider-retry history above all. Without this the
+            # message read as though the whole chain had been tried.
+            failure += ("；未尝试的环节被拒绝："
+                        + ", ".join(sorted(set(map(str, unroutable))[:6])))
         if detail_text:
             failure += f"; broker details: {detail_text}"
         retryable = outcome["status"] == "halted" and outcome.get("reason") == "capacity_busy"

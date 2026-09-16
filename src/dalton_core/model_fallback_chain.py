@@ -707,6 +707,10 @@ def execute_chain(
             # not independent of the producer, over budget, or already tried.
             # The decision's candidate snapshot names every link and the reason
             # each one was refused, so the chain does not have to restate it.
+            # 2026-09-15: the failures recorded on the way here travel with
+            # the walk -- dropping them left the trajectory showing bare
+            # skip classes with no broker message for exactly the walks that
+            # got furthest.
             return {
                 "status": "exhausted",
                 "tier": tier,
@@ -715,6 +719,7 @@ def execute_chain(
                 "route_decision_ref": route["id"],
                 "rejection_reasons": route["rejection_reasons"],
                 "links": links,
+                "failures": failures,
                 "served": None,
             }
         profile = router.get_profile(route["selected_profile_version_ref"])
@@ -763,6 +768,7 @@ def execute_chain(
                     "purpose": purpose,
                     "reason": "budget_refused",
                     "links": links,
+                    "failures": failures,
                     "served": None,
                 }
         outcome = call(route, profile)

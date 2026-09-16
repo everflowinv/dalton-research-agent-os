@@ -265,7 +265,7 @@ class ChainExecutionTests(unittest.TestCase):
 
     def _run(self, tier, broker, *, purpose="plan", capability="research",
              work_id=None, producer_decision_ref=None, producer_decision_refs=(),
-             admit=None):
+             admit=None, excluded_profile_ids=()):
         work = _work(work_id or f"work:p14m-{tier}", capability=capability)
         return execute_chain(
             self.router,
@@ -287,6 +287,7 @@ class ChainExecutionTests(unittest.TestCase):
             admit=admit,
             producer_decision_ref=producer_decision_ref,
             producer_decision_refs=producer_decision_refs,
+            excluded_profile_ids=excluded_profile_ids,
         )
 
     def test_production_setup_replays_policy_with_publication_overrides(self) -> None:
@@ -381,6 +382,31 @@ class ChainExecutionTests(unittest.TestCase):
         links = self.router.chain_links(work_order_id="work:p14m-brain")
         self.assertEqual(len(links), 1)
         self.assertEqual(links[0]["skip_reason"], "content_refusal")
+
+    def test_an_unroutable_tail_still_carries_the_failures_recorded_on_the_way(self) -> None:
+        # 2026-09-15: a walk that ends in "no link of the chain is routable"
+        # dropped the failures it had already recorded, so the trajectory
+        # showed bare skip classes with no broker message for exactly the
+        # walks that got furthest.
+        broker = FakeBroker({
+            "profile:gpt-6-astra": {
+                "outcome": "failed", "failure_class": "provider_failure",
+                "error_code": "RATE_LIMITED", "reason": "provider throttled",
+            }
+        })
+        result = self._run(
+            "brain", broker,
+            excluded_profile_ids=("profile:claude-fable-5-1", "profile:zai-glm-5-3"))
+        self.assertEqual(result["status"], "exhausted")
+        self.assertEqual(result["reason"], "no link of the chain is routable")
+        self.assertEqual(len(result["links"]), 1)
+        self.assertEqual(
+            result["failures"],
+            [{"profile_id": "profile:gpt-6-astra",
+              "failure_class": "provider_failure",
+              "code": "RATE_LIMITED",
+              "message": "provider throttled"}],
+        )
 
     def test_an_unclassified_failure_fails_closed(self) -> None:
         broker = FakeBroker({
