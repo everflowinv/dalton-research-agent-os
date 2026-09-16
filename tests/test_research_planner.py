@@ -412,6 +412,96 @@ class PromptTests(unittest.TestCase):
         self.assertEqual(
             caught.exception.report["projection_rule_ref"], PROMPT_PROJECTION_REF)
 
+    def heavy_state(self):
+        """A state whose weight is past the previews: rows, refs and models."""
+        from dalton_core.store import content_hash
+        built = self.document_state()
+        for company in built["companies"]:
+            company["unavailable_documents"] = [
+                {"record_ref": f"record:{company['company_ref']}:{n}",
+                 "document_ref": f"document:{company['company_ref']}:u{n}",
+                 "source_ref": "source:broker-research", "readable": False,
+                 "reason": "source_not_readable"}
+                for n in range(40)
+            ] + [
+                {"record_ref": f"record:{company['company_ref']}:h{n}",
+                 "document_ref": f"document:{company['company_ref']}:h{n}",
+                 "source_ref": "source:alphaengine", "readable": False,
+                 "reason": "held_for_rights"}
+                for n in range(5)
+            ]
+            company["financial_model"] = {
+                "status": "projected", "spec_ref": "spec:1", "rows": [
+                    {"line": f"revenue_line_{n}", "value": str(n * 1000)}
+                    for n in range(40)
+                ],
+            }
+        built.pop("content_hash", None)
+        built["content_hash"] = content_hash(built)
+        return built
+
+    def test_stage_two_aggregates_unavailable_rows_and_discloses_them(self):
+        built = self.heavy_state()
+        full = len(build_prompt(built).encode("utf-8"))
+        # A bound the previews alone cannot reach but the row aggregation can.
+        projected = project_state_for_prompt(
+            built, max_input_bytes=full - 12_000)
+        meta = projected["prompt_projection"]
+        self.assertIn("aggregate_unavailable_documents", meta["stages_applied"])
+        for company in projected["companies"]:
+            self.assertNotIn("unavailable_documents", company)
+            summary = company["unavailable_documents_summary"]
+            self.assertEqual(summary["count"], 45)
+            self.assertEqual(summary["by_reason"]["source_not_readable"], 40)
+            self.assertEqual(summary["by_reason"]["held_for_rights"], 5)
+            self.assertEqual(len(summary["sample_document_refs"]), 3)
+            self.assertTrue(summary["omitted_rows_hash"])
+        # Every readable identity is still whole.
+        for company in projected["companies"]:
+            for document in company["readable_documents"]:
+                self.assertTrue(document["document_ref"])
+
+    def test_stages_three_and_four_slim_refs_and_digest_models(self):
+        built = self.heavy_state()
+        full = len(build_prompt(built).encode("utf-8"))
+        with self.assertRaises(ResearchPlanInputTooLarge) as caught:
+            # Far below every floor: the refusal must name all four stages.
+            project_state_for_prompt(built, max_input_bytes=1)
+        self.assertEqual(
+            caught.exception.report["stages_applied"],
+            ["drop_preview_triplets", "aggregate_unavailable_documents",
+             "slim_readable_document_identity", "digest_financial_models"])
+
+    def test_stage_three_drops_verification_fields_and_four_digests_models(self):
+        built = self.heavy_state()
+        full = len(build_prompt(built).encode("utf-8"))
+        # Squeeze until stages three and four engage, keeping the result
+        # above the refusal floor by trying a descending bound.
+        projected = None
+        bound = full - 2_000
+        while bound > 1_000 and projected is None:
+            try:
+                projected = project_state_for_prompt(built, max_input_bytes=bound)
+            except ResearchPlanInputTooLarge:
+                bound -= 1_000
+                continue
+            meta = projected["prompt_projection"]
+            if "digest_financial_models" not in meta["stages_applied"]:
+                projected = None
+                bound -= 1_000
+        self.assertIsNotNone(projected)
+        meta = projected["prompt_projection"]
+        self.assertIn("slim_readable_document_identity", meta["stages_applied"])
+        self.assertIn("digest_financial_models", meta["stages_applied"])
+        for company in projected["companies"]:
+            for document in company["readable_documents"]:
+                for key in ("authority_ref", "authority_hash",
+                            "source_content_hash", "operations"):
+                    self.assertNotIn(key, document)
+            model = company["financial_model"]
+            self.assertEqual(set(model), {"status", "digest"})
+        self.assertIn("projected in these stages", meta["notice"])
+
     def test_small_state_keeps_the_historical_prompt_exact(self):
         built = state()
         prompt = build_prompt(built)

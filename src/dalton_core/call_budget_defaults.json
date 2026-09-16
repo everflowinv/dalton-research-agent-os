@@ -158,7 +158,7 @@
     },
     "plan": {
       "max_cost_usd": 1.0,
-      "max_input_tokens": 120000,
+      "max_input_tokens": 80000,
       "max_output_tokens": 4000,
       "timeout_seconds": 300
     },

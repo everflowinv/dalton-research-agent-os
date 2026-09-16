@@ -80,10 +80,20 @@ MAX_REQUIRED_MULTIPLE = 3
 # admits complete preview+proof triplets in a fair deterministic order, and
 # describes exactly what it omitted.  Changing that policy changes the prompt
 # and therefore the model Work identity.
-PROMPT_PROJECTION_REF = "rule:research-plan-input-projection:0.1"
+#
+# 0.2, 2026-09-16: preview-dropping alone could not reach a planner budget
+# worth having -- the live state's floor after every preview was dropped was
+# still ~200KB, most of it unavailable-document rows, per-document authority
+# refs and whole financial models.  Three more stages now engage in order when
+# the previews are not enough, each one recording what it omitted by hash:
+# aggregate the unavailable lists per company, slim every readable document's
+# verification-only fields, and replace each financial model with a digest.
+# Identities and omission records stay complete; a stage that does not fit
+# still sends nothing.
+PROMPT_PROJECTION_REF = "rule:research-plan-input-projection:0.2"
 PROMPT_PROJECTION_RULE = {
     "ref": PROMPT_PROJECTION_REF,
-    "preserved": "the complete research state except original document preview bodies and their proof refs",
+    "preserved": "every document and company identity; prior-review facts; omission records for everything projected away",
     "preview_unit": "original_preview, preview_proof_ref and preview_proof_hash travel together",
     "priority": [
         "documents without a prior review",
@@ -91,9 +101,22 @@ PROMPT_PROJECTION_RULE = {
         "documents whose prior review is dismissed",
     ],
     "fairness": "within each priority, offer one document per company before a second",
-    "refusal": "if the complete state without preview triplets exceeds the configured input bound, send nothing",
+    "stages": [
+        "drop_preview_triplets",
+        "aggregate_unavailable_documents",
+        "slim_readable_document_identity",
+        "digest_financial_models",
+    ],
+    "refusal": "if the state after every stage exceeds the configured input bound, send nothing",
 }
 PROMPT_PROJECTION_HASH = content_hash(PROMPT_PROJECTION_RULE)
+
+# Stage three's verification-only fields.  The planner chooses work; these
+# four fields exist so a reader can re-verify a registration, and a work
+# choice never consults them.
+_DOCUMENT_VERIFICATION_FIELDS: tuple[str, ...] = (
+    "authority_ref", "authority_hash", "source_content_hash", "operations",
+)
 
 # What the dispatcher can actually do. A plan may only ask for these, because
 # a directive nobody can execute is a plan that looks like work and is not.
@@ -384,9 +407,10 @@ def project_state_for_prompt(
 
     The returned mapping is prompt material, not a replacement ResearchState.
     Its ``content_hash`` remains the hash of the complete state used to validate
-    the response.  Only verified preview triplets may be omitted.  If that is
-    insufficient, the call is refused before routing rather than silently
-    dropping documents, feedback, figures, or checklist facts.
+    the response.  Preview triplets go first; if that is not enough the stages
+    of ``PROMPT_PROJECTION_RULE`` engage in order, each recording what it
+    omitted by hash.  If every stage together is still insufficient, the call
+    is refused before routing rather than silently dropping checklist facts.
     """
 
     if isinstance(max_input_bytes, bool) or not isinstance(max_input_bytes, int) \
@@ -421,6 +445,11 @@ def project_state_for_prompt(
         for key in ("original_preview", "preview_proof_ref", "preview_proof_hash"):
             document.pop(key, None)
 
+    # The stages this projection has engaged, in the order the rule fixes.
+    # ``projection_meta`` reads the list at render time, so the disclosure
+    # always names exactly what was done.
+    stages_applied: list[str] = ["drop_preview_triplets"]
+
     def projection_meta(retained: set[tuple[int, int]], prompt_bytes: int | None) -> dict[str, Any]:
         omitted = [identities[position] for position in order if position not in retained]
         by_company: dict[str, dict[str, int]] = {}
@@ -428,6 +457,23 @@ def project_state_for_prompt(
             company_ref = str(identities[position]["company_ref"])
             counts = by_company.setdefault(company_ref, {"retained": 0, "omitted": 0})
             counts["retained" if position in retained else "omitted"] += 1
+        if len(stages_applied) == 1:
+            notice = (
+                "Some verified opening previews and their proof refs were omitted "
+                "from this model prompt to fit the configured input bound. Every "
+                "document identity, version, source, completeness and prior review "
+                "remains present. An omitted preview is unread here and says nothing "
+                "about whether that document answers a question."
+            )
+        else:
+            notice = (
+                "To fit the configured input bound this prompt was projected in "
+                f"these stages: {', '.join(stages_applied)}. Every company and "
+                "document identity is preserved; everything projected away is "
+                "recorded here by hash. An unread preview or an aggregated "
+                "unavailable row says nothing about whether that document "
+                "answers a question."
+            )
         return {
             "schema_version": "0.1",
             "rule_ref": PROMPT_PROJECTION_REF,
@@ -438,22 +484,72 @@ def project_state_for_prompt(
             "configured_max_input_bytes": max_input_bytes,
             "projected_prompt_bytes": prompt_bytes,
             "document_identities_preserved": True,
+            "stages_applied": list(stages_applied),
             "preview_triplets_total": len(order),
             "preview_triplets_retained": len(retained),
             "preview_triplets_omitted": len(omitted),
             "omitted_preview_set_hash": content_hash(omitted),
             "preview_counts_by_company": by_company,
-            "notice": (
-                "Some verified opening previews and their proof refs were omitted "
-                "from this model prompt to fit the configured input bound. Every "
-                "document identity, version, source, completeness and prior review "
-                "remains present. An omitted preview is unread here and says nothing "
-                "about whether that document answers a question."
-            ),
+            "notice": notice,
         }
 
     retained: set[tuple[int, int]] = set()
+
+    def _fits() -> bool:
+        return len(build_prompt(projected).encode("utf-8")) <= max_input_bytes
+
     projected["prompt_projection"] = projection_meta(retained, None)
+
+    if not _fits():
+        # Stage two: the unavailable lists become one summary per company --
+        # counts by reason, three named examples, and the hash of the full row
+        # set.  A planner deciding what to work on next reads "why not" as a
+        # category; the row-by-row detail carries no decision it can act on.
+        for company in companies:
+            rows = company.pop("unavailable_documents", None)
+            if rows is None:
+                continue
+            by_reason: dict[str, int] = {}
+            for row in rows:
+                reason = str(row.get("reason") or "source_not_readable")
+                by_reason[reason] = by_reason.get(reason, 0) + 1
+            company["unavailable_documents_summary"] = {
+                "count": len(rows),
+                "by_reason": dict(sorted(by_reason.items())),
+                "sample_document_refs": [
+                    row.get("document_ref") for row in rows[:3]
+                ],
+                "omitted_rows_hash": content_hash(rows),
+            }
+        stages_applied.append("aggregate_unavailable_documents")
+        projected["prompt_projection"] = projection_meta(retained, None)
+
+    if not _fits():
+        # Stage three: drop each readable document's verification-only fields.
+        # The uniform rule keeps the projection honest without per-document
+        # bookkeeping: what a reader re-checks a registration with is not what
+        # a work choice consults.
+        for company in companies:
+            for document in company.get("readable_documents") or []:
+                for key in _DOCUMENT_VERIFICATION_FIELDS:
+                    document.pop(key, None)
+        stages_applied.append("slim_readable_document_identity")
+        projected["prompt_projection"] = projection_meta(retained, None)
+
+    if not _fits():
+        # Stage four: each financial model becomes its status plus the hash of
+        # the whole model.  The planner is not forecasting; the model's shape
+        # is one fact ("projected" / "held") and its content is recoverable.
+        for company in companies:
+            model = company.get("financial_model")
+            if isinstance(model, Mapping) and len(model) > 2:
+                company["financial_model"] = {
+                    "status": model.get("status"),
+                    "digest": content_hash(model),
+                }
+        stages_applied.append("digest_financial_models")
+        projected["prompt_projection"] = projection_meta(retained, None)
+
     base_report = prompt_size_report(projected, max_input_bytes=max_input_bytes)
     if not base_report["fits"]:
         raise ResearchPlanInputTooLarge({
@@ -461,6 +557,7 @@ def project_state_for_prompt(
             "full_prompt_bytes": full_prompt_bytes,
             "projection_rule_ref": PROMPT_PROJECTION_REF,
             "document_identities_preserved": True,
+            "stages_applied": list(stages_applied),
         })
 
     # Try every preview, because a later short one may fit when an earlier long

@@ -55,7 +55,12 @@ from .store import DaltonStore, canonical_json
 SUMMARY_SCHEMA_VERSION = "0.1"
 # The planner reads a small object and answers with a short ranked list. Both
 # bounds are generous against that, and small against a filing window.
-MAX_INPUT_TOKENS = 120_000
+# 2026-09-16: 120,000 → 80,000. The staged projection carries the live state
+# down to a measured 75KB floor (90 document identities do not compress
+# further); at 262KB the plan prompt was more than three times the tokens it
+# needed, which is three times the per-minute pressure on every provider
+# that throttles by tokens.
+MAX_INPUT_TOKENS = 80_000
 MAX_OUTPUT_TOKENS = 4_000
 # The router estimates a call at its *permitted* output, not its likely one:
 # 13,300 tokens in and the full 4,000 out is $0.33 on this model, while a real
