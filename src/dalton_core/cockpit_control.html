@@ -1149,11 +1149,17 @@ function tierChainEditor(card,r){
   left.append(leftList);
   const rightList=document.createElement("select");rightList.size="8";rightList.multiple=false;
   rightList.setAttribute("aria-label","备选模型");
-  const verifierOnly=card.tier==="verifier"&&r.eligibility_enforced!==false;
+  /* 2026-09-16: the verifier picker always filters to models whose broker
+     route declares verification controls -- offering a link the router will
+     always skip is how a dead chain got built. Other tiers keep every
+     model; the unpriced note still shows everywhere, the verifier-contract
+     notes only in the verifier column. */
+  const verifierOnly=card.tier==="verifier";
   r.choices.forEach(choice=>{const option=document.createElement("option");option.value=choice.model;
     const ineligible=verifierOnly&&!choice.verifier_eligible;
     if(ineligible)option.disabled=true;
-    option.textContent=`${choice.display_name}${verifierOnly?(choice.verifier_eligible?" ✓ 可独立复核":" ✕ 不可复核"):""}${choice.note?"（"+choice.note+"）":""}`;
+    const note=choice.note&&!verifierOnly&&choice.note.indexOf("未定价")!==0?null:choice.note;
+    option.textContent=`${choice.display_name}${verifierOnly?(choice.verifier_eligible?" ✓ 可独立复核":" ✕ 不可复核"):""}${note?"（"+note+"）":""}`;
     rightList.append(option)});
   const toChain=node("button","← 加入链尾","ghost"),fromChain=node("button","从链中移除 →","ghost");
   toChain.type=fromChain.type="button";

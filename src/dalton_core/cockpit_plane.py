@@ -6115,16 +6115,19 @@ class CockpitPlane:
             if not card["chain"] and row["mode"] == "tier":
                 card["chain"] = list(row["chain"])
         from .model_fallback_chain import CHAIN_ELIGIBILITY_ENFORCED
+        # 2026-09-16: the picker's verifier column keeps the honest contract
+        # facts even with eligibility enforcement off. The owner's freedom
+        # was "any model may join any chain", and that stands; but a model
+        # without broker verification controls cannot route one verification
+        # work order, so offering it as a verifier pick is offering a link
+        # the router will always skip. The picker says so instead.
+        _VERIFIER_NOTES = {
+            "未声明可核验的模型家族：不能承担独立核验",
+            "缺少受控计数：不能放在独立复核链里",
+        }
         if not CHAIN_ELIGIBILITY_ENFORCED:
-            # The owner's 2026-09-15 direction: every model may join every
-            # tier's chain.  The capability facts stay on each choice so the
-            # picker can still say what a model declares.
             for choice in choices:
-                choice["verifier_eligible"] = True
-                if choice["note"] in (
-                    "未声明可核验的模型家族：不能承担独立核验",
-                    "缺少受控计数：不能放在独立复核链里",
-                ):
+                if not choice["verifier_eligible"] and choice["note"] in _VERIFIER_NOTES:
                     choice["note"] = None
         return {
             "available": True,
