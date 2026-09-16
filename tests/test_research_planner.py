@@ -465,12 +465,70 @@ class PromptTests(unittest.TestCase):
         built = self.heavy_state()
         full = len(build_prompt(built).encode("utf-8"))
         with self.assertRaises(ResearchPlanInputTooLarge) as caught:
-            # Far below every floor: the refusal must name all four stages.
+            # Far below every floor: the refusal must name every stage this
+            # small inventory can engage (four documents per company never
+            # reaches the readable-aggregation stage).
             project_state_for_prompt(built, max_input_bytes=1)
         self.assertEqual(
             caught.exception.report["stages_applied"],
             ["drop_preview_triplets", "aggregate_unavailable_documents",
              "slim_readable_document_identity", "digest_financial_models"])
+
+    def test_stage_five_keeps_the_newest_documents_and_aggregates_the_rest(self):
+        # 2026-09-16: the identity inventory grows with every document the
+        # extraction queue drains; a fixed input bound cannot survive that.
+        # Stage five keeps each company's newest documents and aggregates the
+        # rest, so the floor stops growing with the queue.
+        from dalton_core.store import content_hash
+        built = self.heavy_state()
+        # Grow the inventory past the keep: 30 dated documents per company.
+        for company in built["companies"]:
+            extra = [
+                dict(document, document_ref=f"{document['document_ref']}:x{n}",
+                     doc_date=f"2026-08-{(n % 28) + 1:02d}")
+                for n, document in enumerate(
+                    company["readable_documents"] * 8)
+            ][:30]
+            company["readable_documents"] = extra
+        built.pop("content_hash", None)
+        built["content_hash"] = content_hash(built)
+        full = len(build_prompt(built).encode("utf-8"))
+        with self.assertRaises(ResearchPlanInputTooLarge) as caught:
+            # The refusal proves every stage engaged before giving up.
+            project_state_for_prompt(built, max_input_bytes=1)
+        self.assertIn(
+            "aggregate_readable_document_inventory",
+            caught.exception.report["stages_applied"])
+        # A bound the first four stages cannot reach but five can, found by
+        # descending from just under the full size.
+        projected = None
+        bound = full - 4_000
+        while bound > 2_000 and projected is None:
+            try:
+                candidate = project_state_for_prompt(built, max_input_bytes=bound)
+            except ResearchPlanInputTooLarge:
+                bound -= 1_000
+                continue
+            if "aggregate_readable_document_inventory" not in \
+                    candidate["prompt_projection"]["stages_applied"]:
+                bound -= 1_000
+                continue
+            projected = candidate
+        self.assertIsNotNone(projected)
+        meta = projected["prompt_projection"]
+        self.assertIn("aggregate_readable_document_inventory", meta["stages_applied"])
+        from dalton_core.research_planner import READABLE_KEEP_PER_COMPANY
+        for company in projected["companies"]:
+            self.assertLessEqual(
+                len(company["readable_documents"]), READABLE_KEEP_PER_COMPANY)
+            summary = company["readable_documents_summary"]
+            self.assertEqual(
+                summary["retained_recent"] + summary["aggregated"], 30)
+            self.assertTrue(summary["omitted_rows_hash"])
+            kept_dates = [d.get("doc_date") for d in company["readable_documents"]]
+            self.assertTrue(all(
+                date >= (summary["latest_doc_date"] or "")
+                for date in kept_dates if date))
 
     def test_stage_three_drops_verification_fields_and_four_digests_models(self):
         built = self.heavy_state()

@@ -5,7 +5,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from unittest.mock import patch
-from datetime import datetime, timezone
+from datetime import timedelta, datetime, timezone
 from pathlib import Path
 
 from dalton_core.cockpit_model import build_work
@@ -37,7 +37,7 @@ class EventRouteBudgetTests(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.router = ModelRouter(Path(self.directory.name) / "router.sqlite", clock=lambda: NOW)
         self.addCleanup(self.router.close)
-        sync_openclaw_model_catalog(self.router, _config(), checked_at=NOW)
+        sync_openclaw_model_catalog(self.router, _config(), checked_at=NOW, availability_ttl=timedelta(days=3650))
 
     def route(self, tier: str, purpose: str, *, producer_family: str | None = None):
         policy = ensure_planner_policy(

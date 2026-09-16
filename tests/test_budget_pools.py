@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import timedelta, datetime, timezone
 from pathlib import Path
 
 import dalton_core.claim_index_tagging  # noqa: F401 - registers the purpose
@@ -427,7 +427,7 @@ class CockpitPoolTests(unittest.TestCase):
         self.root = Path(self.directory.name)
         self.router_db = self.root / "router.sqlite"
         with ModelRouter(self.router_db) as router:
-            sync_openclaw_model_catalog(router, _config(), checked_at=MORNING)
+            sync_openclaw_model_catalog(router, _config(), checked_at=MORNING, availability_ttl=timedelta(days=3650))
             self.policy = ensure_planner_policy(
                 router, tier="cheap", now=MORNING,
                 policy_id="model-routing-policy:c2-cockpit-cheap",

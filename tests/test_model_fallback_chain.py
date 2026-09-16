@@ -7,7 +7,7 @@ import sqlite3
 import threading
 import time
 import unittest
-from datetime import datetime, timezone
+from datetime import timedelta, datetime, timezone
 from pathlib import Path
 
 from dalton_core.contracts import WorkOrder
@@ -253,7 +253,8 @@ class ChainExecutionTests(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.router = ModelRouter(Path(self.directory.name) / "router.sqlite")
         self.addCleanup(self.router.close)
-        sync_openclaw_model_catalog(self.router, _config(), checked_at=NOW)
+        sync_openclaw_model_catalog(self.router, _config(), checked_at=NOW,
+                                     availability_ttl=timedelta(days=3650))
         self.policies = {}
         for tier in TIERS:
             self.policies[tier] = ensure_planner_policy(
@@ -586,7 +587,7 @@ class ChainExecutionTests(unittest.TestCase):
             profile for profile in entries["profiles"]
             if profile["id"] != "profile:gpt-6-astra"
         ]
-        sync_openclaw_model_catalog(self.router, dropped, checked_at=NOW)
+        sync_openclaw_model_catalog(self.router, dropped, checked_at=NOW, availability_ttl=timedelta(days=3650))
         result = self._run("brain", FakeBroker({}))
         self.assertEqual(result["profile_id"], "profile:claude-fable-5-1")
         self.assertEqual(result["chain_position"], 2)

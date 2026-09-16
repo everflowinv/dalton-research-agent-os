@@ -90,10 +90,21 @@ MAX_REQUIRED_MULTIPLE = 3
 # verification-only fields, and replace each financial model with a digest.
 # Identities and omission records stay complete; a stage that does not fit
 # still sends nothing.
-PROMPT_PROJECTION_REF = "rule:research-plan-input-projection:0.2"
+#
+# 0.3, 2026-09-16 (same day, evening): the identity floor itself grows
+# without bound.  Every document the extraction queue drains becomes a
+# readable identity in the state, and the live inventory crossed 100
+# documents -- stages one through four no longer reached an 80KB bound, and
+# the planner went dark precisely because reading was working again.  A fifth
+# stage now aggregates each company's readable inventory down to its K most
+# recent documents, with counts, kind mix, date span and the hash of the
+# omitted rows.  The planner chooses what to work on next from checklist
+# gaps, theses and outcomes; the newest documents per company are what it
+# would realistically order read next, and the aggregate is the rest.
+PROMPT_PROJECTION_REF = "rule:research-plan-input-projection:0.3"
 PROMPT_PROJECTION_RULE = {
     "ref": PROMPT_PROJECTION_REF,
-    "preserved": "every document and company identity; prior-review facts; omission records for everything projected away",
+    "preserved": "every company identity; omission records for everything projected away",
     "preview_unit": "original_preview, preview_proof_ref and preview_proof_hash travel together",
     "priority": [
         "documents without a prior review",
@@ -106,10 +117,16 @@ PROMPT_PROJECTION_RULE = {
         "aggregate_unavailable_documents",
         "slim_readable_document_identity",
         "digest_financial_models",
+        "aggregate_readable_document_inventory",
     ],
+    "readable_keep_per_company": 8,
     "refusal": "if the state after every stage exceeds the configured input bound, send nothing",
 }
 PROMPT_PROJECTION_HASH = content_hash(PROMPT_PROJECTION_RULE)
+
+# Stage five's retention: the newest documents a work order would realistically
+# name, kept in full per company while the rest becomes counts and a hash.
+READABLE_KEEP_PER_COMPANY = 8
 
 # Stage three's verification-only fields.  The planner chooses work; these
 # four fields exist so a reader can re-verify a registration, and a work
@@ -550,6 +567,52 @@ def project_state_for_prompt(
         stages_applied.append("digest_financial_models")
         projected["prompt_projection"] = projection_meta(retained, None)
 
+    inventory_aggregated = False
+    if not _fits():
+        # Stage five: the readable inventory itself is the unbounded term --
+        # every document the extraction queue drains becomes an identity here,
+        # and no fixed input bound survives that.  Each company keeps its K
+        # newest documents in full (what a work order would realistically name
+        # next); the rest becomes counts by kind, the date span, and the hash
+        # of the omitted rows.  Preview restoration is skipped when this stage
+        # engages: the retention loop indexes the original inventory and would
+        # write into the wrong rows of the truncated one.
+        for company in companies:
+            documents = company.get("readable_documents") or []
+            if len(documents) <= READABLE_KEEP_PER_COMPANY:
+                continue
+            ordered = sorted(
+                documents,
+                key=lambda document: (
+                    str(document.get("doc_date") or ""),
+                    str(document.get("document_ref") or ""),
+                ),
+                reverse=True,
+            )
+            keep, omit = ordered[:READABLE_KEEP_PER_COMPANY], ordered[READABLE_KEEP_PER_COMPANY:]
+            by_kind: dict[str, int] = {}
+            for document in omit:
+                kind = str(document.get("doc_kind") or "unknown")
+                by_kind[kind] = by_kind.get(kind, 0) + 1
+            company["readable_documents"] = keep
+            company["readable_documents_summary"] = {
+                "retained_recent": len(keep),
+                "aggregated": len(omit),
+                "by_kind": dict(sorted(by_kind.items())),
+                "earliest_doc_date": min(
+                    (document.get("doc_date") for document in omit
+                     if document.get("doc_date")), default=None),
+                "latest_doc_date": max(
+                    (document.get("doc_date") for document in omit
+                     if document.get("doc_date")), default=None),
+                "omitted_rows_hash": content_hash(omit),
+            }
+        inventory_aggregated = any(
+            "readable_documents_summary" in company for company in companies)
+        if inventory_aggregated:
+            stages_applied.append("aggregate_readable_document_inventory")
+            projected["prompt_projection"] = projection_meta(retained, None)
+
     base_report = prompt_size_report(projected, max_input_bytes=max_input_bytes)
     if not base_report["fits"]:
         raise ResearchPlanInputTooLarge({
@@ -562,19 +625,20 @@ def project_state_for_prompt(
 
     # Try every preview, because a later short one may fit when an earlier long
     # one does not. A preview and its exact proof identity are always restored as
-    # one unit.
-    for position in order:
-        company_index, document_index = position
-        document = companies[company_index]["readable_documents"][document_index]
-        document.update(preview_triplets[position])
-        candidate_retained = {*retained, position}
-        projected["prompt_projection"] = projection_meta(candidate_retained, None)
-        if len(build_prompt(projected).encode("utf-8")) <= max_input_bytes:
-            retained = candidate_retained
-        else:
-            for key in preview_triplets[position]:
-                document.pop(key, None)
-            projected["prompt_projection"] = projection_meta(retained, None)
+    # one unit.  Skipped when stage five reorganized the inventories.
+    if not inventory_aggregated:
+        for position in order:
+            company_index, document_index = position
+            document = companies[company_index]["readable_documents"][document_index]
+            document.update(preview_triplets[position])
+            candidate_retained = {*retained, position}
+            projected["prompt_projection"] = projection_meta(candidate_retained, None)
+            if len(build_prompt(projected).encode("utf-8")) <= max_input_bytes:
+                retained = candidate_retained
+            else:
+                for key in preview_triplets[position]:
+                    document.pop(key, None)
+                projected["prompt_projection"] = projection_meta(retained, None)
 
     # The byte count is part of the disclosure. Iterate to stability in case
     # writing the decimal count changes its own number of digits.

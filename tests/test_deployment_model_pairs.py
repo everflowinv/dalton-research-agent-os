@@ -6,7 +6,7 @@ import json
 import subprocess
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import timedelta, datetime, timezone
 from pathlib import Path
 
 from dalton_core.mission_dossier_lane import argv_fragment as dossier_argv
@@ -51,7 +51,7 @@ class DeploymentModelPairTests(unittest.TestCase):
         # role policies. Role setup must not resurrect static profile seeds.
         with ModelRouter(service["model_router_db"]) as router:
             sync_openclaw_model_catalog(router, _config(),
-                                       checked_at=datetime.now(timezone.utc))
+                                       checked_at=datetime.now(timezone.utc), availability_ttl=timedelta(days=3650))
 
     def install_pair(self, producer_policy: str, producer_file: str,
                      verifier_policy: str, verifier_file: str) -> None:

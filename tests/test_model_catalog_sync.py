@@ -53,7 +53,13 @@ class CatalogSyncTests(unittest.TestCase):
         self.addCleanup(self.router.close)
 
     def _install(self, config: dict) -> dict:
-        return sync_openclaw_model_catalog(self.router, config, checked_at=NOW)
+        # The catalog module's own expiry tests pass their own TTLs and
+        # checked_at moments; every other fixture installs with a window that
+        # cannot lapse mid-patrol, because routing compares availability
+        # against the real clock.
+        return sync_openclaw_model_catalog(
+            self.router, config, checked_at=NOW,
+            availability_ttl=timedelta(days=3650))
 
     def test_missing_profiles_are_added_and_a_second_run_is_a_no_op(self) -> None:
         config = _config()
@@ -138,7 +144,9 @@ class CatalogSyncTests(unittest.TestCase):
 
     def test_expired_catalog_observation_renews_without_rewriting_history(self) -> None:
         config = _config()
-        self._install(config)
+        # The subject is the seven-day lapse, so this one test installs with
+        # the production TTL rather than the fixture's patrol-proof window.
+        sync_openclaw_model_catalog(self.router, config, checked_at=NOW)
         old = self.router.latest_profiles()
         old_bytes = {
             row[0]: row[1] for row in self.router.connection.execute(

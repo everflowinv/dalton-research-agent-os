@@ -1243,7 +1243,7 @@ class CockpitChainTests(unittest.TestCase):
             if profile["id"] in verifier_ids:
                 profile["providerControls"] = _controls(profile["model"])
         with ModelRouter(self.router_db) as router:
-            sync_openclaw_model_catalog(router, config, checked_at=NOW)
+            sync_openclaw_model_catalog(router, config, checked_at=NOW, availability_ttl=timedelta(days=3650))
             self.chain_policy = ensure_planner_policy(
                 router, tier="brain", now=NOW,
                 policy_id="model-routing-policy:p14m-cockpit-brain",

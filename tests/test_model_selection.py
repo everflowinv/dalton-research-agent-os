@@ -159,7 +159,8 @@ class RouterCase(unittest.TestCase):
         self.root = Path(self.directory.name)
         self.router = ModelRouter(self.root / "model-router.sqlite")
         self.addCleanup(self.router.close)
-        sync_openclaw_model_catalog(self.router, self.catalog_config(), checked_at=NOW)
+        sync_openclaw_model_catalog(self.router, self.catalog_config(), checked_at=NOW,
+                                     availability_ttl=timedelta(days=3650))
         register_purpose_tier(VERIFY_PURPOSE, "verifier")
         self.policies = {
             tier: ensure_planner_policy(
@@ -325,7 +326,7 @@ class UnpricedModelTests(RouterCase):
             if item["id"] == "profile:gemini-3-5-flash-lite"
         )
         config = _unprice(self.catalog_config(), "google/gemini-3.5-flash-lite")
-        sync_openclaw_model_catalog(self.router, config, checked_at=NOW)
+        sync_openclaw_model_catalog(self.router, config, checked_at=NOW, availability_ttl=timedelta(days=3650))
         after = next(
             item for item in self.router.latest_profiles()
             if item["id"] == "profile:gemini-3-5-flash-lite"
@@ -429,7 +430,7 @@ class VerifierIndependenceTests(RouterCase):
             family="unclassified:fixture", capabilities=["research", "verify"],
             actor_ref=OWNER, created_at=NOW.isoformat(),
         )
-        sync_openclaw_model_catalog(self.router, config, checked_at=NOW)
+        sync_openclaw_model_catalog(self.router, config, checked_at=NOW, availability_ttl=timedelta(days=3650))
         validate_selection(self.router, purpose=VERIFY_PURPOSE, mode="explicit",
                            chain=[broker["id"]])
         with patch.object(fallback_chain, "CHAIN_ELIGIBILITY_ENFORCED", True), \
@@ -467,7 +468,7 @@ class VerifierIndependenceTests(RouterCase):
         for profile_id in tier_chain("verifier"):
             if held[profile_id]["family"] != producer_family:
                 _drop_broker_profile(config, profile_id)
-        sync_openclaw_model_catalog(self.router, config, checked_at=NOW)
+        sync_openclaw_model_catalog(self.router, config, checked_at=NOW, availability_ttl=timedelta(days=3650))
         outcome = execute_chain(
             self.router, _work("work:p14m2-verify", capability="verify"),
             purpose=VERIFY_PURPOSE, tier="verifier", capability="verify",
@@ -966,7 +967,7 @@ class DiscoveryTests(unittest.TestCase):
             set(discovery["allowed_not_in_dalton"]), set(discovery["broker_profile_ids"])
         )
         self.assertFalse(discovery["in_sync"])
-        sync_openclaw_model_catalog(self.router, config, checked_at=NOW)
+        sync_openclaw_model_catalog(self.router, config, checked_at=NOW, availability_ttl=timedelta(days=3650))
         after = discover_models(config, router=self.router, checked_at=NOW)
         self.assertEqual(after["allowed_not_in_dalton"], [])
         self.assertEqual(after["dalton_not_in_openclaw"], [])
@@ -974,7 +975,7 @@ class DiscoveryTests(unittest.TestCase):
 
     def test_a_profile_this_core_holds_that_the_gateway_has_dropped(self) -> None:
         config = _allowing_config()
-        sync_openclaw_model_catalog(self.router, config, checked_at=NOW)
+        sync_openclaw_model_catalog(self.router, config, checked_at=NOW, availability_ttl=timedelta(days=3650))
         dropped = copy.deepcopy(config)
         provider = dropped["models"]["providers"]["openai"]
         provider["models"] = [
@@ -991,7 +992,7 @@ class DiscoveryTests(unittest.TestCase):
                 "dalton-openclaw-model-broker"]["llm"]["allowedModels"]
             if ref != "openai/gpt-6-astra"
         ]
-        sync_openclaw_model_catalog(self.router, dropped, checked_at=NOW)
+        sync_openclaw_model_catalog(self.router, dropped, checked_at=NOW, availability_ttl=timedelta(days=3650))
         after = discover_models(dropped, router=self.router, checked_at=NOW)
         self.assertEqual(after["dalton_not_in_openclaw"], [])
         self.assertIn("profile:gpt-6-astra", after["retired_profile_ids"])
@@ -1255,7 +1256,7 @@ class RetirementNoticeTests(StateDirectoryCase):
         config = _allowing_config()
         for profile_id in profile_ids:
             _drop_broker_profile(config, profile_id)
-        return sync_openclaw_model_catalog(self.router, config, checked_at=NOW)
+        return sync_openclaw_model_catalog(self.router, config, checked_at=NOW, availability_ttl=timedelta(days=3650))
 
     def test_a_retired_first_link_falls_to_the_next_one_by_itself(self) -> None:
         self._drop("profile:gpt-6-astra")
@@ -1390,7 +1391,7 @@ class ReviewFindingTests(StateDirectoryCase):
         config = _allowing_config()
         for profile_id in profile_ids:
             _drop_broker_profile(config, profile_id)
-        return sync_openclaw_model_catalog(self.router, config, checked_at=NOW)
+        return sync_openclaw_model_catalog(self.router, config, checked_at=NOW, availability_ttl=timedelta(days=3650))
 
     def test_the_installers_sync_retires_and_the_lane_still_tells_the_owner(
         self,
@@ -1590,7 +1591,7 @@ class ReviewFindingTests(StateDirectoryCase):
         # the declared chain, an unpriced link in front of a retired one would
         # be refused for not being last while being the only thing left.
         config = _with_unpriced_model(_allowing_config())
-        sync_openclaw_model_catalog(self.router, config, checked_at=NOW)
+        sync_openclaw_model_catalog(self.router, config, checked_at=NOW, availability_ttl=timedelta(days=3650))
         # A chain that was legal when it was written -- the unpriced link is
         # not last, so publishing it through the selection path is refused --
         # and then the link behind it goes away. Registered directly because
@@ -1614,7 +1615,7 @@ class ReviewFindingTests(StateDirectoryCase):
         })
         self.router.register_policy(wire)
         _drop_broker_profile(config, "profile:gemini-3-5-flash-lite")
-        sync_openclaw_model_catalog(self.router, config, checked_at=NOW)
+        sync_openclaw_model_catalog(self.router, config, checked_at=NOW, availability_ttl=timedelta(days=3650))
         decision = self.router.route(
             _work("work:p14m2-unpriced-live", capability="research"),
             attempt_number=1, capability="research",
@@ -1742,7 +1743,8 @@ class GovernanceOperationTests(unittest.TestCase):
             openclaw_path.write_text(json.dumps(_allowing_config()), encoding="utf-8")
             with ModelRouter(router_path) as router:
                 sync_openclaw_model_catalog(
-                    router, _allowing_config(), checked_at=NOW)
+                    router, _allowing_config(), checked_at=NOW,
+                    availability_ttl=timedelta(days=3650))
                 profile = router.latest_profiles()[0]
             lane_config = root / "model-catalog-sync.json"
             lane_config.write_text(json.dumps({
@@ -1880,7 +1882,8 @@ class CockpitModelPageTests(unittest.TestCase):
 
     def install(self) -> str:
         with ModelRouter(self.router_db) as router:
-            sync_openclaw_model_catalog(router, _allowing_config(), checked_at=NOW)
+            sync_openclaw_model_catalog(router, _allowing_config(), checked_at=NOW,
+                                         availability_ttl=timedelta(days=3650))
             policy = ensure_planner_policy(
                 router, tier="brain", now=NOW,
                 policy_id="model-routing-policy:p14m2-cockpit",
@@ -1986,7 +1989,8 @@ class CockpitModelPageTests(unittest.TestCase):
 
     def test_page_reads_each_stage_from_its_actual_consumer_config(self) -> None:
         with ModelRouter(self.router_db) as router:
-            sync_openclaw_model_catalog(router, _allowing_config(), checked_at=NOW)
+            sync_openclaw_model_catalog(router, _allowing_config(), checked_at=NOW,
+                                         availability_ttl=timedelta(days=3650))
             profile_ids = [item["id"] for item in router.latest_profiles()][:4]
             refs = []
             for number, profile_id in enumerate(profile_ids, 1):
@@ -2055,7 +2059,8 @@ class CockpitModelPageTests(unittest.TestCase):
     def test_page_reads_a_binding_from_its_own_router_even_when_refs_match(self) -> None:
         primary_profile = secondary_profile = None
         with ModelRouter(self.router_db) as router:
-            sync_openclaw_model_catalog(router, _allowing_config(), checked_at=NOW)
+            sync_openclaw_model_catalog(router, _allowing_config(), checked_at=NOW,
+                                         availability_ttl=timedelta(days=3650))
             primary_profile = router.latest_profiles()[0]["id"]
             shared_ref = ensure_planner_policy(
                 router, profile_ids=[primary_profile], now=NOW,
@@ -2063,7 +2068,8 @@ class CockpitModelPageTests(unittest.TestCase):
             )["policy_version_ref"]
         secondary_db = self.root / "secondary-router.sqlite"
         with ModelRouter(secondary_db) as router:
-            sync_openclaw_model_catalog(router, _allowing_config(), checked_at=NOW)
+            sync_openclaw_model_catalog(router, _allowing_config(), checked_at=NOW,
+                                         availability_ttl=timedelta(days=3650))
             secondary_profile = router.latest_profiles()[1]["id"]
             self.assertEqual(ensure_planner_policy(
                 router, profile_ids=[secondary_profile], now=NOW,
@@ -2089,7 +2095,8 @@ class CockpitModelPageTests(unittest.TestCase):
 
     def test_multi_pin_legacy_policy_is_an_unordered_candidate_set(self) -> None:
         with ModelRouter(self.router_db) as router:
-            sync_openclaw_model_catalog(router, _allowing_config(), checked_at=NOW)
+            sync_openclaw_model_catalog(router, _allowing_config(), checked_at=NOW,
+                                         availability_ttl=timedelta(days=3650))
             profiles = [item["id"] for item in router.latest_profiles()][:2]
             ref = ensure_planner_policy(
                 router, profile_ids=profiles, now=NOW,
