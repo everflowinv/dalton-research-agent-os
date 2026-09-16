@@ -92,10 +92,11 @@ def validate_setup_planning_context(value: Mapping[str, Any]) -> dict[str, Any]:
                 "max_alphaengine_calls_24h"}
     if not isinstance(budget, Mapping) or not required.issubset(budget):
         raise CockpitModelError("setup planning context lacks its bounded budget")
-    if (isinstance(budget["max_daily_paid_calls"], bool)
+        if (isinstance(budget["max_daily_paid_calls"], bool)
             or not isinstance(budget["max_daily_paid_calls"], int)
-            or not 1 <= budget["max_daily_paid_calls"] <= 6):
-        raise CockpitModelError("setup planning permits at most six paid calls")
+            or not 1 <= budget["max_daily_paid_calls"] <= 30):
+            raise CockpitModelError(
+                "setup planning permits at most thirty paid calls")
     amount = budget["max_daily_cost_usd"]
     if (isinstance(amount, bool) or not isinstance(amount, (int, float))
             or not 0 <= float(amount) <= 10.0):

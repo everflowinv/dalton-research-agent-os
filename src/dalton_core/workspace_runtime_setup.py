@@ -390,7 +390,15 @@ def install(workspace_manifest: str | Path, *, actor_ref: str) -> dict[str, Any]
             "feed-plan", "ir-pages", "crowd-map",
         ],
         "setup_planning_budget": {
-            "max_model_calls": 6, "max_input_tokens": 120000,
+            # 2026-09-16: 6 -> 30. The allowance counts admissions, not
+            # successes, and a first-goal attempt that dies on an external
+            # error (a quota-walled gateway, a throttled provider) burns one
+            # of them. Six proved to be a lockout: retries after a morning of
+            # transport failures exhausted the day's setup allowance by lunch
+            # and every further attempt read 超出费用或用量限制. Thirty still
+            # bounds a runaway loop -- the $10 day cap binds regardless --
+            # while letting a workspace actually start.
+            "max_model_calls": 30, "max_input_tokens": 120000,
             "max_output_tokens": 24000, "max_cost_usd": 10.0,
         },
         "connector_governance_records": connectors,
