@@ -2498,7 +2498,7 @@ class CockpitModel:
             # excluded by provider-retry history above all. Without this the
             # message read as though the whole chain had been tried.
             failure += ("；未尝试的环节被拒绝："
-                        + ", ".join(sorted(set(map(str, unroutable))[:6])))
+                        + ", ".join(sorted(map(str, set(unroutable)))[:6]))
         if detail_text:
             failure += f"; broker details: {detail_text}"
         retryable = outcome["status"] == "halted" and outcome.get("reason") == "capacity_busy"
