@@ -818,7 +818,7 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual(len(self.commands), 1)
 
     def test_the_runner_is_bound_to_the_slug_the_quota_table_uses(self):
-        """The declared fifty a day is only real if these two strings match."""
+        """The declared daily ceiling is only real if these two strings match."""
 
         from dalton_core.connector_quota_policy import governed_daily_quota
         from dalton_core.mission_crowd_source_lane import SOURCE_IDENTITY
@@ -831,7 +831,7 @@ class ExecutionTests(unittest.TestCase):
             template_key = SOURCE_IDENTITY[source][0]
             for operation in operations:
                 quota = governed_daily_quota(template_key, operation)
-                self.assertEqual(quota["daily_unit_limit"], 50)
+                self.assertEqual(quota["daily_unit_limit"], 10_000)
 
     def test_every_source_has_an_identity_the_runner_can_bind(self):
         from dalton_core.mission_crowd_source_lane import source_identity

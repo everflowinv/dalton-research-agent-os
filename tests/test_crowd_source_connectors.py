@@ -205,7 +205,11 @@ class GovernanceTests(unittest.TestCase):
 
 
 class QuotaTests(unittest.TestCase):
-    def test_every_crowd_operation_declares_a_conservative_daily_ceiling(self):
+    def test_every_crowd_operation_declares_the_raised_daily_ceiling(self):
+        # 2026-09-16: 50 -> 10,000 at the owner's direction. The original
+        # conservative fifty filled its records meter in a morning (one Blind
+        # page is a dozen posts) and the lane spent the day waiting on a
+        # dependency; the lane's own tick budget is the runaway bound now.
         pairs = [
             ("xueqiu-posts", "search_posts"), ("xueqiu-posts", "get_post"),
             ("xueqiu-posts", "hot_rank"), ("x-xreach-crowd", "user_timeline"),
@@ -214,7 +218,7 @@ class QuotaTests(unittest.TestCase):
         ]
         for slug, operation in pairs:
             quota = governed_daily_quota(slug, operation)
-            self.assertEqual(quota["daily_unit_limit"], 50, f"{slug}/{operation}")
+            self.assertEqual(quota["daily_unit_limit"], 10_000, f"{slug}/{operation}")
             self.assertGreaterEqual(quota["max_physical_calls_per_unit"], 1)
 
 

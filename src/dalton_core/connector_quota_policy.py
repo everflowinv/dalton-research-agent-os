@@ -81,15 +81,17 @@ _DAILY_QUOTAS = MappingProxyType(
         # mission needs a handful of these a day, not a stream. data.sec.gov is
         # free but rate limited, and this ceiling is what stands between a retry
         # loop and being throttled off the source the whole SEC lane depends on.
-        # S3: the crowd sources, all at fifty units a day.
+        # S3: the crowd sources.
         #
-        # Fifty is not a measurement. None of these three publishes a rate
-        # limit, and two of them are read through a host tool that would be
-        # throttled or logged out long before any number here mattered. Fifty
-        # is a bound on what a bug can cost: five companies read once a day is
-        # five units, so this is ten times what the lane is for, and a runaway
-        # retry loop stops at breakfast rather than at the point where an
-        # account is flagged.
+        # 2026-09-16: 50 -> 10,000 units a day, at the owner's direction. The
+        # original fifty was a bound on what a bug can cost, not a
+        # measurement -- but its ``records`` meter filled in a morning (a
+        # single Blind page returns a dozen posts, so five companies' reviews
+        # exhausted it by lunch) and the lane spent the day "waiting for a
+        # dependency". The lane's own tick budget (one bounded read per source
+        # per tick, children killed at twenty seconds) is the real runaway
+        # bound now; the ceiling stays only as a number no legitimate day can
+        # reach, same as the wiki and prior-research reads.
         #
         # It is deliberately the same number for all seven operations. A
         # different figure for each would imply a measurement behind each one,
@@ -101,42 +103,42 @@ _DAILY_QUOTAS = MappingProxyType(
         ("xueqiu-posts", "search_posts"): MappingProxyType(
             {
                 "quota_unit": "search",
-                "daily_unit_limit": 50,
+                "daily_unit_limit": 10_000,
                 "max_physical_calls_per_unit": 5,
             }
         ),
         ("xueqiu-posts", "get_post"): MappingProxyType(
             {
                 "quota_unit": "document",
-                "daily_unit_limit": 50,
+                "daily_unit_limit": 10_000,
                 "max_physical_calls_per_unit": 1,
             }
         ),
         ("xueqiu-posts", "hot_rank"): MappingProxyType(
             {
                 "quota_unit": "search",
-                "daily_unit_limit": 50,
+                "daily_unit_limit": 10_000,
                 "max_physical_calls_per_unit": 1,
             }
         ),
         ("x-xreach-crowd", "user_timeline"): MappingProxyType(
             {
                 "quota_unit": "search",
-                "daily_unit_limit": 50,
+                "daily_unit_limit": 10_000,
                 "max_physical_calls_per_unit": 5,
             }
         ),
         ("x-xreach-crowd", "search"): MappingProxyType(
             {
                 "quota_unit": "search",
-                "daily_unit_limit": 50,
+                "daily_unit_limit": 10_000,
                 "max_physical_calls_per_unit": 5,
             }
         ),
         ("x-xreach-crowd", "thread"): MappingProxyType(
             {
                 "quota_unit": "document",
-                "daily_unit_limit": 50,
+                "daily_unit_limit": 10_000,
                 "max_physical_calls_per_unit": 5,
             }
         ),
@@ -146,7 +148,7 @@ _DAILY_QUOTAS = MappingProxyType(
         ("employee-reviews", "blind_reviews"): MappingProxyType(
             {
                 "quota_unit": "document",
-                "daily_unit_limit": 50,
+                "daily_unit_limit": 10_000,
                 "max_physical_calls_per_unit": 20,
             }
         ),
