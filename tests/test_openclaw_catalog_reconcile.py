@@ -120,7 +120,13 @@ class OpenClawCatalogReconcileTests(unittest.TestCase):
         self.assertEqual(report["smoke_required_profile_ids"], ["profile:gemini-new-smoke"])
         catalog = openclaw_broker_profiles_from_config(config, checked_at=NOW)
         dynamic = next(item for item in catalog if item["id"] == "profile:gemini-new-smoke")
-        self.assertEqual(dynamic["capabilities"], ["research"])
+        # 2026-09-16: a model the catalog just met is not pre-judged -- every
+        # generic capability by default. The broker-contract capability
+        # (provider-controlled-verify) stays broker-driven and is absent here
+        # because this fixture's broker entry declares no controls.
+        from dalton_core.openclaw_catalog_reconcile import DEFAULT_CAPABILITIES
+        self.assertEqual(dynamic["capabilities"], list(DEFAULT_CAPABILITIES))
+        self.assertNotIn("provider-controlled-verify", dynamic["capabilities"])
         self.assertEqual(dynamic["family"], "unclassified:google")
         self.assertEqual(dynamic["limits"]["max_output_tokens"], 4_000)
         with tempfile.TemporaryDirectory() as directory:

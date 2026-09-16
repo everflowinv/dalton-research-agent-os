@@ -39,6 +39,18 @@ _BROKER_PLUGIN_ID = "dalton-openclaw-model-broker"
 # cost, and the model still may only be a chain's last link.
 UNPRICED_CEILING_INPUT_PER_MILLION_USD = 25.0
 UNPRICED_CEILING_OUTPUT_PER_MILLION_USD = 100.0
+# 2026-09-16, the owner's standing rule from the day before made concrete: a
+# model is not pre-judged for what it may do. Every profile the catalog sync
+# registers -- curated or brand new -- carries every generic capability unless
+# the owner's own metadata declaration says otherwise. The one exception is
+# ``provider-controlled-verify``, which is not our classification label but a
+# real broker-side property (metered verification controls with a rate card);
+# declaring it for a model whose broker route does not enforce controls would
+# pass routing and then fail the actual verification call at the broker.
+DEFAULT_CAPABILITIES: tuple[str, ...] = (
+    "research", "research-hard", "verify", "adjudicate", "code",
+    "summarize", "extract", "format",
+)
 _PROFILE_ID_RE = re.compile(r"^profile:[A-Za-z0-9][A-Za-z0-9._:/+-]*$")
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]*$")
 
@@ -373,6 +385,12 @@ def openclaw_broker_profiles_from_config(
             if declaration is not None:
                 profile["family"] = declaration["family"]
                 profile["capabilities"] = list(declaration["capabilities"])
+            else:
+                # No owner metadata: every generic capability, per the
+                # standing rule. The curated per-model lists remain in the
+                # deployment module for an owner who wants them back by
+                # declaring metadata on the models page.
+                profile["capabilities"] = list(DEFAULT_CAPABILITIES)
             if broker["provider_controls"]:
                 profile["capabilities"] = list(dict.fromkeys(
                     [*profile["capabilities"], "provider-controlled-verify"]
@@ -453,9 +471,11 @@ def openclaw_broker_profiles_from_config(
                        or f"unclassified:{provider_model['provider']}"),
             "adapter_ref": ADAPTER_REF,
             "credential_slot_ref": f"credential-slot:openclaw:{provider_model['provider']}",
-            # An unknown catalog entry is visible and priceable, but it is not
-            # silently certified for hard research or independent verification.
-            "capabilities": list((declaration or {}).get("capabilities") or ["research"]),
+            # The owner's standing rule: a model the catalog just met is not
+            # pre-judged. All generic capabilities unless the owner declared
+            # otherwise; the broker-contract capability stays broker-driven.
+            "capabilities": list((declaration or {}).get("capabilities")
+                                 or DEFAULT_CAPABILITIES),
             "modalities": ["text"],
             "context": {
                 "max_context_tokens": context_window,
