@@ -813,6 +813,8 @@ class AgendaControlApplication:
         plane = self.cockpit_plane
         if action == "workspace_create":
             return plane.create_workspace(login, value)
+        if action == "workspace_rename":
+            return plane.rename_workspace(login, value)
         if action == "ask":
             return plane.ask(login, value)
         if action == "goal":

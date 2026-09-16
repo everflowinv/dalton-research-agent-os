@@ -781,7 +781,19 @@ function renderWorkspaces(result){
     const actions=node("div",null,"actions"),enter=node("button",item.current?"当前环境":"进入","ghost");
     enter.disabled=item.current||!item.url;enter.onclick=()=>{if(item.url)window.location.assign(item.url)};
     if(!item.url&&!item.current)enter.title="环境准备好后即可进入";
-    actions.append(enter);row.append(copy,actions);return row;
+    const rename=node("button","重命名","ghost");
+    rename.onclick=async()=>{
+      const next=window.prompt("研究环境的新名称",name);
+      if(!next||!next.trim()||next.trim()===name)return;
+      rename.disabled=true;
+      try{
+        await postJson("/v1/cockpit/workspace_rename",{slug:item.slug||"",name:next.trim()},{timeoutMs:30000});
+        toast("名称已保存");await loadWorkspaces(true);if(item.current)loadOverview(true);
+      }
+      catch(e){toast(readableError(e,"重命名").message)}
+      finally{rename.disabled=false}
+    };
+    actions.append(enter,rename);row.append(copy,actions);return row;
   }));
   $("workspace-status").textContent=items.length?`${items.length} 个研究环境`:"";
 }
@@ -815,7 +827,7 @@ function renderOverview(o){
   FINAL_RESEARCH_REQUIRED=o.publication_policy?.language_review_required===true;
   const workspace=o.workspace;
   const workspaceLabel=workspace&&(workspace.name||workspace.slug);
-  $("workspace-name").textContent=workspace&&workspace.mode==="isolated"?workspaceLabel:"研究系统";
+  $("workspace-name").textContent=workspace&&(workspace.mode==="isolated"?workspaceLabel:(workspace.name||"研究系统"));
   $("workspace-name").title=workspace&&workspace.workspace_id?`分析师工作区 ${workspace.workspace_id}`:"";
   document.title=workspace&&workspace.mode==="isolated"?`${workspaceLabel} · Dalton 投研工作台`:"Dalton 投研工作台";
   const awaiting=o.state==="awaiting_mission";
@@ -1185,7 +1197,11 @@ function renderModels(sheet,r,overview){sheet.replaceChildren(readerClose(),node
     c.append(editor.box);
     const row=node("div",null,"actions");row.append(editor.save,editor.st);c.append(row);
     const details=node("details"),summary=node("summary","这一类包含哪些环节");details.append(summary);
-    card.purposes.forEach(p=>{details.append(node("small",`${p.label} · ${p.mode_label}${p.requires_restart?" · 修改需重启":""}`,"raw"))});
+    card.purposes.forEach(p=>{
+      const line=node("small",`${p.label} · ${p.mode_label}${p.requires_restart?" · 修改需重启":""}`,"raw");
+      details.append(line);
+      if(p.pin_note)details.append(node("small",p.pin_note,"hint"));
+    });
     c.append(details);
     d.append(c);stages.append(d)});
   sheet.append(stages);

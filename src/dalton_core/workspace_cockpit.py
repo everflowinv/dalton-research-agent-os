@@ -17,8 +17,19 @@ def cockpit_workspace_context(
     environment = os.environ if environ is None else environ
     manifest = environment.get("DALTON_WORKSPACE_MANIFEST")
     if manifest is None:
+        # The legacy environment has no workspace root of its own; its display
+        # name (when the owner has renamed it from a cockpit) lives in the
+        # host root the legacy state directory sits inside.
+        name = None
+        for legacy_display in (
+            Path(environment.get("DALTON_STATE_DIR", "")) / ".." / "legacy-display" / "display.json",
+        ):
+            try:
+                name = json.loads(legacy_display.resolve().read_text()).get("display_name")
+            except (OSError, ValueError):
+                continue
         return {"mode": "legacy", "slug": None, "workspace_id": None,
-                "aggregate_capacity": "unknown"}
+                "name": name, "aggregate_capacity": "unknown"}
     if not manifest:
         raise WorkspaceError("workspace manifest environment binding is empty")
     workspace = load_workspace_manifest(manifest)

@@ -248,10 +248,12 @@ def _catalog(config: Mapping[str, Any]) -> tuple[dict[str, Any] | None, list[str
 
 
 def _public(record: Mapping[str, Any], current_id: str | None) -> dict[str, Any]:
+    slug = record.get("slug")
     return {key: record.get(key) for key in (
         "workspace_id", "name", "url", "status", "retryable", "failure_reason"
     )} | {
         "current": record.get("workspace_id") == current_id,
+        "slug": slug if slug else "legacy",
     }
 
 
@@ -281,8 +283,57 @@ def list_workspaces(config_path: Path | None, login: str, current_id: str | None
             "shared_connections": {**catalog_counts, "available": catalog is not None}}
 
 
+def rename_workspace(config_path: Path, login: str, value: Mapping[str, Any]) -> dict[str, Any]:
+    """Rename one workspace (or the legacy environment) from the cockpit.
+
+    Presentation metadata only: the display name in ``display.json`` (hash
+    re-bound) and the ``name`` on the creation-request record the list reads.
+    No authority, route or Core state is touched, which is why this runs in
+    the caller's process rather than out-of-process like creation.
+    """
+
+    if set(value) != {"slug", "name"}:
+        raise WorkspaceError("请填写研究环境名称")
+    slug, name = value["slug"], value["name"]
+    if not isinstance(slug, str) or not re.fullmatch(r"(legacy|ws-[a-f0-9]{24})", slug):
+        raise WorkspaceError("研究环境标识无效")
+    if not isinstance(name, str) or not name.strip() or len(name.strip()) > 80 \
+            or any(ord(c) < 32 for c in name):
+        raise WorkspaceError("名称需为 1 到 80 个字符")
+    name = name.strip()
+    config = _config(config_path)
+    if config["owner_login"] != login:
+        raise PermissionError("workspace owner mismatch")
+    root = Path(config["host_root"])
+
+    def _rename_display(workspace_root: Path) -> None:
+        display = workspace_root / "display.json"
+        wire = json.loads(display.read_text(encoding="utf-8")) if display.is_file() else {}
+        body = {key: item for key, item in wire.items() if key != "content_hash"}
+        body["display_name"] = name
+        _write(display, {**body, "content_hash": _metadata_hash(body)})
+
+    if slug == "legacy":
+        _rename_display(root / "legacy-display")
+        return {"status": "renamed", "slug": slug, "name": name}
+    record_path = root / "creation-requests" / (slug.removeprefix("ws-") + ".json")
+    if not record_path.is_file():
+        raise WorkspaceError("没有这个研究环境")
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    if record.get("owner_login") != login:
+        raise PermissionError("workspace owner mismatch")
+    record["name"] = name
+    _write(record_path, record)
+    _rename_display(root / "workspaces" / slug)
+    return {"status": "renamed", "slug": slug, "name": name}
+
+
+def _metadata_hash(body: Mapping[str, Any]) -> str:
+    from .store import content_hash
+    return content_hash(body)
+
+
 def request_create(config_path: Path, login: str, value: Mapping[str, Any]) -> dict[str, Any]:
-    """Run outside the caller's namespace; never modify process-wide environment."""
     if set(value) != {"name", "request_id"}:
         raise WorkspaceError("请填写研究环境名称")
     name, request_id = value["name"], value["request_id"]

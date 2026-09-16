@@ -4864,6 +4864,36 @@ class CockpitPlane:
         except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
             raise CockpitError("研究环境尚未准备完成，可以重试同一次创建请求") from exc
 
+    def rename_workspace(self, login: str, value: Mapping[str, Any]) -> dict[str, Any]:
+        from .workspace import WorkspaceError
+        from .workspace_manager import rename_workspace as rename
+        path = getattr(self.config, "workspace_manager_config_path", None)
+        if path is None:
+            raise CockpitError("研究环境管理尚未配置")
+        # An isolated cockpit may name itself without carrying its slug; the
+        # caller's namespace knows it, this process's request does not.
+        if isinstance(value, Mapping) and value.get("slug") in (None, ""):
+            slug = (self.workspace_context or {}).get("slug")
+            if slug is None and (self.workspace_context or {}).get("mode") == "legacy":
+                slug = "legacy"
+            value = {**value, "slug": slug}
+        if isinstance(value, Mapping) and value.get("slug") in (None, ""):
+            raise CockpitError("没有找到要重命名的研究环境")
+        try:
+            result = rename(path, login, value)
+        except WorkspaceError as exc:
+            raise CockpitError(str(exc)) from exc
+        except (OSError, ValueError) as exc:
+            raise CockpitError("重命名没有保存") from exc
+        # The current environment's own header reads the display file at
+        # startup; carry the new name back so the page updates without a
+        # restart.
+        if (self.workspace_context or {}).get("slug") == result.get("slug") \
+                or (result.get("slug") == "legacy"
+                    and (self.workspace_context or {}).get("mode") == "legacy"):
+            self.workspace_context = {**self.workspace_context, "name": result["name"]}
+        return result
+
     def _model_router_db(self) -> str | None:
         """The model catalog this Core reads, named by its model configuration."""
 
@@ -5920,9 +5950,11 @@ class CockpitPlane:
             if binding.get("status") == "deterministic":
                 row = {**default_rows[purpose], "mode": "deterministic", "chain": [],
                        "superseded_chain": [], "last_served": None}
+                override = None
             elif selected is None:
                 row = {**default_rows[purpose], "mode": "unconfigured", "chain": [],
                        "superseded_chain": [], "last_served": None}
+                override = None
             else:
                 row = next(item for item in selected["purposes"]
                            if item["purpose"] == purpose)
@@ -5975,6 +6007,18 @@ class CockpitPlane:
                 "policy_version_ref": policy_ref,
                 "requires_restart": bool(binding.get("requires_restart")),
                 "editable": bool(binding.get("editable")),
+                # 2026-09-16: the verification purposes are pinned by explicit
+                # overrides to the only profiles whose broker routes declare
+                # provider-controlled-verify.  An owner reading the page saw
+                # "第 1 顺位 gemini-3.8-flash · Google" against their own tier
+                # choice and reasonably asked why.  The row now says it is a
+                # contract pin, not their selection.
+                "pin_note": (
+                    "独立复核契约钉定：验证类工单需要供应商侧验证控件，"
+                    "目录中只有个别模型声明支持，因此这一列不走你选的层级链。"
+                    if isinstance(override, Mapping) and row["tier"] == "verifier"
+                    else None
+                ),
                 "call_budget": call_budget_view(self.config.state_dir, purpose, binding=binding),
                 "run_budget": call_budget_view(self.config.state_dir, purpose, binding=binding, kind="run"),
                 "chain": chain,
