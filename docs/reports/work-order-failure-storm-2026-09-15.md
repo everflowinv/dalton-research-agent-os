@@ -97,3 +97,26 @@ a design change for another day. Routing around the small pipe is honest.
 zhipu answers 200 but throttles inside the stream on the large prompt, and
 Claude resets 9am ET. All three are external capacity; the chains walk,
 retry with backoff, and will complete when any one of them has room.
+
+## Planner payload round (2026-09-16)
+
+**Measured the antigravity transport precisely.** The agy CLI silently returns
+empty content above ~30K characters (28K CJK chars pass, 32.4K fail, ASCII
+80K fails; the gateway logs `SUCCESS responseChars:0` and the broker wraps it
+as INVALID_HOST_RESULT). It is a chars-based cap inside the agy binary -- not
+fixable from dalton or the gateway. Both antigravity profiles now declare
+28,000, so oversized prompts route around and small calls stay local.
+
+**Staged the plan-prompt projection (rule 0.2).** When dropping previews is
+not enough: aggregate each company's unavailable rows (counts by reason,
+samples, hash of the full set), drop verification-only document fields, and
+digest financial models -- every stage recorded in the disclosure. The live
+state measures a 75KB floor after all four stages (90 document identities do
+not compress further), so the planner bound is 80K everywhere: the live plan
+prompt dropped 269KB -> 79KB, three times less token pressure on providers
+that throttle per minute.
+
+**Fixed a crash found by the first real run**: the unroutable-links message
+sliced a set before sorting it, crashing exactly the walks the message was
+added for. Failure messages now render every link's class, the untried
+links' rejection reasons, and the broker detail in one line.
