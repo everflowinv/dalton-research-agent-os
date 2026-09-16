@@ -71,3 +71,29 @@ built from commit 865ccfda with the dependency lock; full suite 8538 OK.
   9am ET when Claude's resets. Adding a third brain link (e.g. zai-glm-5-3,
   which recent chain versions carried) would remove this single point of
   provider capacity — an owner tier-page decision.
+
+## Follow-up round (late evening)
+
+**Failure detail was being dropped by the walk that got furthest.** The
+chain-walk return for "no link of the chain is routable" (and the halted
+`budget_refused` return) omitted the `failures` list, so exhausted envelopes
+showed bare skip classes with no broker message. Both returns carry failures
+now, and the cockpit message appends why the untried links were refused.
+
+**Antigravity's declared input limit was fiction.** The CLI-gateway transport
+refuses prompts above roughly 64KB before the CLI starts (probed: 63KB passes,
+95KB fails, always as `INVALID_HOST_RESULT: host returned invalid text`), while
+the profiles declared a 960K-token input window. Corrected to 60K on both
+antigravity profiles (host-side version bump): the router now excludes them
+for oversized prompts (`profile_input_limit_exceeded`) instead of burning the
+first chain link per attempt. Small prompts still take the fast local path.
+
+The plan prompt itself stays ~250KB (the projection's floor after dropping
+all previews is ~200KB of document identities, unavailable-document detail and
+financial models); slimming further means summarizing state fields, which is
+a design change for another day. Routing around the small pipe is honest.
+
+**Where plan stands tonight:** OpenAI is genuinely 429-throttling astra,
+zhipu answers 200 but throttles inside the stream on the large prompt, and
+Claude resets 9am ET. All three are external capacity; the chains walk,
+retry with backoff, and will complete when any one of them has room.
