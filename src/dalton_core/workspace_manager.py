@@ -267,7 +267,17 @@ def list_workspaces(config_path: Path | None, login: str, current_id: str | None
     items = []
     legacy = config.get("legacy_workspace")
     if legacy:
-        items.append(_public(legacy, current_id or "legacy"))
+        row = _public(legacy, current_id or "legacy")
+        # The legacy row's name in the manager config is the install-time
+        # default; a cockpit rename writes display.json beside it instead.
+        try:
+            display = json.loads(
+                (Path(config["host_root"]) / "legacy-display" / "display.json").read_text())
+            if display.get("display_name"):
+                row["name"] = display["display_name"]
+        except (OSError, ValueError):
+            pass
+        items.append(row)
     for path in sorted((Path(config["host_root"]) / "creation-requests").glob("*.json")):
         record = json.loads(path.read_text())
         if record.get("owner_login") == login:
