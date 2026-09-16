@@ -407,21 +407,24 @@ class VerifierIndependenceTests(RouterCase):
         self.assertEqual(checked["chain"][0], "profile:gemini-3-8-flash")
 
     def test_uncontrolled_profile_cannot_be_selected_for_verification(self) -> None:
-        # 2026-09-15: off by default, the same chain is a valid selection;
-        # the refusal is pinned with the flag on so the rule survives.
-        validate_selection(
-            self.router, purpose=VERIFY_PURPOSE, mode="explicit",
-            chain=["profile:claude-fable-5-1"],
-        )
-        with patch.object(fallback_chain, "CHAIN_ELIGIBILITY_ENFORCED", True), \
-                self.assertRaisesRegex(FallbackChainError, "providerControls"):
+        # 2026-09-16: the provider-controls floor is no longer behind the
+        # eligibility flag -- a verifier chain with no controlled link cannot
+        # route a single work order, so it is refused outright with the names
+        # of the models that can serve. Uncontrolled links stay allowed as
+        # long as one controlled link is somewhere in the chain.
+        with self.assertRaisesRegex(FallbackChainError, "验证控件"):
             validate_selection(
                 self.router, purpose=VERIFY_PURPOSE, mode="explicit",
                 chain=["profile:claude-fable-5-1"],
             )
+        checked = validate_selection(
+            self.router, purpose=VERIFY_PURPOSE, mode="explicit",
+            chain=["profile:claude-fable-5-1", "profile:gemini-3-8-flash"],
+        )
+        self.assertEqual(checked["chain"], ["profile:claude-fable-5-1", "profile:gemini-3-8-flash"])
 
     def test_unknown_lineage_cannot_be_selected_for_verification(self) -> None:
-        config = _config()
+        config = self.catalog_config()
         broker = config["plugins"]["entries"]["dalton-openclaw-model-broker"]["config"]["profiles"][0]
         provider, model = broker["model"].split("/", 1)
         self.router.declare_profile_metadata(
@@ -431,12 +434,14 @@ class VerifierIndependenceTests(RouterCase):
             actor_ref=OWNER, created_at=NOW.isoformat(),
         )
         sync_openclaw_model_catalog(self.router, config, checked_at=NOW, availability_ttl=timedelta(days=3650))
+        # The lineage advisory stays behind the flag; the chain carries a
+        # controlled link so the new controls floor does not fire first.
         validate_selection(self.router, purpose=VERIFY_PURPOSE, mode="explicit",
-                           chain=[broker["id"]])
+                           chain=[broker["id"], "profile:gemini-3-8-flash"])
         with patch.object(fallback_chain, "CHAIN_ELIGIBILITY_ENFORCED", True), \
                 self.assertRaisesRegex(FallbackChainError, "no declared family"):
             validate_selection(self.router, purpose=VERIFY_PURPOSE, mode="explicit",
-                               chain=[broker["id"]])
+                           chain=[broker["id"], "profile:gemini-3-8-flash"])
 
     def test_a_verifier_from_a_different_family_is_accepted(self) -> None:
         checked = validate_selection(

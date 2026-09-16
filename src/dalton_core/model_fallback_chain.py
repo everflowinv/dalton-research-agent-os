@@ -499,21 +499,38 @@ def validate_selection(
                     f"{profile_id} has no published price, so it can only be the last "
                     "resort; put it at the end of the chain or leave it out"
                 )
-    if tier == TIER_VERIFIER and CHAIN_ELIGIBILITY_ENFORCED:
-        for profile_id in links:
-            profile = held[profile_id]
-            family = profile["family"]
-            if not family or family.startswith("unclassified:"):
-                raise FallbackChainError(
-                    f"{profile_id} has no declared family; declare its lineage "
-                    "before selecting it for independent verification"
-                )
-            if "provider-controlled-verify" not in profile["capabilities"]:
-                raise FallbackChainError(
-                    f"{profile_id} does not declare broker-enforced verifier "
-                    "controls; select a profile whose current broker route "
-                    "declares providerControls"
-                )
+    if tier == TIER_VERIFIER:
+        # 2026-09-16: split out of CHAIN_ELIGIBILITY_ENFORCED. The owner's
+        # standing rule lifted the *capability* restrictions, and that flag
+        # stays off for the family/lineage advisory below. But this check is
+        # not a capability opinion -- a verifier chain where no link declares
+        # broker-enforced controls cannot route a single verification work
+        # order (capability_not_supported on every link), so saving one is
+        # saving a dead chain. It is refused with the names of the models
+        # that can serve, instead of silently breaking verification the next
+        # time the tier page is used.
+        capable = [
+            profile_id for profile_id, profile in held.items()
+            if "provider-controlled-verify" in profile["capabilities"]
+        ]
+        if not any(
+            "provider-controlled-verify" in held[profile_id]["capabilities"]
+            for profile_id in links
+        ):
+            raise FallbackChainError(
+                "这条独立核验链里没有任何模型声明 broker 验证控件，保存后所有验证工单都会被拒。"
+                f"目前目录中支持验证控件的模型：{', '.join(sorted(capable)) or '（暂无）'}。"
+                "可以把这些模型加入链条（任意位置），其余模型保留作后备。"
+            )
+        if CHAIN_ELIGIBILITY_ENFORCED:
+            for profile_id in links:
+                profile = held[profile_id]
+                family = profile["family"]
+                if not family or family.startswith("unclassified:"):
+                    raise FallbackChainError(
+                        f"{profile_id} has no declared family; declare its lineage "
+                        "before selecting it for independent verification"
+                    )
     return {"purpose": purpose, "tier": tier, "mode": "explicit", "chain": links}
 
 
