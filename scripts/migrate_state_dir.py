@@ -336,6 +336,50 @@ def health(args: argparse.Namespace) -> dict[str, Any]:
             "ok": readable and (advanced or before is None)}
 
 
+def rebind_workspaces(target: Path, launch_agents_dir: Path) -> list[str]:
+    """迁移后每个工作区的 service.json 与 plist 必须指向解析后的真实路径。
+
+    运行时把 manifest 路径与各数据库路径 resolve() 之后逐字比较，而 service.json
+    里写的是迁移前的字面路径，不改写服务会以「service config paths do not match
+    the bound workspace manifest」拒绝启动。另外 launchd 打不开外置卷上的
+    stdout/stderr（EX_CONFIG 78），所以 plist 的日志文件改到启动卷上。
+    """
+
+    actions: list[str] = []
+    home = Path.home()
+    for manifest in sorted(target.glob("*/workspace.json")):
+        real_root = manifest.parent.resolve()
+        slug = real_root.name
+        old_root = home / ".dalton" / "workspaces" / slug
+        service_path = real_root / "config" / "service.json"
+        if service_path.is_file():
+            text = service_path.read_text(encoding="utf-8")
+            replaced = text.replace(str(old_root), str(real_root))
+            record = json.loads(replaced)
+            binding = dict(record.get("workspace") or {})
+            binding["manifest_path"] = str(manifest.resolve())
+            record["workspace"] = binding
+            temporary = service_path.with_name(".service.json.migrate.tmp")
+            temporary.write_text(json.dumps(record, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                                 encoding="utf-8")
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, service_path)
+            actions.append(f"rebound {slug}/config/service.json to {real_root}")
+        log_dir = home / "Library" / "Logs" / "Dalton" / "workspaces" / slug
+        log_dir.mkdir(parents=True, exist_ok=True)
+        for plist_path in launch_agents_dir.glob(f"space.lumos.dalton.workspace.{slug}.*.plist"):
+            import plistlib
+            with plist_path.open("rb") as stream:
+                data = plistlib.load(stream)
+            role = plist_path.stem.rsplit(".", 1)[-1]
+            data["StandardOutPath"] = str(log_dir / f"{role}.stdout.log")
+            data["StandardErrorPath"] = str(log_dir / f"{role}.stderr.log")
+            with plist_path.open("wb") as stream:
+                plistlib.dump(data, stream)
+            actions.append(f"launchd logs for {plist_path.name} -> {log_dir}")
+    return actions
+
+
 def apply_migration(args: argparse.Namespace, prepared: dict[str, Any]) -> dict[str, Any]:
     if prepared["blocking"]:
         raise MigrationError("预检不通过：" + "；".join(prepared["blocking"]))
@@ -369,6 +413,8 @@ def apply_migration(args: argparse.Namespace, prepared: dict[str, Any]) -> dict[
             os.symlink(target, source)
             moved.append({"name": row["name"], "source": str(source),
                           "target": str(target), "preserved": str(kept)})
+            if row["name"] == "workspaces":
+                actions.extend(rebind_workspaces(target, args.launch_agents_dir.expanduser().resolve()))
     except Exception as exc:
         # rsync 在改名之前失败时源目录原封不动；已经改名的组软链是完整的。
         # 无论哪种情况服务都必须回来，不能让一次复制失败变成整套系统停机。

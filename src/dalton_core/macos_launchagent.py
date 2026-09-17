@@ -116,6 +116,22 @@ def _atomic_plist(path: Path, value: dict[str, Any]) -> None:
             temporary.unlink()
 
 
+def _launchd_log_dir(logs: Path, label_namespace: str | None) -> Path:
+    """launchd 能打开的日志目录：与家目录同一卷则原样，否则回落到本地。"""
+
+    home = Path.home()
+    try:
+        same_volume = logs.stat().st_dev == home.stat().st_dev if logs.exists() else (
+            logs.parent.stat().st_dev == home.stat().st_dev if logs.parent.exists() else True)
+    except OSError:
+        same_volume = True
+    if same_volume:
+        return logs
+    local = home / "Library" / "Logs" / "Dalton" / (label_namespace or "workspaces") 
+    local.mkdir(parents=True, exist_ok=True)
+    return local
+
+
 def render(
     launch_agents_dir: str | Path,
     python_env_bin: str | Path,
@@ -134,6 +150,11 @@ def render(
     state = Path(state_dir).expanduser().resolve()
     config = Path(config_path).expanduser().resolve()
     logs = Path(log_dir).expanduser().resolve()
+    # launchd 打不开外置卷上的 stdout/stderr 文件（服务会以 EX_CONFIG 78 退出、
+    # 一个字节都不输出；2026-09-17 把 workspaces 迁到 /Volumes/EveSSD 时撞到）。
+    # 工作区自己的 log_dir 必须留在 workspace_root 之内（manifest 校验），所以
+    # 只把 launchd 写的那两个文件放到启动卷上的 ~/Library/Logs/Dalton 下。
+    logs = _launchd_log_dir(logs, label_namespace)
     if label_namespace is None:
         labels = {
             "writer": WRITER_LABEL,

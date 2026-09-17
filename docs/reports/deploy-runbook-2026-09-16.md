@@ -139,3 +139,11 @@ sudo diskutil enableOwnership /Volumes/EveSSD        # 可选但推荐：保住 
 .venv/bin/python scripts/migrate_state_dir.py --dest /Volumes/EveSSD/Dalton            # 预演
 .venv/bin/python scripts/migrate_state_dir.py --dest /Volumes/EveSSD/Dalton --apply    # 执行；回滚：--rollback --apply
 ```
+
+## 执行记录（2026-09-17 03:00–03:35 UTC）与偏差
+
+- 第 1 步：`build_release.py` 的 `pip install <wheel>` 装不上 optional extras，改为用仓库自带 `workspace_release.install_release(wheelhouse=/private/tmp/dalton-workspace-dependencies-0914/wheelhouse, dependency_lock=…/dependencies.lock.json)` 正规安装（生成 venv 内 `dalton-release.json`），再用 `write_release_manifest.py` 补 release 级 manifest。`build_release.py` 已改为按锁定清单安装依赖。
+- 第 3 步：`install_workspace` 在服务运行时会因端口占用拒绝；改为直接调用 `macos_launchagent.render`。workspace.json 改动后必须把 `content_hash` 同步到 service.json 的 `workspace.manifest_hash`（`release_switch.py` 已补）。
+- 第 5 步：legacy controller 首次 bootstrap 遇 launchd 半注册态 I/O 错误，单独 bootout/bootstrap 一次即可。
+- 新增：三个环境的 writer-tokens.json 需把新 lane 的 dispatch op 加入 core 主体（`writer_server.load_principals` + `replace_token_config`），否则新车道报 operation is not permitted。
+- 第 12 步：迁移见 PROJECT_STATUS 2026-09-17 记录的三处修复。

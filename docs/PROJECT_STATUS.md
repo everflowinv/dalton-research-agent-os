@@ -1,5 +1,13 @@
 # Dalton 项目进度
 
+## 2026-09-17 凌晨：09-16 批次已部署到全部环境；状态目录已迁至 EveSSD
+
+源码 `7f24d085`（运行包 `7ae450054d82…`，含锁定的 62 个依赖 wheel 与 venv 内完整性清单）已通过 `scripts/release_switch.py` 切到 legacy 与两个 workspace 共 10 个 LaunchAgent，manager.json / current-release.json / current-runtime-config.json / 发布 worker gate 同步更新。线上随后执行：投影间隔 2 → 60；写 writer-tokens.json 把 `dispatch_valuation_snapshot`、`dispatch_quantitative_claim_promotion` 授予三个环境的 core 主体（新车道此前报 operation is not permitted）；`repair_brain_chains.py --apply` 发布 5 项（brain 档 `deepseek-v4-flash → zai-glm-5-3 → claude-opus-5`，debate_map/dossier/model_spec 钉 `claude-opus-5 → deepseek-v4-flash`，research_language_check 钉 antigravity gemini-3.8-flash）；新环境模板导出为 `model-runtime-20260916-v5` / `service-runtime-20260916-v7`（planner max_output_tokens 16000）；治理策略签署为 policy-17 / constitution v15 / mission v24，新增 `mission-verified-figure:v1` 与 `sec-statement-line:v1` 两条自动入账规则；日志轮转 LaunchAgent 安装；219 个被封的发布 worker 批次移出重试。
+
+切换后 1 小时的回读：tick 耗时 222s → 50s；ACN 档案连出 v10–v13、EPAM v6；估值快照五家各 1 版；定量结论 22 → 247 并以每 tick 200 条继续入账；抽取队列 193 → 116；发布 worker 已开始产出（completed 2，pending 382）；僵尸子进程只在 tick 内短暂存在、不再累积；今日实际模型花费约 6 美元。**未解决**：`sales_notes_feed` / `company_wiki_feed` 仍是 `out_of_time, launched 0`（5 秒软预算内枚举即耗尽，需要把枚举结果跨 tick 缓存）。
+
+状态目录迁移：`~/Library/Application Support/Dalton/state` → `/Volumes/EveSSD/Dalton/legacy-state`，`~/.dalton/workspaces` → `/Volumes/EveSSD/Dalton/workspaces`，原目录保留为 `*.pre-migration-20260917T031346Z`（稳定后手动删除）。迁移中暴露并修复三处：macOS 自带 openrsync 无 `-A/-X`；workspace 的 service.json 路径与 manifest 绑定必须改写为解析后的真实路径；launchd 打不开外置卷上的 stdout/stderr（EX_CONFIG 78 且无输出），workspace 的 launchd 日志改到 `~/Library/Logs/Dalton/workspaces/<slug>/`。`migrate_state_dir.py` 与 `macos_launchagent.render` 已把这三条固化。EveSSD 仍以 noowners 挂载（`sudo diskutil enableOwnership /Volumes/EveSSD` 需 owner 执行）。
+
 ## 2026-09-16 晚：研究推进卡点的系统性修复（一次合并，8 个并行工作包）
 
 起因是当日的只读审计（[live-ops-and-research-audit-2026-09-16.md](reports/live-ops-and-research-audit-2026-09-16.md)）：五家公司全部停在初筛出口之后、深度认知门之前 3 天；43 小时无正式交付物新版本；writer 单写者队列被注定失败的 lane 独占、tick 从 22s 退化到 188s；账本因 429 失败按上限计费在零成功调用下记了 286 USD；定量事实只有 22 条且全是同一指标。全量测试 **9,147 项全绿（4 跳过）**。按主题：
