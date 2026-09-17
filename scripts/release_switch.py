@@ -392,6 +392,18 @@ def apply_switch(args: argparse.Namespace, plan: dict[str, Any]) -> dict[str, An
     time.sleep(3)
     for label, path in labels:
         actions.append(launchctl("start", label, path))
+    # launchd 在 bootout 之后的几秒里仍持有旧标签（"Bootstrap failed: 5: Input/output
+    # error"），legacy 的 writer/controller 两次发布都撞到。等一会儿再对失败的
+    # 标签重试，而不是把它们留给下一轮巡检。
+    retry_labels = [(label, path) for (label, path), line in zip(labels, actions[-len(labels):])
+                    if "-> 0" not in line]
+    if retry_labels:
+        time.sleep(6)
+        for label, path in retry_labels:
+            launchctl("stop", label, path)
+        time.sleep(3)
+        for label, path in retry_labels:
+            actions.append("retry " + launchctl("start", label, path))
     time.sleep(args.settle_seconds)
     return {"actions": actions, **pointers}
 

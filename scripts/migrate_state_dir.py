@@ -51,7 +51,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import shutil
+import tempfile
 import sqlite3
 import subprocess
 import sys
@@ -380,9 +382,57 @@ def rebind_workspaces(target: Path, launch_agents_dir: Path) -> list[str]:
     return actions
 
 
+def launchd_access_probe(destination: Path) -> dict[str, Any]:
+    """launchd 起的后台进程能不能读目标盘。
+
+    macOS 的「可移动卷」隐私保护（TCC）对 launchd 后台代理单独计：交互 shell 能读的
+    外置盘，launchd 起的 /bin/sh 会得到 Operation not permitted，Python 则卡在 getcwd
+    等授权（2026-09-17 全部 10 个服务因此停摆）。所以迁移前用一个一次性 LaunchAgent
+    实际试一次，而不是相信当前 shell 的结果。
+    """
+
+    import plistlib
+    label = "com.dalton.migrate-access-probe"
+    out = Path(tempfile.gettempdir()) / f"{label}.out"
+    plist = Path(tempfile.gettempdir()) / f"{label}.plist"
+    out.unlink(missing_ok=True)
+    marker = destination / ".dalton-launchd-probe"
+    with plist.open("wb") as stream:
+        plistlib.dump({
+            "Label": label,
+            "ProgramArguments": ["/bin/sh", "-c",
+                                 f"cd {shlex.quote(str(destination))} && ls . >/dev/null "
+                                 f"&& touch {shlex.quote(str(marker))} && echo ok || echo denied"],
+            "RunAtLoad": True,
+            "StandardOutPath": str(out), "StandardErrorPath": str(out),
+        }, stream)
+    domain = f"gui/{os.getuid()}"
+    subprocess.run(["launchctl", "bootout", f"{domain}/{label}"], capture_output=True)
+    subprocess.run(["launchctl", "bootstrap", domain, str(plist)], capture_output=True)
+    deadline = time.monotonic() + 15
+    text = ""
+    while time.monotonic() < deadline:
+        text = out.read_text(encoding="utf-8", errors="replace") if out.exists() else ""
+        if "ok" in text or "denied" in text:
+            break
+        time.sleep(0.5)
+    subprocess.run(["launchctl", "bootout", f"{domain}/{label}"], capture_output=True)
+    marker.unlink(missing_ok=True)
+    ok = "ok" in text and "denied" not in text
+    return {"ok": ok, "output": text.strip()[:300],
+            "hint": None if ok else (
+                "launchd 后台进程无法访问目标盘（macOS 可移动卷隐私保护）。请在"
+                "「系统设置 → 隐私与安全性 → 完全磁盘访问」里加入 Python.app"
+                "（/opt/homebrew/Cellar/python@3.14/…/Python.framework/Versions/3.14/Resources/Python.app）"
+                "后再迁移；否则迁移完成后所有服务会卡在启动。")}
+
+
 def apply_migration(args: argparse.Namespace, prepared: dict[str, Any]) -> dict[str, Any]:
     if prepared["blocking"]:
         raise MigrationError("预检不通过：" + "；".join(prepared["blocking"]))
+    access = launchd_access_probe(Path(prepared["destination"]))
+    if not access["ok"]:
+        raise MigrationError("launchd 访问探测不通过：" + json.dumps(access, ensure_ascii=False))
     probe = target_capability_probe(Path(prepared["destination"]))
     if not probe["ok"]:
         raise MigrationError("目标盘能力探测不通过：" + json.dumps(probe, ensure_ascii=False))

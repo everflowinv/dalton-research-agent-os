@@ -1,5 +1,13 @@
 # Dalton 项目进度
 
+## 2026-09-17 05:00 UTC：第二批部署（ea6b1e54 → 运行包 3687233129fd…）；EveSSD 迁移因 TCC 回退
+
+**部署内容**：深度认知门裁决改为折叠阶梯（研究目标版本滚动后草稿不再失去按钮；stage record 写到 pointer 当前版本；证据被更新只提示不拒绝；不达标旧草稿一键「按系统建议退回」并预填逐题意见）；「需要你处理」面板移到待办审批页；feed lane 枚举结果跨 tick 持久化 + 读取/枚举分开计预算 + `launched` 如实计数（此前 327 次读取一直报 0）；定量提升跳过已入账数字后再截取 limit（此前每轮重放同一批 225 条重复项、promoted=0）；`release_switch.py` 对 launchd 半注册态自动重试。全量 9,181 项通过。切换过程中 legacy writer/controller 再次撞到 launchd 的 bootstrap I/O 错误，手动重拉后正常。
+
+**治理**：通过 `connector_governance_cli approve` 批准 12 条记录（ir-page-watch ×2、sec-beneficial-ownership、sec-form13f-holdings、sec-form144-notices、sec-financial-statements-v3、cn-hk-findata ×6）；4 条 hkex-filings 记录的连接器种类不在当前 `GOVERNANCE_KIND_REGISTRY` 里（approve 报 unsupported kind），且本研究目标无港股，未处理。
+
+**EveSSD 迁移回退（重要）**：切换到 3687233… 重启后 10 个服务全部卡在 Python 启动的 `getcwd()`（`open$NOCANCEL` 永不返回），launchd 起的 `/bin/sh` 对 `/Volumes/EveSSD/Dalton/...` 执行 `ls` 得到 `Operation not permitted`——macOS「可移动卷」隐私保护（TCC）对 launchd 后台代理单独生效，交互 shell 能读不代表服务能读。此前 03:15–04:46 能运行属侥幸。处置：停服务 → 用 SSD 上的最新数据 rsync 回本地目录（无数据丢失）→ 撤销软链 → workspace 的 service.json 路径改回 `~/.dalton/workspaces/...` → 重启，05:58 UTC 三个环境全部恢复运行。`migrate_state_dir.py` 新增 launchd 访问探测（用一次性 LaunchAgent 实测），探测不过就拒绝迁移。**再迁移的前提**：owner 在「系统设置 → 隐私与安全性 → 完全磁盘访问」加入 `/opt/homebrew/Cellar/python@3.14/3.14.6/Frameworks/Python.framework/Versions/3.14/Resources/Python.app`（进程实际以它执行），之后重跑 `scripts/migrate_state_dir.py --dest /Volumes/EveSSD/Dalton --apply`。SSD 上 `/Volumes/EveSSD/Dalton/` 现为 05:53 UTC 的旧副本，可删。
+
 ## 2026-09-17 凌晨：09-16 批次已部署到全部环境；状态目录已迁至 EveSSD
 
 源码 `7f24d085`（运行包 `7ae450054d82…`，含锁定的 62 个依赖 wheel 与 venv 内完整性清单）已通过 `scripts/release_switch.py` 切到 legacy 与两个 workspace 共 10 个 LaunchAgent，manager.json / current-release.json / current-runtime-config.json / 发布 worker gate 同步更新。线上随后执行：投影间隔 2 → 60；写 writer-tokens.json 把 `dispatch_valuation_snapshot`、`dispatch_quantitative_claim_promotion` 授予三个环境的 core 主体（新车道此前报 operation is not permitted）；`repair_brain_chains.py --apply` 发布 5 项（brain 档 `deepseek-v4-flash → zai-glm-5-3 → claude-opus-5`，debate_map/dossier/model_spec 钉 `claude-opus-5 → deepseek-v4-flash`，research_language_check 钉 antigravity gemini-3.8-flash）；新环境模板导出为 `model-runtime-20260916-v5` / `service-runtime-20260916-v7`（planner max_output_tokens 16000）；治理策略签署为 policy-17 / constitution v15 / mission v24，新增 `mission-verified-figure:v1` 与 `sec-statement-line:v1` 两条自动入账规则；日志轮转 LaunchAgent 安装；219 个被封的发布 worker 批次移出重试。
