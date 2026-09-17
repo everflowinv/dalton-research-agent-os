@@ -3760,11 +3760,7 @@ class CockpitPlane:
                 "sources": [{"source_ref": s["source_ref"], "label": SOURCE_LABELS.get(s["source_ref"], s["source_ref"]),
                              "role": s["role"], "connected": s["status"] == "connected",
                              "daily_cap": _source_daily_cap(s["source_ref"], mission["budget"])}
-                            for s in mission["source_plan"]
-                            if s["source_ref"] != "source:company-ir"],
-                # IR pages describe company-owned web material, not a
-                # separately installed source. Preserve the original task
-                # declaration for inspection without presenting a phantom connector.
+                            for s in mission["source_plan"]],
                 "source_plan_details": list(mission["source_plan"]),
                 "history": versions,
             },
