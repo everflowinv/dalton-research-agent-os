@@ -5053,6 +5053,24 @@ class CoverageMissionAuthority:
             _canonical_record(row["record_json"], "mission stage reopen")
             for row in self.connection.execute(query, params).fetchall()
         ]
+    @staticmethod
+    def _decoded_stage_record(row: Any) -> dict[str, Any]:
+        """One stage record read back and checked against its own index row."""
+
+        wire = validate_mission_stage_record(_canonical_record(row["record_json"], "mission stage record"))
+        if (
+            wire["id"] != row["record_id"]
+            or wire["mission_version_ref"] != row["mission_version_ref"]
+            or wire["company_ref"] != row["company_ref"]
+            or wire["stage_ref"] != row["stage_ref"]
+            or wire["status"] != row["status"]
+            or wire["actor_ref"] != row["actor_ref"]
+            or wire["created_at"] != row["created_at"]
+            or wire["content_hash"] != row["content_hash"]
+        ):
+            raise CoverageMissionConflict("mission stage record authority drifted")
+        return wire
+
     def stage_records(self, mission_version_ref: str, company_ref: str | None = None) -> list[dict[str, Any]]:
         mission_version_ref = _text(mission_version_ref, "mission_version_ref")
         query = "SELECT * FROM coverage_mission_stage_records WHERE mission_version_ref=?"
@@ -5061,22 +5079,37 @@ class CoverageMissionAuthority:
             query += " AND company_ref=?"
             params.append(_text(company_ref, "company_ref"))
         query += " ORDER BY created_at,record_id"
-        records = []
-        for row in self.connection.execute(query, params).fetchall():
-            wire = validate_mission_stage_record(_canonical_record(row["record_json"], "mission stage record"))
-            if (
-                wire["id"] != row["record_id"]
-                or wire["mission_version_ref"] != row["mission_version_ref"]
-                or wire["company_ref"] != row["company_ref"]
-                or wire["stage_ref"] != row["stage_ref"]
-                or wire["status"] != row["status"]
-                or wire["actor_ref"] != row["actor_ref"]
-                or wire["created_at"] != row["created_at"]
-                or wire["content_hash"] != row["content_hash"]
-            ):
-                raise CoverageMissionConflict("mission stage record authority drifted")
-            records.append(wire)
-        return records
+        return [self._decoded_stage_record(row)
+                for row in self.connection.execute(query, params).fetchall()]
+
+    def stage_records_across_versions(
+        self, mission_ref: str, company_ref: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Every stage record of one mission, every version of it, in time order.
+
+        ``stage_records`` answers "what was written under this version".  That
+        is the wrong question for a caller about to write one: the ladder
+        ``record_stage`` validates against is *folded* across versions (P14-S),
+        so a caller that read one version's rows would re-enter a stage the
+        company entered two versions ago and be refused for it.  This answers
+        "what has this company done in this mission", which is what the fold is
+        about.  Reopen markers are deliberately not in it -- they are not stage
+        records; ``current_stage_state`` is where the two ledgers meet.
+        """
+
+        mission_ref = _text(mission_ref, "mission_ref")
+        query = (
+            "SELECT r.* FROM coverage_mission_stage_records r "
+            "JOIN coverage_mission_versions v ON v.mission_version_id=r.mission_version_ref "
+            "WHERE v.mission_ref=?"
+        )
+        params: list[Any] = [mission_ref]
+        if company_ref is not None:
+            query += " AND r.company_ref=?"
+            params.append(_text(company_ref, "company_ref"))
+        query += " ORDER BY r.created_at,r.record_id"
+        return [self._decoded_stage_record(row)
+                for row in self.connection.execute(query, params).fetchall()]
 
     def record_stage_claim(
         self,

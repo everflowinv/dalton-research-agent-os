@@ -1779,6 +1779,119 @@ def _gate_decidability(core: sqlite3.Connection, record: Mapping[str, Any]) -> d
     return decidability(core, record)
 
 
+def _gate_quality(
+    core: sqlite3.Connection, record: Mapping[str, Any], state_dir: Any
+) -> dict[str, Any] | None:
+    """What the submission standard makes of a draft that is already waiting.
+
+    H2.  The standard (D1) holds a bad draft back *before* it is published, so
+    it has nothing to say about the four that were published before it existed
+    -- and those four are exactly the ones sitting in the owner's queue looking
+    like work.  Asking the same question of a draft already on the chain costs
+    one read and turns "read twelve answers to find out they are three" into a
+    line on the card and a return note already written.
+
+    ``verifier_passed=True`` because a published draft is one the verifier
+    passed: the drafting run refuses to publish otherwise, so asking again here
+    would fail a check nobody can answer from the Core.  Never fatal -- a card
+    that cannot be graded is still a card the owner has to decide.
+    """
+
+    from .deep_insight_gate_quality import assess, load_standard
+    from .needs_human import dossier_for
+
+    try:
+        standard = load_standard(state_dir)
+    except Exception:  # noqa: BLE001 - a broken threshold file is not this card's problem
+        standard = None
+    try:
+        return assess(record, dossier=dossier_for(core, record),
+                      verifier_passed=True, standard=standard)
+    except Exception:  # noqa: BLE001 - never let a summary take a card's buttons away
+        return None
+
+
+def _gate_quality_details(quality: Mapping[str, Any] | None) -> dict[str, str]:
+    """The standard's verdict on a waiting draft, as detail rows the page renders.
+
+    Same shape D1's held-back cards already use, because it is the same news
+    about the same kind of draft; the only difference is that this one was
+    published before the standard existed and so is in front of a person.
+    """
+
+    if quality is None or quality.get("submittable", True):
+        return {}
+    rows = {"系统复核": str(quality.get("summary") or "")}
+    for index, gap in enumerate((quality.get("question_gaps") or [])[:12], start=1):
+        rows[f"缺口 {index}"] = (f"第 {gap.get('question_number')} 问缺"
+                                f"{gap.get('missing')}；下一步：{gap.get('next_step')}")
+    return rows
+
+
+def _gate_card_notes(verdict: Mapping[str, Any],
+                     quality: Mapping[str, Any] | None) -> dict[str, Any]:
+    """What the card says above its buttons, and what it pre-fills below them.
+
+    Three things can be true at once and each is a different repair: the ladder
+    cannot take this verdict; the evidence this draft rests on has moved since
+    it was written; the submission standard would not have shown it at all.
+    The first two come from ``decidability``, the third from the standard, and
+    a card that showed only one of them would be hiding the other two.
+    """
+
+    from .deep_insight_gate_quality import suggested_return_reason
+
+    notes: list[str] = []
+    out: dict[str, Any] = {}
+    if not verdict["decidable"]:
+        notes.append("暂时不能裁决：" + str(verdict["reason"] or ""))
+    if verdict.get("advisory"):
+        notes.append(str(verdict["advisory"]))
+    if quality is not None and not quality.get("submittable", True):
+        notes.append(str(quality.get("summary") or ""))
+        # Offered in the box rather than sent: the owner reads it, edits it if
+        # they disagree, and presses the button that was already there.
+        out["rationale_default"] = suggested_return_reason(quality)
+    if notes:
+        out["note"] = " ".join(note for note in notes if note)
+    return out
+
+
+def _gate_actions(verdict: Mapping[str, Any],
+                  quality: Mapping[str, Any] | None) -> list[dict[str, Any]]:
+    """The three buttons, and which of them the ladder can honour right now.
+
+    H1.  A card with no buttons at all was the defect: five drafts bound to a
+    mission version the pointer had rolled past sat inert, and the lane stayed
+    held because a draft was "waiting for a person" who had nothing to press.
+    So the three always appear.  ``return_for_more_work`` is always live -- it
+    writes no stage record, so the ladder has no opinion about it -- and the
+    two that do write one are disabled *with the reason attached* when the
+    ladder would refuse, rather than throwing after the click.  A version roll
+    is no longer one of those reasons.
+
+    H2.  When the submission standard would not have shown this draft at all,
+    the return button says so: one press sends the per-question gaps back to
+    the lane, which redrafts on a return (D2).
+    """
+
+    decidable = bool(verdict["decidable"])
+    hint = None if decidable else str(verdict["reason"] or "")
+    below_standard = bool(quality is not None and not quality.get("submittable", True))
+    actions: list[dict[str, Any]] = []
+    for action in GATE_ACTIONS:
+        row = dict(action)
+        if action["decision"] == "return_for_more_work":
+            if below_standard:
+                row["label"] = "按系统建议退回"
+                row["hint"] = "退回理由已按提交标准逐题填好，可以直接提交，也可以改写。"
+        elif not decidable:
+            row["disabled"] = True
+            row["hint"] = hint
+        actions.append(row)
+    return actions
+
+
 CHECKPOINT_TITLES = {
     "thesis_revision_candidate": "新证据可能影响现有投资论点，待人工决策",
     "gate_reopen": "已有研究报告需要重新评估",
@@ -4964,6 +5077,8 @@ class CockpitPlane:
             ):
                 record = json.loads(row["record_json"])
                 verdict = _gate_decidability(core, record)
+                quality = _gate_quality(core, record, self.config.state_dir)
+                quality_details = _gate_quality_details(quality)
                 answered = [item for item in record["answers"]
                             if item["status"] == "answered"]
                 # D2: what the last person who read this company's gate asked
@@ -4989,6 +5104,7 @@ class CockpitPlane:
                         "行业分类": record["classification"],
                         **{item["question_ref"]: _gate_answer_line(item)
                            for item in record["answers"]},
+                        **quality_details,
                         "档案版本": record["bindings"]["dossier_version_ref"],
                         "争议图版本": record["bindings"]["debate_map_version_ref"],
                     },
@@ -4996,16 +5112,18 @@ class CockpitPlane:
                         "行业分类": "行业分类",
                         **{item["question_ref"]: f"研究问题 {number}"
                            for number, item in enumerate(record["answers"], 1)},
+                        **{name: name for name in quality_details},
                     },
-                    "actions": list(GATE_ACTIONS) if verdict["decidable"] else [],
-                    "needs_rationale": verdict["decidable"],
+                    "actions": _gate_actions(verdict, quality),
+                    # Always: the box is where the return note lives, and
+                    # return is always live.
+                    "needs_rationale": True,
                     # D2: the reviewer may point at question numbers rather
                     # than at the document.  The page collects both in one
                     # box, which is how people actually write.
                     "rationale_hint": GATE_RATIONALE_HINT,
                     "question_refs": [item["question_ref"] for item in record["answers"]],
-                    **({} if verdict["decidable"]
-                       else {"note": "暂时不能裁决：" + verdict["reason"]}),
+                    **_gate_card_notes(verdict, quality),
                 })
             # D1: the drafts the submission standard held back.  Information,
             # not an approval: there is nothing to press, and the reason the

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -953,38 +954,128 @@ class DecisionOperationTests(unittest.TestCase):
             )
         return record["id"]
 
-    def test_a_rolled_mission_version_is_refused_readably_rather_than_crashing(self):
-        # The stage ledger is scoped by version and the live mission rolls. A
-        # draft published under version N can stop being decidable without
-        # anybody touching it, and the owner should not learn that from a
-        # traceback after clicking.
+    def roll(self):
+        """Publish a new mission version, the way a signed budget does live."""
+
         self.harness.fixture = LedgerFixture(str(self.harness.state_dir / "core.sqlite"))
         self.harness.store = self.harness.fixture.store
         self.harness.missions = CoverageMissionAuthority(self.harness.store)
+        rolled = self.harness.roll_mission_version()
+        self.harness.fixture.close()
+        return rolled
+
+    def test_a_rolled_mission_version_is_still_decided_under_the_pointer(self):
+        # H1. The live mission rolls a version every time a budget or a policy
+        # is signed, and five drafts sat buttonless because of it. The ladder
+        # is folded: what the company did does not un-happen, so the verdict
+        # lands -- under the *active* version, which is where the stage record
+        # belongs.
+        rolled = self.roll()
+        server = self.server()
+        result = self.decide(server, "approve")
+        self.assertEqual(result["stage_status"], "gate_passed")
+        rows = self.on_store(server, lambda: [
+            (record["stage_ref"], record["status"], record["mission_version_ref"])
+            for record in server.coverage_mission.stage_records_across_versions(
+                rolled["mission_ref"], ACN)])
+        self.assertIn(("deep_insight_gate", "entered", rolled["id"]), rows)
+        self.assertIn(("deep_insight_gate", "gate_passed", rolled["id"]), rows)
+        # And nothing was written under the version the draft was drafted under.
+        self.assertNotIn(
+            ("deep_insight_gate", "gate_passed",
+             self.draft["bindings"]["mission_version_ref"]), rows)
+
+    def test_a_rolled_mission_version_shows_as_decidable_before_the_click(self):
+        rolled = self.roll()
+        server = self.server()
+        listed = self.on_store(
+            server, lambda: server._op_deep_insight_gate_submissions({}))["drafts"]
+        self.assertEqual(len(listed), 1)
+        self.assertTrue(listed[0]["decidable"])
+        self.assertIsNone(listed[0]["undecidable_reason"])
+        self.assertTrue(listed[0]["mission_version_rolled"])
+        self.assertEqual(listed[0]["active_mission_version_ref"], rolled["id"])
+
+    def core(self):
+        """A read-only-shaped handle on the Core, the way the cockpit reads it."""
+
+        core = sqlite3.connect(str(self.harness.state_dir / "core.sqlite"))
+        core.row_factory = sqlite3.Row
+        self.addCleanup(core.close)
+        return core
+
+    def test_a_company_whose_screen_never_passed_is_refused_in_chinese(self):
+        # The folded precondition, unmet. CTSH is in the mission universe and
+        # has never passed an Initial Screen under any version of it, so the
+        # reason names the ladder rather than the version -- the version is not
+        # what is wrong.
+        from dalton_core.deep_insight_gate import UNDECIDABLE_REASONS, decidability
+
+        unscreened = next(member["company_ref"]
+                          for member in self.harness.mission["universe"]
+                          if member["company_ref"] != ACN)
+        verdict = decidability(self.core(), {**self.draft, "company_ref": unscreened})
+        self.assertFalse(verdict["decidable"])
+        self.assertEqual(verdict["reason_code"], "screen_not_passed")
+        self.assertEqual(verdict["reason"], UNDECIDABLE_REASONS["screen_not_passed"])
+        self.assertIn("initial_screen", verdict["reason"])
+        self.assertIn("深度认知门必须排在它后面", verdict["reason"])
+
+    def test_a_company_dropped_from_the_universe_is_refused_readably(self):
+        # The one case where a version roll really does shut the door: the
+        # stage record binds the active version, and its universe is what the
+        # authority checks the company against. Refused in the owner's words
+        # before anything is written, rather than by a traceback after.
+        from dalton_core.deep_insight_gate import UNDECIDABLE_REASONS
+
+        self.harness.fixture = LedgerFixture(str(self.harness.state_dir / "core.sqlite"))
+        self.harness.store = self.harness.fixture.store
+        self.harness.missions = CoverageMissionAuthority(self.harness.store)
+        self.harness.mission = {
+            **self.harness.mission,
+            "universe": [member for member in self.harness.mission["universe"]
+                         if member["company_ref"] != ACN],
+        }
         self.harness.roll_mission_version()
         self.harness.fixture.close()
         server = self.server()
         with self.assertRaises(WriterServerError) as raised:
             self.decide(server, "approve")
-        self.assertIn("研究目标版本", str(raised.exception))
-        # And returning still works: it writes no stage record, so the ladder
-        # has no opinion about it.
+        self.assertIn(UNDECIDABLE_REASONS["left_the_universe"], str(raised.exception))
+        # And returning still works: it writes no stage record at all, so the
+        # ladder has no opinion about it.
         returned = self.decide(server, "return_for_more_work", reason="先放着")
         self.assertIsNone(returned["stage_status"])
 
-    def test_a_rolled_mission_version_shows_as_undecidable_before_the_click(self):
+    def test_superseded_evidence_is_an_advisory_rather_than_a_closed_door(self):
+        from dalton_core.deep_insight_gate import ADVISORY_REASONS, decidability
+
+        self.assertIsNone(decidability(self.core(), self.draft)["advisory_code"])
+        self.move_the_file()
+        verdict = decidability(self.core(), self.draft)
+        # Still three buttons: the owner read *this* draft, and a file that
+        # moved afterwards is a reason to prefer returning it, not a reason to
+        # take the verdict away.
+        self.assertTrue(verdict["decidable"])
+        self.assertEqual(verdict["advisory_code"], "evidence_superseded")
+        self.assertEqual(verdict["advisory"], ADVISORY_REASONS["evidence_superseded"])
+        self.assertEqual([row["kind"] for row in verdict["superseded_evidence"]],
+                         ["公司档案"])
+        self.assertEqual(verdict["superseded_evidence"][0]["bound_ref"],
+                         self.draft["bindings"]["dossier_version_ref"])
+
+    def move_the_file(self):
+        """Publish a newer dossier version for the company, as a filing would."""
+
         self.harness.fixture = LedgerFixture(str(self.harness.state_dir / "core.sqlite"))
         self.harness.store = self.harness.fixture.store
-        self.harness.missions = CoverageMissionAuthority(self.harness.store)
-        self.harness.roll_mission_version()
+        self.harness.dossiers = CompanyDossierAuthority(self.harness.store)
+        fresh = self.harness.fixture.add_claim(
+            "c-new", kind="qualitative", value=None, unit=None,
+            statement="新的一条定性结论")["claim_version_id"]
+        published = self.harness.publish_dossier(extra={"guidance_style": fresh})
         self.harness.fixture.close()
-        server = self.server()
-        listed = self.on_store(
-            server, lambda: server._op_deep_insight_gate_submissions({}))["drafts"]
-        self.assertEqual(len(listed), 1)
-        self.assertFalse(listed[0]["decidable"])
-        self.assertEqual(listed[0]["undecidable_reason_code"], "mission_version_rolled")
-        self.assertIn("研究目标版本", listed[0]["undecidable_reason"])
+        return published
 
     def test_the_submissions_view_lists_the_draft_with_its_twelve_answers(self):
         server = self.server()
@@ -1057,21 +1148,99 @@ class CockpitTests(unittest.TestCase):
                        if row["status"] == "unknown")
         self.assertIn("所需证据", item["details"][unknown["question_ref"]])
 
-    def test_a_rolled_mission_version_leaves_the_item_with_no_buttons(self):
-        from dalton_core.deep_insight_gate import UNDECIDABLE_REASONS
-
+    def test_a_rolled_mission_version_keeps_all_three_buttons(self):
+        # H1. This is the live defect: the pointer rolls every time a budget or
+        # a policy is signed, and every waiting draft lost its buttons -- while
+        # the lane stayed held because a draft was "waiting for a person".
         self.harness.fixture = LedgerFixture(str(self.harness.state_dir / "core.sqlite"))
         self.harness.store = self.harness.fixture.store
         self.harness.missions = CoverageMissionAuthority(self.harness.store)
         self.harness.roll_mission_version()
         self.harness.fixture.close()
         item = self.gate_item(self.plane())
-        # Still on the page -- it is still what the owner has to deal with --
-        # and saying why, because a button that goes nowhere is worse than an
-        # item that says so.
-        self.assertEqual(item["actions"], [])
-        self.assertFalse(item["needs_rationale"])
-        self.assertIn(UNDECIDABLE_REASONS["mission_version_rolled"], item["note"])
+        self.assertEqual([action["decision"] for action in item["actions"]],
+                         ["approve", "return_for_more_work", "reject"])
+        self.assertFalse([action for action in item["actions"]
+                          if action.get("disabled")])
+        self.assertTrue(item["needs_rationale"])
+        self.assertNotIn("note", item)
+
+    def test_a_ladder_that_cannot_take_the_verdict_keeps_return_live(self):
+        # H1 fail-closed. A company dropped from the mission universe is the
+        # one case a roll really does shut: the two buttons that write a stage
+        # record say why they are shut, and the one that writes none stays live
+        # so the card is never inert.
+        from dalton_core.deep_insight_gate import UNDECIDABLE_REASONS
+
+        self.harness.fixture = LedgerFixture(str(self.harness.state_dir / "core.sqlite"))
+        self.harness.store = self.harness.fixture.store
+        self.harness.missions = CoverageMissionAuthority(self.harness.store)
+        self.harness.mission = {
+            **self.harness.mission,
+            "universe": [member for member in self.harness.mission["universe"]
+                         if member["company_ref"] != ACN],
+        }
+        self.harness.roll_mission_version()
+        self.harness.fixture.close()
+        item = self.gate_item(self.plane())
+        actions = {action["decision"]: action for action in item["actions"]}
+        self.assertEqual(list(actions), ["approve", "return_for_more_work", "reject"])
+        self.assertTrue(actions["approve"]["disabled"])
+        self.assertTrue(actions["reject"]["disabled"])
+        self.assertNotIn("disabled", actions["return_for_more_work"])
+        self.assertEqual(actions["approve"]["hint"],
+                         UNDECIDABLE_REASONS["left_the_universe"])
+        self.assertIn(UNDECIDABLE_REASONS["left_the_universe"], item["note"])
+
+    def test_superseded_evidence_is_said_on_the_card_without_taking_a_button(self):
+        from dalton_core.deep_insight_gate import ADVISORY_REASONS
+        from dalton_core.company_dossier import CompanyDossierAuthority
+
+        self.harness.fixture = LedgerFixture(str(self.harness.state_dir / "core.sqlite"))
+        self.harness.store = self.harness.fixture.store
+        self.harness.dossiers = CompanyDossierAuthority(self.harness.store)
+        fresh = self.harness.fixture.add_claim(
+            "c-new", kind="qualitative", value=None, unit=None,
+            statement="新的一条定性结论")["claim_version_id"]
+        self.harness.publish_dossier(extra={"guidance_style": fresh})
+        self.harness.fixture.close()
+        item = self.gate_item(self.plane())
+        self.assertEqual([action["decision"] for action in item["actions"]],
+                         ["approve", "return_for_more_work", "reject"])
+        self.assertFalse([action for action in item["actions"]
+                          if action.get("disabled")])
+        self.assertIn(ADVISORY_REASONS["evidence_superseded"], item["note"])
+
+    def test_a_draft_below_the_standard_offers_the_return_it_would_have_written(self):
+        # H2. The four live drafts were published before the submission
+        # standard existed, and reappear under it as "waiting for a person"
+        # without saying that the system would not have shown them at all.
+        # Reproduced exactly: publish under a permissive standard, then put the
+        # shipped one in place, which is what happened live.
+        from dalton_core.deep_insight_gate_quality import STANDARD_FILE_NAME
+
+        (self.harness.state_dir / STANDARD_FILE_NAME).unlink()
+        item = self.gate_item(self.plane())
+        self.assertIn("系统判定草稿尚不足以提交", item["note"])
+        self.assertEqual(
+            [action["label"] for action in item["actions"]
+             if action["decision"] == "return_for_more_work"], ["按系统建议退回"])
+        self.assertTrue(item["rationale_default"].startswith("按提交标准复核"))
+        # Every question line is one the redraft prompt can read: D2 parses a
+        # line that starts with a question number into that question's own
+        # instruction.
+        lines = item["rationale_default"].splitlines()
+        self.assertTrue(any(re.match(r"^q\d+：", line) for line in lines))
+        self.assertIn("系统复核", item["details"])
+        self.assertIn("系统复核", item["detail_labels"])
+        # And the draft that does meet the standard says none of this.
+        (self.harness.state_dir / STANDARD_FILE_NAME).write_text(
+            json.dumps(PERMISSIVE_STANDARD), encoding="utf-8")
+        plain = self.gate_item(self.plane())
+        self.assertNotIn("rationale_default", plain)
+        self.assertEqual(
+            [action["label"] for action in plain["actions"]
+             if action["decision"] == "return_for_more_work"], ["退回补充"])
 
     def test_a_decided_gate_leaves_the_page(self):
         plane = self.plane()

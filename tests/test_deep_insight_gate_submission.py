@@ -35,6 +35,7 @@ from dalton_core.deep_insight_gate_quality import (
     note_is_current,
     read_note,
     read_notes,
+    suggested_return_reason,
 )
 from dalton_core.deep_insight_gate_review import (
     CARRIED_FORWARD_NOTE,
@@ -164,6 +165,54 @@ class AssessmentTests(unittest.TestCase):
         result = assess(record, dossier=dossier(), verifier_passed=True,
                         standard=relaxed)
         self.assertTrue(result["submittable"], result["shortfalls"])
+
+
+class SuggestedReturnTests(unittest.TestCase):
+    """H2: the return note the standard would have written, for a draft it
+    never got to hold back."""
+
+    def assessment(self):
+        return assess(draft(answered_refs={"q1", "q5"}), dossier=dossier(),
+                      verifier_passed=True)
+
+    def test_it_names_the_shortfalls_and_then_the_questions(self):
+        import re
+
+        text = suggested_return_reason(self.assessment())
+        lines = text.splitlines()
+        self.assertTrue(lines[0].startswith("按提交标准复核"))
+        self.assertIn("足够的证据引用", lines[0])
+        questions = [line for line in lines if re.match(r"^q\d+：", line)]
+        self.assertTrue(questions)
+        self.assertIn("下一步取", questions[0])
+        self.assertIn("自动填的", lines[-1])
+
+    def test_every_question_line_is_one_the_redraft_prompt_can_read(self):
+        # D2 parses a line beginning with a question number into that
+        # question's own instruction; a suggestion the parser cannot read would
+        # be a paragraph the next draft never hears.
+        from dalton_core.cockpit_plane import _gate_question_notes
+        from dalton_core.deep_insight_gate import QUESTION_REFS
+
+        notes = _gate_question_notes(None, suggested_return_reason(self.assessment()))
+        self.assertTrue(notes)
+        self.assertTrue(set(notes) <= set(QUESTION_REFS))
+        self.assertTrue(all(note.strip() for note in notes.values()))
+
+    def test_it_stays_inside_the_length_the_writer_accepts(self):
+        from dalton_core.deep_insight_gate_quality import MAX_RETURN_REASON_CHARS
+
+        wordy = {
+            "shortfall_labels": ["足够的证据引用"],
+            "question_gaps": [
+                {"question_ref": f"q{number}", "question_number": str(number),
+                 "missing": "缺" * 400, "next_step": "取" * 400}
+                for number in range(1, 13)],
+        }
+        text = suggested_return_reason(wordy)
+        self.assertLessEqual(len(text), MAX_RETURN_REASON_CHARS)
+        self.assertLess(len(text), 4000)
+        self.assertIn("自动填的", text.splitlines()[-1])
 
 
 class AutoReturnTests(unittest.TestCase):

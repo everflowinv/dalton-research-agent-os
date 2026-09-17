@@ -34,6 +34,7 @@ batch, settlement, the review row -- is here and is what the tick runs.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import time
@@ -54,6 +55,7 @@ from .prior_research_core import (
     DOCUMENT_REF_PREFIX as PRIOR_RESEARCH_REF_PREFIX,
     SOURCE_REF as PRIOR_RESEARCH_SOURCE_REF,
 )
+from .lane_child_launcher import write_owner_only
 from .lane_registry import LaneSpec, register_lane
 from .connector import ConnectorQuotaExceeded
 from .store import canonical_json, content_hash
@@ -144,6 +146,40 @@ ENUMERATIONS_PER_TICK: int | None = None
 # slow enumeration silently reintroduces the starvation.  A tick that reads
 # one document has made progress; a tick that reads none never will.
 MIN_DOCUMENT_READ_SECONDS = 2.0
+
+# 2026-09-16 (I1): an enumeration outlives the tick that paid for it.
+#
+# B1-2 split the budgets and added a cursor, and the lanes still reported
+# ``enumerated: 211, launched: 0, out_of_time: true`` every five minutes.  The
+# arithmetic says why: the writer gives a lane five seconds
+# (``writer_server.LANE_SOFT_BUDGET_SECONDS``), one enumeration is a governed
+# child process over a local corpus and costs three to four of them, and what
+# is left is one document read -- if the tick does not overrun first.  So the
+# lane spent five sixths of every tick re-listing a directory it had already
+# listed, and the *reading* -- the only half that turns a feed into mission
+# documents -- got the crumbs.
+#
+# The listing is the cheap thing to be wrong about.  A fortnight of sell-side
+# notes does not change between two ticks five minutes apart, and when it does
+# the only cost of a stale listing is that this tick reads yesterday's notes
+# instead of this morning's -- the next refresh picks them up.  Whereas
+# re-deriving it costs a process start every single tick, for ever.  So the
+# enumeration is cached on disk, keyed by the window it covers and fingerprinted
+# by what would make it wrong (the feed, the frozen plan, the window shape),
+# and a tick that finds a live entry spends its whole budget reading.
+#
+# An hour, because that is short enough that a note filed at nine is read
+# before lunch, and long enough that a five-minute controller covers the whole
+# lookback out of cache between refreshes.
+ENUMERATION_CACHE_TTL_SECONDS = 3600.0
+# At most this many windows are kept.  The lookback is nine windows and the
+# cursor rotates through them, so the bound is a guard against a lookback that
+# grows, not a limit the normal case reaches.  Oldest entries are dropped
+# first, because the newest window is the one a tick asks for most.
+ENUMERATION_CACHE_MAX_WINDOWS = 32
+# A sidecar this big is a bug, not a busy fortnight; a cache that cannot be
+# trusted is dropped rather than parsed.
+ENUMERATION_CACHE_MAX_BYTES = 16_000_000
 
 # What one governed child may take before it is killed.  This used to be
 # derived from the tick budget (``budget / 2`` = 4 s), which conflated two
@@ -643,6 +679,188 @@ def _merge_reads(source_ref: str, reads: Sequence[Mapping[str, Any]]) -> dict[st
     return merged
 
 
+# -- the enumeration cache ----------------------------------------------
+
+
+ENUMERATION_CACHE_SCHEMA_VERSION = "0.1"
+
+
+class FeedEnumerationCache:
+    """One feed's window listings, on disk, surviving ticks and restarts.
+
+    The sidecar lives beside the launcher's tickets because that is already
+    this lane's owner-only durable state: same directory, same 0700, same
+    ``write_owner_only`` used for the ticket files themselves.
+
+    Every failure mode here is a miss, never an exception.  A cache is an
+    optimisation; a lane that cannot read its cache must still enumerate and
+    read, and a lane that crashes because a JSON file was truncated by a power
+    cut has turned an optimisation into an outage.
+    """
+
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        ttl_seconds: float = ENUMERATION_CACHE_TTL_SECONDS,
+        max_windows: int = ENUMERATION_CACHE_MAX_WINDOWS,
+        max_bytes: int = ENUMERATION_CACHE_MAX_BYTES,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        self.path = Path(path)
+        self.ttl_seconds = max(0.0, float(ttl_seconds))
+        self.max_windows = max(1, int(max_windows))
+        self.max_bytes = max(1, int(max_bytes))
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self._entries: dict[str, dict[str, Any]] | None = None
+
+    # -- construction ---------------------------------------------------
+
+    @classmethod
+    def for_launcher(cls, launcher: Any, **kwargs: Any) -> "FeedEnumerationCache | None":
+        """The cache for this launcher, or ``None`` if it has no state.
+
+        ``None`` rather than a refusal: a coordinator built in a test around a
+        stub launcher has no ticket directory, and the lane's job does not
+        depend on having somewhere to cache.
+        """
+
+        path = getattr(launcher, "enumeration_cache_path", None)
+        if path is None:
+            return None
+        return cls(path, **kwargs)
+
+    # -- the file -------------------------------------------------------
+
+    @staticmethod
+    def _window_key(since: str, until: str) -> str:
+        return f"{since}|{until}"
+
+    def _read(self) -> dict[str, dict[str, Any]]:
+        if self._entries is not None:
+            return self._entries
+        self._entries = {}
+        try:
+            descriptor = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW)
+        except OSError:
+            return self._entries
+        try:
+            with os.fdopen(descriptor, "rb") as handle:
+                raw = handle.read(self.max_bytes + 1)
+        except OSError:
+            return self._entries
+        if len(raw) > self.max_bytes:
+            return self._entries
+        try:
+            document = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            return self._entries
+        if (not isinstance(document, Mapping)
+                or document.get("schema_version") != ENUMERATION_CACHE_SCHEMA_VERSION):
+            return self._entries
+        windows = document.get("windows")
+        if not isinstance(windows, Mapping):
+            return self._entries
+        for key, entry in windows.items():
+            if isinstance(key, str) and self._usable(entry):
+                self._entries[key] = dict(entry)
+        return self._entries
+
+    @staticmethod
+    def _usable(entry: Any) -> bool:
+        return (
+            isinstance(entry, Mapping)
+            and isinstance(entry.get("since"), str)
+            and isinstance(entry.get("until"), str)
+            and isinstance(entry.get("fingerprint"), str)
+            and isinstance(entry.get("cached_at"), str)
+            and isinstance(entry.get("observations"), list)
+        )
+
+    def _write(self) -> None:
+        entries = self._read()
+        # Newest first, then truncated: the cursor asks for every window in
+        # turn, but a lookback that grew must not grow the sidecar with it.
+        ordered = sorted(
+            entries.items(), key=lambda item: item[1]["cached_at"], reverse=True
+        )[: self.max_windows]
+        self._entries = dict(ordered)
+        document = {
+            "schema_version": ENUMERATION_CACHE_SCHEMA_VERSION,
+            "windows": self._entries,
+        }
+        try:
+            write_owner_only(self.path, document)
+        except OSError:
+            # A sidecar that cannot be written is a slow lane, not a failed
+            # one. Keep what was learned in memory for this process.
+            pass
+
+    # -- the cache ------------------------------------------------------
+
+    def _age_seconds(self, entry: Mapping[str, Any]) -> float | None:
+        try:
+            cached_at = datetime.fromisoformat(entry["cached_at"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if cached_at.tzinfo is None:
+            cached_at = cached_at.replace(tzinfo=timezone.utc)
+        return (self.clock() - cached_at).total_seconds()
+
+    def has(self, *, since: str, until: str, fingerprint: str) -> bool:
+        """Whether this window is live in the cache, without materialising it.
+
+        A tick plans its whole order before it reads anything, over a lookback
+        that is twenty-nine windows wide live.  Planning must not cost a copy
+        of every listing it is deciding between.
+        """
+
+        entry = self._read().get(self._window_key(since, until))
+        if entry is None or entry.get("fingerprint") != fingerprint:
+            return False
+        age = self._age_seconds(entry)
+        return age is not None and 0 <= age <= self.ttl_seconds
+
+    def get(
+        self, *, since: str, until: str, fingerprint: str
+    ) -> list[dict[str, Any]] | None:
+        """This window's listing, if one was taken recently for this shape."""
+
+        entry = self._read().get(self._window_key(since, until))
+        if entry is None:
+            return None
+        if entry.get("fingerprint") != fingerprint:
+            return None
+        age = self._age_seconds(entry)
+        if age is None or age < 0 or age > self.ttl_seconds:
+            return None
+        return [dict(item) for item in entry["observations"]]
+
+    def put(
+        self, *, since: str, until: str, fingerprint: str,
+        observations: Sequence[Mapping[str, Any]],
+    ) -> None:
+        """Keep one window's listing for the ticks that follow this one."""
+
+        entries = self._read()
+        entries[self._window_key(since, until)] = {
+            "since": since,
+            "until": until,
+            "fingerprint": fingerprint,
+            "cached_at": self.clock().astimezone(timezone.utc).isoformat(
+                timespec="microseconds"
+            ),
+            "observations": [dict(item) for item in observations],
+        }
+        self._write()
+
+    def forget(self, *, since: str, until: str) -> None:
+        """Drop one window, so the next tick re-enumerates it."""
+
+        if self._read().pop(self._window_key(since, until), None) is not None:
+            self._write()
+
+
 # -- the lane -----------------------------------------------------------
 
 
@@ -675,6 +893,7 @@ class FeedDiscoveryCoordinator:
         body_read_cursor_ref: str | None = None,
         enumerations_per_tick: int | None = ENUMERATIONS_PER_TICK,
         enumeration_cursor_ref: str | None = None,
+        enumeration_cache: Any = None,
     ) -> None:
         if source_ref not in FEED_DISCOVERY_SOURCES:
             raise FeedLaneRejected(f"{source_ref} is not a feed discovery source")
@@ -703,6 +922,9 @@ class FeedDiscoveryCoordinator:
             else max(1, int(enumerations_per_tick))
         )
         self.enumeration_cursor_ref = enumeration_cursor_ref
+        # Optional on purpose: without one the lane behaves exactly as it did
+        # before the cache existed -- it enumerates every window it reaches.
+        self.enumeration_cache = enumeration_cache
 
     def enumeration_order(
         self, *, since: str | None = None
@@ -725,6 +947,45 @@ class FeedDiscoveryCoordinator:
                 pivot = (index + 1) % len(spans)
                 return spans[pivot:] + spans[:pivot]
         return spans
+
+    def tick_windows(
+        self, *, since: str | None = None
+    ) -> list[tuple[str, str, bool]]:
+        """This tick's windows: the ones already listed first, then the rest.
+
+        This ordering is what makes the cache reachable at all, and the live
+        numbers are why.  The deployed lookback is four hundred days, which is
+        twenty-nine windows; the cursor visits one per tick and the controller
+        ticks every five minutes, so a window comes round again after two and
+        a half hours.  A listing kept for one hour would therefore *never* be
+        found -- every tick would arrive at a window whose entry had expired
+        forty minutes earlier and buy it again, which is exactly the behaviour
+        this work package exists to end.
+
+        So reading comes before listing.  A window whose listing is already on
+        disk is free to read from, and reading is the half of this lane that
+        produces documents; buying a new listing while there is still unread
+        material in one already paid for is spending a quarter of the tick to
+        find work the lane already has.  A new listing is bought when reading
+        finishes early -- the enumeration reserve is what "early" means -- and
+        the cursor still rotates over those purchases, so the whole lookback
+        is covered, just in longer stretches per window.
+
+        The flag is whether the window was live in the cache when the tick
+        planned its order.  It is re-checked before use: planning is cheap and
+        deliberately does not materialise twenty-nine listings.
+        """
+
+        kept: list[tuple[str, str, bool]] = []
+        fresh: list[tuple[str, str, bool]] = []
+        for window_since, window_until in self.enumeration_order(since=since):
+            target = (
+                kept
+                if self.has_enumeration(since=window_since, until=window_until)
+                else fresh
+            )
+            target.append((window_since, window_until, target is kept))
+        return kept + fresh
 
     # -- windows --------------------------------------------------------
 
@@ -820,6 +1081,70 @@ class FeedDiscoveryCoordinator:
         """Both feeds take the same bounded window; neither takes a query."""
 
         return {"since": since, "until": until}
+
+    def enumeration_fingerprint(self, *, since: str, until: str) -> str:
+        """What would have to change before a kept listing is the wrong answer.
+
+        Not the contents of the listing -- those cannot be checked without
+        taking it again, which is the cost the cache exists to avoid.  This is
+        the *shape* of the question: which feed, under which frozen plan, over
+        which window, split how.  A plan the owner re-signs, a lookback that
+        moved, a window size that changed: each one makes every kept listing
+        an answer to a question nobody asked, and each one changes this.
+        """
+
+        return content_hash({
+            "source_ref": self.source_ref,
+            "plan_hash": self.plan.get("content_hash"),
+            "parameters": self.enumeration_parameters(since=since, until=until),
+            "window_days": ENUMERATION_WINDOW_DAYS,
+        })
+
+    def cached_enumeration(
+        self, *, since: str, until: str
+    ) -> list[dict[str, Any]] | None:
+        """A live listing for this window, or ``None`` to go and take one."""
+
+        if self.enumeration_cache is None:
+            return None
+        try:
+            return self.enumeration_cache.get(
+                since=since, until=until,
+                fingerprint=self.enumeration_fingerprint(since=since, until=until),
+            )
+        except Exception:  # noqa: BLE001 - a cache miss is never a lane failure
+            return None
+
+    def has_enumeration(self, *, since: str, until: str) -> bool:
+        """Whether this window can be read from this tick without a child."""
+
+        if self.enumeration_cache is None:
+            return False
+        try:
+            return bool(self.enumeration_cache.has(
+                since=since, until=until,
+                fingerprint=self.enumeration_fingerprint(since=since, until=until),
+            ))
+        except Exception:  # noqa: BLE001 - a cache miss is never a lane failure
+            return False
+
+    def cache_enumeration(
+        self, *, since: str, until: str,
+        observations: Sequence[Mapping[str, Any]],
+    ) -> bool:
+        """Keep this window's listing. ``True`` when the next tick will find it."""
+
+        if self.enumeration_cache is None or not observations:
+            return False
+        try:
+            self.enumeration_cache.put(
+                since=since, until=until,
+                fingerprint=self.enumeration_fingerprint(since=since, until=until),
+                observations=observations,
+            )
+        except Exception:  # noqa: BLE001 - see above
+            return False
+        return True
 
     def triage(
         self, observation: Mapping[str, Any], universe: Sequence[Mapping[str, Any]]
@@ -991,9 +1316,29 @@ class FeedDiscoveryCoordinator:
             pivot = pending.index(self.body_read_cursor_ref) + 1
             pending = pending[pivot:] + pending[:pivot]
         outcomes: list[dict[str, Any]] = []
+        spent = 0.0
         for document_ref in pending[: max(0, bound)]:
-            if deadline is not None and time.monotonic() >= deadline:
-                break
+            if deadline is not None:
+                # I2: a read that cannot finish inside the budget is not
+                # started.  The writer's lane budget is soft -- an overrun is
+                # reported, not interrupted -- so a lane that starts a
+                # nine-tenths-of-a-second child a tenth of a second before its
+                # deadline is reported ``busy`` every single tick, which is
+                # how an owner reads a stalled lane.  Live, that was every
+                # tick of both feeds: five reads, the last one crossing the
+                # line, ``over_budget_seconds: 5.65`` against a budget of 5.
+                #
+                # The estimate is this tick's own measured cost rather than a
+                # constant, because the two feeds and the two corpora differ
+                # by more than any constant would survive.  The first read is
+                # always allowed: a tick that reads one document has made
+                # progress, and there is nothing to estimate from yet.
+                if not outcomes:
+                    if time.monotonic() >= deadline:
+                        break
+                elif time.monotonic() + spent / len(outcomes) > deadline:
+                    break
+            mark = time.monotonic()
             outcome = self._resolve_one(
                 document_ref=document_ref,
                 universe=universe,
@@ -1002,6 +1347,7 @@ class FeedDiscoveryCoordinator:
                 since=since,
                 requested_by=requested_by,
             )
+            spent += time.monotonic() - mark
             outcomes.append(outcome)
             # A connector quota is shared by every remaining document. Once
             # the connector proves it exhausted, another 49 calls can only
@@ -1338,6 +1684,16 @@ class FeedDiscoveryCoordinator:
         reaches further back. That is how the whole lookback gets covered
         without any tick being unbounded.
 
+        WP-I put one thing in front of that order: a window whose listing is
+        already on disk is walked before one that would have to be bought.
+        Enumerating is not "one cheap local read" in production -- it is a
+        governed child process, about a quarter of the five seconds the writer
+        gives this lane -- and buying a listing while an already-paid-for one
+        still holds unread notes spends that quarter finding work the lane
+        already had.  So reading comes first and a new listing is bought when
+        reading finishes early.  ``tick_windows`` is that order;
+        ``FeedEnumerationCache`` is what makes the listing outlive its tick.
+
         Without a runner the tick still does the queue half -- acquiring rows
         some other path discovered -- and says so, rather than failing a
         controller tick because one lane is not fully installed.
@@ -1362,27 +1718,53 @@ class FeedDiscoveryCoordinator:
             windows = 0
             partial_windows = 0
             enumerations = 0
+            cache_hits = 0
+            enumeration_seconds = 0.0
+            read_seconds = 0.0
+            deferred = False
             reads: list[dict[str, Any]] = []
-            for window_since, window_until in self.enumeration_order(since=since):
-                if (budget <= 0
-                        or (self.enumerations_per_tick is not None
-                            and enumerations >= self.enumerations_per_tick)
-                        or time.monotonic() >= enumeration_deadline):
-                    results["out_of_time"] = time.monotonic() >= deadline
+            for window_since, window_until, kept in self.tick_windows(since=since):
+                if budget <= 0:
                     break
-                enumerations += 1
-                # Advance before the read, not after: a tick that spends its
-                # whole read budget on this window must still start at the
-                # next one, or the lane re-enumerates the same fortnight
-                # forever and never reaches the rest of the lookback.
-                self.enumeration_cursor_ref = window_until
-                for observation in self.enumerate_window(
-                    since=window_since, until=window_until,
-                    deadline=enumeration_deadline,
-                ):
-                    if time.monotonic() >= deadline:
-                        results["out_of_time"] = True
+                if time.monotonic() >= deadline:
+                    results["out_of_time"] = True
+                    break
+                # I1: the listing first, from disk if a recent tick already
+                # paid for it.  A hit costs a file read and no child process,
+                # which is the whole point: the tick's budget then belongs to
+                # reading, which is the half that produces documents.
+                observations = (
+                    self.cached_enumeration(since=window_since, until=window_until)
+                    if kept else None
+                )
+                repeatable = observations is not None
+                if observations is None:
+                    if ((self.enumerations_per_tick is not None
+                            and enumerations >= self.enumerations_per_tick)
+                            or time.monotonic() >= enumeration_deadline):
+                        results["out_of_time"] = time.monotonic() >= deadline
                         break
+                    enumerations += 1
+                    # Advance before the read, not after: a tick that spends
+                    # its whole read budget on this window must still start at
+                    # the next one, or the lane re-enumerates the same
+                    # fortnight forever and never reaches the rest of the
+                    # lookback.
+                    self.enumeration_cursor_ref = window_until
+                    mark = time.monotonic()
+                    observations = self.enumerate_window(
+                        since=window_since, until=window_until,
+                        deadline=enumeration_deadline,
+                    )
+                    enumeration_seconds += time.monotonic() - mark
+                    repeatable = self.cache_enumeration(
+                        since=window_since, until=window_until,
+                        observations=observations,
+                    )
+                else:
+                    cache_hits += 1
+                    self.enumeration_cursor_ref = window_until
+                for observation in observations:
                     windows += 1
                     if observation.get("next_cursor") is not None:
                         partial_windows += 1
@@ -1390,27 +1772,69 @@ class FeedDiscoveryCoordinator:
                     enumerated += len(headers)
                     if budget <= 0:
                         continue
+                    # I2: a read that cannot start inside the budget the
+                    # writer gave this lane.  There are two honest answers and
+                    # which one is right depends on whether this tick's work
+                    # survives it.  If the listing is now on disk, stopping
+                    # costs nothing -- the next tick starts with a cache hit,
+                    # spends the whole budget reading, and launches.  If it is
+                    # not, stopping would starve the lane exactly as before,
+                    # so the read keeps its floor and the tick overruns.
+                    if time.monotonic() + MIN_DOCUMENT_READ_SECONDS > deadline:
+                        results["out_of_time"] = True
+                        if repeatable and enumerations:
+                            # ``enumerations`` is the guarantee.  Deferring is
+                            # only ever right when this tick is the one that
+                            # paid for the listing, so the next tick is
+                            # cheaper by exactly what this one spent.  A tick
+                            # whose windows all came from cache has no cheaper
+                            # successor to hand the work to, so it reads --
+                            # otherwise a writer budget too small for one read
+                            # would defer for ever and launch nothing.
+                            deferred = True
+                            break
+                        read_deadline = (
+                            time.monotonic() + MIN_DOCUMENT_READ_SECONDS
+                        )
+                    else:
+                        read_deadline = deadline
                     triage = self.triage(observation, universe)
+                    mark = time.monotonic()
                     read = self.resolve_documents(
                         queue=triage["read_queue"], universe=universe,
                         headers=headers, header_company=triage["header_company"],
                         since=window_since, known=held, limit=budget,
-                        deadline=max(
-                            deadline,
-                            time.monotonic() + MIN_DOCUMENT_READ_SECONDS,
-                        ),
+                        deadline=read_deadline,
                     )
+                    read_seconds += time.monotonic() - mark
                     reads.append(read)
                     budget -= read["read"]
                     held.update(
                         item["document_ref"] for item in read["outcomes"]
                         if item["outcome"] == "company"
                     )
+                if deferred:
+                    break
             results["read"] = _merge_reads(self.source_ref, reads)
+            # Every document this tick read is a governed child this tick
+            # started, so it belongs in the same count as an acquisition
+            # launch.  It was missing, and the ledger consequently reported
+            # ``launched: 0`` on ticks that had read and recorded documents --
+            # the one number an owner watches to see whether the lane works.
+            results["launched"].extend(
+                {"status": "launched", "ticket_ref": outcome["ticket_ref"],
+                 "document_ref": outcome["document_ref"]}
+                for read in reads for outcome in read["outcomes"]
+                if outcome.get("ticket_ref")
+            )
             results["enumerated"] = enumerated
             results["windows"] = windows
             results["partial_windows"] = partial_windows
             results["enumerations"] = enumerations
+            results["cache_hits"] = cache_hits
+            results["enumeration_seconds"] = round(enumeration_seconds, 2)
+            results["read_seconds"] = round(read_seconds, 2)
+            results["read_deferred"] = deferred
         else:
             for _ in range(self.acquisitions_per_tick):
                 if time.monotonic() >= deadline:
@@ -1570,6 +1994,12 @@ def _dispatch(server: Any, source_ref: str, launcher_kwarg: str) -> dict[str, An
     )
     writer_budget = lane_budget_remaining(server)
     if writer_budget is not None:
+        # I2: the writer's number is the real one.  The lane's own eight
+        # seconds is a bound on a CLI run; inside the writer the budget is
+        # whatever is left of the share of the single store thread this tick
+        # was given, and a lane that plans against eight when it has five
+        # plans to overrun.  The floor is half a second so that a lane called
+        # with a spent budget still settles what is outstanding.
         tick_budget_seconds = max(0.5, min(tick_budget_seconds, writer_budget))
     from .feed_launcher import FeedLaunchRejected
 
@@ -1605,6 +2035,12 @@ def _dispatch(server: Any, source_ref: str, launcher_kwarg: str) -> dict[str, An
         body_read_cursor_ref=getattr(launcher, "_body_read_cursor_ref", None),
         tick_budget_seconds=tick_budget_seconds,
         enumeration_cursor_ref=getattr(launcher, "_enumeration_cursor_ref", None),
+        # I1: on disk rather than on the launcher object, because the cursors
+        # above are in-process only and a writer restart throws them away.  A
+        # restart that also threw away the listings would put the lane back
+        # into the state this work package exists to end: every tick spending
+        # its budget re-deriving what the last one already knew.
+        enumeration_cache=FeedEnumerationCache.for_launcher(launcher),
         **runners,
     )
     try:

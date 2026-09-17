@@ -568,7 +568,9 @@ class TheLaneRunTests(unittest.TestCase):
         written = self.claims()
         self.assertEqual(written, first["admitted"])
         second = self.run_lane()
-        self.assertEqual(second["admitted"], first["admitted"])
+        # 已入账的数字不再进入下一轮的提案（否则 limit 会被重复项占满），
+        # 所以重放一轮既不写账本也不重报 admitted。
+        self.assertEqual(second["admitted"], 0)
         self.assertEqual(second["formal_authority_writes"], 0)
         self.assertEqual(second["promoted"],
                          {"statement_line": 0, "derived_ratio": 0, "document_figure": 0})

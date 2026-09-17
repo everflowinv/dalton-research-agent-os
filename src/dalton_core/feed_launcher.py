@@ -95,6 +95,23 @@ class FeedChildLauncher(LaneChildLauncher):
             None if spool_dir is None else Path(spool_dir).expanduser().resolve()
         )
 
+    # -- the enumeration sidecar -------------------------------------------
+
+    #: WP-I: where this feed keeps the window listings it has already paid a
+    #: child process for.  Beside the tickets, because that directory is
+    #: already this launcher's owner-only durable state (0700, one per feed,
+    #: reconciled at startup) and because a listing belongs to the same run
+    #: history as the tickets it produced.  A dot-prefixed file, like the
+    #: reconciliation marker: the ticket scan globs ``*/ticket.json`` and a
+    #: file in the directory root is never mistaken for a run.
+    ENUMERATION_CACHE_FILENAME = ".enumeration-cache.json"
+
+    @property
+    def enumeration_cache_path(self) -> Path:
+        """The sidecar the feed lane caches this feed's enumerations in."""
+
+        return self.tickets_dir / self.ENUMERATION_CACHE_FILENAME
+
     # -- governance --------------------------------------------------------
 
     def load_governance(self, operation: str) -> ConnectorGovernance:

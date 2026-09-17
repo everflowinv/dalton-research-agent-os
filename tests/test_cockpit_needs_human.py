@@ -5,8 +5,9 @@ proposal against a screen version that has been superseded -- and says how many
 it stopped offering, because a to-do list that empties for invisible reasons is
 a broken page rather than a clean one.  The gate card gains the two things a
 reviewer needs to revise rather than re-read: what the last person asked for and
-what this version actually changed.  And the home page gains one panel that
-answers the question the owner actually has.
+what this version actually changed.  And the approvals page gains one panel that
+answers the question the owner actually has (H3 moved it there from the home
+page: the two lists are the same errand).
 """
 
 from __future__ import annotations
@@ -134,6 +135,58 @@ class NeedsHumanEndpointTests(PlaneHarness):
         self.assertTrue(hasattr(self.plane(), "needs_human"))
         source = AgendaControlApplication.cockpit_view.__code__.co_consts
         self.assertIn("/v1/cockpit/needs-human", source)
+
+
+class PanelPlacementTests(unittest.TestCase):
+    """H3: the panel lives on the approvals page, beside the verdicts it names.
+
+    Asserted against the page's own markup rather than a rendered DOM, which is
+    what every other cockpit UI test in this repository does: the file is the
+    artefact that ships.
+    """
+
+    def page(self) -> str:
+        from pathlib import Path
+
+        import dalton_core
+
+        return (Path(dalton_core.__file__).with_name("cockpit_control.html")
+                .read_text(encoding="utf-8"))
+
+    def section(self, page: str, view: str) -> str:
+        start = page.index(f'id="view-{view}"')
+        return page[start:page.index("</section>", start)]
+
+    def test_the_panel_is_on_the_approvals_page_and_not_the_home_page(self):
+        page = self.page()
+        self.assertEqual(page.count('id="needs-human-card"'), 1)
+        self.assertIn('id="needs-human-card"', self.section(page, "approve"))
+        self.assertNotIn('id="needs-human-card"', self.section(page, "goal"))
+        # Above the queue: what to do first, then the verdicts.
+        approve = self.section(page, "approve")
+        self.assertLess(approve.index('id="needs-human-card"'),
+                        approve.index('id="approvals"'))
+
+    def test_it_is_loaded_with_the_approvals_page_and_keeps_its_cache(self):
+        page = self.page()
+        self.assertIn('if(view==="approve"){loadApprovals();loadNeedsHuman()}', page)
+        self.assertIn('if(view==="goal")loadOverview(true)', page)
+        # The 30-second cache and the read-only failure mode are untouched.
+        self.assertIn("Date.now()-needsHumanLast<30000", page)
+        self.assertIn('current==="approve")loadNeedsHuman()', page)
+
+    def test_the_badge_still_counts_verdicts_only(self):
+        # The navigation badge is set from the approvals count, which the
+        # needs-human list never enters: it is a view over checkpoints, not a
+        # queue of them, and counting it twice would tell the owner there is
+        # more waiting than there is.
+        page = self.page()
+        badge = page[page.index('const b=$("approve-badge")'):]
+        self.assertTrue(badge.startswith(
+            'const b=$("approve-badge");if(r.count)'))
+        self.assertNotIn("needs-human", page[
+            page.index("async function loadApprovals()"):
+            page.index("function needsHumanItem")])
 
 
 class ReopenNoiseTests(unittest.TestCase):

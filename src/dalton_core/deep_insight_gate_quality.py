@@ -86,6 +86,12 @@ NOTES_DIR_NAME = "deep-insight-gate-returns"
 # here rather than imported as a string literal so the two spellings cannot
 # drift; the closed list itself is the dossier's.
 UNDECIDED_CLASSIFICATION = "insufficient_evidence"
+# H2: how long the return note this module offers may get.  The decision's
+# ``reason`` is capped at 4000 characters by the gate authority and by the
+# cockpit before it, and twelve unknowns can carry four hundred characters
+# each; a suggestion the writer would refuse is not a suggestion.
+MAX_RETURN_REASON_CHARS = 3600
+MAX_RETURN_REASON_LINE_CHARS = 200
 
 DEFAULT_STANDARD: Mapping[str, Any] = MappingProxyType({
     "schema_version": SCHEMA_VERSION,
@@ -477,6 +483,47 @@ def held_summary(note: Mapping[str, Any]) -> str:
     return str(assessment.get("summary") or "系统判定草稿尚不足以提交。")
 
 
+def suggested_return_reason(assessment: Mapping[str, Any]) -> str:
+    """The return note this standard would write, in the reviewer's own format.
+
+    H2.  Four drafts were published before the submission standard existed and
+    are waiting for a person who can see, in one line, that the system would
+    not have shown them at all.  "Not good enough" is not an instruction, so
+    this is not one: every line after the first begins with a question number,
+    which is exactly what ``cockpit_plane._gate_question_notes`` parses into
+    the per-question instructions the redraft prompt reads (D2).  A return
+    filled in from here therefore tells the next draft *which* questions to
+    rewrite and what evidence would answer them.
+
+    Offered, never sent: it lands in the reviewer's own text box, where it is
+    the owner's to edit, replace or delete before they press anything.
+    """
+
+    labels = [str(label) for label in assessment.get("shortfall_labels") or []]
+    tail = "（以上是系统按提交标准自动填的，改成你自己的话再提交也可以。）"
+    lines = [("按提交标准复核，这份草稿还不能进入完整覆盖：缺"
+              + "、".join(labels) + "。") if labels else
+             "按提交标准复核，这份草稿还需要补充后再看。"]
+    # The decision's own ``reason`` is capped, and twelve unknowns can each be
+    # four hundred characters. A note that the writer would refuse is worse
+    # than a shorter one, so the budget is spent on as many questions as fit
+    # and the rest stay in the card's own gap list.
+    budget = MAX_RETURN_REASON_CHARS - len(lines[0]) - len(tail) - 2
+    for gap in (assessment.get("question_gaps") or [])[:QUESTION_COUNT]:
+        ref = str(gap.get("question_ref") or "").strip()
+        missing = str(gap.get("missing") or "").strip()[:MAX_RETURN_REASON_LINE_CHARS]
+        next_step = str(gap.get("next_step") or "").strip()[:MAX_RETURN_REASON_LINE_CHARS]
+        if not ref or not missing:
+            continue
+        line = f"{ref}：{missing}" + (f"；下一步取{next_step}。" if next_step else "。")
+        if len(line) + 1 > budget:
+            break
+        budget -= len(line) + 1
+        lines.append(line)
+    lines.append(tail)
+    return "\n".join(lines)
+
+
 def answer_preview(record: Mapping[str, Any], question_ref: str) -> str:
     """What one question currently says, for a note or a card."""
 
@@ -491,6 +538,7 @@ def answer_preview(record: Mapping[str, Any], question_ref: str) -> str:
 
 __all__ = [
     "CHECKS",
+    "MAX_RETURN_REASON_CHARS",
     "DEFAULT_STANDARD",
     "NOTES_DIR_NAME",
     "SCHEMA_VERSION",
@@ -511,5 +559,6 @@ __all__ = [
     "read_note",
     "read_notes",
     "standard_hash",
+    "suggested_return_reason",
     "write_note",
 ]

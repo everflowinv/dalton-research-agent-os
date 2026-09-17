@@ -195,7 +195,7 @@ def gate_decisions(core: Any, *, state_dir: Path | None = None) -> list[dict[str
             record = json.loads(row["record_json"])
         except (TypeError, ValueError):
             continue
-        dossier = _dossier_for(core, record)
+        dossier = dossier_for(core, record)
         try:
             quality = assess(record, dossier=dossier, verifier_passed=True,
                              standard=standard)
@@ -226,7 +226,13 @@ def gate_decisions(core: Any, *, state_dir: Path | None = None) -> list[dict[str
     return out
 
 
-def _dossier_for(core: Any, record: Mapping[str, Any]) -> dict[str, Any] | None:
+def dossier_for(core: Any, record: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The company dossier a gate draft binds, or ``None`` if it is not there.
+
+    Public because the approvals page asks the same question of the same draft
+    and two readers of one binding should read it the same way.
+    """
+
     ref = str((record.get("bindings") or {}).get("dossier_version_ref") or "")
     if not ref or not _table(core, "company_dossier_versions"):
         return None
@@ -769,6 +775,7 @@ __all__ = [
     "URGENCY_LABELS",
     "auto_returned_drafts",
     "collect",
+    "dossier_for",
     "gate_decisions",
     "governance_records",
     "held_lanes",

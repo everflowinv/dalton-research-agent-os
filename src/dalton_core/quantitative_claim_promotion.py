@@ -491,10 +491,25 @@ def statement_line_proposals(
     if clauses:
         query += " WHERE " + " AND ".join(clauses)
     query += " ORDER BY filed DESC, accession DESC"
+    # 已入账的数字不再占用本轮的 limit：否则最新申报的前 limit 条一旦入账，
+    # 之后每一轮都只重放这同一批重复项，其余几千行永远轮不到（2026-09-17 线上
+    # 就卡在 admitted=225 / promoted=0）。blocked / staged 的仍然重提，它们还没走完。
+    admitted: set[str] = set()
+    if connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='quantitative_claim_promotions'"
+    ).fetchone() is not None:
+        admitted = {
+            str(row[0]) for row in connection.execute(
+                "SELECT promotion_id FROM quantitative_claim_promotions WHERE disposition='admitted'"
+            ).fetchall()
+        }
     proposals: list[dict[str, Any]] = []
     for filing_row in connection.execute(query, params).fetchall():
         filing = {key: filing_row[key] for key in filing_row.keys()}
-        proposals.extend(filing_proposals(connection, filing))
+        for proposal in filing_proposals(connection, filing):
+            if admitted and promotion_id_for(proposal) in admitted:
+                continue
+            proposals.append(proposal)
         if len(proposals) >= limit:
             break
     return proposals[:limit]

@@ -733,97 +733,250 @@ def classification_agrees(
 # Why an undecided draft cannot be decided right now.  Closed, because each of
 # these sends the owner somewhere different, and "the button did nothing" is
 # what this vocabulary exists to replace.
+#
+# H1: "绑定的研究目标版本不是当前版本" is no longer one of them.  The stage
+# ladder was made *folded* -- a fact about ``(mission_ref, company_ref,
+# stage_ref)`` across every version, see ``fold_stage_status`` -- and
+# ``record_stage`` validates against the folded state while binding the active
+# version as provenance.  This predicate was still reading one version's rows,
+# so five drafts sat buttonless under a pointer that had rolled ten times, and
+# the lane stayed held because a draft was "waiting for a person".  A version
+# roll is not an event in a company's ladder; it is not a reason to refuse a
+# verdict a person has already formed.
 UNDECIDABLE_REASONS: Mapping[str, str] = MappingProxyType({
-    "mission_version_rolled": (
-        "这份草稿绑定的研究目标版本已经不是当前版本了。阶段账本按版本记，"
-        "新版本只把 entered 带过来，所以现在写不进 gate_passed。"
-        "等阶段账本能跨版本带 gate_passed 之后，这条会自动可裁决。"
-    ),
-    "screen_not_passed_here": (
-        "当前研究目标版本下，这家公司还没有 initial_screen 的 gate_passed 记录，"
+    "screen_not_passed": (
+        "这家公司在本研究目标下还没有任何一个版本记下 initial_screen 的 gate_passed，"
         "而深度认知门必须排在它后面。"
     ),
-    "already_passed": "这家公司的深度认知门在当前版本下已经过了。",
+    "already_passed": "这家公司的深度认知门已经过了（记在另一份草稿名下）。",
     "no_mission_version": "这份草稿没有绑定任何研究目标版本。",
+    "no_active_mission_version": (
+        "这份草稿绑定的研究目标现在没有生效版本，阶段记录无处可写。"
+    ),
+    "left_the_universe": (
+        "当前研究目标版本的公司清单里已经没有这家公司了。阶段记录只能写在当前版本下，"
+        "所以现在写不进去：要么把它加回清单，要么退回这份草稿。"
+    ),
 })
+
+# Not a refusal: something the owner should know before pressing a button that
+# still works.  Kept apart from ``UNDECIDABLE_REASONS`` on purpose -- one list
+# says "this door is shut", the other says "the door opens, and here is what
+# has changed since this draft was written".
+ADVISORY_REASONS: Mapping[str, str] = MappingProxyType({
+    "evidence_superseded": (
+        "证据已更新：这份草稿依据的公司档案／争议图已经有更新的版本了。"
+        "建议退回，让系统按新证据重写一版；"
+        "你也可以直接裁决——你读的是这份草稿本身，三个按钮都在。"
+    ),
+})
+
+
+def _folded_stage_history(
+    core: Any, mission_ref: str, company_ref: str, stages: Sequence[str]
+) -> dict[str, list[dict[str, Any]]]:
+    """Every stage record of one company across every version of one mission.
+
+    The same union ``CoverageMission._folded_rows`` reads, in the same time
+    order, narrowed to the two stages this gate cares about.  Plain SQL rather
+    than the authority because the cockpit process holds no Core write handle
+    (ADR-0006) and reads the Core directly; the *fold* itself is imported from
+    the authority, because two implementations of "what status is this stage
+    in" is exactly how a page and the door behind it start disagreeing.
+    """
+
+    placeholders = ",".join("?" for _ in stages)
+    query = (
+        "SELECT r.stage_ref AS stage_ref, r.status AS status, "
+        "r.record_json AS record_json, r.created_at AS created_at, "
+        "r.record_id AS record_id "
+        "FROM coverage_mission_stage_records r "
+        "JOIN coverage_mission_versions v ON v.mission_version_id=r.mission_version_ref "
+        f"WHERE v.mission_ref=? AND r.company_ref=? AND r.stage_ref IN ({placeholders})"
+    )
+    params: list[Any] = [mission_ref, company_ref, *stages]
+    if _table_exists(core, "coverage_mission_stage_reopens"):
+        # A reopen is not a stage record and carries no status column; it folds
+        # in as the fourth folded status because "a person un-decided this
+        # gate" is an event in the company's ladder.
+        query += (
+            " UNION ALL SELECT o.stage_ref, ?, o.record_json, o.created_at, o.record_id "
+            "FROM coverage_mission_stage_reopens o "
+            "JOIN coverage_mission_versions w ON w.mission_version_id=o.mission_version_ref "
+            f"WHERE w.mission_ref=? AND o.company_ref=? AND o.stage_ref IN ({placeholders})"
+        )
+        params += ["reopened", mission_ref, company_ref, *stages]
+    query += " ORDER BY created_at, record_id"
+    history: dict[str, list[dict[str, Any]]] = {stage: [] for stage in stages}
+    for row in core.execute(query, params).fetchall():
+        try:
+            evidence = list(json.loads(row[2]).get("evidence_refs") or ())
+        except (TypeError, ValueError):
+            evidence = []
+        history[str(row[0])].append({
+            "status": str(row[1]), "evidence_refs": [str(ref) for ref in evidence],
+            "record_id": str(row[4]),
+        })
+    return history
+
+
+def _table_exists(core: Any, name: str) -> bool:
+    return core.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+    ).fetchone() is not None
+
+
+def _head_of_chain(core: Any, table: str, key: str, version_ref: str) -> str | None:
+    """The newest version of the chain ``version_ref`` belongs to, or ``None``."""
+
+    if not version_ref or not _table_exists(core, table):
+        return None
+    row = core.execute(
+        f"SELECT version_id FROM {table} WHERE {key}="
+        f"(SELECT {key} FROM {table} WHERE version_id=?) "
+        "ORDER BY version_number DESC, created_at DESC LIMIT 1",
+        (version_ref,),
+    ).fetchone()
+    return None if row is None else str(row[0])
+
+
+def superseded_evidence(core: Any, record: Mapping[str, Any]) -> list[dict[str, str]]:
+    """The evidence bindings of this draft that a newer version has replaced.
+
+    Read rather than stored: a draft is append-only, and "the file moved after
+    this was written" is a fact about two records rather than about one.
+    """
+
+    bindings = record.get("bindings") or {}
+    out: list[dict[str, str]] = []
+    for label, ref_name, table, key in (
+        ("公司档案", "dossier_version_ref", "company_dossier_versions", "dossier_ref"),
+        ("争议图", "debate_map_version_ref", "debate_map_versions", "map_ref"),
+    ):
+        bound = str(bindings.get(ref_name) or "")
+        head = _head_of_chain(core, table, key, bound)
+        if head is not None and head != bound:
+            out.append({"kind": label, "bound_ref": bound, "current_ref": head})
+    return out
 
 
 def decidability(core: Any, record: Mapping[str, Any]) -> dict[str, Any]:
     """Whether the ladder would accept this draft's decision, asked before it is made.
 
-    The mission stage ledger is scoped *by version*, and the live mission rolls
-    constantly.  A draft published under version N carries version N's ref; by
-    the time the owner reads it the pointer may be at N+1, where carry-forward
-    re-seeds ``entered`` but not ``gate_passed`` -- so ``record_stage`` would
-    refuse to enter ``deep_insight_gate`` because ``initial_screen`` has not
-    passed *in that version*, and the owner would learn this by clicking.
+    Read off the Core beforehand, by both the page that offers the button and
+    the operation behind it: one predicate, two callers, no second answer.
 
-    So it is read off the Core beforehand, by both the page that offers the
-    button and the operation behind it.  Plain SQL rather than the CoverageMission
-    authority because the cockpit process holds no Core write handle (ADR-0006)
-    and reads the Core directly; one predicate, two callers, no second answer.
+    The ladder it asks is the **folded** one -- every version of this
+    ``mission_ref``, in time order -- because that is the ladder
+    ``record_stage`` validates against.  The live mission rolls a version every
+    time a budget or a policy is signed, and a company's Initial Screen does
+    not un-pass when it does.  The stage record this decision produces still
+    binds the *active* version, which is where provenance belongs and what the
+    authority requires; ``active_mission_version_ref`` is returned so the
+    caller writes it there rather than under the version the draft was drafted
+    under.
 
-    ``return_for_more_work`` is decidable whatever this says: it writes no stage
-    record at all, so the ladder has no opinion about it.
+    ``return_for_more_work`` is decidable whatever this says: it writes no
+    stage record at all, so the ladder has no opinion about it.  ``reject``
+    writes ``gate_failed`` and so does go through here -- but the page offers
+    both regardless, because a draft nobody can act on is worse than a refusal
+    the owner can read.
     """
 
-    def table(name: str) -> bool:
-        return core.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
-        ).fetchone() is not None
+    from .coverage_mission import STAGE_ORDER, fold_stage_status
 
-    bound = str((record.get("bindings") or {}).get("mission_version_ref") or "")
+    bindings = record.get("bindings") or {}
+    bound = str(bindings.get("mission_version_ref") or "")
     company_ref = str(record.get("company_ref") or "")
+    gate_ref = str(record.get("id") or "")
+    state: dict[str, Any] = {
+        "decidable": True, "reason_code": None, "reason": None,
+        "active_mission_version_ref": None,
+        "bound_mission_version_ref": bound or None,
+        "mission_version_rolled": False,
+        "advisory_code": None, "advisory": None,
+        "superseded_evidence": [],
+    }
+
+    def out(**overrides: Any) -> dict[str, Any]:
+        return {**state, **overrides}
+
+    def refuse(code: str) -> dict[str, Any]:
+        return out(decidable=False, reason_code=code, reason=UNDECIDABLE_REASONS[code])
+
+    # The evidence advisory is independent of the ladder and is worth saying
+    # even when the answer is no: "this cannot be decided" and "and it was
+    # written against a file that has since moved" are two different repairs.
+    state["superseded_evidence"] = superseded_evidence(core, record)
+    if state["superseded_evidence"]:
+        state["advisory_code"] = "evidence_superseded"
+        state["advisory"] = ADVISORY_REASONS["evidence_superseded"]
+
     if not bound:
-        return {"decidable": False, "reason_code": "no_mission_version",
-                "reason": UNDECIDABLE_REASONS["no_mission_version"],
-                "active_mission_version_ref": None}
-    if not table("coverage_mission_versions") or not table("coverage_mission_pointer"):
+        return refuse("no_mission_version")
+    if not _table_exists(core, "coverage_mission_versions") \
+            or not _table_exists(core, "coverage_mission_pointer"):
         # No mission tables at all is not this draft's problem to diagnose; the
         # operation will say so in the authority's own words.
-        return {"decidable": True, "reason_code": None, "reason": None,
-                "active_mission_version_ref": None}
+        return out()
     row = core.execute(
         "SELECT mission_ref FROM coverage_mission_versions WHERE mission_version_id=?",
         (bound,),
     ).fetchone()
-    pointer = None if row is None else core.execute(
+    if row is None:
+        return out()
+    mission_ref = str(row[0])
+    pointer = core.execute(
         "SELECT mission_version_id FROM coverage_mission_pointer WHERE mission_ref=?",
-        (row[0],),
+        (mission_ref,),
     ).fetchone()
-    active = None if pointer is None else str(pointer[0])
-    if active is not None and active != bound:
-        return {"decidable": False, "reason_code": "mission_version_rolled",
-                "reason": UNDECIDABLE_REASONS["mission_version_rolled"],
-                "active_mission_version_ref": active}
-    if not table("coverage_mission_stage_records"):
-        return {"decidable": True, "reason_code": None, "reason": None,
-                "active_mission_version_ref": active}
-    rows = core.execute(
-        "SELECT stage_ref,status,record_json FROM coverage_mission_stage_records "
-        "WHERE mission_version_ref=? AND company_ref=?", (bound, company_ref),
-    ).fetchall()
-    statuses = {(str(item[0]), str(item[1])) for item in rows}
-    passed_by_another = any(
-        str(item[0]) == STAGE_REF and str(item[1]) == "gate_passed"
-        and str(record.get("id") or "") not in
-        [str(ref) for ref in (json.loads(item[2]).get("evidence_refs") or ())]
-        for item in rows
-    )
-    if passed_by_another:
+    if pointer is None:
+        return refuse("no_active_mission_version")
+    active = str(pointer[0])
+    state["active_mission_version_ref"] = active
+    state["mission_version_rolled"] = active != bound
+
+    # The stage record binds the active version, and that version's universe is
+    # what ``record_stage`` checks the company against.  A company dropped from
+    # the mission is the one case where a roll really does shut the door, and
+    # it is a different repair from everything else here.
+    active_row = core.execute(
+        "SELECT record_json FROM coverage_mission_versions WHERE mission_version_id=?",
+        (active,),
+    ).fetchone()
+    if active_row is not None:
+        try:
+            universe = json.loads(active_row[0]).get("universe") or []
+            members = {str(member.get("company_ref")) for member in universe}
+        except (TypeError, ValueError, AttributeError):
+            members = set()
+        if members and company_ref not in members:
+            return refuse("left_the_universe")
+
+    if not _table_exists(core, "coverage_mission_stage_records"):
+        return out()
+    prior_stage = STAGE_ORDER[STAGE_ORDER.index(STAGE_REF) - 1]
+    history = _folded_stage_history(
+        core, mission_ref, company_ref, (prior_stage, STAGE_REF))
+    gate_rows = history[STAGE_REF]
+    gate_status = fold_stage_status([item["status"] for item in gate_rows])
+    if gate_status == "gate_passed" and not any(
+            item["status"] == "gate_passed" and gate_ref in item["evidence_refs"]
+            for item in gate_rows):
         # Already passed, and not by this draft.  A row this draft *did* write
         # is a retry -- the stage write goes first precisely so that a crash
         # between the two heals -- and refusing it would turn the healing path
         # into a dead end.
-        return {"decidable": False, "reason_code": "already_passed",
-                "reason": UNDECIDABLE_REASONS["already_passed"],
-                "active_mission_version_ref": active}
-    if ("initial_screen", "gate_passed") not in statuses:
-        return {"decidable": False, "reason_code": "screen_not_passed_here",
-                "reason": UNDECIDABLE_REASONS["screen_not_passed_here"],
-                "active_mission_version_ref": active}
-    return {"decidable": True, "reason_code": None, "reason": None,
-            "active_mission_version_ref": active}
+        return refuse("already_passed")
+    if not any(item["status"] == "entered" for item in gate_rows) \
+            and fold_stage_status(
+                [item["status"] for item in history[prior_stage]]) != "gate_passed":
+        # Exactly the door's own condition: the previous stage is only checked
+        # when this one still has to be *entered*.  A stage already entered is
+        # past that question, and asking it twice would refuse a gate the
+        # authority would accept.
+        return refuse("screen_not_passed")
+    return out()
 
 
 # ---------------------------------------------------------------------------
@@ -1501,6 +1654,7 @@ def table_exists(connection: Any) -> bool:
 
 
 __all__ = [
+    "ADVISORY_REASONS",
     "ANSWER_STATUSES",
     "CHANGE_REASONS",
     "CONFIDENCE_LEVELS",
@@ -1557,6 +1711,7 @@ __all__ = [
     "normalise_ref",
     "output_rubric_findings",
     "questions_hash",
+    "superseded_evidence",
     "table_exists",
     "validate_answer",
     "validate_decision",

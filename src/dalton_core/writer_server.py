@@ -4284,6 +4284,16 @@ class WriterServer:
         ``return_for_more_work`` writes no stage record at all: a returned draft
         is not a failed gate, it is a gate the owner has asked a better question
         of, and the lane redrafts it when the evidence moves (ADR-0008).
+
+        H1: the stage record is written under the **active** mission version,
+        not the one the draft was drafted under, and its preconditions are read
+        off the folded ladder.  The live mission rolls a version every time a
+        budget or a policy is signed; before this, a draft published under v14
+        could never be decided once the pointer reached v15, because
+        ``record_stage`` requires the active version and the old one is not it.
+        The version a stage record binds is provenance -- when and under what
+        mission this happened -- and the state it validates against is the
+        company's, across every version (P14-S).
         """
 
         from .deep_insight_gate import (
@@ -4305,18 +4315,20 @@ class WriterServer:
         status = DECISION_STAGE_STATUS.get(decision)
         if status is not None:
             # Asked before anything is written, and by the same predicate the
-            # approvals page uses to decide whether to show the button at all.
-            # The mission stage ledger is scoped by version and the live mission
-            # rolls constantly, so a draft published under version N can become
-            # undecidable without anybody touching it; the owner should not
-            # learn that from a stack trace after clicking.
+            # approvals page uses to decide whether to show the button at all,
+            # so the page and the door cannot disagree about whether it opens.
             verdict = decidability(self.store.connection, draft)
             if not verdict["decidable"]:
                 raise WriterServerError(
                     f"this gate draft cannot be decided right now: {verdict['reason']}"
                 )
-            mission = self.coverage_mission.mission(mission_version_ref)
-            records = self.coverage_mission.stage_records(mission["id"], company_ref)
+            # Where the row goes: the active version, which is the only one
+            # ``record_stage`` accepts.  Falling back to the bound one keeps a
+            # Core with no pointer table behaving exactly as it did.
+            mission = self.coverage_mission.mission(
+                verdict["active_mission_version_ref"] or mission_version_ref)
+            records = self.coverage_mission.stage_records_across_versions(
+                mission["mission_ref"], company_ref)
             state = {(record["stage_ref"], record["status"]) for record in records}
             if (STAGE_REF, "entered") not in state:
                 # The gate stage has to be entered before its gate is decided,
@@ -4333,19 +4345,23 @@ class WriterServer:
                     actor_ref=actor_ref,
                     idempotency_key=f"deep-insight-gate:{gate_version_ref}:entered",
                 )
-            if (STAGE_REF, status) in state:
-                # The ladder already carries this decision: a previous call
-                # wrote the stage record and then failed, or the caller is
-                # retrying. Reuse the row that exists rather than leaving the
-                # decision unable to name the stage record it produced -- the
-                # whole reason the stage write goes first is that this retry
-                # heals, and a retry that healed the ladder and lost the link
-                # would have healed nothing worth having.
-                existing = next(
-                    (record for record in records
-                     if record["stage_ref"] == STAGE_REF
-                     and record["status"] == status), None)
-                stage_record_ref = None if existing is None else existing["id"]
+            # The ladder may already carry this decision: a previous call wrote
+            # the stage record and then failed, or the caller is retrying.
+            # Reuse the row that exists rather than leaving the decision unable
+            # to name the stage record it produced -- the whole reason the
+            # stage write goes first is that this retry heals, and a retry that
+            # healed the ladder and lost the link would have healed nothing
+            # worth having.  Looked for across versions and by the draft it
+            # cites: a half-written decision from before a version roll is
+            # exactly the row this heals, and a row written for a *different*
+            # draft is not this draft's to name.
+            existing = next(
+                (record for record in records
+                 if record["stage_ref"] == STAGE_REF
+                 and record["status"] == status
+                 and gate_version_ref in (record.get("evidence_refs") or ())), None)
+            if existing is not None:
+                stage_record_ref = existing["id"]
             else:
                 record = self.coverage_mission.record_stage(
                     mission_version_ref=mission["id"],
@@ -4562,10 +4578,11 @@ class WriterServer:
     def _op_deep_insight_gate_submissions(self, p: Mapping[str, Any]) -> Any:
         """Every gate draft waiting for a person, oldest first.
 
-        Each one says whether the ladder would accept its decision today. A
-        draft whose mission version has rolled is still shown -- it is still
-        what the owner has to deal with -- but it says so, and says why, rather
-        than offering a verdict the writer would refuse.
+        Each one says whether the ladder would accept its decision today, and
+        whether the evidence it was written against has moved since.  A draft
+        that cannot be decided is still shown -- it is still what the owner has
+        to deal with -- but it says so, and says why, rather than offering a
+        verdict the writer would refuse.
         """
 
         from .deep_insight_gate import decidability
@@ -4585,6 +4602,11 @@ class WriterServer:
                 "decidable": verdict["decidable"],
                 "undecidable_reason": verdict["reason"],
                 "undecidable_reason_code": verdict["reason_code"],
+                "advisory": verdict["advisory"],
+                "advisory_code": verdict["advisory_code"],
+                "superseded_evidence": verdict["superseded_evidence"],
+                "mission_version_rolled": verdict["mission_version_rolled"],
+                "active_mission_version_ref": verdict["active_mission_version_ref"],
             })
         return {"projection_kind": "deep_insight_gate_submissions", "drafts": drafts}
 
