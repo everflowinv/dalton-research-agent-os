@@ -624,6 +624,11 @@ def directed_classification(*, promotion: Any, outcome: Any, fresh_links: Sequen
     if (isinstance(latest_recovery, Mapping)
             and latest_recovery.get("reason") == "send_state_unproved"):
         return "unknown_send_state_terminal_barrier"
+    if (isinstance(latest_recovery, Mapping) and latest_recovery.get("reason") in {
+            "contract_failed_after_automatic_retry",
+            "contract_failed_after_owner_authorized_retry"}):
+        # The bounded retry was already bought; this one really is a person's.
+        return "paid_output_contract_failed_after_bounded_retry"
     if (isinstance(latest_recovery, Mapping)
             and latest_recovery.get("reason") == "paid_send_output_contract_failed"):
         return "proved_paid_output_contract_terminal_barrier"

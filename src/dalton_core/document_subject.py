@@ -37,9 +37,22 @@ from typing import Any, Mapping, Sequence
 
 SCHEMA_VERSION = "0.1"
 
+#: Ticker (or ``industry:`` ref) to the names a document may call it by. Built
+#: per mission; see ``mission_company_names``.
+NameTable = Mapping[str, Sequence[str]]
+
 # Display names for the covered tickers. Kept small and explicit: a wrong name
 # here weakens a check, so it is a list somebody maintains rather than a guess
 # derived from a ref.
+#
+# W7: this is now a *fallback*, not the answer. It is the legacy Core's five
+# issuers, and a second environment covering other companies was refused by
+# every feed lane on the strength of this dict -- "MSFT has no company names to
+# match a subject line against" -- which named a missing row in a shared table
+# as though it were a fact about the research. The answer is a per-mission
+# table (``mission_company_names.mission_name_table``) that each caller passes
+# in; this dict is consulted only when no table was supplied, which is what
+# keeps the legacy Core working unchanged.
 COMPANY_NAMES: Mapping[str, tuple[str, ...]] = {
     "ACN": ("Accenture",),
     "CTSH": ("Cognizant",),
@@ -69,28 +82,38 @@ def _fold(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", folded).strip()
 
 
-def subject_names(ticker: Any) -> tuple[str, ...]:
+def subject_names(ticker: Any, names: NameTable | None = None) -> tuple[str, ...]:
     """Every name this subject is called, best first, for a text check.
 
     Takes a ticker or an ``industry:`` ref: both are subjects a figure can
     belong to, and both have to be recognised in a document's own words.
+
+    ``names`` is the mission's own ticker-to-names table. It wins outright
+    when it has an entry, because it was built from the mission that is
+    actually running; the packaged dict answers only when it does not, which
+    is the legacy Core and nothing else.
     """
 
     if not isinstance(ticker, str) or not ticker.strip():
         return ()
     if ticker.startswith("industry:"):
+        if names is not None and ticker in names:
+            return tuple(str(name) for name in names[ticker] if str(name).strip())
         return tuple(INDUSTRY_NAMES.get(ticker, ()))
     key = ticker.strip().upper()
-    names = tuple(COMPANY_NAMES.get(key, ()))
-    if len(key) >= MIN_TICKER_CHARS and key not in {n.upper() for n in names}:
-        names = names + (key,)
-    return names
+    if names is not None and key in names:
+        found = tuple(str(name) for name in names[key] if str(name).strip())
+    else:
+        found = tuple(COMPANY_NAMES.get(key, ()))
+    if len(key) >= MIN_TICKER_CHARS and key not in {n.upper() for n in found}:
+        found = found + (key,)
+    return found
 
 
-def subject_label(ticker: Any) -> str:
+def subject_label(ticker: Any, names: NameTable | None = None) -> str:
     """How to name the subject to a model. A CIK ref tells it nothing."""
 
-    names = subject_names(ticker)
+    names = subject_names(ticker, names)
     if not names:
         return "the company under coverage"
     if len(names) == 1:
@@ -114,7 +137,8 @@ def _mentions(text: str, names: Sequence[str]) -> list[str]:
     return found
 
 
-def document_names_subject(text: Any, subject: Any) -> dict[str, Any]:
+def document_names_subject(text: Any, subject: Any,
+                           names: NameTable | None = None) -> dict[str, Any]:
     """Whether this document names the subject, and which name it used.
 
     The answer is a floor: a document that never names the subject is not about
@@ -122,7 +146,7 @@ def document_names_subject(text: Any, subject: Any) -> dict[str, Any]:
     some figures are that company's. The second half is the model's job.
     """
 
-    names = subject_names(subject)
+    names = subject_names(subject, names)
     if not names:
         # Nothing to check against. Refusing here would block every company
         # nobody has named, which is a configuration gap, not evidence.
@@ -138,9 +162,11 @@ def document_names_subject(text: Any, subject: Any) -> dict[str, Any]:
     }
 
 
-def earnings_call_names_issuer(title: Any, subject: Any) -> dict[str, Any]:
+def earnings_call_names_issuer(title: Any, subject: Any,
+                               names: NameTable | None = None) -> dict[str, Any]:
     """Whether a transcript title names the subject in the issuer position."""
-    names = subject_names(subject)
+    table = names
+    names = subject_names(subject, table)
     if not names or not isinstance(title, str):
         return {"checked": bool(names), "names_issuer": False, "matched": []}
     folded = _fold(title)
@@ -159,9 +185,15 @@ def earnings_call_names_issuer(title: Any, subject: Any) -> dict[str, Any]:
     if call is not None:
         issuer_zone += " " + folded[quarter.end():quarter.end() + call.end()]
     matched = _mentions(issuer_zone, names)
+    # The other covered issuers, so a title naming two of them is refused as
+    # ambiguous. Read from the mission's table when there is one: on a
+    # workspace the packaged five are not the covered set and would make a
+    # "Cognizant" in an Amazon title invisible.
+    source = table if table is not None else COMPANY_NAMES
     other_names = tuple(
-        name for aliases in COMPANY_NAMES.values() for name in aliases
-        if name not in names
+        str(name) for key, aliases in source.items()
+        if not str(key).startswith("industry:")
+        for name in aliases if str(name) not in names
     )
     ambiguous = _mentions(issuer_zone, other_names)
     return {"checked": True, "names_issuer": bool(matched) and not ambiguous,
@@ -170,6 +202,7 @@ def earnings_call_names_issuer(title: Any, subject: Any) -> dict[str, Any]:
 
 __all__ = [
     "COMPANY_NAMES",
+    "NameTable",
     "INDUSTRY_NAMES",
     "MIN_TICKER_CHARS",
     "SCHEMA_VERSION",

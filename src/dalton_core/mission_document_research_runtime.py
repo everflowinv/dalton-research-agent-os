@@ -207,6 +207,10 @@ class MissionDocumentResearchRuntime:
                     "mission document admission hash drifted before execution"
                 )
             self.registry = authority.registry
+            from .document_research_inventory import (
+                CONFIG_FILENAME, automatic_contract_retry_cap,
+            )
+
             self.executor = MissionDocumentResearchExecutor(
                 authority=authority,
                 scheduler=scheduler,
@@ -216,6 +220,10 @@ class MissionDocumentResearchRuntime:
                 staging=self.staging,
                 actor_ref=ACTOR_REF,
                 clock=self.clock,
+                max_automatic_contract_retries_per_day=automatic_contract_retry_cap(
+                    Path(document_config_path) if document_config_path is not None
+                    else self.state_dir / CONFIG_FILENAME,
+                ),
             )
         except Exception:
             self.close()
@@ -254,6 +262,11 @@ class MissionDocumentResearchRuntime:
             # Scheduler attempts. One final transition records waiting/stopped
             # recovery authority even when fresh recovery is disabled.
             transitions += fresh * (1 + int(steps[index]["max_attempts"])) + 1
+            # The lane may also buy exactly one bounded retry of a proved-paid
+            # output-contract rejection at this stage.  Budget its enqueue and
+            # attempts, or the child stops one step short of the reply it just
+            # paid for and the whole run has to be re-entered to read it.
+            transitions += 1 + int(steps[index]["max_attempts"])
         return transitions
 
     def wait_until_claimable(self, work_order_ref: str) -> bool:

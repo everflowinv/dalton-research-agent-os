@@ -135,6 +135,39 @@ class DocumentInventoryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_inventory_config(value)
 
+    def test_automatic_contract_retry_cap_is_optional_and_defaults(self):
+        import json
+
+        from dalton_core.document_research_inventory import automatic_contract_retry_cap
+        from dalton_core.mission_document_research_executor import (
+            DEFAULT_MAX_AUTOMATIC_CONTRACT_RETRIES_PER_DAY,
+        )
+
+        value = {"schema_version": "document-research-config-0.1",
+                 "purpose": "directed_research", "inventory_preview_chars": 600,
+                 "spool_dir": str(self.state),
+                 "enabled_sources": ["source:sales-notes"], "policy": policy(),
+                 "source_reading_limits": {
+                     "alphaengine_max_document_chars": 10000000,
+                     "public_web_max_source_chars": 9000000,
+                     "public_web_max_pdf_pages": 2000,
+                     "public_web_max_decompressed_bytes": 80000000}}
+        path = self.state / "cap-config.json"
+        # Every installed copy of this file predates the knob.
+        path.write_text(json.dumps(value), encoding="utf-8")
+        self.assertEqual(automatic_contract_retry_cap(path),
+                         DEFAULT_MAX_AUTOMATIC_CONTRACT_RETRIES_PER_DAY)
+        self.assertEqual(automatic_contract_retry_cap(self.state / "absent.json"),
+                         DEFAULT_MAX_AUTOMATIC_CONTRACT_RETRIES_PER_DAY)
+        value["max_automatic_contract_retries_per_day"] = 3
+        path.write_text(json.dumps(value), encoding="utf-8")
+        self.assertEqual(validate_inventory_config(value)[
+            "max_automatic_contract_retries_per_day"], 3)
+        self.assertEqual(automatic_contract_retry_cap(path), 3)
+        value["max_automatic_contract_retries_per_day"] = -1
+        with self.assertRaises(ValueError):
+            validate_inventory_config(value)
+
     def test_sec_10k_target_requires_exact_annual_diluted_eps_and_share_lines(self):
         mission_hash = "9" * 64
         self.mission["content_hash"] = mission_hash

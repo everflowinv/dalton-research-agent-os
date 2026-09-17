@@ -3719,6 +3719,10 @@ class CockpitPlane:
         web = discovery.get("web_search") or {}
         budgets = {
             "model_calls": self._model_calls_today(mission, today),
+            # 2026-09-17: the owner's caps are one host-wide number now, so the
+            # page has to show what the whole machine spent today beside what
+            # this environment's mission spent, or "还没到上限" means nothing.
+            "shared_daily": self._shared_daily_today(today),
             "alphaengine": ((discovery.get("acquisition") or {}).get("budget") or (discovery.get("discovery") or {}).get("budget")),
             "web": ((web.get("acquisition") or {}).get("budget") or (web.get("discovery") or {}).get("budget")),
             "mission": mission["budget"],
@@ -4007,6 +4011,25 @@ class CockpitPlane:
             micros += int(settled if isinstance(settled, int) else row["reserved_micros"])
         return {"used": calls, "cap": mission["budget"]["max_daily_paid_calls"],
                 "cost_usd": round(micros / 1_000_000, 4), "cost_cap_usd": mission["budget"]["max_daily_cost_usd"]}
+
+    def _shared_daily_today(self, today: str) -> dict[str, Any] | None:
+        """The host-wide day cap and what every environment has spent against it.
+
+        ``None`` when this environment has no shared budget bound, so a host
+        that has not been given one keeps the page it had.  Never raises: a
+        budget panel that throws would take the whole overview with it, and the
+        mission's own numbers are still true.
+        """
+
+        ledger = self._budget_db()
+        if ledger is None:
+            return None
+        from .shared_daily_budget import shared_day_view
+
+        try:
+            return shared_day_view(ledger, today)
+        except Exception:  # noqa: BLE001 - a panel, not an authority
+            return None
 
     def _budget_db(self) -> Path | None:
         """Where the day ledger lives, according to the model configuration."""
@@ -7151,6 +7174,41 @@ class CockpitPlane:
             refs={"mission_version_ref": result.get("mission")})
         return result
 
+    def _sync_model_selection(self, login: str, params: Mapping[str, Any]) -> dict[str, Any]:
+        """Publish the selection the owner just saved into every other environment.
+
+        The owner's 2026-09-17 instruction is that the model configuration is
+        the same in every research environment on this Mac.  The cockpit knows
+        which environment it is; it does not, and must not, know how to write
+        another one's databases -- so the fan-out makes the same owner call
+        against each other environment's own writer.
+
+        Runs *after* the local publication has committed and never raises: an
+        environment that is stopped is named in the save result and on the
+        model page, and nothing local is rolled back.  A save that succeeded
+        here must not be reported as a failure because a workspace the owner
+        has not opened in a week is asleep.
+        """
+
+        manager = self.config.workspace_manager_config_path
+        if manager is None:
+            return {"status": "unavailable", "synced": [], "skipped": [],
+                    "failed": [], "environment_count": 0,
+                    "note": "没有同步到其它环境：这台机器没有配置研究环境清单。"}
+        from .model_routing_sync import fan_out_selection
+
+        try:
+            return fan_out_selection(
+                manager_config_path=manager,
+                origin_state_dir=self.config.state_dir,
+                actor_ref=_subject_for_login(login),
+                params=params,
+            )
+        except Exception as exc:  # noqa: BLE001 - never lose a committed save
+            return {"status": "unavailable", "synced": [], "skipped": [],
+                    "failed": [], "environment_count": 0,
+                    "note": f"没有同步到其它环境：{exc}"}
+
     def select_model(self, login: str, value: Mapping[str, Any]) -> dict[str, Any]:
         """P14-M2: the owner points one calling stage at a model, or at its tier.
 
@@ -7184,19 +7242,23 @@ class CockpitPlane:
                 params["chain"] = [_text(item, "chain[]", maximum=256) for item in chain]
             result = self._governance(
                 login, "set_model_selection", params, failure="这个选择没有生效")
+            sync = self._sync_model_selection(login, params)
             self.journal.record_event(
                 kind="model_selection", title=f"你给「{MODEL_TIER_LABELS[tier]}」整类选了模型",
                 detail=("使用系统推荐配置" if mode == "tier"
-                        else " → ".join(chain)),
+                        else " → ".join(chain)) + f"（{sync['note']}）",
                 login=login, refs={"tier": tier, "mode": mode,
                                    "profile_ids": ",".join(chain)})
-            return {**result, "tier": tier, "label": MODEL_TIER_LABELS[tier]}
+            return {**result, "tier": tier, "label": MODEL_TIER_LABELS[tier],
+                    "sync": sync,
+                    "reload_note": _with_sync_note(result.get("reload_note"), sync)}
         purpose = _text(value.get("purpose"), "purpose", maximum=64)
         params = {"purpose": purpose, "mode": mode}
         if mode == "explicit":
             params["chain"] = [_text(item, "chain[]", maximum=256) for item in chain]
         result = self._governance(
             login, "set_model_selection", params, failure="这个选择没有生效")
+        sync = self._sync_model_selection(login, params)
         label = PURPOSE_LABELS.get(purpose, purpose)
         display_chain: list[str] = []
         if mode == "explicit":
@@ -7216,10 +7278,11 @@ class CockpitPlane:
         self.journal.record_event(
             kind="model_selection", title=f"你给「{label}」选了模型",
             detail=("使用系统推荐配置" if mode == "tier"
-                    else " → ".join(display_chain)),
+                    else " → ".join(display_chain)) + f"（{sync['note']}）",
             login=login, refs={"purpose": purpose, "mode": mode,
                                "profile_ids": ",".join(chain)})
-        return {**result, "purpose": purpose, "label": label}
+        return {**result, "purpose": purpose, "label": label, "sync": sync,
+                "reload_note": _with_sync_note(result.get("reload_note"), sync)}
 
     def allow_model(self, login: str, value: Mapping[str, Any]) -> dict[str, Any]:
         """P14-M2: 「允许使用」 -- let one of the gateway's models through to Dalton."""
@@ -8044,6 +8107,21 @@ class CockpitPlane:
 def _reason(exc: BaseException) -> str:
     text = str(exc) or type(exc).__name__
     return text[:300]
+
+
+def _with_sync_note(reload_note: Any, sync: Mapping[str, Any]) -> str:
+    """Put the fan-out result in the sentence the page already shows.
+
+    The model page renders ``reload_note`` after a save and nothing else, so a
+    fan-out failure appended anywhere else would be invisible on exactly the
+    screen the owner is looking at when it happens.
+    """
+
+    note = str(reload_note or "").strip()
+    tail = str(sync.get("note") or "").strip()
+    if not tail:
+        return note
+    return f"{note}{tail}" if note else tail
 
 
 def _subject_for_login(login: str) -> str:

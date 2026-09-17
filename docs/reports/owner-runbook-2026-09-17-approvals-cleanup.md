@@ -24,7 +24,7 @@ done
 ```
 - **选项 B（真正接上）**：在 changedetection 的设置里关闭 API key 要求（或改客户端支持 key）；确认 `deploy/phase9/p9-us-it-services-ir-pages-v1.json` 里五家公司的 IR 页面 URL；`cp` 到 `"$S/ir-pages.json"`；重渲染 writer plist（见 deploy-runbook-2026-09-16 第 3 步）并 `launchctl kickstart -k gui/$(id -u)/space.lumos.dalton.writer`；看到 `tick_ledger_lanes` 里 `dispatch_mission_ownership` 出现 IR sweep 计数后，再用同一脚本把状态改为 `connected`（`--status connected`）。
 
-## 3. `mission_document_research` 车道「停着等授权」（19 条 admission，原因 paid_send_output_contract_failed）
+## 3. `mission_document_research` 车道「停着等授权」（19 条 admission，原因 paid_send_output_contract_failed）——已改为有界自动重试（见 PROJECT_STATUS 12:20 条目）；部署后自动处理，重试仍失败的才会进入待办
 这些 admission 已经发起过付费模型调用、输出没过契约；系统按设计不自动重试。车道自己的说明（`OWNER_AUTHORIZATION_NOTE`）写明：目前没有任何 CLI 或 writer 操作能下发这条授权。要解除需要新开发一个 writer 人工治理操作 + CLI（按 admission 生成绑定 work order 哈希的授权、封顶费用）。本轮自动模式不允许我起草这部分（分类器判为付费交易类），需要你明确说"做这个工具"，我再开发；或者接受这 19 条一直停着（它们只影响文档研究这一条车道）。
 
 ## 4. 部署本轮代码修复（见 PROJECT_STATUS 09:30 条目）后，回到待办页

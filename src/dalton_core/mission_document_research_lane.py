@@ -45,12 +45,32 @@ MAX_ESCAPES_PER_ADMISSION = 2
 # The exact words the owner needs, for the admissions no automation may touch.
 OWNER_AUTHORIZATION_NOTE = (
     "这条已经发起过模型调用、但调用是否真的送达/计费无法证明，因此系统不会自动重开。"
+    "（只有「已经证明送达并结算、仅仅是回复不符合输出契约」那一种失败，系统才会自动"
+    "重试一次；这一条不是那一种。）"
     "需要 owner 授权一次受控恢复："
     "MissionDocumentResearchExecutor.authorize_paid_contract_recovery("
     "admission_ref, authorization)，其中 authorization 的 actor_ref 必须是 "
     "\"operator:owner-authorized-document-recovery\"、stage_ordinal 为 2 或 3、"
     "max_fresh_work_orders 为 1、max_cost_usd 等于该 WorkOrder 自己的 budget.max_cost_usd。"
     "目前没有任何 CLI 或 writer 操作可以下发这条授权，只能由 owner 运行脚本。"
+)
+# The words for the one contract failure that has already been retried once by
+# the lane itself.  This is the only contract state a person is asked about,
+# and the ask has to say what was already tried, or the owner will just
+# authorise the same purchase again.
+CONTRACT_ESCALATION_NOTE = (
+    "这条的模型回复连续两次不符合输出契约：第一次失败之后系统已经自动重试过一次"
+    "（同一个 WorkOrder 的 budget.max_cost_usd 上限、只放一条新 WorkOrder、"
+    "授权记录的 actor_ref 是 \"automation:document-research-contract-retry\"），"
+    "重试买回来的回复仍然不合契约，所以才升级给人。"
+    "先看模型或提示词为什么连续两次给不出合契约的回复——连续两次同样失败通常是契约/提示词"
+    "的问题，再买一次大概率还是同一个结果。"
+    "确认值得再买一次时，由 owner 授权最后一次受控恢复："
+    "MissionDocumentResearchExecutor.authorize_paid_contract_recovery("
+    "admission_ref, authorization)，其中 authorization 的 actor_ref 必须是 "
+    "\"operator:owner-authorized-document-recovery\"、stage_ordinal 为 2 或 3、"
+    "max_fresh_work_orders 为 1、max_cost_usd 等于那条失败 WorkOrder 自己的 "
+    "budget.max_cost_usd（注意此时失败的是自动重试放出来的那条 WorkOrder）。"
 )
 
 
@@ -223,22 +243,35 @@ class MissionDocumentResearchCoordinator:
         say what the person is being asked to do.
         """
 
+        from .mission_document_research_executor import (
+            CONTRACT_FAILED_AFTER_AUTOMATIC_RETRY,
+        )
+
         order = {admission["id"]: index for index, admission in enumerate(admissions)}
         detail = []
         for admission_ref, held in holds.items():
             started = self._started(admission_ref)
+            # An admission that never started sent nothing and cost nothing, so
+            # reopening it is free and the lane may do it.  One that started may
+            # have been charged for a send nobody can prove, and only the owner
+            # may authorise that.  A timed wait -- a budget day, the automatic
+            # contract retry's daily cap -- is the lane's own business and must
+            # never be put in front of a person: that is exactly the pile the
+            # owner asked not to be shown.
+            needs_owner = bool(started) and held["disposition"] == "recovery_required"
             detail.append({
                 "admission_ref": admission_ref,
                 "disposition": held["disposition"],
                 "reason": held["reason"],
                 "ticket_ref": held.get("ticket_ref"),
                 "started": started,
-                # An admission that never started sent nothing and cost
-                # nothing, so reopening it is free and the lane may do it.
-                # One that started may have been charged for a send nobody can
-                # prove, and only the owner may authorise that.
-                "needs_owner_authorization": bool(started),
-                "owner_action": OWNER_AUTHORIZATION_NOTE if started else None,
+                "needs_owner_authorization": needs_owner,
+                "owner_action": (
+                    (CONTRACT_ESCALATION_NOTE
+                     if held["reason"] == CONTRACT_FAILED_AFTER_AUTOMATIC_RETRY
+                     else OWNER_AUTHORIZATION_NOTE)
+                    if needs_owner else None
+                ),
                 "order": order.get(admission_ref, len(order)),
             })
         detail.sort(key=lambda item: (item["order"], item["admission_ref"]))
@@ -709,7 +742,7 @@ class MissionDocumentResearchCoordinator:
         selected = (
             current_stopped[-1] if current_stopped else
             stopped[-1] if stopped else
-            next((by_status[key] for key in ("eligible", "waiting")
+            next((by_status[key] for key in ("eligible", "waiting", "admitted")
                   if key in by_status), None)
         )
         if selected is None:
@@ -717,6 +750,34 @@ class MissionDocumentResearchCoordinator:
                 "document research recovery observation has an invalid state"
             )
         recovery = selected["recovery"]
+        from .mission_document_research_executor import LEGACY_PAID_CONTRACT_REASON
+
+        if (recovery["status"] == "stopped"
+                and recovery.get("reason") == LEGACY_PAID_CONTRACT_REASON):
+            # Releases before the bounded automatic contract retry existed
+            # recorded a proved paid contract rejection as permanently stopped
+            # and waited for a signature.  Such an admission has not spent its
+            # one automatic retry, so the child may re-enter: the executor
+            # revalidates the whole paid-send proof before it can enqueue
+            # anything, and then records either the retry or the daily cap.
+            # Any newer row for this same Work supersedes the legacy verdict.
+            newer = next((by_status[key] for key in ("waiting", "admitted")
+                          if key in by_status), None)
+            if newer is None:
+                return {
+                    "action": "resume",
+                    "reason": "automatic_contract_retry_available",
+                    "work_order_ref": work_ref,
+                }
+            recovery = newer["recovery"]
+        if recovery["status"] == "admitted":
+            # A controlled retry was already admitted for this Work.  Re-enter:
+            # the executor rebuilds the exact effective Work, so this also
+            # repairs an interrupted link write.
+            return {
+                "action": "resume", "reason": "controlled_contract_retry_admitted",
+                "work_order_ref": work_ref,
+            }
         if recovery["status"] == "stopped":
             # Releases before the bounded UTC-day recovery contract could
             # persist a daily-budget refusal as permanently stopped when its
@@ -1353,7 +1414,7 @@ class MissionDocumentResearchCoordinator:
             reason = (
                 f"{len(needs_owner)} 条文档研究 admission 停在待恢复状态，"
                 f"最早的一条的原因是「{needs_owner[0]['reason']}」。"
-                + OWNER_AUTHORIZATION_NOTE
+                + (needs_owner[0]["owner_action"] or OWNER_AUTHORIZATION_NOTE)
             )
         return {
             "status": status,
@@ -1493,6 +1554,7 @@ LANE = register_lane(LaneSpec(
 
 
 __all__ = [
+    "CONTRACT_ESCALATION_NOTE",
     "DEADLOCK_ESCAPE_AFTER",
     "ESCAPES_FILE",
     "MAX_ESCAPES_PER_ADMISSION",

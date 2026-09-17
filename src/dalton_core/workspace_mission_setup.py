@@ -421,9 +421,78 @@ def publish_first_mission_to_store(
     materialize_first_mission_output_policies(
         workspace, mission=mission, constitution=constitution,
         driver_pack=foundation["methods"]["driver_pack_template"]["value"])
+    # The resolver names each issuer on the way to its CIK. Collected here so
+    # the feed plan below can say what a document may call each company; see
+    # ``mission_company_names`` for why that could not stay a packaged dict.
+    issuer_names: dict[str, list[str]] = {}
     materialize_first_mission_discovery_plans(
-        workspace, mission, sec_resolver_identity=sec_resolver_identity)
+        workspace, mission, sec_resolver_identity=sec_resolver_identity,
+        issuer_names=issuer_names)
+    materialize_first_mission_lane_plans(
+        workspace, mission, company_names=issuer_names)
     return mission
+
+
+def materialize_first_mission_lane_plans(
+    workspace: WorkspacePaths, mission: Mapping[str, Any],
+    *, company_names: Mapping[str, Any] | None = None,
+) -> dict[str, str]:
+    """Write the per-mission plans the feed, Guidepoint and crowd lanes need.
+
+    ``company_names`` is ticker to names, normally the issuer names the SEC
+    resolver returned while the discovery plans were being written -- they are
+    a by-product of a call this publish already makes, and throwing them away
+    was what left the feed lanes with no way to recognise a company in a note.
+
+    ``research-foundation.json`` has listed ``feed-plan`` and ``crowd-map``
+    under ``mission_generated_files`` since the first workspace, and nothing
+    generated them: only the SEC, AlphaEngine and web-search plans were ever
+    written here.  So three lanes whose approved records the workspace already
+    held came up with no plan on disk, their fragments emitted nothing, and the
+    tick reported ``held`` with "no lane on this writer" -- which named the
+    symptom and not one word of the cause.
+
+    Failure is deliberately not fatal: a mission that cannot yield one of these
+    (an empty universe, no industry) must still publish.  The lane stays off
+    and ``dalton_core.workspace_parity_cli`` says which plan is missing and why.
+    """
+
+    from .workspace_lane_parity import (
+        LaneParityError,
+        MISSION_CROWD_MAP_NAME,
+        MISSION_FEED_PLAN_NAME,
+        MISSION_GUIDEPOINT_PLAN_NAME,
+        build_mission_crowd_map,
+        build_mission_feed_plan,
+        build_mission_guidepoint_plan,
+        connected_source_refs,
+    )
+
+    granted = connected_source_refs(mission)
+    state = workspace.state_dir
+    targets = (
+        ("feed-plans", MISSION_FEED_PLAN_NAME, build_mission_feed_plan,
+         {"source:sales-notes", "source:company-wiki", "source:prior-research"}),
+        ("discovery-plans", MISSION_GUIDEPOINT_PLAN_NAME,
+         build_mission_guidepoint_plan, {"source:guidepoint"}),
+        ("phase9", MISSION_CROWD_MAP_NAME, build_mission_crowd_map,
+         {"source:xueqiu", "source:x", "source:blind"}),
+    )
+    written: dict[str, str] = {}
+    for directory, filename, builder, sources in targets:
+        if not sources & granted:
+            continue
+        path = state / directory / filename
+        if path.exists():
+            continue
+        try:
+            value = (builder(mission, company_names=company_names)
+                     if builder is build_mission_feed_plan else builder(mission))
+        except (LaneParityError, ValueError, KeyError, TypeError):
+            continue
+        _atomic_json(path, value)
+        written[filename] = str(path)
+    return written
 
 
 def _atomic_json(path: Any, value: Mapping[str, Any]) -> None:
@@ -504,8 +573,17 @@ def materialize_first_mission_discovery_plans(
     workspace: WorkspacePaths, mission: Mapping[str, Any], *,
     sec_ticker_resolver: Callable[[str], Mapping[str, str]] | None = None,
     sec_resolver_identity: str | None = None,
+    issuer_names: dict[str, list[str]] | None = None,
 ) -> dict[str, str]:
-    """Write the approved, mission-specific search plans selected at restart."""
+    """Write the approved, mission-specific search plans selected at restart.
+
+    ``issuer_names`` is an out-parameter, filled with ticker to registered
+    name for every company the SEC resolver answered for.  An out-parameter
+    rather than a second return value because the return type is a path map
+    that callers already destructure, and rather than a second resolver pass
+    because the name arrives in the same response as the CIK -- the caller
+    that wants it should not pay for a second call.
+    """
     from .mission_source_discovery import (
         ALPHAENGINE_SOURCE_REF, SEC_SOURCE_REF, WEB_SEARCH_SOURCE_REF,
         build_discovery_plan, validate_discovery_plan,
@@ -520,6 +598,7 @@ def materialize_first_mission_discovery_plans(
     created_at = "1970-01-01T00:00:00.000000+00:00"
     directory = workspace.state_dir / "discovery-plans"
     plans: list[tuple[str, str, str, dict[str, Any]]] = []
+    names_out = issuer_names if issuer_names is not None else {}
     paid_calls = int(mission["budget"]["max_daily_paid_calls"])
     if SEC_SOURCE_REF in connected:
         resolver = sec_ticker_resolver or (
@@ -536,6 +615,13 @@ def materialize_first_mission_discovery_plans(
             except (KeyError, TypeError, ValueError, WorkspaceMissionSetupError) as exc:
                 pending[company_ref] = str(exc)
                 continue
+            # W7: keep the registered name. The resolver has always returned
+            # it and this function has always dropped it, which is why the
+            # feed lanes had nothing to recognise a company by except a
+            # five-row packaged dict. One call, two facts.
+            name = str(issuer.get("name") or "").strip()
+            if name:
+                names_out.setdefault(ticker.upper(), []).append(name)
             if re.fullmatch(r"[0-9]{10}", cik):
                 resolved[company_ref] = {"cik": cik}
         if resolved:

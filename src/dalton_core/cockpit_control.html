@@ -904,7 +904,11 @@ function renderOverview(o){
   const budgetEntry=node("button","模型与预算","ghost");
   budgetEntry.onclick=openModels;
   $("totals").append(budgetEntry);
-  $("totals-sub").textContent=`截至 ${fmtDate(o.as_of)}`+(b.web?` · 网页搜索今日 ${b.web.spent}/${b.web.cap}`:"")+(b.alphaengine?` · 研报获取 24 小时 ${b.alphaengine.spent}/${b.alphaengine.cap}`:"");
+  /* 2026-09-17: the day budget is one number for the whole machine. The
+     mission's own spend on its own is no longer an answer to "how much is
+     left today", so the shared figure sits in the same line. */
+  const shared=b.shared_daily;
+  $("totals-sub").textContent=`截至 ${fmtDate(o.as_of)}`+(b.web?` · 网页搜索今日 ${b.web.spent}/${b.web.cap}`:"")+(b.alphaengine?` · 研报获取 24 小时 ${b.alphaengine.spent}/${b.alphaengine.cap}`:"")+sharedBudgetLine(shared);
   $("lanes").replaceChildren(...o.activity.lanes.map(l=>{const d=node("div",null,"lane");const cls=laneClassOf(l.status),detail=readableLaneDetail(l.detail);d.append(node("span",null,`st ${cls}`));const c=node("div");c.append(node("b",l.label),node("small",`${laneStatus(l.status,l.detail)} · ${displayText(l.note)}`));if(detail.display)c.append(node("small",detail.display,"raw"));const tech=technicalDetails(detail.technical);if(tech)c.append(tech);d.append(c);return d}));
   const run=$("running");run.replaceChildren(...o.activity.running.map(r=>{const d=node("div",null,"r");d.append(node("span",null,"spin"),node("span",displayText(r.title)+(r.detail?` — ${displayText(r.detail)}`:"")));return d}));
   if(!o.activity.running.length)run.append(node("div","此刻没有正在运行的任务；调度器每 5 分钟检查一次。","hint"));
@@ -1119,6 +1123,31 @@ function renderSources(sheet,r){sheet.replaceChildren(readerClose(),node("h2","�
    and a selector. Below it the gateway's catalog in three columns, with a
    允许使用 button on the one column an owner can act on. */
 $("open-models").onclick=openModels;$("hero-models").onclick=openModels;$("workspace-open-models").onclick=openModels;
+/* The host-wide day budget, in one clause. Returns "" when this machine has
+   no shared budget bound, so an installation that has not been given one keeps
+   exactly the line it had. */
+function sharedBudgetLine(shared){
+  if(!shared)return "";
+  if(shared.status!=="ok")return ` · ${shared.note||"共享预算读不到"}`;
+  return ` · 全部环境今日 $${shared.cost_usd}/$${shared.cost_cap_usd} · ${shared.used}/${shared.cap} 次调用`;
+}
+/* The same numbers spelled out, for the 模型与预算 sheet where there is room
+   to say which environment spent what. */
+function sharedBudgetSection(shared){
+  const section=node("section");section.append(node("h3","全部环境共享的每日预算"));
+  if(!shared){section.append(node("div","这台机器还没有绑定共享每日预算；每个环境仍按自己的任务预算计算。","meta"));return section}
+  if(shared.status!=="ok"){section.append(node("div",shared.note||"共享预算读不到","meta"));return section}
+  section.append(node("div",`今天全部环境已花 $${shared.cost_usd}，上限 $${shared.cost_cap_usd}；已调用 ${shared.used} 次，上限 ${shared.cap} 次。`,"meta"));
+  const rows=[{name:"本环境",used:shared.this_environment.used,cost_usd:shared.this_environment.cost_usd},
+              ...(shared.environments||[])];
+  rows.forEach(r=>{const d=node("div",null,"lane");d.append(node("span",null,"st on"));
+    const c=node("div");c.append(node("b",r.name||r.environment_id||"环境"),node("small",`今天 ${r.calls!==undefined?r.calls:r.used} 次调用 · $${r.cost_usd!==undefined?r.cost_usd:(r.cost_micros/1000000).toFixed(4)}`));
+    d.append(c);section.append(d)});
+  (shared.unavailable||[]).forEach(u=>{const d=node("div",null,"lane");d.append(node("span",null,"st hold"));
+    const c=node("div");c.append(node("b",u.name||u.environment_id||"环境"),node("small","读不到，未计入今日合计"));d.append(c);section.append(d)});
+  section.append(node("div",shared.note,"meta"));
+  return section;
+}
 async function openModels(){const sheet=prepareReader("研究详情");
   sheet.replaceChildren(node("div","正在读取…","empty"));
   try{const [models,overview]=await Promise.all([getJson("/v1/cockpit/models"),getJson("/v1/cockpit/overview")]);
@@ -1223,6 +1252,7 @@ function renderModels(sheet,r,overview){sheet.replaceChildren(readerClose(),node
     c.append(details);
     d.append(c);stages.append(d)});
   sheet.append(stages);
+  sheet.append(sharedBudgetSection(overview&&overview.budgets?overview.budgets.shared_daily:null));
   const goal=overview&&overview.goal?overview.goal:null;
   if(goal&&goal.budget){
     const section=node("section");section.append(node("h3","预算上限"));

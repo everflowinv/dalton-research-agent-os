@@ -119,9 +119,16 @@ class ThesisImpactBudgetStore:
         *,
         clock: Callable[[], datetime] | None = None,
         read_only: bool = False,
+        shared_daily_budget: Mapping[str, Any] | None = None,
     ) -> None:
         self.path = str(path)
         self.read_only = read_only
+        # 2026-09-17: the host's shared day cap. Normally discovered from the
+        # binding file beside this ledger, so the cap applies to every lane on
+        # the host rather than to the call sites somebody remembered to edit;
+        # passed in only by tests and by tools that already read it.
+        self._shared_daily_budget = (
+            None if shared_daily_budget is None else dict(shared_daily_budget))
         if not read_only and self.path != ":memory:":
             target = Path(self.path)
             target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -152,6 +159,31 @@ class ThesisImpactBudgetStore:
             snapshot.close()
             raise
         return snapshot
+
+    def shared_daily_gate(self) -> dict[str, Any] | None:
+        """The host-wide day cap this ledger is bound to, if any.
+
+        Resolved on every admission rather than cached, for the same reason the
+        shared per-call cost policy is re-read on every call: a cap the owner
+        lowered has to bind the next call, not the next restart. An unbound
+        environment -- and every in-memory ledger -- answers ``None`` and
+        behaves exactly as it did before the shared budget existed.
+        """
+
+        if self._shared_daily_budget is not None:
+            return dict(self._shared_daily_budget)
+        if self.path == ":memory:":
+            return None
+        from .shared_daily_budget import SharedDailyBudgetError, resolve_shared_gate
+
+        try:
+            return resolve_shared_gate(self.path)
+        except SharedDailyBudgetError as exc:
+            # A binding that exists and does not parse is somebody's mistake,
+            # and a budget that silently stops applying is the failure this
+            # gate exists to prevent. Refuse loudly instead.
+            raise ThesisImpactBudgetValidationError(
+                f"shared daily budget binding is unusable: {exc}") from exc
 
     def close(self) -> None:
         self.connection.close()
@@ -552,6 +584,30 @@ class ThesisImpactBudgetStore:
                     mission_cost = sum(r["reserved_micros"] if r["actual_micros"] is None else r["actual_micros"] for r in rows)
                     mission_exceeded = (len(rows) + 1 > mission_binding["max_daily_paid_calls"] or
                                         mission_cost + reserved_micros > mission_binding["max_daily_cost_micros"])
+                # 2026-09-17: the host's shared day cap, over the top of the
+                # mission's own. Counted across every environment on this Mac
+                # -- this ledger inside the transaction that is about to
+                # insert, the others read-only -- because four environments
+                # each honouring a $500 cap were between them honouring
+                # nothing. A peer that will not read counts as zero and is
+                # named by the cockpit: an unplugged disk is not spending, and
+                # refusing every call on this host because of it would be a
+                # worse failure than the overspend.
+                shared = self.shared_daily_gate()
+                shared_exceeded = False
+                if shared is not None:
+                    from .shared_daily_budget import (
+                        _DAY_SPEND_SQL, cross_environment_spend, day_spend_rows,
+                    )
+
+                    local = day_spend_rows(cur.execute(_DAY_SPEND_SQL, (day,)).fetchall())
+                    peers = cross_environment_spend(shared["peer_ledgers"], day)
+                    shared_calls = local["calls"] + peers["calls"] + 1
+                    shared_cost = (local["cost_micros"] + peers["cost_micros"]
+                                   + reserved_micros)
+                    shared_exceeded = (
+                        shared_calls > int(shared["max_daily_paid_calls"])
+                        or shared_cost > int(shared["max_daily_cost_micros"]))
                 outer_exceeded = False
                 if mission_binding is not None and mission_binding.get("outer_budget") is not None:
                     outer = mission_binding["outer_budget"]
@@ -567,7 +623,8 @@ class ThesisImpactBudgetStore:
                     outer_cost = sum(r["reserved_micros"] if r["actual_micros"] is None else r["actual_micros"] for r in outer_rows)
                     outer_exceeded = (len(outer_rows) + 1 > outer["max_daily_paid_calls"] or
                                       outer_cost + reserved_micros > outer["max_daily_cost_micros"])
-                if mission_exceeded or outer_exceeded or committed + reserved_micros > policy["day_cap_micros"]:
+                if (mission_exceeded or outer_exceeded or shared_exceeded
+                        or committed + reserved_micros > policy["day_cap_micros"]):
                     rejection = {
                         "schema_version": SCHEMA_VERSION,
                         "rejection_id": "thesis-impact-rejection:"
@@ -584,7 +641,13 @@ class ThesisImpactBudgetStore:
                     if mission_binding is not None:
                         rejection["mission_binding"] = mission_binding
                         rejection["reason"] = ("mission_budget_exceeded" if mission_exceeded else
-                                               "outer_research_budget_exceeded" if outer_exceeded else "owner_budget_exceeded")
+                                               "outer_research_budget_exceeded" if outer_exceeded else
+                                               "shared_daily_budget_exceeded" if shared_exceeded else "owner_budget_exceeded")
+                    elif shared_exceeded:
+                        # A lane with no mission binding can still pass the
+                        # host's shared cap, and "day_budget_exceeded" would
+                        # send the owner to the wrong page to fix it.
+                        rejection["reason"] = "shared_daily_budget_exceeded"
                     rejection["content_hash"] = content_hash(rejection)
                     cur.execute(
                         "INSERT INTO thesis_impact_day_rejections("

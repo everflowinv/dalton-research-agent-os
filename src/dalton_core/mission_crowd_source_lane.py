@@ -775,6 +775,19 @@ GOVERNANCE_FILES = {
     "employee-reviews": {"blind_reviews": "employee-reviews-blind-v1.json"},
 }
 CROWD_SOURCE_MAP = "p9-us-it-services-crowd-sources-v1.json"
+# W7: the map an environment generated from its own mission universe,
+# looked for first. The packaged map names five US IT services issuers and
+# their handles; a workspace covering other companies must not run on it.
+MISSION_CROWD_SOURCE_MAP = "mission-crowd-sources-v1.json"
+
+
+def resolve_crowd_source_map(state: Any) -> Any:
+    """The crowd map this state directory runs on, mission-generated first."""
+
+    mission_map = state / "phase9" / MISSION_CROWD_SOURCE_MAP
+    return mission_map if mission_map.is_file() else state / "phase9" / CROWD_SOURCE_MAP
+
+
 LAUNCHER_KWARG = "crowd_source_launcher"
 
 
@@ -1061,7 +1074,7 @@ def argv_fragment(context: Any) -> list[str]:
     # Enabled by the map and at least one *approved* record being on disk, and
     # off on a Core with neither -- which is every Core until the owner
     # approves, because all seven records ship proposed.
-    source_map = context.state / "phase9" / CROWD_SOURCE_MAP
+    source_map = resolve_crowd_source_map(context.state)
     governance = context.state / "connector-governance"
     if not source_map.is_file() or not approved_records(governance):
         return []
@@ -1112,6 +1125,7 @@ LANE = register_lane(LaneSpec(
 __all__ = [
     "CROWD_BASIS",
     "CROWD_SOURCE_MAP",
+    "MISSION_CROWD_SOURCE_MAP",
     "GOVERNANCE_FILES",
     "LANE",
     "LAUNCHER_KWARG",
@@ -1131,6 +1145,7 @@ __all__ = [
     "CrowdSourceExecution",
     "SOURCE_IDENTITY",
     "approved_records",
+    "resolve_crowd_source_map",
     "build_crowd_source_runner",
     "source_identity",
     "CrowdSourceLaneError",

@@ -1,5 +1,32 @@
 # Dalton 项目进度
 
+## 2026-09-17 13:10 UTC：模型配置全机器统一、每日预算全机器共用（源码，待 owner 执行命令）
+
+owner 的指示：**模型配置在每个研究环境里必须一样**——在任何一个环境保存，其它环境跟着变；当下全部对齐到 legacy（IT services）环境；**每天的预算是整台机器共用的**，不再是每个环境各有一份。
+
+**模型保存的扇出**（新 `model_routing_sync.py`；cockpit 模型页保存处接上）：模型页保存成功、本环境的策略版本已经落库之后，控制进程只读地从 `~/.dalton/manager.json` 和各 workspace manifest（legacy 的路径取自它自己的 service.json）枚举出本机的每个环境，再对**每个其它环境自己的 writer socket + token 配置**发一次同样的 `set_model_selection`，actor 用同一个人。所以每个环境照样由自己的 writer 追加自己的不可变策略版本，单写者规则一点没动，扇出只是个客户端。已经是这条链的环境**一次都不会被叫醒**（先读它自己的策略再决定要不要发），所以是幂等的。某个环境没在跑不会回滚本地这次保存，只会在保存结果和模型页上写出来：「已同步到 2 个环境；1 个环境未同步：…」。
+
+**对齐脚本**（新 `scripts/align_model_routing.py`，默认只预演）：读 legacy 环境每条策略谱系的档位链与逐环节钉定，逐环境逐策略打印 before/after，`--apply --actor human:<owner>` 才通过各环境自己的 writer 发布（先整类后逐环节，和 `repair_brain_chains.py` 同一个顺序理由）。源环境自己内部就不一致的那一项（今天是 `verifier` 档）会被跳过并写明，需要 owner 先决定用哪一条。
+
+**共用的每日预算**（新 `shared_daily_budget.py` + `scripts/bind_shared_daily_budget.py`）：主机级策略文件 `~/.dalton/connections/shared-daily-budget.json`，闭合结构、内容哈希、`prior_hash` 串链、只能由人签名，写法与 `model-call-budget-policy.json` 一致；每个环境的日账本旁边放一份绑定文件。准入 `ThesisImpactBudgetStore.admit` 在任务自己的上限之外多一道：把本环境（同一个事务里）和其它环境（只读）今天的花费与调用次数加起来，超过共用上限就拒绝，拒绝理由记为 `shared_daily_budget_exceeded`。读不到的环境按 0 计并在页面上点名（没在跑的环境本来就没在花钱，为一块没挂载的盘停掉整台机器更糟）。没有绑定文件的环境行为与改动前逐字节相同。AlphaEngine 的 24 小时上限也进了这份策略，但它的计数仍在 Core 的连接器账本里按滚动 24 小时算（不是 UTC 自然日），所以只是把上限递给那道检查，计数没有搬家。驾驶舱首页和「模型与预算」里现在把「全部环境今日 $X/$Y」摆在任务自己的数字旁边。
+
+**owner 命令**（都先预演）：
+
+```
+scripts/align_model_routing.py
+scripts/align_model_routing.py --apply --actor human:lumos
+
+scripts/bind_shared_daily_budget.py
+scripts/bind_shared_daily_budget.py --apply --actor human:lumos
+```
+
+初始上限取 legacy 任务现在的数：每天 $500、100000 次付费调用、AlphaEngine 24 小时 130 次。
+
+## 2026-09-17 12:20 UTC：文档研究的契约失败改为「自动重试一次，再找人」（源码，待部署）
+
+线上 `mission_document_research` 19 条 admission 全部停在 `paid_send_output_contract_failed`：模型调用确实发出、确实结算，只是回复不合输出契约，而旧策略把这一类判为「不允许任何自动恢复」，只能等 owner 逐条授权——车道零产出，owner 的原话是「不希望出现大量堆积给人审批」。改为有界自动重试：每个（admission，阶段）最多自动放**一条**新 WorkOrder，上限与 owner 授权那条完全相同（`max_fresh_work_orders` 1、`max_cost_usd` 等于失败那条 WorkOrder 自己的 `budget.max_cost_usd`），并且同样写一行授权记录进 `mission_document_research_controlled_recovery_authorizations`（`actor_ref` 为 `automation:document-research-contract-retry`、分类 `automation_bounded_contract_retry`，带当日日期与当日上限），走的是原来的 `_effective_stage` / `_verify_recovery_failure_proof` / 付费证明机制，没有手写调度行。全车道每个 UTC 日最多 20 次（`max_automatic_contract_retries_per_day`，可在 `document-research-config.json` 里调小，缺省即 20，老配置文件不写这一项也合法）——系统性的契约 bug 不能一轮把当天预算烧完；撞到上限的那条记为 `automatic_contract_retry_day_cap_reached` 并等到 UTC 换日自动重试，**不会**出现在 owner 的待办里。
+
+只有自动重试买回来的回复**仍然**不合契约时，才升级为 `contract_failed_after_automatic_retry`，这时车道的 `holds`/`reason`、needs-human 的「受控恢复」条目都会先说明「已经自动重试过一次、同样失败」，再给 `authorize_paid_contract_recovery` 的原命令（owner 这道门本身不变，只是对象变成自动重试放出来的那条 WorkOrder）。既有的 19 条是本次改动之前写下的、还没用掉那一次自动重试，车道下一轮会把它们重新放进子进程并各自买一次重试，不会被落下。全量测试通过（本轮 9,322 项；跑到的唯一一处失败在另一路并行改动的 workspace 车道对齐上，单独重跑通过，与本次无关）。
 ## 2026-09-17 10:40 UTC：第四类模型「交付物起草」（待 owner 执行拆分命令）
 
 公司档案 / 争议图 / 模型规格这三个环节的产出是要归档、要过结构校验的正式文件，选模型时看的是「能不能守住契约」。2026-09-16 起它们靠三条手写的 `purpose_overrides`（`claude-opus-5 → deepseek-v4-flash`）钉着：owner 在模型页上看不到它们是一组，不能拖动排序，而且任何一次高阶推理的整类保存都会把三条钉定悄悄丢掉（整类保存本来就会清掉本类的逐环节钉定）。现在把它们做成第四类模型：`deliverable`／**交付物起草**，与高阶推理、批量阅读、独立复核并列，模型页上四条可拖动的链、四个整类保存。三个复核环节仍留在独立复核类。

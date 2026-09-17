@@ -49,7 +49,8 @@ class WorkspaceRuntimeSetupTests(unittest.TestCase):
         self.temporary.cleanup()
 
     def test_installs_real_mission_neutral_foundations_and_local_connection_authority(self):
-        result = install(self.manifest, actor_ref="human:owner@example.com")
+        result = install(self.manifest, actor_ref="human:owner@example.com",
+                         stage_host_lanes=False)
         self.assertEqual(result["setup_state"], "awaiting_mission")
         for name in ("market-proxy-mappings.json", "tracking-policy.json",
                      "research-foundation.json", "p12a-dossier-policy-v1.json",
@@ -102,10 +103,12 @@ class WorkspaceRuntimeSetupTests(unittest.TestCase):
                 "SELECT count(*) FROM research_playbook_versions").fetchone()[0], 1)
 
     def test_replay_preserves_owner_edits_and_does_not_copy_research(self):
-        first = install(self.manifest, actor_ref="human:owner@example.com")
+        first = install(self.manifest, actor_ref="human:owner@example.com",
+                        stage_host_lanes=False)
         proxy = self.state / "market-proxy-mappings.json"
         proxy.write_text('{"owner":"edit"}\n', encoding="utf-8")
-        second = install(self.manifest, actor_ref="human:owner@example.com")
+        second = install(self.manifest, actor_ref="human:owner@example.com",
+                         stage_host_lanes=False)
         self.assertEqual(proxy.read_text(), '{"owner":"edit"}\n')
         self.assertEqual(second["files"]["market-proxy-mappings.json"], "preserved")
         self.assertFalse(first["research_state_copied"])
@@ -145,7 +148,8 @@ class WorkspaceRuntimeSetupTests(unittest.TestCase):
         from dalton_core.cockpit_plane import CockpitConfig, CockpitPlane, CockpitConflict
         from dalton_core.workspace import load_workspace_manifest
         from dalton_core.workspace_mission_setup import publish_first_mission_to_store
-        install(self.manifest, actor_ref="human:owner@example.com")
+        install(self.manifest, actor_ref="human:owner@example.com",
+                stage_host_lanes=False)
         workspace = load_workspace_manifest(self.manifest)
         model_calls = []
         class Model:

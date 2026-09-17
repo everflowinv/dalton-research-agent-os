@@ -45,7 +45,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from .company_wiki_core import SOURCE_REF as COMPANY_WIKI_SOURCE_REF
 from .coverage_mission import DISCOVERED_DOCUMENT_STATUSES
-from .document_subject import COMPANY_NAMES, subject_names
+from .document_subject import subject_names
 from .sales_notes_core import (
     DOCUMENT_REF_PREFIX as SALES_NOTE_REF_PREFIX,
     SOURCE_REF as SALES_NOTES_SOURCE_REF,
@@ -269,9 +269,21 @@ def validate_feed_discovery_plan(value: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(companies, Mapping) or not companies:
         raise FeedLaneRejected("feed discovery plan needs at least one company")
     for company_ref, entry in companies.items():
-        if not isinstance(entry, Mapping) or set(entry) != {"search_terms"} \
+        # W7: ``names`` is optional and additive. The legacy Core's plan has
+        # only ``search_terms`` and must keep validating; a plan generated from
+        # a mission carries what each issuer is called, so a lane never has to
+        # look the answer up in a dict shared with another environment.
+        if not isinstance(entry, Mapping) or set(entry) - {"search_terms", "names"} \
+                or "search_terms" not in entry \
                 or not str(entry["search_terms"]).strip():
             raise FeedLaneRejected(f"feed discovery plan entry for {company_ref} is malformed")
+        if "names" in entry:
+            names = entry["names"]
+            if not isinstance(names, list) or not names \
+                    or len(set(names)) != len(names) \
+                    or any(not isinstance(name, str) or not name.strip() for name in names):
+                raise FeedLaneRejected(
+                    f"feed discovery plan names for {company_ref} must be unique non-empty text")
     for name in ("industry_keywords", "peer_names"):
         terms = wire[name]
         if not isinstance(terms, list) or not terms or len(set(terms)) != len(terms) \
@@ -347,25 +359,48 @@ def feed_query_hash(source_ref: str, parameters: Mapping[str, Any]) -> str:
 # -- attribution --------------------------------------------------------
 
 
-def _universe_terms(universe: Sequence[Mapping[str, Any]]) -> list[tuple[str, str]]:
-    """Company ref and ticker for each covered name, refusing an unknown one.
+def _universe_terms(
+    universe: Sequence[Mapping[str, Any]],
+    names: Mapping[str, Sequence[str]] | None = None,
+) -> list[tuple[str, str]]:
+    """Company ref and ticker for each covered name, refusing an unnamed one.
 
     A ticker the name tables do not know still "matches" itself -- a subject
     line saying ZZZZ names ZZZZ -- and that is the trap: a subject line almost
     never says the ticker, so such a company would be silently attributed
-    nothing at all for the whole run. It fails at the top instead, where the
-    fix is one row in ``document_subject.COMPANY_NAMES``.
+    nothing at all for the whole run. It fails at the top instead.
+
+    W7: what counts as "known" is this mission's table, not a dict in this
+    package. ``names`` is normally ``mission_name_table(universe, plan)``; the
+    packaged five answer only when no table was supplied, which is the legacy
+    Core. So the fix for a refusal is a row in *this mission's* feed plan.
     """
 
-    entries: list[tuple[str, str]] = []
-    for item in universe:
-        ticker = str(item["ticker"]).strip()
-        if ticker not in COMPANY_NAMES:
-            raise FeedLaneRejected(
-                f"{ticker} has no company names to match a subject line against"
-            )
-        entries.append((str(item["company_ref"]), ticker))
-    return entries
+    from .mission_company_names import (
+        MissionCompanyNamesError, mission_name_table, require_named,
+    )
+
+    table = dict(names) if names is not None else mission_name_table(universe)
+    try:
+        require_named(
+            {ticker: table.get(ticker, ()) for ticker in (
+                str(item["ticker"]).strip().upper() for item in universe)},
+            where="this mission's feed discovery plan (companies[].names)",
+        )
+    except MissionCompanyNamesError as exc:
+        raise FeedLaneRejected(str(exc)) from exc
+    return [(str(item["company_ref"]), str(item["ticker"]).strip())
+            for item in universe]
+
+
+def plan_company_names(
+    universe: Sequence[Mapping[str, Any]], plan: Mapping[str, Any] | None,
+) -> dict[str, tuple[str, ...]]:
+    """This run's ticker-to-names table, built from its own plan."""
+
+    from .mission_company_names import mission_name_table
+
+    return mission_name_table(universe, plan)
 
 
 def mentions_any(text: Any, phrases: Sequence[str]) -> list[str]:
@@ -383,7 +418,8 @@ def mentions_any(text: Any, phrases: Sequence[str]) -> list[str]:
 
 
 def attribute_notes(
-    notes: Sequence[Mapping[str, Any]], universe: Sequence[Mapping[str, Any]]
+    notes: Sequence[Mapping[str, Any]], universe: Sequence[Mapping[str, Any]],
+    names: Mapping[str, Sequence[str]] | None = None,
 ) -> dict[str, Any]:
     """Which covered company each note's **headers** name, if any.
 
@@ -397,14 +433,14 @@ def attribute_notes(
 
     from .document_subject import document_names_subject
 
-    entries = _universe_terms(universe)
+    entries = _universe_terms(universe, names)
     by_company: dict[str, list[str]] = {}
     unattributed: list[str] = []
     for note in notes:
         subject = str(note.get("subject") or "")
         matched = False
         for company_ref, ticker in entries:
-            if document_names_subject(subject, ticker)["names_subject"]:
+            if document_names_subject(subject, ticker, names)["names_subject"]:
                 by_company.setdefault(company_ref, []).append(note["note_id"])
                 matched = True
         if not matched:
@@ -416,7 +452,8 @@ def attribute_notes(
 
 
 def attribute_wiki_documents(
-    documents: Sequence[Mapping[str, Any]], universe: Sequence[Mapping[str, Any]]
+    documents: Sequence[Mapping[str, Any]], universe: Sequence[Mapping[str, Any]],
+    names: Mapping[str, Sequence[str]] | None = None,
 ) -> dict[str, Any]:
     """The corpus's own company tags, intersected with the mission universe.
 
@@ -446,6 +483,7 @@ def triage_notes(
     notes: Sequence[Mapping[str, Any]],
     universe: Sequence[Mapping[str, Any]],
     plan: Mapping[str, Any],
+    names: Mapping[str, Sequence[str]] | None = None,
 ) -> dict[str, Any]:
     """Split an enumeration into "already attributed" and "worth reading".
 
@@ -460,7 +498,8 @@ def triage_notes(
     belongs after the read, where it can carry a reason.
     """
 
-    entries = _universe_terms(universe)
+    names = names if names is not None else plan_company_names(universe, plan)
+    entries = _universe_terms(universe, names)
     terms = plan_terms(plan)
     company: dict[str, list[str]] = {}
     header_company: list[str] = []
@@ -469,7 +508,7 @@ def triage_notes(
     for note in notes:
         header_text = f"{note.get('subject') or ''} {note.get('sender') or ''}"
         hits = [ref for ref, ticker in entries
-                if mentions_any(header_text, subject_names(ticker))]
+                if mentions_any(header_text, subject_names(ticker, names))]
         if hits:
             for ref in hits:
                 company.setdefault(ref, []).append(note["note_id"])
@@ -495,6 +534,7 @@ def attribute_body(
     plan: Mapping[str, Any],
     *,
     header_companies: Sequence[str] = (),
+    names: Mapping[str, Sequence[str]] | None = None,
 ) -> dict[str, Any]:
     """The decision a body read is for: company, industry, or dropped.
 
@@ -505,10 +545,11 @@ def attribute_body(
     the difference between "we looked" and "we never saw it".
     """
 
-    entries = _universe_terms(universe)
+    names = names if names is not None else plan_company_names(universe, plan)
+    entries = _universe_terms(universe, names)
     companies = list(dict.fromkeys(header_companies))
     for ref, ticker in entries:
-        if ref not in companies and mentions_any(text, subject_names(ticker)):
+        if ref not in companies and mentions_any(text, subject_names(ticker, names)):
             companies.append(ref)
     terms = mentions_any(text, plan_terms(plan))
     if companies:
@@ -525,6 +566,7 @@ def triage_wiki_documents(
     documents: Sequence[Mapping[str, Any]],
     universe: Sequence[Mapping[str, Any]],
     plan: Mapping[str, Any],
+    names: Mapping[str, Sequence[str]] | None = None,
 ) -> dict[str, Any]:
     """The same split for the wiki, decided by the corpus's own filing.
 
@@ -536,7 +578,8 @@ def triage_wiki_documents(
     note may only say what it is about in its text.
     """
 
-    _universe_terms(universe)
+    _universe_terms(universe,
+                    names if names is not None else plan_company_names(universe, plan))
     ticker_to_ref = {str(item["ticker"]).strip(): str(item["company_ref"])
                      for item in universe}
     terms = plan_terms(plan)
@@ -586,7 +629,8 @@ def prior_research_ticker(document: Mapping[str, Any]) -> str:
 
 
 def attribute_prior_documents(
-    documents: Sequence[Mapping[str, Any]], universe: Sequence[Mapping[str, Any]]
+    documents: Sequence[Mapping[str, Any]], universe: Sequence[Mapping[str, Any]],
+    names: Mapping[str, Sequence[str]] | None = None,
 ) -> dict[str, Any]:
     """The company folder, intersected with the mission universe.
 
@@ -616,6 +660,7 @@ def triage_prior_documents(
     documents: Sequence[Mapping[str, Any]],
     universe: Sequence[Mapping[str, Any]],
     plan: Mapping[str, Any],
+    names: Mapping[str, Sequence[str]] | None = None,
 ) -> dict[str, Any]:
     """Split an enumeration into "already attributed" and "worth reading".
 
@@ -625,7 +670,8 @@ def triage_prior_documents(
     keep that order within each kind.
     """
 
-    _universe_terms(universe)
+    _universe_terms(universe,
+                    names if names is not None else plan_company_names(universe, plan))
     ticker_to_ref = {str(item["ticker"]).strip(): str(item["company_ref"])
                      for item in universe}
     company: dict[str, list[str]] = {}
@@ -1146,14 +1192,29 @@ class FeedDiscoveryCoordinator:
             return False
         return True
 
+    def company_names(
+        self, universe: Sequence[Mapping[str, Any]]
+    ) -> dict[str, tuple[str, ...]]:
+        """This run's ticker-to-names table, from this mission's own plan.
+
+        Built here rather than inside each attribution call so that one tick
+        answers "what is MSFT called" once, and so that every decision in that
+        tick answers it the same way.
+        """
+
+        return plan_company_names(universe, self.plan)
+
     def triage(
         self, observation: Mapping[str, Any], universe: Sequence[Mapping[str, Any]]
     ) -> dict[str, Any]:
+        names = self.company_names(universe)
         if self.source_ref == SALES_NOTES_SOURCE_REF:
-            return triage_notes(observation["notes"], universe, self.plan)
+            return triage_notes(observation["notes"], universe, self.plan, names)
         if self.source_ref == PRIOR_RESEARCH_SOURCE_REF:
-            return triage_prior_documents(observation["documents"], universe, self.plan)
-        return triage_wiki_documents(observation["documents"], universe, self.plan)
+            return triage_prior_documents(observation["documents"], universe,
+                                          self.plan, names)
+        return triage_wiki_documents(observation["documents"], universe,
+                                     self.plan, names)
 
     def headers_by_document(self, observation: Mapping[str, Any]) -> dict[str, Any]:
         if self.source_ref == SALES_NOTES_SOURCE_REF:
@@ -1204,11 +1265,12 @@ class FeedDiscoveryCoordinator:
     def attribute(
         self, observation: Mapping[str, Any], universe: Sequence[Mapping[str, Any]]
     ) -> dict[str, Any]:
+        names = self.company_names(universe)
         if self.source_ref == SALES_NOTES_SOURCE_REF:
-            return attribute_notes(observation["notes"], universe)
+            return attribute_notes(observation["notes"], universe, names)
         if self.source_ref == PRIOR_RESEARCH_SOURCE_REF:
-            return attribute_prior_documents(observation["documents"], universe)
-        return attribute_wiki_documents(observation["documents"], universe)
+            return attribute_prior_documents(observation["documents"], universe, names)
+        return attribute_wiki_documents(observation["documents"], universe, names)
 
     def spec_refs(self, observation: Mapping[str, Any]) -> dict[str, str]:
         """Document ref to spec ref, which is what carries the evidence tier."""
@@ -1574,6 +1636,7 @@ class FeedDiscoveryCoordinator:
             return attribute_body(
                 observation["body"], universe, self.plan,
                 header_companies=header_companies,
+                names=self.company_names(universe),
             )
         if self.source_ref == PRIOR_RESEARCH_SOURCE_REF:
             # The company folder is the attribution and there is no second
@@ -2156,6 +2219,21 @@ def build_company_wiki_launcher(args: Any) -> Any | None:
     )
 
 
+#: W7: the plan a workspace generated from its own mission universe. Looked for
+#: before the packaged ``p9-us-it-services-feeds-v2.json`` because an
+#: environment covering another industry must not run on that industry's plan --
+#: and a file named after US IT services sitting in a hyperscaler workspace
+#: would be a lie on disk even if its contents were right.
+MISSION_FEED_PLAN_NAME = "mission-feeds-v1.json"
+
+
+def resolve_feed_plan(state: Path, plan_name: str) -> Path:
+    """The feed plan this state directory runs on, mission-generated first."""
+
+    mission_plan = state / "feed-plans" / MISSION_FEED_PLAN_NAME
+    return mission_plan if mission_plan.is_file() else state / "feed-plans" / plan_name
+
+
 def _feed_argv(context: Any, *, plan_name: str, governance: Sequence[str],
                flags: Sequence[tuple[str, Path]]) -> list[str]:
     """Off unless every file this lane needs is already on this machine.
@@ -2165,7 +2243,7 @@ def _feed_argv(context: Any, *, plan_name: str, governance: Sequence[str],
     Core without the OpenClaw workspace simply has no feed lane.
     """
 
-    plan = context.state / "feed-plans" / plan_name
+    plan = resolve_feed_plan(context.state, plan_name)
     records = [context.state / "connector-governance" / name for name in governance]
     if not plan.is_file() or any(not path.is_file() for path in records):
         return []
@@ -2259,6 +2337,7 @@ __all__ = [
     "PRIOR_RESEARCH_REF_PREFIX",
     "PRIOR_RESEARCH_SOURCE_REF",
     "MAX_WINDOW_SPLITS",
+    "MISSION_FEED_PLAN_NAME",
     "FEED_IDENTITY",
     "MAX_BODY_READS_PER_TICK",
     "PLAN_SCHEMA_VERSION",
@@ -2284,10 +2363,12 @@ __all__ = [
     "dispatch_company_wiki",
     "dispatch_sales_notes",
     "feed_discovery_parameters",
+    "resolve_feed_plan",
     "feed_identity",
     "feed_query_hash",
     "load_feed_discovery_plan",
     "mentions_any",
+    "plan_company_names",
     "plan_terms",
     "sales_notes_argv",
     "triage_notes",

@@ -1097,6 +1097,7 @@ class WebSearchLauncher(_SearchLauncherBase):
 def alphaengine_calls_remaining(
     connection: Any, *, mission_cap: int, owner_cap: int = MAX_CALLS_PER_WINDOW,
     as_of: datetime | None = None,
+    shared: Mapping[str, Any] | None = None,
 ) -> dict[str, int]:
     """Trailing-24h AlphaEngine calls (search + document pages) against the tighter cap.
 
@@ -1105,16 +1106,34 @@ def alphaengine_calls_remaining(
     codebase is tighter -- and nothing said so. A cap that silently overrides
     the owner's own signed budget has to be visible, or the next person to
     raise a budget will believe they raised it too.
+
+    2026-09-17: ``shared`` is the host-wide window -- the same cap counted
+    across every research environment on this Mac, because four environments
+    each honouring 130 calls were between them honouring 520. It tightens the
+    remaining figure and never loosens it, and it names itself in ``bound_by``
+    for exactly the reason above.
     """
 
     spent = count_recent_alphaengine_calls(connection, as_of=as_of)
     mission_cap, owner_cap = int(mission_cap), int(owner_cap)
     cap = min(mission_cap, owner_cap)
-    return {
-        "spent": spent, "cap": cap, "remaining": max(0, cap - spent),
+    remaining = max(0, cap - spent)
+    bound_by = "owner" if owner_cap < mission_cap else "mission"
+    budget = {
+        "spent": spent, "cap": cap, "remaining": remaining,
         "mission_cap": mission_cap, "owner_cap": owner_cap,
-        "bound_by": "owner" if owner_cap < mission_cap else "mission",
+        "bound_by": bound_by,
     }
+    if shared is not None:
+        elsewhere = int(shared.get("spent_elsewhere") or 0)
+        shared_cap = int(shared["cap"])
+        shared_remaining = max(0, shared_cap - spent - elsewhere)
+        budget["shared_cap"] = shared_cap
+        budget["shared_spent_elsewhere"] = elsewhere
+        if shared_remaining < remaining:
+            budget["remaining"] = shared_remaining
+            budget["bound_by"] = "shared"
+    return budget
 
 
 def _parse_wire_time(value: str) -> datetime:
@@ -2115,6 +2134,30 @@ class MissionSourceDiscoveryCoordinator:
             return f"last attempt {row['status']} {age.days}d ago; retry interval {spec['retry_interval_days']}d"
         return None
 
+    def _shared_alphaengine_window(self) -> dict[str, Any] | None:
+        """The host-wide AlphaEngine window, when this environment is bound to one.
+
+        Found from this Core's own directory rather than passed in, so every
+        lane that asks for a discovery budget gets the host cap without a
+        caller having had to know about it. ``None`` -- an unbound host, or a
+        Core we cannot name -- is the pre-2026-09-17 behaviour.
+        """
+
+        from .shared_daily_budget import SharedDailyBudgetError, shared_alphaengine_view
+
+        try:
+            row = self.store.connection.execute(
+                "PRAGMA database_list").fetchall()
+        except Exception:  # noqa: BLE001 - a budget hint, not an authority
+            return None
+        path = next((item[2] for item in row if item[1] == "main" and item[2]), None)
+        if not path:
+            return None
+        try:
+            return shared_alphaengine_view(path, as_of=self.clock())
+        except (SharedDailyBudgetError, OSError, ValueError):
+            return None
+
     def _reserved_calls(self) -> int:
         """Children launched but not yet settled may not have recorded their call yet."""
 
@@ -2158,6 +2201,7 @@ class MissionSourceDiscoveryCoordinator:
             budget = alphaengine_calls_remaining(
                 self.store.connection, mission_cap=mission_cap,
                 owner_cap=owner_cap, as_of=self.clock(),
+                shared=self._shared_alphaengine_window(),
             )
         reserved = self._reserved_calls()
         budget["reserved"] = reserved

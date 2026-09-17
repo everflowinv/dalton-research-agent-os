@@ -299,8 +299,67 @@ def _publish_playbook(workspace: Any, actor_ref: str) -> dict[str, str]:
     return {"ref": published["id"], "hash": published["content_hash"]}
 
 
-def install(workspace_manifest: str | Path, *, actor_ref: str) -> dict[str, Any]:
-    """Install idempotent, mission-neutral research foundations."""
+def _host_lane_inputs(workspace: Any, actor_ref: str,
+                      host_sources: Mapping[str, Path] | None,
+                      enabled: bool) -> dict[str, Any]:
+    """Stage the lane inputs that are facts about this machine, not this mission.
+
+    A workspace used to come up with a third of the legacy environment's lanes,
+    and the reason was never a decision anybody made: a lane turns itself on
+    from the files in its state directory, and these files -- the packaged
+    yfinance / SEC-ownership / HKEX / prior-research / crowd contracts, the
+    OpenClaw corpora, the crowd host tools and their grants -- were only ever
+    installed by ``deploy/macos/install.sh`` into the legacy Core.  Nothing in
+    workspace creation put them anywhere.
+
+    Staged rather than copied where the host keeps writing (a link), and built
+    locally rather than copied where it is a contract (``approved_by`` names
+    *this* workspace's owner, so no approval is inherited).  A host input this
+    machine does not have is skipped silently here and reported loudly by
+    ``dalton_core.workspace_parity_cli``, which is where an owner goes to find
+    out what a quiet lane is waiting for.
+    """
+
+    from .workspace_lane_parity import (
+        apply_parity_actions,
+        host_provisioned_source_refs,
+        plan_parity_actions,
+        resolve_host_sources,
+    )
+
+    if not enabled:
+        return {"source_refs": [], "host_sources": [], "staged": [],
+                "skipped": "host lane staging was not requested"}
+    resolved = (resolve_host_sources() if host_sources is None
+                else dict(host_sources))
+    actions = plan_parity_actions(
+        workspace.state_dir, actor_ref=actor_ref, host_sources=resolved,
+        mission=None,
+    )
+    performed = apply_parity_actions(actions, actor_ref=actor_ref)
+    return {
+        "source_refs": host_provisioned_source_refs(resolved),
+        "host_sources": sorted(resolved),
+        "staged": sorted(Path(row["target"]).name for row in performed),
+    }
+
+
+def install(workspace_manifest: str | Path, *, actor_ref: str,
+            stage_host_lanes: bool = True,
+            host_sources: Mapping[str, Path] | None = None) -> dict[str, Any]:
+    """Install idempotent, mission-neutral research foundations.
+
+    ``host_sources`` names where this machine keeps the host-level lane inputs.
+    It is a parameter rather than always a discovery so that what a setup did
+    is reproducible: a test pins it, and a caller installing on behalf of
+    another host can say so.  ``None`` means "look at this machine".
+
+    ``stage_host_lanes=False`` installs the foundation and nothing else.  A
+    hermetic rehearsal wants that: it runs real writers against made-up
+    missions in a temp directory, and a workspace that came up with the market
+    price and event calendar lanes would have that rehearsal make live calls
+    to a public data provider about tickers nobody is covering.
+    """
     if not isinstance(actor_ref, str) or not actor_ref.startswith(OWNER_ACTOR_PREFIX) \
             or not actor_ref.removeprefix(OWNER_ACTOR_PREFIX).strip():
         raise WorkspaceError("runtime setup actor_ref must identify the workspace owner")
@@ -319,6 +378,8 @@ def install(workspace_manifest: str | Path, *, actor_ref: str) -> dict[str, Any]
     files = {name: _atomic_seed(workspace.state_dir / name, value)
              for name, value in defaults.items()}
     connectors, unsupported = _connector_records(workspace, actor_ref)
+    host_lanes = _host_lane_inputs(workspace, actor_ref, host_sources,
+                                   stage_host_lanes)
     debate_hash = content_hash(DEBATE_POLICY)
     conviction_hash = content_hash(CONVICTION_POLICY)
     playbook_template = {
@@ -331,6 +392,22 @@ def install(workspace_manifest: str | Path, *, actor_ref: str) -> dict[str, Any]
         {"source_ref": source_ref, "role": "shared connected evidence source",
          "status": "connected"}
         for source_ref in sorted(by_source)
+    ]
+    # The lanes whose input is a fact about this machine rather than a paid
+    # account: public market data, public filing disclosure, the wiki and
+    # digest directories the host already writes, the crowd tools the owner
+    # already bound.  A first mission may grant these because the workspace
+    # now holds their approved contracts -- and only these, because
+    # ``host_provisioned_source_refs`` offers a source only when its host
+    # input was actually found.  Without this the first mission is published
+    # without the source, and a lane whose record and corpus are both present
+    # still reports "mission marks this source as not connected", which reads
+    # like a fault and is in fact an authority the mission never claimed.
+    default_source_plan += [
+        {"source_ref": source_ref, "role": "host-level evidence source",
+         "status": "connected"}
+        for source_ref in host_lanes["source_refs"]
+        if source_ref not in by_source
     ]
     playbook_binding = _publish_playbook(workspace, actor_ref)
     driver_pack = generic_driver_pack_template()
@@ -410,6 +487,9 @@ def install(workspace_manifest: str | Path, *, actor_ref: str) -> dict[str, Any]
         },
         "connector_governance_records": connectors,
         "unsupported_shared_capabilities": unsupported,
+        # What this machine supplied, recorded so the provenance of a lane that
+        # nobody in this workspace approved by hand is readable afterwards.
+        "host_lane_inputs": host_lanes,
     }
     foundation = {**foundation_body, "content_hash": content_hash(foundation_body)}
     files["research-foundation.json"] = _atomic_seed(
@@ -418,6 +498,7 @@ def install(workspace_manifest: str | Path, *, actor_ref: str) -> dict[str, Any]
             "setup_state": "awaiting_mission", "files": files,
             "connector_governance_records": connectors,
             "unsupported_shared_capabilities": unsupported,
+            "host_lane_inputs": host_lanes,
             "research_state_copied": False, "legacy_approvals_copied": False}
 
 

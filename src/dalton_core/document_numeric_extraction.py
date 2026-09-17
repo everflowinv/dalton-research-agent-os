@@ -130,7 +130,12 @@ def build_request(
         # P13c: the subject by name. The prompt said "this company" and passed
         # only a CIK ref, which tells a model nothing -- so it had no way to
         # notice it was reading a different company's earnings call.
-        "subject_label": subject_label(context.get("company_ticker")),
+        # W7: ``company_names`` is this mission's own table when the caller has
+        # one. Without it the label falls back to the packaged five, and a
+        # workspace covering other issuers would tell the model "MSFT" -- a
+        # ticker, which is exactly the thing P13c found tells a model nothing.
+        "subject_label": subject_label(context.get("company_ticker"),
+                                       context.get("company_names")),
         "document_ref": context["document_ref"],
         "slots": slots,
         "quotes": [

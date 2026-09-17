@@ -102,6 +102,27 @@ class DefinitelyNotSentFirstWorkAdapter(CountingFakeAdapter):
         return FakeAdapter.execute(self, work, route, selected)
 
 
+class ContractRejectOnceAdapter(CountingFakeAdapter):
+    """Reject the output contract on the first Work of a stage, then answer.
+
+    The live shape this stands for: the provider request happened and was
+    charged, and only the reply body was unusable -- the one paid failure whose
+    replay is honest, and the exact case the bounded automatic retry exists for.
+    """
+
+    def __init__(self, good_wire, bad_wire):
+        super().__init__(good_wire)
+        self.good_wire, self.bad_wire = good_wire, bad_wire
+        self.rejected_work_id = None
+
+    def execute(self, work, route, selected):
+        if self.rejected_work_id is None:
+            self.rejected_work_id = work.id
+        self.candidate_wire = (
+            self.bad_wire if work.id == self.rejected_work_id else self.good_wire)
+        return super().execute(work, route, selected)
+
+
 class RouteBoundCountingFakeAdapter(CountingFakeAdapter):
     """Keep the shared fixture adapter's invocation faithful to the selected route."""
 
@@ -163,7 +184,8 @@ class MissionDocumentResearchTests(unittest.TestCase):
         }
 
     def _executor(self, fixture, authority, *, draft_adapter=None,
-                  verifier_adapter=None, fault_injector=None):
+                  verifier_adapter=None, fault_injector=None,
+                  max_automatic_contract_retries_per_day=None):
         statement = "Managed services revenue is recognized over time."
         draft_adapter = draft_adapter or RouteBoundCountingFakeAdapter({
             "schema_version": "0.1", "status": "answered", "answer": statement,
@@ -197,11 +219,14 @@ class MissionDocumentResearchTests(unittest.TestCase):
             credential_slot_refs=(fixture.verifier_profile["credential_slot_ref"],),
             **common,
         )
+        cap = ({} if max_automatic_contract_retries_per_day is None else
+               {"max_automatic_contract_retries_per_day":
+                max_automatic_contract_retries_per_day})
         return MissionDocumentResearchExecutor(
             authority=authority, scheduler=scheduler, registry=authority.registry,
             draft_worker=draft, verifier_worker=verifier,
             staging=fixture.harness.staging, actor_ref="automation:test",
-            clock=fixture.harness.clock, fault_injector=fault_injector,
+            clock=fixture.harness.clock, fault_injector=fault_injector, **cap,
         ), draft_adapter, verifier_adapter
 
     @staticmethod
@@ -1055,7 +1080,17 @@ class MissionDocumentResearchTests(unittest.TestCase):
                 self.assertEqual(read_mission_document_research_observations(
                     fixture.store.connection)[0]["outcome"], "recovery_required")
 
-    def test_paid_contract_exhaustion_is_distinct_from_unknown_send_state(self):
+    def _run_until(self, executor, admission, predicate, *, limit=20):
+        current = None
+        for _ in range(limit):
+            current = executor.run_once(admission["id"])
+            if predicate(current):
+                return current
+        self.fail(f"fixture never reached the expected state: {current}")
+
+    def test_paid_contract_failure_buys_exactly_one_automatic_retry(self):
+        """One contract rejection is retried by the lane; the second asks a person."""
+
         fixture, authority, args, _registration, _launcher = self._fixture()
         self._enable_recovery(fixture, maximum=2)
         admission = authority.admit_from_plan(**args)
@@ -1068,19 +1103,204 @@ class MissionDocumentResearchTests(unittest.TestCase):
             if current["status"] == "failed":
                 break
         result = executor.run_once(admission["id"])
-        self.assertEqual(result["reason"], "paid_send_output_contract_failed")
+        self.assertEqual(result["status"], "admitted")
+        self.assertEqual(result["reason"], "automatic_bounded_contract_retry")
+        failed = executor._derive_work(admission, executor._blueprints(admission), 1)
+        rows = fixture.store.connection.execute(
+            "SELECT record_json FROM "
+            "mission_document_research_controlled_recovery_authorizations"
+        ).fetchall()
+        self.assertEqual(len(rows), 1)
+        authorization = json.loads(rows[0]["record_json"])
+        self.assertEqual(authorization["actor_ref"],
+                         "automation:document-research-contract-retry")
+        self.assertEqual(authorization["kind"], "automation_bounded_contract_retry")
+        self.assertEqual(authorization["max_fresh_work_orders"], 1)
+        self.assertEqual(authorization["max_cost_usd"],
+                         failed["budget"]["max_cost_usd"])
+        self.assertEqual(authorization["failed_work_order_ref"], failed["id"])
+        self.assertEqual(authorization["max_automatic_contract_retries_per_day"], 20)
+        links = fixture.store.connection.execute(
+            "SELECT record_json FROM mission_document_research_recovery_links"
+        ).fetchall()
+        self.assertEqual(len(links), 1)
+        link = json.loads(links[0]["record_json"])
+        self.assertEqual(link["failure_proof"]["classification"],
+                         "automation_bounded_contract_retry")
+        self.assertEqual(link["failure_proof"]["paid_contract_proof"]["classification"],
+                         "proved_paid_output_contract_failure")
+        self.assertGreater(
+            link["failure_proof"]["paid_contract_proof"]["actual_micros"], 0)
+        observation = next(
+            item for item in read_mission_document_research_observations(
+                fixture.store.connection)
+            if item["recovery"]["reason"] == "automatic_bounded_contract_retry")
+        self.assertIn("one bounded automatic retry", observation["meaning"])
+        # The retry's reply fails the contract as well: escalate, and never buy
+        # a second automatic reply.
+        escalated = self._run_until(
+            executor, admission,
+            lambda item: item.get("reason") == "contract_failed_after_automatic_retry")
+        self.assertEqual(escalated["status"], "stopped")
+        for _ in range(2):
+            repeated = executor.run_once(admission["id"])
+            self.assertEqual(repeated["reason"],
+                             "contract_failed_after_automatic_retry")
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM mission_document_research_recovery_links"
+        ).fetchone()[0], 1)
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM "
+            "mission_document_research_controlled_recovery_authorizations"
+        ).fetchone()[0], 1)
+        escalation = next(
+            item for item in read_mission_document_research_observations(
+                fixture.store.connection)
+            if item["recovery"]["reason"] == "contract_failed_after_automatic_retry")
+        self.assertIn("only an owner authorization", escalation["meaning"])
+        self.assertEqual(escalation["recovery"]["proof"]["classification"],
+                         "proved_paid_output_contract_failure")
+
+    def test_automatic_contract_retry_replays_its_own_authorization_after_a_crash(self):
+        """One failed Work carries one authorization, even across a crash.
+
+        Minting a second one on the next day would collide with the ledger's
+        uniqueness and wedge the admission for good, so the stored row and its
+        original instant are reused.
+        """
+
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        self._enable_recovery(fixture, maximum=2)
+        admission = authority.admit_from_plan(**args)
+        adapter = CountingFakeAdapter({"schema_version": "0.1", "status": "answered"})
+        executor, _draft, _verifier = self._executor(
+            fixture, authority, draft_adapter=adapter)
+        while True:
+            current = executor.run_once(admission["id"])
+            if current["status"] == "failed":
+                break
+        enqueue = executor.scheduler.enqueue
+
+        def crash(_work):
+            raise RuntimeError("crash between the authorization and the Work")
+
+        executor.scheduler.enqueue = crash
+        with self.assertRaisesRegex(RuntimeError, "crash"):
+            executor.run_once(admission["id"])
+        executor.scheduler.enqueue = enqueue
+        rows = fixture.store.connection.execute(
+            "SELECT record_json FROM "
+            "mission_document_research_controlled_recovery_authorizations"
+        ).fetchall()
+        self.assertEqual(len(rows), 1)
+        authorized_at = json.loads(rows[0]["record_json"])["authorized_at"]
         self.assertEqual(fixture.store.connection.execute(
             "SELECT count(*) FROM mission_document_research_recovery_links"
         ).fetchone()[0], 0)
-        observation = read_mission_document_research_observations(
-            fixture.store.connection)[0]
-        proof = observation["recovery"]["proof"]
-        self.assertEqual(proof["classification"],
-                         "proved_paid_output_contract_failure")
-        self.assertGreater(proof["actual_micros"], 0)
-        self.assertIsNotNone(proof["usage_entry_ref"])
+        fixture.harness.clock.value = NOW + timedelta(days=1)
+        result = executor.run_once(admission["id"])
+        self.assertEqual(result["reason"], "automatic_bounded_contract_retry")
+        rows = fixture.store.connection.execute(
+            "SELECT record_json FROM "
+            "mission_document_research_controlled_recovery_authorizations"
+        ).fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(json.loads(rows[0]["record_json"])["authorized_at"],
+                         authorized_at)
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM mission_document_research_recovery_links"
+        ).fetchone()[0], 1)
+
+    def test_automatic_contract_retry_that_answers_lets_the_admission_finish(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        self._enable_recovery(fixture, maximum=2)
+        admission = authority.admit_from_plan(**args)
+        statement = "Managed services revenue is recognized over time."
+        adapter = ContractRejectOnceAdapter({
+            "schema_version": "0.1", "status": "answered", "answer": statement,
+            "candidate": {"normalized_statement": statement,
+                          "metric_or_aspect": "managed services revenue recognition",
+                          "period": "current policy", "basis": "reported",
+                          "cited_match_indexes": [0]}, "missing": [],
+        }, {"schema_version": "0.1", "status": "answered"})
+        executor, _draft, _verifier = self._executor(
+            fixture, authority, draft_adapter=adapter)
+        final = self._run_until(
+            executor, admission,
+            lambda item: item.get("research_status") == "candidate_staged")
+        self.assertEqual(final["research_status"], "candidate_staged")
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM mission_document_research_recovery_links"
+        ).fetchone()[0], 1)
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM "
+            "mission_document_research_controlled_recovery_authorizations"
+        ).fetchone()[0], 1)
+        work, links = executor_module._effective_stage(
+            authority, executor.scheduler, admission, 1,
+            worker=executor.draft_worker)
+        self.assertEqual(len(links), 1)
+        self.assertEqual(executor.scheduler.formal_result(work["id"])["terminal_state"],
+                         "succeeded")
+
+    def test_automatic_contract_retry_stops_at_the_daily_cap_and_waits_for_utc_reset(self):
+        """The cap is a spending bound, so its answer is tomorrow, not a person."""
+
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        self._enable_recovery(fixture, maximum=2)
+        admission = authority.admit_from_plan(**args)
+        statement = "Managed services revenue is recognized over time."
+        draft = ContractRejectOnceAdapter({
+            "schema_version": "0.1", "status": "answered", "answer": statement,
+            "candidate": {"normalized_statement": statement,
+                          "metric_or_aspect": "managed services revenue recognition",
+                          "period": "current policy", "basis": "reported",
+                          "cited_match_indexes": [0]}, "missing": [],
+        }, {"schema_version": "0.1", "status": "answered"})
+        verifier = RouteBoundCountingFakeAdapter(
+            {"schema_version": "0.1", "verdict": "pass"})
+        executor, _draft, _verifier = self._executor(
+            fixture, authority, draft_adapter=draft, verifier_adapter=verifier,
+            max_automatic_contract_retries_per_day=1)
+        # The draft stage spends the day's single automatic retry; the verifier
+        # stage's own contract rejection then has to wait for the UTC reset.
+        capped = self._run_until(
+            executor, admission,
+            lambda item: item.get("reason")
+            == "automatic_contract_retry_day_cap_reached")
+        self.assertEqual(capped["status"], "waiting")
+        self.assertEqual(
+            capped["retry_at"],
+            (NOW.replace(hour=0, minute=0, second=0, microsecond=0)
+             + timedelta(days=1)).isoformat(timespec="microseconds"))
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM "
+            "mission_document_research_controlled_recovery_authorizations"
+        ).fetchone()[0], 1)
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM mission_document_research_recovery_links"
+        ).fetchone()[0], 1)
+        observation = next(
+            item for item in read_mission_document_research_observations(
+                fixture.store.connection)
+            if item["recovery"]["reason"]
+            == "automatic_contract_retry_day_cap_reached")
+        self.assertEqual(observation["recovery"]["day"], NOW.date().isoformat())
+        self.assertIn("after the UTC day resets", observation["meaning"])
+        # The same tick repeated is the same immutable row, and buys nothing.
+        self.assertEqual(executor.run_once(admission["id"])["reason"],
+                         "automatic_contract_retry_day_cap_reached")
+        # A new UTC day releases the cap and the retry is taken automatically.
+        fixture.harness.clock.value = NOW + timedelta(days=1)
+        released = executor.run_once(admission["id"])
+        self.assertEqual(released["reason"], "automatic_bounded_contract_retry")
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM mission_document_research_recovery_links"
+        ).fetchone()[0], 2)
 
     def test_owner_authorizes_one_exact_paid_contract_recovery_without_calling_model(self):
+        """The owner door still opens -- on the state the automatic retry escalated."""
+
         fixture, authority, args, _registration, _launcher = self._fixture()
         self._enable_recovery(fixture, maximum=2)
         admission = authority.admit_from_plan(**args)
@@ -1088,11 +1308,15 @@ class MissionDocumentResearchTests(unittest.TestCase):
         executor, _draft, _verifier = self._executor(
             fixture, authority, draft_adapter=adapter,
         )
-        while True:
-            current = executor.run_once(admission["id"])
-            if current["status"] == "failed":
-                break
-        work = executor._derive_work(admission, executor._blueprints(admission), 1)
+        self._run_until(
+            executor, admission,
+            lambda item: item.get("reason") == "contract_failed_after_automatic_retry")
+        work, automatic = executor_module._effective_stage(
+            authority, executor.scheduler, admission, 1,
+            worker=executor.draft_worker)
+        self.assertEqual(len(automatic), 1)
+        self.assertEqual(automatic[0]["failure_proof"]["classification"],
+                         "automation_bounded_contract_retry")
         formal = executor.scheduler.formal_result(work["id"])
         body = {
             "schema_version": "0.1",
@@ -1120,12 +1344,19 @@ class MissionDocumentResearchTests(unittest.TestCase):
         self.assertEqual(adapter.calls, calls)
         self.assertEqual(executor.authorize_paid_contract_recovery(
             admission["id"], authorization), result)
+        # The automation's row and link stay; the owner's are appended to them.
         self.assertEqual(fixture.store.connection.execute(
             "SELECT count(*) FROM mission_document_research_controlled_recovery_authorizations"
-        ).fetchone()[0], 1)
+        ).fetchone()[0], 2)
         self.assertEqual(fixture.store.connection.execute(
             "SELECT count(*) FROM mission_document_research_recovery_links"
-        ).fetchone()[0], 1)
+        ).fetchone()[0], 2)
+        _owned, owner_links = executor_module._effective_stage(
+            authority, executor.scheduler, admission, 1,
+            worker=executor.draft_worker)
+        self.assertEqual([item["failure_proof"]["classification"] for item in owner_links],
+                         ["automation_bounded_contract_retry",
+                          "owner_authorized_paid_contract_retry"])
         changed = dict(authorization)
         changed["max_cost_usd"] = authorization["max_cost_usd"] + 1
         changed["content_hash"] = content_hash(
@@ -1141,17 +1372,17 @@ class MissionDocumentResearchTests(unittest.TestCase):
         executor, _draft, _verifier = self._executor(
             fixture, authority, draft_adapter=adapter)
         # First failure is proved no-send.  The generic recovery is then sent,
-        # paid, and rejected by the output contract, matching live EPAM 6a2b.
-        for _ in range(20):
-            current = executor.run_once(admission["id"])
-            if current.get("reason") == "paid_send_output_contract_failed":
-                break
-        else:
-            self.fail("fixture did not reach paid rejection after generic recovery")
+        # paid, and rejected by the output contract, matching live EPAM 6a2b;
+        # the lane's own bounded retry follows and is rejected the same way.
+        self._run_until(
+            executor, admission,
+            lambda item: item.get("reason") == "contract_failed_after_automatic_retry")
         work, prior = executor_module._effective_stage(
             authority, executor.scheduler, admission, 1,
             worker=executor.draft_worker)
-        self.assertEqual(len(prior), 1)
+        self.assertEqual([item["failure_proof"]["classification"] for item in prior],
+                         ["proved_zero_cost_no_send",
+                          "automation_bounded_contract_retry"])
         formal = executor.scheduler.formal_result(work["id"])
         body = {
             "schema_version": "0.1",
@@ -1176,9 +1407,11 @@ class MissionDocumentResearchTests(unittest.TestCase):
         _work, links = executor_module._effective_stage(
             authority, executor.scheduler, admission, 1,
             worker=executor.draft_worker)
-        self.assertEqual(len(links), 2)
-        self.assertEqual(links[1]["prior_recovery_link_ref"], links[0]["id"])
-        self.assertEqual(links[1]["recovery_number"], 2)
+        self.assertEqual(len(links), 3)
+        self.assertEqual(links[2]["prior_recovery_link_ref"], links[1]["id"])
+        self.assertEqual(links[2]["recovery_number"], 3)
+        self.assertEqual(links[2]["failure_proof"]["classification"],
+                         "owner_authorized_paid_contract_retry")
 
     def test_sealed_historical_no_send_proof_admits_one_verifier_retry(self):
         fixture, authority, args, _registration, _launcher = self._fixture()
@@ -1423,6 +1656,50 @@ class MissionDocumentResearchTests(unittest.TestCase):
         ).fetchone()[0])
         self.assertEqual(link["failure_proof"]["classification"],
                          "atomic_day_budget_refusal")
+
+    def test_pre_change_contract_hold_is_picked_up_by_the_automatic_retry(self):
+        """The nineteen live holds: recorded before the retry existed, not spent."""
+
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        self._enable_recovery(fixture, maximum=2)
+        admission = authority.admit_from_plan(**args)
+        adapter = CountingFakeAdapter({"schema_version": "0.1", "status": "answered"})
+        executor, _draft, _verifier = self._executor(
+            fixture, authority, draft_adapter=adapter)
+        while True:
+            current = executor.run_once(admission["id"])
+            if current["status"] == "failed":
+                break
+        work = executor._derive_work(admission, executor._blueprints(admission), 1)
+        formal = executor.scheduler.formal_result(work["id"])
+        paid = executor._paid_contract_failure_proof(work, formal, 1)
+        self.assertIsNotNone(paid)
+        # Exactly what the old executor wrote and then waited on forever.
+        executor._recovery_observation(admission, work, formal, 1, {
+            "status": "stopped", "reason": "paid_send_output_contract_failed",
+            "eligible": False, "used_fresh_work_orders": 0,
+            "max_fresh_work_orders": 2, "retry_at": None,
+            "deadline": (NOW + timedelta(hours=1)).isoformat(
+                timespec="microseconds"),
+            "proof": paid,
+        })
+        lane = MissionDocumentResearchCoordinator(
+            store=fixture.store, launcher=None, clock=fixture.harness.clock,
+        )
+        self.assertEqual(lane._typed_recovery_state(admission, work["id"]), {
+            "action": "resume", "reason": "automatic_contract_retry_available",
+            "work_order_ref": work["id"],
+        })
+        # Re-entering spends the automatic retry rather than asking a person.
+        self.assertEqual(executor.run_once(admission["id"])["reason"],
+                         "automatic_bounded_contract_retry")
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM mission_document_research_recovery_links"
+        ).fetchone()[0], 1)
+        # The newer row supersedes the legacy verdict for the same Work.
+        self.assertEqual(
+            lane._typed_recovery_state(admission, work["id"])["reason"],
+            "controlled_contract_retry_admitted")
 
     def test_legacy_equal_deadline_day_budget_reopens_only_for_bounded_window(self):
         fixture, authority, args, _registration, _launcher = self._fixture()

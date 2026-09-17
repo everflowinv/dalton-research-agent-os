@@ -28,6 +28,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from dalton_core.mission_document_research_lane import (
+    CONTRACT_ESCALATION_NOTE,
     DEADLOCK_ESCAPE_AFTER,
     MAX_ESCAPES_PER_ADMISSION,
     OWNER_AUTHORIZATION_NOTE,
@@ -159,6 +160,50 @@ class DeadlockEscapeTests(unittest.TestCase):
                 self.assertIsNone(escaped, attempt)
         record = json.loads(self.lane.escapes_path.read_text(encoding="utf-8"))
         self.assertEqual(record["escapes"][admission["id"]], MAX_ESCAPES_PER_ADMISSION)
+
+    def test_the_escalated_contract_hold_says_the_retry_already_happened(self) -> None:
+        # The only contract state a person is asked about now.  If the ask did
+        # not say the lane already bought one reply, the owner would authorise
+        # the same purchase again without knowing.
+        admission = self.store.add(1)
+        self.lane._execution_state = lambda _admission: {
+            "action": "recovery_required",
+            "reason": "contract_failed_after_automatic_retry",
+        }
+        self._hold(admission, reason="contract_failed_after_automatic_retry",
+                   started=True)
+        result = self.lane.dispatch_once()
+        self.assertEqual(result["waiting_on_owner"], 1)
+        self.assertIn("contract_failed_after_automatic_retry", result["reason"])
+        self.assertIn("已经自动重试过一次", result["reason"])
+        self.assertIn("authorize_paid_contract_recovery", result["reason"])
+        self.assertEqual(result["reason"][-len(CONTRACT_ESCALATION_NOTE):],
+                         CONTRACT_ESCALATION_NOTE)
+        self.assertEqual(result["holds"][0]["owner_action"], CONTRACT_ESCALATION_NOTE)
+
+    def test_a_daily_cap_wait_is_never_put_in_front_of_a_person(self) -> None:
+        # The cap means "tomorrow", not "a person".  Showing it on the owner's
+        # list is exactly the pile the owner asked not to be shown.
+        admission = self.store.add(1)
+        retry_at = (self.clock.moment + timedelta(hours=2)).isoformat()
+        self.lane._execution_state = lambda _admission: {
+            "action": "waiting",
+            "reason": "automatic_contract_retry_day_cap_reached",
+            "retry_at": retry_at,
+        }
+        holds: dict = {}
+        self.lane._hold(holds, admission,
+                        reason="automatic_contract_retry_day_cap_reached",
+                        ticket_ref=None, disposition="recovery_wait",
+                        retry_at=retry_at)
+        self.store.started(admission["id"])
+        result = self.lane.dispatch_once()
+        self.assertEqual(result["status"], "waiting")
+        self.assertEqual(result["waiting_on_owner"], 0)
+        self.assertFalse(result["holds"][0]["needs_owner_authorization"])
+        self.assertIsNone(result["holds"][0]["owner_action"])
+        self.assertEqual(result["holds"][0]["reason"],
+                         "automatic_contract_retry_day_cap_reached")
 
     def test_a_lane_that_is_working_forgets_the_deadlock_clock(self) -> None:
         self.store.add(1)

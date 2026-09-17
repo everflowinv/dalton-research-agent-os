@@ -43,6 +43,45 @@ _HISTORICAL_BROKER_SOURCE_SHA256 = (
 _HISTORICAL_BROKER_SNAPSHOT_SHA256 = (
     "47c731019dc8016522abfe75481cccb1b96d8d324adef927c7657cab1b5b74de")
 
+# The two doors that may replace one *proved paid* output-contract rejection.
+# A contract reject is the one paid failure whose replay is honest -- the
+# request happened, the charge is settled, and only the reply was unusable --
+# so the lane is allowed exactly one bounded retry of its own before a person
+# is asked.  Both doors write the same shaped authorization row and the same
+# shaped recovery link; only the actor differs, so one audit reads both.
+OWNER_CONTRACT_RETRY_CLASSIFICATION = "owner_authorized_paid_contract_retry"
+AUTOMATIC_CONTRACT_RETRY_CLASSIFICATION = "automation_bounded_contract_retry"
+CONTRACT_RETRY_ACTORS: Mapping[str, str] = {
+    OWNER_CONTRACT_RETRY_CLASSIFICATION: "operator:owner-authorized-document-recovery",
+    AUTOMATIC_CONTRACT_RETRY_CLASSIFICATION: "automation:document-research-contract-retry",
+}
+AUTOMATIC_CONTRACT_RETRY_ACTOR = CONTRACT_RETRY_ACTORS[
+    AUTOMATIC_CONTRACT_RETRY_CLASSIFICATION]
+# The closed schema of the automation's own authorization row.  It carries the
+# same bound the owner grants (one fresh Work, the failed Work's own ceiling)
+# plus the day and the cap it was issued under, so the ledger alone answers
+# "why was this allowed".
+AUTOMATIC_CONTRACT_RETRY_FIELDS = frozenset({
+    "schema_version", "id", "kind", "actor_ref", "admission_ref", "admission_hash",
+    "stage_ordinal", "failed_work_order_ref", "failed_work_order_hash",
+    "formal_result_ref", "formal_result_hash", "max_fresh_work_orders",
+    "max_cost_usd", "authorized_at", "day", "max_automatic_contract_retries_per_day",
+    "paid_contract_proof_hash", "content_hash",
+})
+# How many automatic contract retries this install may issue in one UTC day,
+# across every admission.  A systemic contract bug -- a changed provider reply
+# shape, a broken prompt -- fails every admission at once; without this cap one
+# tick would pay for the whole lane twice.
+DEFAULT_MAX_AUTOMATIC_CONTRACT_RETRIES_PER_DAY = 20
+# Recovery reasons the rest of the system matches on by name.
+AUTOMATIC_CONTRACT_RETRY_REASON = "automatic_bounded_contract_retry"
+CONTRACT_RETRY_DAY_CAP_REASON = "automatic_contract_retry_day_cap_reached"
+CONTRACT_FAILED_AFTER_AUTOMATIC_RETRY = "contract_failed_after_automatic_retry"
+CONTRACT_FAILED_AFTER_OWNER_RETRY = "contract_failed_after_owner_authorized_retry"
+# Written only by releases before the bounded automatic retry existed.  Such a
+# hold has not spent its automatic retry, so the lane re-enters it once.
+LEGACY_PAID_CONTRACT_REASON = "paid_send_output_contract_failed"
+
 
 class MissionDocumentResearchExecutorError(RuntimeError):
     pass
@@ -927,7 +966,8 @@ def _verify_recovery_failure_proof(authority: Any, scheduler: Scheduler,
     }
     if any(proof.get(key) != value for key, value in common.items()):
         raise MissionDocumentResearchExecutorError("recovery formal proof drifted")
-    if proof.get("classification") == "owner_authorized_paid_contract_retry":
+    if proof.get("classification") in CONTRACT_RETRY_ACTORS:
+        classification = proof["classification"]
         row = authority.store.connection.execute(
             "SELECT record_json,content_hash FROM "
             "mission_document_research_controlled_recovery_authorizations "
@@ -944,12 +984,21 @@ def _verify_recovery_failure_proof(authority: Any, scheduler: Scheduler,
         body = dict(authorization)
         asserted = body.pop("content_hash", None)
         actual = _paid_contract_failure_proof(authority, failed, formal, index, worker)
+        if classification == AUTOMATIC_CONTRACT_RETRY_CLASSIFICATION and (
+                set(authorization) != AUTOMATIC_CONTRACT_RETRY_FIELDS
+                or authorization.get("kind") != classification
+                or authorization.get("day")
+                != str(authorization.get("authorized_at"))[:10]
+                or actual is None
+                or authorization.get("paid_contract_proof_hash")
+                != content_hash(actual)):
+            raise MissionDocumentResearchExecutorError(
+                "automatic contract retry authorization drifted")
         if (canonical_json(authorization) != row["record_json"]
                 or asserted != row["content_hash"] or asserted != content_hash(body)
                 or asserted != proof.get("authorization_hash")
                 or authorization.get("id") != proof.get("authorization_ref")
-                or authorization.get("actor_ref")
-                != "operator:owner-authorized-document-recovery"
+                or authorization.get("actor_ref") != CONTRACT_RETRY_ACTORS[classification]
                 or authorization.get("admission_ref") != admission["id"]
                 or authorization.get("admission_hash") != admission["content_hash"]
                 or authorization.get("stage_ordinal") != index + 1
@@ -1136,8 +1185,12 @@ def _read_recovery_link(
     started = _parse_time(expected["window_started_at"], "recovery window start")
     created = _parse_time(expected["created_at"], "recovery eligibility time")
     proof = wire.get("failure_proof") if isinstance(wire, Mapping) else None
+    # A link opened by a recorded authorization row -- the owner's, the sealed
+    # historical receipt's, or the lane's own bounded contract retry -- carries
+    # its bound in that row instead of in the generic unknown-recovery policy.
     owner_authorized = (isinstance(proof, Mapping) and proof.get("classification") in {
-        "owner_authorized_paid_contract_retry",
+        OWNER_CONTRACT_RETRY_CLASSIFICATION,
+        AUTOMATIC_CONTRACT_RETRY_CLASSIFICATION,
         "reconstructed_historical_provider_controls_no_send",
     })
     failed_formal_time = (
@@ -1281,7 +1334,9 @@ class MissionDocumentResearchExecutor:
                  registry: DocumentResearchRegistry, draft_worker: MissionDocumentDraftWorker,
                  verifier_worker: MissionDocumentVerifierWorker, staging: CandidateStagingStore,
                  actor_ref: str, clock: Callable[[], datetime] = _now,
-                 fault_injector: Callable[[str], None] | None = None):
+                 fault_injector: Callable[[str], None] | None = None,
+                 max_automatic_contract_retries_per_day: int =
+                 DEFAULT_MAX_AUTOMATIC_CONTRACT_RETRIES_PER_DAY):
         if not isinstance(authority, MissionDocumentResearchAuthority):
             raise TypeError("authority has the wrong type")
         if not isinstance(scheduler, Scheduler) or not isinstance(registry, DocumentResearchRegistry):
@@ -1300,6 +1355,12 @@ class MissionDocumentResearchExecutor:
         self.registry, self.draft_worker, self.verifier_worker = registry, draft_worker, verifier_worker
         self.staging, self.actor_ref, self.clock = staging, actor_ref, clock
         self.fault_injector = fault_injector
+        if (isinstance(max_automatic_contract_retries_per_day, bool)
+                or not isinstance(max_automatic_contract_retries_per_day, int)
+                or max_automatic_contract_retries_per_day < 0):
+            raise TypeError(
+                "max_automatic_contract_retries_per_day must be a non-negative integer")
+        self.max_automatic_contract_retries_per_day = max_automatic_contract_retries_per_day
         self._authorization_flag = authorization_flag(
             self.connection, "dalton_mission_document_research_executor_authorized")
         self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
@@ -1748,8 +1809,11 @@ class MissionDocumentResearchExecutor:
     def _paid_contract_failure_proof(self, work, formal, index):
         """Prove a terminal contract rejection was sent and actually settled.
 
-        This proof is diagnostic only.  It never makes the Work eligible for a
-        fresh recovery; the provider request already happened.
+        The request happened and the charge is settled, so this proof never
+        makes the Work eligible for *generic* recovery.  What it does authorise
+        is one bounded replacement -- by the owner, or once by the lane itself
+        -- because the one thing that failed was the reply, and the replay of a
+        request that is already paid for is honest.
         """
 
         try:
@@ -1933,9 +1997,26 @@ class MissionDocumentResearchExecutor:
         if paid is None:
             raise MissionDocumentResearchExecutorError(
                 "paid contract failure proof is unavailable")
+        return self._append_contract_retry(
+            admission, work, formal, index, links, authorization,
+            classification=OWNER_CONTRACT_RETRY_CLASSIFICATION, paid=paid)
+
+    def _append_contract_retry(self, admission, work, formal, index, links,
+                               authorization, *, classification, paid):
+        """Append exactly one replacement Work for a proved paid contract reject.
+
+        Both doors land here -- the owner's hand and the lane's own bounded
+        automatic retry -- so the authorization row, the recovery link, the
+        Scheduler enqueue and the reconvergence check are the same records
+        whoever opened the door, and an audit does not have to learn two
+        shapes.  The caller has already proved the charge and built the closed
+        authorization body; this appends it and the one Work it grants.
+        """
+
+        worker = self.draft_worker if index == 1 else self.verifier_worker
         envelope = ResultEnvelope.from_dict(formal["result_envelope"]).to_dict()
         proof = {
-            "classification": "owner_authorized_paid_contract_retry",
+            "classification": classification,
             "failed_at": formal["created_at"],
             "formal_result_ref": _formal_ref(formal),
             "formal_result_hash": _formal_hash(formal),
@@ -2017,6 +2098,103 @@ class MissionDocumentResearchExecutor:
         return {"status": "admitted", "work_order_ref": recovered["id"],
                 "authorization_ref": authorization["id"], "model_calls": 0}
 
+    def _automatic_contract_retries_today(self, day: str) -> int:
+        """Count this install's automatic contract retries issued on one UTC day.
+
+        Counted from the authorization ledger rather than a side file: the row
+        that grants the retry is the row that is counted, so the cap cannot
+        drift away from what was actually spent.
+        """
+
+        rows = self.connection.execute(
+            "SELECT record_json FROM "
+            "mission_document_research_controlled_recovery_authorizations "
+            "WHERE substr(created_at,1,10)=?", (day,),
+        ).fetchall()
+        total = 0
+        for row in rows:
+            try:
+                record = json.loads(row["record_json"])
+            except (TypeError, ValueError, RecursionError):
+                continue
+            if (isinstance(record, Mapping)
+                    and record.get("kind") == AUTOMATIC_CONTRACT_RETRY_CLASSIFICATION):
+                total += 1
+        return total
+
+    def _existing_automatic_contract_authorization(self, work_ref):
+        """Replay the authorization already written for this exact failed Work.
+
+        The ledger holds one authorization per failed Work.  Minting a second
+        one after a crash between the authorization write and the link write
+        would collide on that uniqueness and wedge the admission forever, so
+        the stored row -- with its original instant -- is reused.
+        """
+
+        row = self.connection.execute(
+            "SELECT record_json,content_hash FROM "
+            "mission_document_research_controlled_recovery_authorizations "
+            "WHERE failed_work_order_ref=?", (work_ref,),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            record = json.loads(row["record_json"])
+        except (TypeError, ValueError, RecursionError) as exc:
+            raise MissionDocumentResearchExecutorError(
+                "controlled recovery authorization is invalid") from exc
+        if (not isinstance(record, Mapping)
+                or record.get("kind") != AUTOMATIC_CONTRACT_RETRY_CLASSIFICATION):
+            return None
+        if (canonical_json(record) != row["record_json"]
+                or record.get("content_hash") != row["content_hash"]):
+            raise MissionDocumentResearchExecutorError(
+                "automatic contract retry authorization drifted")
+        return dict(record)
+
+    def _automatic_contract_retry_authorization(self, admission, work, formal, index,
+                                                paid, *, day, authorized_at):
+        """Write down what automation allowed itself, in the owner's own shape."""
+
+        body = {
+            "schema_version": SCHEMA_VERSION,
+            "kind": AUTOMATIC_CONTRACT_RETRY_CLASSIFICATION,
+            "actor_ref": AUTOMATIC_CONTRACT_RETRY_ACTOR,
+            "admission_ref": admission["id"], "admission_hash": admission["content_hash"],
+            "stage_ordinal": index + 1, "failed_work_order_ref": work["id"],
+            "failed_work_order_hash": content_hash(work),
+            "formal_result_ref": _formal_ref(formal),
+            "formal_result_hash": _formal_hash(formal),
+            # Exactly the bound the owner door grants by hand.
+            "max_fresh_work_orders": 1,
+            "max_cost_usd": work["budget"]["max_cost_usd"],
+            "authorized_at": authorized_at, "day": day,
+            "max_automatic_contract_retries_per_day":
+                self.max_automatic_contract_retries_per_day,
+            "paid_contract_proof_hash": content_hash(paid),
+        }
+        body["id"] = _ref("mission-document-automatic-contract-retry-authorization", body)
+        body["content_hash"] = content_hash(body)
+        if set(body) != AUTOMATIC_CONTRACT_RETRY_FIELDS:
+            raise MissionDocumentResearchExecutorError(
+                "automatic contract retry authorization schema is invalid")
+        return body
+
+    def _contract_retry_disposition(self, links):
+        """Decide which contract door, if any, this stage still has open."""
+
+        classifications = {
+            link.get("failure_proof", {}).get("classification") for link in links
+        }
+        if OWNER_CONTRACT_RETRY_CLASSIFICATION in classifications:
+            # Both doors are spent.  Nothing here may buy a third reply.
+            return CONTRACT_FAILED_AFTER_OWNER_RETRY
+        if AUTOMATIC_CONTRACT_RETRY_CLASSIFICATION in classifications:
+            # The bounded automatic retry was already bought and also failed
+            # the contract.  This is the only state the owner is asked about.
+            return CONTRACT_FAILED_AFTER_AUTOMATIC_RETRY
+        return None
+
     def _start(self, admission, root):
         start_id = _ref("mission-document-research-start", self._run_id(admission))
         body = {"schema_version": SCHEMA_VERSION, "id": start_id,
@@ -2096,12 +2274,18 @@ class MissionDocumentResearchExecutor:
         draft = work["metadata"].get("draft_proof")
         status = recovery["status"]
         reason = recovery["reason"]
+        identity = {
+            "admission_ref": admission["id"], "work_order_ref": work["id"],
+            "reason": reason, "status": status,
+        }
+        # A day-scoped wait is a different immutable fact on each UTC day: the
+        # same Work may hit the daily cap again tomorrow with a later retry
+        # instant, and rewriting yesterday's row would be a drift error.
+        if recovery.get("day") is not None:
+            identity["day"] = recovery["day"]
         body = {
             "schema_version": SCHEMA_VERSION,
-            "id": _ref("mission-document-research-recovery-observation", {
-                "admission_ref": admission["id"], "work_order_ref": work["id"],
-                "reason": reason, "status": status,
-            }),
+            "id": _ref("mission-document-research-recovery-observation", identity),
             "admission_ref": admission["id"], "admission_hash": admission["content_hash"],
             "mission_version_ref": admission["mission_version_ref"],
             "company_ref": admission["company_ref"], "plan_ref": admission["plan_ref"],
@@ -2129,9 +2313,25 @@ class MissionDocumentResearchExecutor:
             "recovery": dict(recovery),
             "tried_query_terms": list(admission["request"]["query_terms"]),
             "meaning": (
+                "The terminal provider request and actual charge are proved and only the "
+                "reply failed the contract, so the lane issued its one bounded automatic "
+                "retry: one fresh WorkOrder at the failed WorkOrder's own cost ceiling."
+                if reason == AUTOMATIC_CONTRACT_RETRY_REASON else
+                "The terminal provider request and actual charge are proved and only the "
+                "reply failed the contract, but this install has already issued its "
+                "daily maximum of automatic contract retries. The retry is taken "
+                "automatically after the UTC day resets; no person is needed."
+                if reason == CONTRACT_RETRY_DAY_CAP_REASON else
+                "The bounded automatic retry has already been issued for this stage and "
+                "its reply failed the contract as well. Automation stops here; only an "
+                "owner authorization may buy one further reply."
+                if reason == CONTRACT_FAILED_AFTER_AUTOMATIC_RETRY else
+                "The automatic retry and the owner-authorized retry both failed the "
+                "output contract. No further recovery is allowed for this stage."
+                if reason == CONTRACT_FAILED_AFTER_OWNER_RETRY else
                 "The terminal provider request and actual charge are proved, but its "
                 "output failed the contract. No fresh automatic recovery is allowed."
-                if reason == "paid_send_output_contract_failed" else
+                if reason == LEGACY_PAID_CONTRACT_REASON else
                 "The model stage failed without authority for a safe replay; its send and "
                 "charging state remains frozen for review."
                 if reason == "send_state_unproved" else
@@ -2142,6 +2342,76 @@ class MissionDocumentResearchExecutor:
             "created_at": formal["created_at"],
         }
         return self._write_observation(body)
+
+    def _recover_paid_contract_failure(self, admission, work, formal, index, links,
+                                       paid, *, now, deadline):
+        """Retry a proved paid contract rejection once, then ask a person.
+
+        The owner's instruction, after nineteen admissions piled up waiting for
+        a signature that says the same thing every time: a reply that failed
+        the output contract is the one paid failure worth replaying without
+        asking.  The request is proved, the charge is settled, and only the
+        reply was unusable -- so the lane buys exactly one fresh WorkOrder at
+        the same ceiling, under its own recorded authorization row, and
+        escalates to the owner only when that second reply fails too.
+        """
+
+        stage = work["metadata"]["stage"]
+        authorization = self._existing_automatic_contract_authorization(work["id"])
+        spent = self._contract_retry_disposition(links)
+        if spent is None and authorization is None and self.connection.execute(
+            "SELECT 1 FROM mission_document_research_controlled_recovery_authorizations "
+            "WHERE failed_work_order_ref=? LIMIT 1", (work["id"],),
+        ).fetchone() is not None:
+            # Another controlled authorization already names this exact Work --
+            # the owner's, or a sealed historical receipt whose link write did
+            # not land.  One Work carries one authorization; automation never
+            # adds a second and never overwrites a person's.
+            spent = CONTRACT_FAILED_AFTER_OWNER_RETRY
+        if spent is not None:
+            recovery = {
+                "status": "stopped", "reason": spent, "eligible": False,
+                "used_fresh_work_orders": len(links), "max_fresh_work_orders": 1,
+                "retry_at": None, "deadline": _time(deadline), "proof": paid,
+            }
+            self._recovery_observation(admission, work, formal, index, recovery)
+            return {"status": "stopped", "reason": spent,
+                    "work_order_ref": work["id"], "stage": stage}
+        day = _time(now)[:10]
+        if authorization is None and self._automatic_contract_retries_today(day) >= (
+                self.max_automatic_contract_retries_per_day):
+            # The cap is a spending bound, not a doubt about the failure, so the
+            # answer is "tomorrow" rather than "a person".  The retry instant is
+            # the next UTC reset, which is exactly when the count starts again.
+            resets_at = datetime(
+                now.year, now.month, now.day, tzinfo=timezone.utc) + timedelta(days=1)
+            recovery = {
+                "status": "waiting", "reason": CONTRACT_RETRY_DAY_CAP_REASON,
+                "eligible": False, "used_fresh_work_orders": len(links),
+                "max_fresh_work_orders": 1, "retry_at": _time(resets_at),
+                "deadline": _time(deadline), "day": day, "proof": paid,
+            }
+            self._recovery_observation(admission, work, formal, index, recovery)
+            return {"status": "waiting", "reason": CONTRACT_RETRY_DAY_CAP_REASON,
+                    "retry_at": _time(resets_at), "work_order_ref": work["id"],
+                    "stage": stage}
+        if authorization is None:
+            authorization = self._automatic_contract_retry_authorization(
+                admission, work, formal, index, paid, day=day,
+                authorized_at=_time(now))
+        recovery = {
+            "status": "admitted", "reason": AUTOMATIC_CONTRACT_RETRY_REASON,
+            "eligible": False, "used_fresh_work_orders": len(links),
+            "max_fresh_work_orders": 1, "retry_at": None,
+            "deadline": _time(deadline), "proof": paid,
+        }
+        self._recovery_observation(admission, work, formal, index, recovery)
+        issued = self._append_contract_retry(
+            admission, work, formal, index, links, authorization,
+            classification=AUTOMATIC_CONTRACT_RETRY_CLASSIFICATION, paid=paid)
+        return {"status": "admitted", "reason": AUTOMATIC_CONTRACT_RETRY_REASON,
+                "work_order_ref": issued["work_order_ref"],
+                "authorization_ref": issued["authorization_ref"], "stage": stage}
 
     def _recover_failed_model(self, admission, work, formal, index):
         policy = _recovery_policy(admission, index)
@@ -2164,17 +2434,17 @@ class MissionDocumentResearchExecutor:
             paid_contract_proof = self._paid_contract_failure_proof(
                 work, formal, index,
             )
+            if paid_contract_proof is not None:
+                return self._recover_paid_contract_failure(
+                    admission, work, formal, index, links,
+                    paid_contract_proof, now=now, deadline=deadline)
             recovery = {
-                "status": "stopped",
-                "reason": (
-                    "paid_send_output_contract_failed"
-                    if paid_contract_proof is not None else "send_state_unproved"
-                ),
+                "status": "stopped", "reason": "send_state_unproved",
                 "eligible": False,
                 "used_fresh_work_orders": len(links),
                 "max_fresh_work_orders": policy["max_fresh_work_orders"],
                 "retry_at": None, "deadline": _time(deadline),
-                "proof": paid_contract_proof,
+                "proof": None,
             }
         else:
             deadline = _day_budget_recovery_deadline(
@@ -2580,7 +2850,16 @@ class MissionDocumentResearchExecutor:
         raise MissionDocumentResearchExecutorError("directed-document run has invalid shape")
 
 
-__all__ = ["AUTHORITY_KIND", "MissionDocumentResearchExecutor",
+__all__ = ["AUTHORITY_KIND",
+           "AUTOMATIC_CONTRACT_RETRY_ACTOR",
+           "AUTOMATIC_CONTRACT_RETRY_CLASSIFICATION",
+           "AUTOMATIC_CONTRACT_RETRY_REASON",
+           "CONTRACT_FAILED_AFTER_AUTOMATIC_RETRY",
+           "CONTRACT_FAILED_AFTER_OWNER_RETRY",
+           "CONTRACT_RETRY_DAY_CAP_REASON",
+           "DEFAULT_MAX_AUTOMATIC_CONTRACT_RETRIES_PER_DAY",
+           "LEGACY_PAID_CONTRACT_REASON",
+           "MissionDocumentResearchExecutor",
            "MissionDocumentResearchExecutorError",
            "exact_mission_document_model_execution_authority",
            "effective_mission_document_work_orders",

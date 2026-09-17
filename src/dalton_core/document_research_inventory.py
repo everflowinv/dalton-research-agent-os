@@ -29,6 +29,10 @@ from .store import content_hash
 
 CONFIG_FILENAME = "document-research-config.json"
 CONFIG_SCHEMA = "document-research-config-0.1"
+# Optional, because every installed copy of this file predates the knob and an
+# absent key must keep meaning "the built-in default", never "invalid config".
+# The default itself lives with the policy it bounds, in the executor.
+OPTIONAL_CONFIG_FIELDS = frozenset({"max_automatic_contract_retries_per_day"})
 DOCUMENT_RESEARCH_SOURCES = frozenset({"source:alphaengine", "source:public-web", "source:web-search",
                       "source:sec-edgar", "source:sales-notes", "source:company-wiki",
                       "source:prior-research"})
@@ -182,11 +186,16 @@ def financial_note_targets_for_registration(
 
 
 def validate_inventory_config(value: Any) -> dict[str, Any]:
-    if not isinstance(value, Mapping) or set(value) != {
+    if not isinstance(value, Mapping) or set(value) - OPTIONAL_CONFIG_FIELDS != {
         "schema_version", "purpose", "spool_dir", "enabled_sources", "policy",
         "source_reading_limits", "inventory_preview_chars",
     } or value.get("schema_version") != CONFIG_SCHEMA:
         raise ValueError("document research configuration has an invalid shape")
+    retries = value.get("max_automatic_contract_retries_per_day")
+    if retries is not None and (
+            isinstance(retries, bool) or not isinstance(retries, int) or retries < 0):
+        raise ValueError(
+            "max_automatic_contract_retries_per_day must be a non-negative integer")
     policy = validate_document_research_policy(value["policy"])
     preview = value["inventory_preview_chars"]
     if (isinstance(preview, bool) or not isinstance(preview, int)
@@ -302,6 +311,36 @@ def load_document_inventory(*, core: Any, mission: Mapping[str, Any],
     result = load_document_inventory_authority(
         core=core, mission=mission, state_dir=state_dir, config_path=config_path)
     return {key: value for key, value in result.items() if key != "registry"}
+
+
+def automatic_contract_retry_cap(config_path: Path | None) -> int:
+    """How many automatic contract retries this install may issue in a UTC day.
+
+    Read from the installed document research config, which is the file that
+    already states what this lane may spend.  A missing file or a missing key
+    means the built-in default: the knob exists to lower a systemic blast
+    radius, not to be a precondition for running.
+    """
+
+    from .mission_document_research_executor import (
+        DEFAULT_MAX_AUTOMATIC_CONTRACT_RETRIES_PER_DAY,
+    )
+
+    if config_path is None:
+        return DEFAULT_MAX_AUTOMATIC_CONTRACT_RETRIES_PER_DAY
+    path = Path(config_path)
+    if not path.is_file() or path.is_symlink():
+        return DEFAULT_MAX_AUTOMATIC_CONTRACT_RETRIES_PER_DAY
+    try:
+        config = validate_inventory_config(
+            json.loads(path.read_text(encoding="utf-8")))
+    except (OSError, ValueError) as exc:
+        raise ValueError(
+            "document research configuration cannot bound automatic retries"
+        ) from exc
+    value = config.get("max_automatic_contract_retries_per_day")
+    return (DEFAULT_MAX_AUTOMATIC_CONTRACT_RETRIES_PER_DAY if value is None
+            else int(value))
 
 
 def load_document_inventory_authority(*, core: Any, mission: Mapping[str, Any],

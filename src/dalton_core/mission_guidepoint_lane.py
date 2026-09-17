@@ -819,7 +819,20 @@ LAUNCHER_KWARG = "guidepoint_search_launcher"
 # appeared in the governance directory.
 GUIDEPOINT_LANE_GOVERNANCE = "guidepoint-search-library-v1.json"
 GUIDEPOINT_LANE_PLAN = "us-it-services-guidepoint-v1.json"
+# W7: the plan an environment generated from its own mission universe, looked
+# for first. A workspace covering another industry has no business running the
+# packaged US IT services questions, and the industry questions in that file
+# are four judgements a person made about that industry, not a default.
+MISSION_GUIDEPOINT_PLAN = "mission-guidepoint-v1.json"
 GUIDEPOINT_MCP_ENDPOINT = "http://127.0.0.1:8943/mcp"
+
+
+def resolve_guidepoint_plan(state: Any) -> Any:
+    """The Guidepoint plan this state directory runs on, mission-generated first."""
+
+    mission_plan = state / "discovery-plans" / MISSION_GUIDEPOINT_PLAN
+    return (mission_plan if mission_plan.is_file()
+            else state / "discovery-plans" / GUIDEPOINT_LANE_PLAN)
 
 
 def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
@@ -902,7 +915,7 @@ def argv_fragment(context: Any) -> list[str]:
     """
 
     governance = context.state / "connector-governance" / GUIDEPOINT_LANE_GOVERNANCE
-    plan = context.state / "discovery-plans" / GUIDEPOINT_LANE_PLAN
+    plan = resolve_guidepoint_plan(context.state)
     if not governance.is_file() or not plan.is_file():
         return []
     return [
@@ -932,6 +945,7 @@ LANE = register_lane(LaneSpec(
 __all__ = [
     "GUIDEPOINT_LANE_GOVERNANCE",
     "GUIDEPOINT_LANE_PLAN",
+    "MISSION_GUIDEPOINT_PLAN",
     "GUIDEPOINT_MCP_ENDPOINT",
     "GUIDEPOINT_SOURCE_REF",
     "LANE",
@@ -944,6 +958,7 @@ __all__ = [
     "SEARCH_WAIT_SECONDS",
     "add_arguments",
     "argv_fragment",
+    "resolve_guidepoint_plan",
     "build_guidepoint_discovery_plan",
     "build_guidepoint_parameters",
     "build_launcher",

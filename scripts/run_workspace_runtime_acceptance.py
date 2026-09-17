@@ -75,7 +75,13 @@ def _create(host: Path, release: Path, slug: str, port: int) -> Any:
         host, slug, port, "release:sha256:" + "a" * 64, release)
     bootstrap(workspace.state_dir, workspace.config_path,
               workspace_manifest=workspace.manifest_path)
-    install_runtime(workspace.manifest_path, actor_ref="human:acceptance-owner")
+    # Hermetic on purpose: this rehearsal starts real writers against invented
+    # missions in a temp directory, so it must not pick up the host's lane
+    # inputs. With them the writer would come up with the market-price and
+    # event-calendar lanes and start calling a public data provider about
+    # tickers nobody is covering.
+    install_runtime(workspace.manifest_path, actor_ref="human:acceptance-owner",
+                    stage_host_lanes=False)
     config = json.loads(workspace.config_path.read_text())
     config["plugins"] = []
     config["backup"]["enabled"] = False
