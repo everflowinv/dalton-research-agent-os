@@ -47,7 +47,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from dalton_core.model_fallback_chain import (  # noqa: E402
-    TIER_BRAIN, TIER_CHEAP, TIER_VERIFIER,
+    TIER_BRAIN, TIER_CHEAP, TIER_DELIVERABLE, TIER_VERIFIER,
     profiles_serving_transport, purpose_transports, tier_for,
 )
 from dalton_core.model_profile_bounds import MEASURED_INPUT_BOUNDS  # noqa: E402
@@ -55,7 +55,12 @@ from dalton_core.model_router import ModelRouter  # noqa: E402
 
 DEFAULT_STATE_DIR = "~/Library/Application Support/Dalton/state/dalton-core"
 DEFAULT_ACTOR = "human:lumos"
-TIERS = (TIER_BRAIN, TIER_CHEAP, TIER_VERIFIER)
+TIERS = (TIER_BRAIN, TIER_CHEAP, TIER_VERIFIER, TIER_DELIVERABLE)
+
+#: The tiers whose calls are long-form reasoning prompts, and which a link with
+#: a small measured transport ceiling therefore cannot serve. 交付物起草 is in
+#: here for the same reason 高阶推理 is: a dossier prompt is not chunked.
+LONG_PROMPT_TIERS = (TIER_BRAIN, TIER_DELIVERABLE)
 
 #: The endpoint whose rate limiting started this. Removed from every chain by
 #: default; ``--keep-astra`` keeps it as the last resort instead.
@@ -71,6 +76,14 @@ BRAIN_MIN_INPUT_BOUND = 100_000
 #: Stages whose output is a strict JSON contract rather than prose. A chain of
 #: flash models will produce an argument that reads well and a schema that does
 #: not validate, so these are pinned to the two endpoints that hold a contract.
+#:
+#: 2026-09-17: these three now *are* the 交付物起草 tier, so the contract is
+#: carried by that tier's chain rather than by three per-stage pins, and this
+#: script no longer publishes pins for them -- republishing a pin the tier save
+#: has just dropped is how the two would come to disagree. Splitting the tier
+#: out on a live host is scripts/split_deliverable_tier.py; repairing the
+#: tier's chain afterwards is the ordinary tier pass above. A purpose named
+#: with ``--structured-purpose`` that is *not* in the tier is still pinned.
 STRUCTURED_PURPOSES: tuple[str, ...] = ("debate_map", "dossier", "model_spec")
 STRUCTURED_CHAIN: tuple[str, ...] = (
     "profile:claude-opus-5", "profile:deepseek-v4-flash",
@@ -188,10 +201,11 @@ def repair_chain(
             notes.append(f"移除 {ASTRA}：自 2026-09-14T19:58 起 100% HTTP 429")
             continue
         bound = MEASURED_INPUT_BOUNDS.get(resolved)
-        if tier == TIER_BRAIN and bound is not None and bound < BRAIN_MIN_INPUT_BOUND:
+        if tier in LONG_PROMPT_TIERS and bound is not None \
+                and bound < BRAIN_MIN_INPUT_BOUND:
             notes.append(
-                f"从 brain 链移除 {resolved}：实测输入上限 {bound}，"
-                f"低于高阶推理所需的 {BRAIN_MIN_INPUT_BOUND}")
+                f"从 {tier} 链移除 {resolved}：实测输入上限 {bound}，"
+                f"低于长提示词档位所需的 {BRAIN_MIN_INPUT_BOUND}")
             continue
         if resolved in cooled:
             notes.append(f"移除 {resolved}：当前处于供应商冷却中")
@@ -320,6 +334,18 @@ def plan_repair(
         elif pin["notes"]:
             notes_only.extend(f"{purpose}：{note}" for note in pin["notes"])
     for purpose in structured_purposes:
+        if tier_for(purpose) == TIER_DELIVERABLE:
+            unsplit = [
+                policy["id"] for policy in policies
+                if not (policy.get("fallback_chains") or {}).get("tiers", {}).get(
+                    TIER_DELIVERABLE)
+            ]
+            if unsplit:
+                notes_only.append(
+                    f"{purpose}：属于交付物起草档位，但这些策略还没有这一档的链"
+                    f"（{', '.join(sorted(set(unsplit)))}）；"
+                    "先跑 scripts/split_deliverable_tier.py 把它拆出来。")
+            continue
         wanted = [profile_id for profile_id in structured_chain
                   if resolve_profile_id(profile_id, profiles, now=now) == profile_id]
         if len(wanted) != len(list(structured_chain)):
@@ -515,7 +541,8 @@ def apply_offline(state_dir: Path, publish: Sequence[Mapping[str, Any]],
 def render(plan: Mapping[str, Any]) -> str:
     lines: list[str] = []
     if not plan["diffs"] and not plan["publish"]:
-        lines.append("没有需要修复的链：所有策略的 brain/cheap/verifier 链都指向当前有效的模型。")
+        lines.append("没有需要修复的链：所有策略的 "
+                     + "/".join(TIERS) + " 链都指向当前有效的模型。")
     for diff in plan["diffs"]:
         lines.append(f"[{diff['policy_id']}] {diff['tier']}")
         lines.append(f"  现在： {' → '.join(diff['before'])}")

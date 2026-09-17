@@ -519,6 +519,44 @@ def _fallback_chains_wire(value: Any) -> dict[str, Any]:
     return {"tiers": tiers}
 
 
+#: Which tier's chain a policy version that never heard of this tier should
+#: serve.  A tier is added to the code long before every pinned policy version
+#: carries a chain for it, and those versions are immutable -- so without this
+#: map, the day ``deliverable`` was split out of ``brain`` every policy already
+#: on disk would have answered "no chain for this tier" for 公司档案, 争议图 and
+#: 模型规格, and three live stages would have dropped from a declared chain to
+#: single-shot filtering.  Written down rather than left to a default because
+#: the requirement is exact: an old policy must resolve to *byte-identically*
+#: what it resolved to before the split, which is the brain chain it carries.
+#: A policy that does declare the tier wins -- this is the absence case only.
+#:
+#: Tier names are tokens to this module by design (a chain is policy, not an
+#: enumeration in code), so the fallback lives here beside the only two readers
+#: of ``fallback_chains.tiers`` rather than in model_fallback_chain, which
+#: imports this module and not the other way round.
+TIER_CHAIN_FALLBACKS: Mapping[str, str] = {"deliverable": "brain"}
+
+
+def declared_tier_chain(
+    policy: Mapping[str, Any], tier: str | None
+) -> tuple[str, ...] | None:
+    """The chain this policy version declares for one tier, or ``None``.
+
+    The single place the tier fallback above is applied, so the router's
+    candidate filter, the chain walk and the model page cannot disagree about
+    whether a policy "has" a tier.
+    """
+
+    if tier is None:
+        return None
+    declared = (policy.get("fallback_chains") or {}).get("tiers") or {}
+    chain = declared.get(tier)
+    if not chain:
+        inherited = TIER_CHAIN_FALLBACKS.get(tier)
+        chain = declared.get(inherited) if inherited is not None else None
+    return tuple(chain) if chain else None
+
+
 PURPOSE_OVERRIDE_MODES: frozenset[str] = frozenset({"tier", "explicit"})
 _PURPOSE_RE = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
 
@@ -600,10 +638,10 @@ def policy_chain(
     entry = overrides.get(purpose) if isinstance(purpose, str) else None
     if isinstance(entry, Mapping) and entry.get("mode") == "explicit":
         return {"mode": "explicit", "tier": tier, "chain": tuple(entry["chain"])}
-    declared = (policy.get("fallback_chains") or {}).get("tiers", {})
-    if tier is None or tier not in declared:
+    chain = declared_tier_chain(policy, tier)
+    if chain is None:
         return None
-    return {"mode": "tier", "tier": tier, "chain": tuple(declared[tier])}
+    return {"mode": "tier", "tier": tier, "chain": chain}
 
 
 def live_links(
@@ -646,8 +684,7 @@ def resolve_chain(
         return None
     if resolved["mode"] != "explicit" or live_links(resolved["chain"], profiles):
         return resolved
-    declared = (policy.get("fallback_chains") or {}).get("tiers", {})
-    fallback = tuple(declared.get(tier) or ()) if tier is not None else ()
+    fallback = declared_tier_chain(policy, tier) or ()
     if not fallback or not live_links(fallback, profiles):
         return resolved
     return {

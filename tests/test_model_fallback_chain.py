@@ -16,7 +16,9 @@ from dalton_core.model_fallback_chain import (
     FALLBACK_FAILURES,
     HALTING_FAILURES,
     TIERS,
+    TIER_DELIVERABLE,
     FallbackChainError,
+    effective_chain,
     execute_chain,
     fallback_chains,
     classify_model_failure,
@@ -29,7 +31,7 @@ from dalton_core.model_fallback_chain import (
     tier_for,
     unmapped_purposes,
 )
-from dalton_core.model_router import ModelRouter
+from dalton_core.model_router import ModelRouter, policy_chain, resolve_chain
 from dalton_core.openclaw_catalog_reconcile import sync_openclaw_model_catalog
 from dalton_core.document_extraction_setup import ensure_extraction_policy
 from dalton_core.model_selection import publish_selection
@@ -84,12 +86,131 @@ def _work(work_id: str, capability: str = "research") -> WorkOrder:
     )
 
 
+BRAIN_LINKS = ["profile:gpt-6-astra", "profile:claude-fable-5-1"]
+OLD_POLICY = {
+    # A routing-policy version written before the deliverable tier existed:
+    # three chains, and the drafting stages sitting in the brain one.
+    "fallback_chains": {"tiers": {
+        "brain": list(BRAIN_LINKS),
+        "cheap": ["profile:deepseek-v4-flash"],
+        "verifier": ["profile:gemini-3-5-flash-lite"],
+    }},
+}
+DELIVERABLE_LINKS = ["profile:claude-opus-5", "profile:deepseek-v4-flash"]
+
+
+class DeliverableTierResolutionTests(unittest.TestCase):
+    """A tier added to the code must not move a policy version already on disk.
+
+    Every routing-policy version is immutable and pinned by name, so the day
+    ``deliverable`` was split out of ``brain`` there were policies on the host
+    that had never heard of it.  Those must keep answering exactly what they
+    answered the day before -- the brain chain -- rather than "this tier is not
+    declared", which is what would drop 公司档案 / 争议图 / 模型规格 from a
+    declared chain to single-shot filtering.
+    """
+
+    def test_every_declared_fallback_names_tiers_this_core_knows(self) -> None:
+        # The map lives in model_router, which cannot import the tier names it
+        # is talking about; this is the test that keeps the two in step.
+        from dalton_core.model_router import TIER_CHAIN_FALLBACKS
+
+        self.assertEqual(TIER_CHAIN_FALLBACKS, {"deliverable": "brain"})
+        for tier, inherited in TIER_CHAIN_FALLBACKS.items():
+            self.assertIn(tier, TIERS)
+            self.assertIn(inherited, TIERS)
+
+    def test_a_policy_without_the_tier_resolves_to_the_brain_chain(self) -> None:
+        for purpose in ("dossier", "debate_map", "model_spec"):
+            resolved = effective_chain(OLD_POLICY, purpose)
+            self.assertEqual(resolved["mode"], "tier")
+            self.assertTrue(resolved["declared"])
+            # Byte-identical to what the same policy gives a stage that stayed
+            # in the brain tier: this is the whole requirement.
+            self.assertEqual(resolved["chain"],
+                             effective_chain(OLD_POLICY, "plan")["chain"])
+            self.assertEqual(resolved["chain"], BRAIN_LINKS)
+
+    def test_a_declared_chain_wins_over_the_inherited_one(self) -> None:
+        policy = {"fallback_chains": {"tiers": {
+            **OLD_POLICY["fallback_chains"]["tiers"],
+            "deliverable": list(DELIVERABLE_LINKS),
+        }}}
+        self.assertEqual(effective_chain(policy, "dossier")["chain"],
+                         DELIVERABLE_LINKS)
+        # And the brain tier keeps its own chain.
+        self.assertEqual(effective_chain(policy, "plan")["chain"], BRAIN_LINKS)
+
+    def test_a_purpose_override_still_wins_over_the_tier(self) -> None:
+        policy = {
+            "fallback_chains": {"tiers": {
+                **OLD_POLICY["fallback_chains"]["tiers"],
+                "deliverable": list(DELIVERABLE_LINKS),
+            }},
+            "purpose_overrides": {
+                "dossier": {"mode": "explicit", "chain": ["profile:zai-glm-5-3"]},
+                "debate_map": {"mode": "tier"},
+            },
+        }
+        dossier = effective_chain(policy, "dossier")
+        self.assertEqual(dossier["mode"], "explicit")
+        self.assertEqual(dossier["chain"], ["profile:zai-glm-5-3"])
+        # "follow the tier", written down, is the same answer as no override.
+        self.assertEqual(effective_chain(policy, "debate_map")["chain"],
+                         DELIVERABLE_LINKS)
+
+    def test_a_policy_with_no_chains_at_all_is_unchanged(self) -> None:
+        # Legacy pins and filter-only policies must not acquire a chain from
+        # the fallback: there is no brain chain to inherit from either.
+        legacy = {"filters": {"allowed_profile_ids": ["profile:zai-glm-5-3"]}}
+        self.assertEqual(effective_chain(legacy, "dossier")["mode"], "legacy_pin")
+        self.assertIsNone(policy_chain(legacy, tier="deliverable", purpose="dossier"))
+
+    def test_the_inherited_chain_also_supersedes_a_retired_selection(self) -> None:
+        # resolve_chain's retirement rule reads the tier's chain the same way,
+        # so an explicit pin whose models have all gone falls to the brain
+        # chain rather than to nothing.
+        policy = {
+            **OLD_POLICY,
+            "purpose_overrides": {
+                "dossier": {"mode": "explicit", "chain": ["profile:gone"]},
+            },
+        }
+        profiles = {
+            "profile:gone": {"id": "profile:gone", "status": "retired"},
+            "profile:gpt-6-astra": {"id": "profile:gpt-6-astra", "status": "live"},
+            "profile:claude-fable-5-1": {"id": "profile:claude-fable-5-1",
+                                         "status": "live"},
+        }
+        resolved = resolve_chain(policy, tier="deliverable", purpose="dossier",
+                                 profiles=profiles)
+        self.assertEqual(resolved["mode"], "tier_after_retirement")
+        self.assertEqual(list(resolved["chain"]), BRAIN_LINKS)
+        self.assertEqual(resolved["superseded_chain"], ["profile:gone"])
+
+
 class TierMapTests(unittest.TestCase):
     def test_every_seeded_purpose_has_a_tier_and_an_unknown_one_is_refused(self) -> None:
-        for purpose in ("ask", "goal", "steer", "draft", "plan", "model_spec"):
+        for purpose in ("ask", "goal", "steer", "draft", "plan"):
             self.assertEqual(tier_for(purpose), "brain")
         with self.assertRaisesRegex(FallbackChainError, "no model tier"):
             tier_for("no_such_purpose")
+
+    def test_the_three_schema_bound_drafts_are_their_own_tier(self) -> None:
+        # 2026-09-17: 公司档案 / 争议图 / 模型规格 were held on one chain by three
+        # hand-written purpose_overrides. They are a kind of judgement, so they
+        # are a tier the owner can configure -- and their verifiers stay where
+        # independent review belongs.
+        for purpose in ("dossier", "debate_map", "model_spec"):
+            self.assertEqual(tier_for(purpose), TIER_DELIVERABLE)
+        for purpose in ("dossier", "debate_map"):
+            self.assertEqual(tier_for(f"{purpose}_verifier"), "verifier")
+        # Conservative on purpose: the other drafting stages resolve through
+        # the brain chain today with no override in front of them, so moving
+        # them would change what runs.
+        for purpose in ("deep_insight_gate", "investment_memo", "draft",
+                        "industry_framework", "zero_base_review"):
+            self.assertEqual(tier_for(purpose), "brain")
 
     def test_a_purpose_registered_without_a_tier_is_reported_as_unmapped(self) -> None:
         register_purpose("p14m_untiered_probe")
@@ -109,7 +230,7 @@ class TierMapTests(unittest.TestCase):
             register_purpose_tier("p14m_probe_lane_two", "expensive")
 
     def test_the_chains_are_the_ones_the_owner_named(self) -> None:
-        self.assertEqual(TIERS, ("brain", "cheap", "verifier"))
+        self.assertEqual(TIERS, ("brain", "cheap", "verifier", "deliverable"))
         self.assertEqual(
             tier_chain("brain"), ("profile:gpt-6-astra", "profile:claude-fable-5-1")
         )
@@ -122,6 +243,10 @@ class TierMapTests(unittest.TestCase):
             ),
         )
         self.assertEqual(tier_chain("verifier")[0], "profile:claude-fable-5-1")
+        # The new tier's bootstrap chain is the brain chain, link for link:
+        # naming the tier must not by itself move a live stage onto a model
+        # nobody chose. The owner orders it on the model page.
+        self.assertEqual(tier_chain(TIER_DELIVERABLE), tier_chain("brain"))
         self.assertEqual(set(fallback_chains()), {"tiers"})
         self.assertEqual(set(fallback_chains()["tiers"]), set(TIERS))
 

@@ -51,6 +51,7 @@ from .model_fallback_chain import (
 from .model_router import (
     ModelRouter,
     canonical_json,
+    declared_tier_chain,
     live_links,
     policy_chain,
     resolve_chain,
@@ -555,7 +556,8 @@ def publish_tier_selection(
 
     The 2026-09-15 owner simplification edits models per tier -- one chain for
     every high-order reasoning stage, one for batch reading, one for
-    independent verification -- rather than per purpose.  The tier's chain is
+    independent verification and, since 2026-09-17, one for drafting the
+    formal deliverables -- rather than per purpose.  The tier's chain is
     written into ``fallback_chains.tiers`` and every per-purpose override in
     that tier is dropped, so a tier edit means exactly what it says: all of
     the tier's stages follow the new chain.  Validation runs against a
@@ -973,7 +975,6 @@ def retirement_fallbacks(
     }
     if not retired:
         return []
-    declared = (policy.get("fallback_chains") or {}).get("tiers", {})
     overrides = policy.get("purpose_overrides") or {}
     affected: list[dict[str, Any]] = []
     for purpose, tier in sorted(purpose_tiers().items()):
@@ -981,7 +982,10 @@ def retirement_fallbacks(
         override = overrides.get(purpose)
         if isinstance(override, Mapping) and override.get("mode") == "explicit":
             named.extend(override.get("chain") or [])
-        named.extend(declared.get(tier) or [])
+        # The tier's chain as *this* policy version declares it, which for a
+        # tier split out after the version was written is the chain it
+        # inherits -- the same chain resolve_chain below will fall back to.
+        named.extend(declared_tier_chain(policy, tier) or ())
         named = list(dict.fromkeys(named))
         if not named:
             continue

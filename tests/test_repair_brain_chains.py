@@ -79,15 +79,24 @@ def _catalog() -> dict[str, dict]:
     }
 
 
-def _policy(policy_id: str, *, brain=None, overrides=None) -> dict:
+DELIVERABLE = ["profile:claude-opus-5", "profile:deepseek-v4-flash"]
+
+
+def _policy(policy_id: str, *, brain=None, overrides=None,
+            deliverable=None) -> dict:
+    tiers = {
+        "brain": list(LIVE_BRAIN if brain is None else brain),
+        "cheap": ["profile:deepseek-v4-flash"],
+        "verifier": ["profile:gemini-3-8-flash"],
+    }
+    # 2026-09-17: a host that has not been split yet declares three tiers and
+    # pins the three drafting stages by hand; one that has, declares four.
+    if deliverable is not None:
+        tiers["deliverable"] = list(deliverable)
     return {
         "id": policy_id,
         "policy_version_ref": f"{policy_id.replace('policy:', 'policy-version:')}:43",
-        "fallback_chains": {"tiers": {
-            "brain": list(LIVE_BRAIN if brain is None else brain),
-            "cheap": ["profile:deepseek-v4-flash"],
-            "verifier": ["profile:gemini-3-8-flash"],
-        }},
+        "fallback_chains": {"tiers": tiers},
         "purpose_overrides": dict(overrides or {}),
     }
 
@@ -139,7 +148,7 @@ class RepairPlanTests(unittest.TestCase):
             REPAIR.repair_chain(["profile:gpt-6-astra"], tier="brain",
                                 profiles=self.profiles, now=self.now)
 
-    def test_the_plan_is_one_tier_save_plus_the_structured_output_pins(self) -> None:
+    def test_the_plan_is_one_tier_save_plus_the_transport_pin(self) -> None:
         policies = [_policy(f"model-routing-policy:p{index}") for index in range(3)]
         plan = REPAIR.plan_repair(policies, self.profiles, now=self.now)
         self.assertEqual(plan["conflicts"], [])
@@ -152,28 +161,48 @@ class RepairPlanTests(unittest.TestCase):
             "profile:deepseek-v4-flash", "profile:zai-glm-5-3",
             "profile:claude-opus-5",
         ])
-        # The language checker's transport pin comes first: a wrong model there
-        # is not a worse answer, it is the publication worker raising.
+        # 2026-09-17: only the language checker's transport pin is left. The
+        # three schema-bound drafts are the deliverable tier now, so this
+        # script does not republish them as per-stage pins -- the next tier
+        # save would only drop them again. It says which policies still need
+        # splitting instead.
         self.assertEqual([item["purpose"] for item in purposes],
-                         ["research_language_check", "debate_map", "dossier",
-                          "model_spec"])
-        for item in purposes[1:]:
-            self.assertEqual(item["chain"], ["profile:claude-opus-5",
-                                             "profile:deepseek-v4-flash"])
+                         ["research_language_check"])
         self.assertEqual(purposes[0]["chain"], [ANTIGRAVITY, ANTIGRAVITY_HIGH])
+        self.assertTrue(any("split_deliverable_tier" in note
+                            for note in plan["notes"]))
+
+    def test_a_split_host_repairs_the_deliverable_chain_like_any_other(self) -> None:
+        # After the split there is nothing special to say about the drafting
+        # stages: their chain is a tier chain and the ordinary tier pass owns
+        # it, including taking the rate-limited endpoint back out of it.
+        policies = [_policy("model-routing-policy:p0",
+                            deliverable=[*DELIVERABLE, "profile:gpt-6-astra"])]
+        plan = REPAIR.plan_repair(policies, self.profiles, now=self.now)
+        self.assertEqual(plan["conflicts"], [])
+        self.assertEqual(plan["notes"], [])
+        tiers = {item["tier"]: item["chain"] for item in plan["publish"]
+                 if item["kind"] == "tier"}
+        self.assertEqual(tiers["deliverable"], DELIVERABLE)
+
+    def test_the_long_prompt_ceiling_also_applies_to_the_deliverable_tier(self) -> None:
+        # A dossier prompt is not chunked either, so the 30k transport ceiling
+        # disqualifies the same endpoint here as in the brain tier.
+        repaired = REPAIR.repair_chain(
+            [ANTIGRAVITY_HIGH, "profile:claude-opus-5"], tier="deliverable",
+            profiles=self.profiles, now=self.now)
+        self.assertEqual(repaired["after"], ["profile:claude-opus-5"])
+        self.assertIn("实测输入上限 30000", " ".join(repaired["notes"]))
 
     def test_running_it_again_on_a_repaired_host_publishes_nothing(self) -> None:
         repaired_chain = ["profile:deepseek-v4-flash", "profile:zai-glm-5-3",
                           "profile:claude-opus-5"]
         overrides = {
-            purpose: {"mode": "explicit",
-                      "chain": ["profile:claude-opus-5", "profile:deepseek-v4-flash"]}
-            for purpose in REPAIR.STRUCTURED_PURPOSES
+            "research_language_check": {
+                "mode": "explicit", "chain": [ANTIGRAVITY, ANTIGRAVITY_HIGH]},
         }
-        overrides["research_language_check"] = {
-            "mode": "explicit", "chain": [ANTIGRAVITY, ANTIGRAVITY_HIGH]}
         policies = [_policy("model-routing-policy:p0", brain=repaired_chain,
-                            overrides=overrides)]
+                            overrides=overrides, deliverable=DELIVERABLE)]
         plan = REPAIR.plan_repair(policies, self.profiles, now=self.now)
         self.assertEqual(plan["diffs"], [])
         self.assertEqual(plan["publish"], [])
@@ -191,33 +220,20 @@ class RepairPlanTests(unittest.TestCase):
                           if item["kind"] == "tier"])
 
     def test_a_drafting_pin_matching_its_verifier_s_family_is_refused(self) -> None:
+        # Still enforced for a stage named by hand with --structured-purpose,
+        # i.e. one the deliverable tier does not carry.
         policies = [_policy("model-routing-policy:p0", overrides={
-            "debate_map_verifier": {
+            "investment_memo_verifier": {
                 "mode": "explicit",
                 "chain": ["profile:claude-opus-5"],
             },
         })]
-        plan = REPAIR.plan_repair(policies, self.profiles, now=self.now)
+        plan = REPAIR.plan_repair(policies, self.profiles, now=self.now,
+                                  structured_purposes=("investment_memo",))
         self.assertTrue(any("起草与复核必须不同厂商" in item
                             for item in plan["conflicts"]))
         self.assertFalse([item for item in plan["publish"]
-                          if item.get("purpose") == "debate_map"])
-
-    def test_the_live_verifier_pins_do_not_clash_with_the_structured_chain(self) -> None:
-        policies = [_policy("model-routing-policy:p0", overrides={
-            f"{purpose}_verifier": {
-                "mode": "explicit",
-                "chain": ["profile:gemini-3-8-flash",
-                          "profile:gemini-3-1-pro-preview"],
-            }
-            for purpose in REPAIR.STRUCTURED_PURPOSES
-        })]
-        plan = REPAIR.plan_repair(policies, self.profiles, now=self.now)
-        self.assertEqual(plan["conflicts"], [])
-        self.assertEqual(
-            [item["purpose"] for item in plan["publish"]
-             if item["kind"] == "purpose" and item["purpose"] != "research_language_check"],
-            list(REPAIR.STRUCTURED_PURPOSES))
+                          if item.get("purpose") == "investment_memo"])
 
 
 class TransportPinTests(unittest.TestCase):

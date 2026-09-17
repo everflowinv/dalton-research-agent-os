@@ -1574,6 +1574,10 @@ MODEL_TIER_LABELS = {
     "brain": "高阶推理与规划",
     "cheap": "批量阅读与整理",
     "verifier": "独立复核",
+    # 2026-09-17: 起草要归档的正式产物（公司档案、争议图、模型规格）。与高阶
+    # 推理分开，是因为这一类的产出要通过结构校验，选模型时看的是「能不能守住
+    # 契约」，而不只是「能不能讲清楚」。
+    "deliverable": "交付物起草",
 }
 # ADR-0007 / P14d: the two human checkpoints that arrive with the revision
 # loop. Rendered whenever their rows exist; the decision path is not assumed,
@@ -6766,6 +6770,20 @@ class CockpitPlane:
             card["requires_restart"] = card["requires_restart"] or row["requires_restart"]
             if not card["chain"] and row["mode"] == "tier":
                 card["chain"] = list(row["chain"])
+            card.setdefault("_pinned", []).append(list(row["chain"]))
+        # A tier none of whose stages follows the tier -- every member still
+        # carrying a per-stage pin, which is what the deliverable tier looks
+        # like until scripts/split_deliverable_tier.py has run -- would open an
+        # empty editor and invite the owner to build the chain again from
+        # nothing.  When the pins all agree, they *are* the tier's chain in
+        # everything but name, so the editor opens on them instead.
+        for card in tier_cards.values():
+            pinned = card.pop("_pinned", [])
+            if card["chain"] or not pinned or not pinned[0]:
+                continue
+            models = [[link["model"] for link in chain] for chain in pinned]
+            if all(chain == models[0] for chain in models):
+                card["chain"] = list(pinned[0])
         from .model_fallback_chain import CHAIN_ELIGIBILITY_ENFORCED
         # 2026-09-16: the picker's verifier column keeps the honest contract
         # facts even with eligibility enforcement off. The owner's freedom
@@ -7140,8 +7158,8 @@ class CockpitPlane:
     def select_model(self, login: str, value: Mapping[str, Any]) -> dict[str, Any]:
         """P14-M2: the owner points one calling stage at a model, or at its tier.
 
-        2026-09-15: a ``tier`` key edits the whole tier (高阶推理 / 批量阅读 /
-        独立复核) in one save instead of one stage at a time.
+        2026-09-17: a ``tier`` key edits the whole tier (高阶推理 / 批量阅读 /
+        独立复核 / 交付物起草) in one save instead of one stage at a time.
         """
 
         from .model_selection import PURPOSE_LABELS, SELECTION_MODES

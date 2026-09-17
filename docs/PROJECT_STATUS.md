@@ -1,5 +1,20 @@
 # Dalton 项目进度
 
+## 2026-09-17 10:40 UTC：第四类模型「交付物起草」（待 owner 执行拆分命令）
+
+公司档案 / 争议图 / 模型规格这三个环节的产出是要归档、要过结构校验的正式文件，选模型时看的是「能不能守住契约」。2026-09-16 起它们靠三条手写的 `purpose_overrides`（`claude-opus-5 → deepseek-v4-flash`）钉着：owner 在模型页上看不到它们是一组，不能拖动排序，而且任何一次高阶推理的整类保存都会把三条钉定悄悄丢掉（整类保存本来就会清掉本类的逐环节钉定）。现在把它们做成第四类模型：`deliverable`／**交付物起草**，与高阶推理、批量阅读、独立复核并列，模型页上四条可拖动的链、四个整类保存。三个复核环节仍留在独立复核类。
+
+**兼容**：拆分前写下的策略版本是不可变的、按版本号被各车道钉住，它们里面没有 `deliverable` 这一档——因此路由显式规定这一档回落到 brain 链（`model_router.TIER_CHAIN_FALLBACKS`），旧策略解析出来的链与拆分前逐字节相同，不会从「有链」掉回单发路由；策略里一旦有了这一档的链，它就压过 brain 链；逐环节钉定仍然压过档位，语义不变。
+
+**owner 命令**（先预演，看清 before/after 再发布；发布走 writer，与模型页的整类保存同一条路径，幂等）：
+
+```
+scripts/split_deliverable_tier.py --state-dir ~/Library/Application\ Support/Dalton/state/dalton-core
+scripts/split_deliverable_tier.py --state-dir ~/Library/Application\ Support/Dalton/state/dalton-core --apply --actor human:lumos
+```
+
+发布的下一个策略版本会（a）新建 `fallback_chains.tiers.deliverable = [claude-opus-5, deepseek-v4-flash]`（直接取自 dossier 现在钉定的链，所以实际跑的模型不变），（b）删掉 `dossier`／`debate_map`／`model_spec` 三条逐环节钉定，`research_language_check`（供应商契约钉定）和其它一律不动。之后在模型页的「交付物起草」里拖动调整顺序即可。`scripts/repair_brain_chains.py` 不再重发这三条钉定（否则两处会各说各话），改为在预演里提示哪些策略还没拆。
+
 ## 2026-09-17 09:30 UTC：待办审批清理——页面缺陷、各环境待办隔离、认知门退回后的重写循环（待 owner 部署）
 
 owner 反馈：四张认知门卡片退回成功，DXC 那张仍报"保存决定暂时未完成"；要求把待办审批清空，且各研究环境的待办互相独立。盘点三个环境（8793 legacy、8794、8795）的 approvals + needs-human 后按主题修复（三个 opus 子代理并行）：

@@ -639,6 +639,42 @@ class SetTierSelectionTests(StateDirectoryCase):
         self.assertIn("profile:gemini-3-8-flash",
                       policy["filters"]["allowed_profile_ids"])
 
+    def test_the_deliverable_tier_saves_like_any_other_and_drops_its_own_pins(
+            self) -> None:
+        # 2026-09-17: the live shape before the split -- the three drafting
+        # stages held by hand-written overrides. One 整类保存 of 交付物起草
+        # writes the tier chain and takes the three pins away, and leaves an
+        # override belonging to another tier exactly where it was.
+        from dalton_core.model_router import policy_chain
+
+        for purpose in ("dossier", "debate_map", "model_spec"):
+            set_model_selection(
+                self.root, purpose=purpose, mode="explicit",
+                chain=["profile:claude-fable-5-1"], now=NOW)
+        set_model_selection(
+            self.root, purpose="quality", mode="explicit",
+            chain=["profile:gpt-6-astra"], now=NOW)
+        chain = ["profile:claude-fable-5-1", "profile:gpt-6-astra"]
+        result = set_tier_selection(
+            self.root, tier="deliverable", mode="explicit", chain=chain, now=NOW)
+        self.assertEqual(result["status"], "published")
+        self.assertEqual(result["purposes"],
+                         ["debate_map", "dossier", "model_spec"])
+        policy = self.router.get_policy(self.stored()["routing_policy_ref"])
+        tiers = (policy.get("fallback_chains") or {}).get("tiers") or {}
+        self.assertEqual(tiers["deliverable"], chain)
+        overrides = policy.get("purpose_overrides") or {}
+        for purpose in ("dossier", "debate_map", "model_spec"):
+            self.assertNotIn(purpose, overrides)
+            self.assertEqual(
+                policy_chain(policy, tier="deliverable", purpose=purpose)["chain"],
+                tuple(chain), purpose)
+        # A cheap-tier stage's own choice is none of this tier's business.
+        self.assertEqual(overrides["quality"]["chain"], ["profile:gpt-6-astra"])
+        # And the brain tier is untouched, so the stages that stayed there
+        # resolve to exactly what they resolved to before.
+        self.assertEqual(tiers["brain"], list(tier_chain("brain")))
+
     def test_an_unknown_tier_is_refused(self) -> None:
         with self.assertRaises(ModelSelectionError):
             set_tier_selection(self.root, tier="premium", mode="explicit",
@@ -2013,6 +2049,76 @@ class CockpitModelPageTests(unittest.TestCase):
                     "dalton_not_in_openclaw"):
             self.assertIsInstance(catalog[key], list)
             self.assertTrue(catalog[f"{key}_note"])
+
+    def test_the_model_page_offers_a_fourth_chain_for_the_deliverable_tier(
+            self) -> None:
+        # 2026-09-17: 交付物起草 is configured exactly like the other three --
+        # one draggable chain and one 整类保存 -- rather than by three
+        # per-stage pins nobody could see as a group.
+        policy = self.install()
+        for name in ("dossier-model-config.json",
+                     "initial-screen-model-config.json"):
+            (self.root / name).write_text(json.dumps({
+                "routing_policy_ref": policy,
+                "model_router_db": str(self.router_db),
+                "credential_slot_refs": [],
+            }), encoding="utf-8")
+        view = self.plane(with_model_config=True).models()
+        cards = {card["tier"]: card for card in view["tier_cards"]}
+        self.assertEqual([card["tier"] for card in view["tier_cards"]],
+                         ["brain", "cheap", "deliverable", "verifier"])
+        card = cards["deliverable"]
+        self.assertEqual(card["label"], "交付物起草")
+        self.assertEqual(sorted(item["purpose"] for item in card["purposes"]),
+                         ["debate_map", "dossier", "model_spec"])
+        self.assertEqual([link["model"] for link in card["chain"]],
+                         list(tier_chain("deliverable")))
+        for purpose in ("dossier", "debate_map", "model_spec"):
+            row = next(item for item in view["purposes"]
+                       if item["purpose"] == purpose)
+            self.assertEqual(row["tier"], "deliverable", purpose)
+            self.assertEqual(row["tier_label"], "交付物起草", purpose)
+            # "follow the tier", which is what the split leaves behind.
+            self.assertEqual(row["mode"], "tier", purpose)
+            self.assertEqual(row["mode_label"], "使用系统推荐配置", purpose)
+            self.assertEqual([link["model"] for link in row["chain"]],
+                             list(tier_chain("deliverable")), purpose)
+        # The brain card keeps its own stages and its own chain.
+        self.assertNotIn("dossier",
+                         [item["purpose"] for item in cards["brain"]["purposes"]])
+
+    def test_a_tier_still_held_by_agreeing_pins_opens_on_those_pins(self) -> None:
+        # Before scripts/split_deliverable_tier.py has run, every stage of the
+        # tier carries the same per-stage pin. An empty editor would invite the
+        # owner to build the chain again from nothing, so it opens on them.
+        policy = self.install()
+        for name in ("dossier-model-config.json",
+                     "initial-screen-model-config.json"):
+            (self.root / name).write_text(json.dumps({
+                "routing_policy_ref": policy,
+                "model_router_db": str(self.router_db),
+                "credential_slot_refs": [],
+            }), encoding="utf-8")
+        with ModelRouter(self.router_db) as router:
+            for purpose in ("dossier", "debate_map", "model_spec"):
+                policy = publish_selection(
+                    router, policy_version_ref=policy, purpose=purpose,
+                    mode="explicit", chain=["profile:claude-fable-5-1"],
+                    now=NOW)["policy_version_ref"]
+        for name in ("dossier-model-config.json",
+                     "initial-screen-model-config.json"):
+            (self.root / name).write_text(json.dumps({
+                "routing_policy_ref": policy,
+                "model_router_db": str(self.router_db),
+                "credential_slot_refs": [],
+            }), encoding="utf-8")
+        view = self.plane(with_model_config=True).models()
+        card = next(item for item in view["tier_cards"]
+                    if item["tier"] == "deliverable")
+        self.assertEqual([link["model"] for link in card["chain"]],
+                         ["profile:claude-fable-5-1"])
+        self.assertEqual({item["mode"] for item in card["purposes"]},
+                         {"explicit"})
 
     def test_unclassified_family_and_unknown_capability_do_not_leak(self) -> None:
         self.assertEqual(CockpitPlane._model_family_label("unclassified:fixture"),

@@ -29,7 +29,9 @@ ROLE_CONFIGS = {
     "earnings_verifier": ("model-routing-policy:dalton-openclaw-earnings-season-verifier", "earnings-season-verifier-model-config.json"),
     "claim_index": ("model-routing-policy:dalton-openclaw-claim-index", "claim-index-model-config.json"),
 }
-MODEL_TIERS = {"cheap", "brain", "verifier"}
+# Kept in step with model_fallback_chain.TIERS: a manifest naming a tier this
+# script has not heard of is refused, so a new tier has to be added here too.
+MODEL_TIERS = {"cheap", "brain", "verifier", "deliverable"}
 PRESERVED_MISSION_FIELDS = (
     "title", "objective", "industry_ref", "universe", "research_questions",
     "deliverables", "source_plan", "bindings", "budget",

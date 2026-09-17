@@ -1195,7 +1195,7 @@ function tierChainEditor(card,r){
   return {box,save,st};
 }
 function renderModels(sheet,r,overview){sheet.replaceChildren(readerClose(),node("h2","模型与预算"),
-    node("div","三类模型各排一条调用顺序：高阶推理、批量阅读、独立复核。左框是当前顺序（可拖动），右框是备选模型；保存后多数修改在下一次调用生效。","meta"));
+    node("div","四类模型各排一条调用顺序：高阶推理、批量阅读、独立复核、交付物起草。左框是当前顺序（可拖动），右框是备选模型；保存后多数修改在下一次调用生效。","meta"));
   const sharedModels=r.shared_catalog&&Array.isArray(r.shared_catalog.models)?r.shared_catalog.models:[];
   if(sharedModels.length){const shared=node("section");shared.append(node("h3","已有模型连接配置"));sharedModels.forEach(model=>{const row=node("div",null,"lane");row.append(node("span",null,"st wait"));const copy=node("div");copy.append(node("b",model.display_name||"已登记模型"),node("small",[model.provider,model.family_label].filter(Boolean).join(" · ")||"模型信息已登记"),node("small",`能力：${(model.capability_labels||[]).join("、")||"尚未标明"}`,"raw"),node("small","连接配置已登记；研究调用需在本环境配置","raw"));row.append(copy);shared.append(row)});sheet.append(shared)}
   if(!r.available){sheet.append(node("div",r.reason,"empty"));return}
@@ -1205,7 +1205,7 @@ function renderModels(sheet,r,overview){sheet.replaceChildren(readerClose(),node
       try{await postJson("/v1/cockpit/model_notice_ack",{ref:n.ref});toast("已记下");openModels();loadApprovals()}
       catch(e){b.disabled=false;toast(readableError(e,"确认通知").message)}};
     d.append(b);sheet.append(d)});
-  const stages=node("section");stages.append(node("h3","三类模型"));
+  const stages=node("section");stages.append(node("h3","四类模型"));
   const cards=r.tier_cards||[];
   cards.forEach(card=>{const d=node("div",null,"lane");d.dataset.tier=card.tier;
     d.append(node("span",null,"st on"));

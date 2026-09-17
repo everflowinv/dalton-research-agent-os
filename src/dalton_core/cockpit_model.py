@@ -2261,6 +2261,7 @@ class CockpitModel:
         """
 
         from .model_fallback_chain import purpose_tiers
+        from .model_router import declared_tier_chain
 
         try:
             policy = router.get_policy(self.config["routing_policy_ref"])
@@ -2280,7 +2281,12 @@ class CockpitModel:
             raise CockpitModelError(
                 f"the purpose {purpose!r} has no model tier; register one before routing"
             )
-        return tier if tier in declared or override is not None else None
+        # ``declared_tier_chain`` rather than ``tier in declared``: a tier
+        # split out of another one after this policy version was written is
+        # declared by the version it inherits from, and a stage must not fall
+        # back to single-shot routing on the day its tier was named.
+        return (tier if declared_tier_chain(policy, tier) is not None
+                or override is not None else None)
 
     def _chain_ceiling(self, router: ModelRouter, tier: str, prompt_bytes: int,
                        *, purpose: str, call_budget: Mapping[str, Any]) -> int:

@@ -62,17 +62,28 @@ class FallbackChainError(RuntimeError):
 
 _NAME_RE = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
 
-# The three tiers.  A tier is "what kind of judgement is this", not "how much
+# The four tiers.  A tier is "what kind of judgement is this", not "how much
 # does it cost": the cheap tier is cheap because tagging a claim index does not
 # need a frontier model, not because someone wanted to save money on thinking.
 TIER_BRAIN = "brain"
 TIER_CHEAP = "cheap"
 TIER_VERIFIER = "verifier"
+# 2026-09-17: the fourth tier, and why it is a tier rather than three hand
+# overrides.  Drafting a formal deliverable -- the company dossier, the debate
+# map, the company model specification -- is brain work whose *output is a
+# strict contract*: a chain of flash models writes an argument that reads well
+# and a schema that does not validate.  On 2026-09-16 that was held by pinning
+# ``dossier`` / ``debate_map`` / ``model_spec`` to one chain by hand, one
+# ``purpose_overrides`` entry each, which the owner could neither see as a
+# group nor reorder on the model page -- and which any 整类保存 of the brain
+# tier would silently drop.  The kind of judgement really is its own kind, so
+# it gets its own configurable chain and the overrides go away.
+TIER_DELIVERABLE = "deliverable"
 
 # The chains, by profile id, first choice first.
 #
-# brain: the model that carries an argument -- planning, drafting a deliverable
-# or a dossier, producing a thesis-impact assessment, research. gpt-6-astra
+# brain: the model that carries an argument -- planning, producing a
+# thesis-impact assessment, research, the cockpit's ask. gpt-6-astra
 # first because that is the model the owner chose for this work; claude-fable-5-1
 # behind it because it is a different provider *and* a different family, so an
 # OpenAI outage is survivable and a producer/verifier pair drawn from the two is
@@ -111,16 +122,26 @@ _TIER_CHAINS: dict[str, tuple[str, ...]] = {
         "profile:zai-glm-5-3",
         "profile:gemini-3-5-flash-lite",
     ),
+    # deliverable: the bootstrap chain is deliberately the brain chain, link
+    # for link.  A tier that starts life as a copy of the one its purposes used
+    # to follow means turning it on changes nothing by itself -- the owner (or
+    # scripts/split_deliverable_tier.py) then orders it on the model page, and
+    # that ordering is the whole of the change.  Inventing a different default
+    # here would move three live stages onto models nobody chose.
+    TIER_DELIVERABLE: (
+        "profile:gpt-6-astra",
+        "profile:claude-fable-5-1",
+    ),
 }
 
-TIERS: tuple[str, ...] = (TIER_BRAIN, TIER_CHEAP, TIER_VERIFIER)
+TIERS: tuple[str, ...] = (TIER_BRAIN, TIER_CHEAP, TIER_VERIFIER, TIER_DELIVERABLE)
 
-# Every purpose registered today, mapped explicitly.  The six brain ones are a
+# Every purpose registered today, mapped explicitly.  The brain ones are a
 # statement rather than a default: the cockpit's ask, the goal and steering
-# proposals, the deliverable draft, the planner's decision and the company
-# model specification are all "form a view and argue it".  The extraction lane
-# is cheap-tier work too but has no cockpit purpose -- it takes the tier by
-# pinning the cheap policy.
+# proposals, the deliverable draft and the planner's decision are all "form a
+# view and argue it".  The three that file a schema-bound document belong to
+# the deliverable tier instead.  The extraction lane is cheap-tier work too
+# but has no cockpit purpose -- it takes the tier by pinning the cheap policy.
 #
 # This map is code with a test, not policy content.  A lane registering its
 # tier must not append a routing-policy version to every pinned policy.
@@ -130,7 +151,7 @@ _PURPOSE_TIERS: dict[str, str] = {
     "steer": TIER_BRAIN,
     "draft": TIER_BRAIN,
     "plan": TIER_BRAIN,
-    "model_spec": TIER_BRAIN,
+    "model_spec": TIER_DELIVERABLE,
     # Wave 1's two: tagging a claim index against a fixed aspect vocabulary and
     # scoring an artefact against a rubric are both "apply a stated standard to
     # a lot of items", which is the cheap tier's whole description.
@@ -154,9 +175,15 @@ _PURPOSE_TIERS: dict[str, str] = {
     "event_judgement_verifier": TIER_VERIFIER,
     "thesis_reflection": TIER_BRAIN,
     "thesis_reflection_verifier": TIER_VERIFIER,
-    "dossier": TIER_BRAIN,
+    # 2026-09-17: the three drafting stages whose product is a filed document
+    # with a schema -- 公司档案, 争议图, 模型规格.  They read as brain work and
+    # they are, but the contract they have to satisfy is what decides the
+    # model, so they are configured as their own tier rather than as three
+    # hand-written overrides on top of brain.  Their verifiers stay in the
+    # verifier tier: checking a document is still independent review.
+    "dossier": TIER_DELIVERABLE,
     "dossier_verifier": TIER_VERIFIER,
-    "debate_map": TIER_BRAIN,
+    "debate_map": TIER_DELIVERABLE,
     "debate_map_verifier": TIER_VERIFIER,
     "deep_insight_gate": TIER_BRAIN,
     "deep_insight_gate_verifier": TIER_VERIFIER,
@@ -1331,6 +1358,7 @@ __all__ = [
     "TIERS",
     "TIER_BRAIN",
     "TIER_CHEAP",
+    "TIER_DELIVERABLE",
     "TIER_VERIFIER",
     "FallbackChainError",
     "execute_chain",
