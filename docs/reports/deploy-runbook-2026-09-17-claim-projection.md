@@ -1,4 +1,4 @@
-# 2026-09-17 部署 runbook：公司档案车道拖垮 writer 的修复（源码 db30f19d）
+# 2026-09-17 部署 runbook：公司档案车道拖垮 writer 的修复（源码 fc6e0886）
 
 自动模式的安全分类器把"生产部署"类动作拦在执行前，以下两步由 owner 在终端执行（Claude Code 里可用 `! <命令>` 直接跑）。修复内容与实测见 `docs/PROJECT_STATUS.md` 顶部条目。
 
