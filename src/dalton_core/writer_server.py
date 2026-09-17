@@ -3052,6 +3052,12 @@ class WriterServer:
         lane = lane_for_operation(operation)
         parts: list[str] = [self._now().astimezone(timezone.utc).date().isoformat()]
         launcher = None if lane is None else self._lane_launcher(lane)
+        # The active mission, because "no mission" is the other refusal a
+        # held lane is almost always waiting on.  Live on 2026-09-17 a new
+        # environment published its first research goal and fourteen lanes
+        # stayed held on the refusal recorded before it existed -- until the
+        # UTC day rolled over, the only other thing this fingerprint watched.
+        parts.extend(self._mission_pointer_signature())
         if launcher is None:
             parts.append("launcher:absent")
             return content_hash({"lane": operation, "parts": parts})
@@ -3060,6 +3066,18 @@ class WriterServer:
             for name in sorted(paths):
                 parts.append(f"{name}={_governance_signature(paths[name])}")
         return content_hash({"lane": operation, "parts": parts})
+
+    def _mission_pointer_signature(self) -> list[str]:
+        """Every active mission version, as ``mission_ref=version_id`` words."""
+
+        try:
+            rows = self.store.connection.execute(
+                "SELECT mission_ref, mission_version_id FROM coverage_mission_pointer "
+                "ORDER BY mission_ref"
+            ).fetchall()
+        except Exception:  # noqa: BLE001 - a Core without missions has no pointer table
+            return ["mission:none"]
+        return [f"mission:{row[0]}={row[1]}" for row in rows] or ["mission:none"]
 
     def _run_lane(self, lane: Any, params: Mapping[str, Any]) -> Any:
         """Run one lane tick inside a budget, and remember a refusal.

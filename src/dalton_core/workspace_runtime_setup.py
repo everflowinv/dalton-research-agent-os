@@ -378,10 +378,17 @@ def install(workspace_manifest: str | Path, *, actor_ref: str) -> dict[str, Any]
                 "may_write": list(AUTOMATION_WRITE_SCOPES),
                 "human_checkpoints": list(CHECKPOINT_KINDS),
             },
+            # The same numbers the legacy environment runs on.  The first
+            # template shipped 100 calls / US$100 / 50 AlphaEngine calls, and a
+            # workspace that copied them started its first goal on a quarter of
+            # the throughput its sibling had -- the owner read "模型调用 100 次"
+            # on the confirmation card and rightly asked why.  The cost cap is
+            # the real governor; the call count only has to stay out of its way.
             "budget_ceilings": {
-                "max_daily_paid_calls": 100,
-                "max_daily_cost_usd": 100.0,
-                "max_alphaengine_calls_24h": 50,
+                "max_daily_paid_calls": 100000,
+                "max_daily_cost_usd": 500.0,
+                "max_daily_document_reads": 2000,
+                "max_alphaengine_calls_24h": 130,
                 "max_alphaengine_probe_calls_24h": 10,
             },
         },

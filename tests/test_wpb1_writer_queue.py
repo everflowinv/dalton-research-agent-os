@@ -515,3 +515,47 @@ class LaneBudgetTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LaneFingerprintMissionTests(unittest.TestCase):
+    """Publishing a research goal must lift a "no mission" hold on the next tick.
+
+    Live 2026-09-17: a new environment published its first goal and fourteen
+    lanes stayed held on the refusal recorded before it existed, because the
+    fingerprint watched only governance records and the UTC day.
+    """
+
+    def _server(self, connection):
+        from types import SimpleNamespace
+        fake = SimpleNamespace(
+            _now=lambda: datetime(2026, 9, 17, 12, tzinfo=timezone.utc),
+            _lane_launcher=lambda lane: SimpleNamespace(),
+            store=SimpleNamespace(connection=connection),
+        )
+        fake._mission_pointer_signature = (
+            lambda: WriterServer._mission_pointer_signature(fake))
+        return fake
+
+    def test_the_active_mission_is_part_of_every_lane_fingerprint(self):
+        connection = sqlite3.connect(":memory:")
+        connection.execute(
+            "CREATE TABLE coverage_mission_pointer (mission_ref TEXT, mission_version_id TEXT)")
+        fake = self._server(connection)
+        before = WriterServer.lane_fingerprint(fake, "dispatch_debate_map")
+        connection.execute("INSERT INTO coverage_mission_pointer VALUES (?, ?)",
+                           ("coverage-mission:x", "coverage-mission-version:x:1"))
+        after = WriterServer.lane_fingerprint(fake, "dispatch_debate_map")
+        self.assertNotEqual(before, after)
+        connection.execute("UPDATE coverage_mission_pointer SET mission_version_id=?",
+                           ("coverage-mission-version:x:2",))
+        self.assertNotEqual(after, WriterServer.lane_fingerprint(fake, "dispatch_debate_map"))
+        # A launcher-less lane watches the mission too.
+        fake_absent = self._server(connection)
+        fake_absent._lane_launcher = lambda lane: None
+        first = WriterServer.lane_fingerprint(fake_absent, "dispatch_debate_map")
+        connection.execute("DELETE FROM coverage_mission_pointer")
+        self.assertNotEqual(first, WriterServer.lane_fingerprint(fake_absent, "dispatch_debate_map"))
+
+    def test_a_core_without_the_pointer_table_still_fingerprints(self):
+        fake = self._server(sqlite3.connect(":memory:"))
+        self.assertTrue(WriterServer.lane_fingerprint(fake, "dispatch_debate_map"))
