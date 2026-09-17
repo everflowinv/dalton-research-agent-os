@@ -354,6 +354,19 @@ def apply_switch(args: argparse.Namespace, plan: dict[str, Any]) -> dict[str, An
         record["content_hash"] = content_hash(body)
         atomic_write_json(path, record)
         actions.append(f"updated workspace {row['slug']}")
+        # service.json 里的 workspace.manifest_hash 绑定的是 workspace.json 的
+        # content_hash；manifest 一改，不同步这里服务会拒绝启动
+        # （"service config paths do not match the bound workspace manifest"）。
+        service_path = Path(str(record.get("config_path") or path.parent / "config" / "service.json"))
+        if service_path.is_file():
+            _backup(service_path, backup_dir)
+            service = read_json(service_path)
+            binding = dict(service.get("workspace") or {})
+            if binding.get("manifest_hash") != record["content_hash"]:
+                binding["manifest_hash"] = record["content_hash"]
+                service["workspace"] = binding
+                atomic_write_json(service_path, service)
+                actions.append(f"synced workspace manifest hash into {service_path.name} ({row['slug']})")
 
     # 4) 两个发布指针
     pointers = write_pointers(

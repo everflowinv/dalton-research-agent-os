@@ -28,7 +28,7 @@
 		<string>16777216</string>
 		<string>--keep</string>
 		<string>5</string>
-		<string>--apply</string>
+		<string>apply</string>
 	</array>
 	<key>StartCalendarInterval</key>
 	<dict>

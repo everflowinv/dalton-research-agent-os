@@ -8,7 +8,7 @@
   被当成故障），而任何 traceback 都写进 /dev/null，所以 329 个批次连续失败
   17 次却没有一行可读的记录。
 
-  占位符（由 scripts/release_switch.py --apply 或安装脚本替换）：
+  占位符（由 scripts/release_switch.py apply 或安装脚本替换）：
     @@RELEASE_VENV@@  形如 ~/.dalton/runtime/releases/<sha>/venv
     @@STATE_DIR@@     形如 ~/Library/Application Support/Dalton/state/dalton-core
     @@LOG_DIR@@       形如 ~/Library/Logs/Dalton
