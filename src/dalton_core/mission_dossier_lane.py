@@ -125,8 +125,16 @@ def ledger_signature(connection: Any) -> str:
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:32]
 
 
-def company_ledger_signature(connection: Any, company_ref: str) -> str:
-    """Digest only the authority inputs that can change one company's file."""
+def company_ledger_signature(
+    connection: Any, company_ref: str, *,
+    snapshot: Mapping[str, Any] | None = None,
+) -> str:
+    """Digest only the authority inputs that can change one company's file.
+
+    ``snapshot`` is one Claim snapshot shared by every company of one tick:
+    reading and hashing the Ledger is the expensive part of this signature,
+    and it does not depend on the company.
+    """
     from .cockpit_model import verifier_provider_contract_fingerprint
     from .company_dossier_cli import dossier_company_source_fingerprint
     from .company_dossier_draft import (draft_contract_fingerprint,
@@ -134,7 +142,8 @@ def company_ledger_signature(connection: Any, company_ref: str) -> str:
     from .mission_deliverable import number_source_contract_fingerprint
     from .company_dossier import output_rubric_contract_fingerprint
 
-    parts = [company_ref, dossier_company_source_fingerprint(connection, company_ref),
+    parts = [company_ref,
+             dossier_company_source_fingerprint(connection, company_ref, snapshot=snapshot),
              verifier_provider_contract_fingerprint("dossier_verifier"),
              draft_contract_fingerprint(), verifier_prompt_contract_fingerprint(),
              number_source_contract_fingerprint(), output_rubric_contract_fingerprint()]
@@ -269,11 +278,22 @@ class MissionDossierLaneCoordinator:
         except Exception as exc:  # noqa: BLE001 - one lane's failure is not the tick's
             return {"status": "unavailable", "settled": settled,
                     "reason": f"{type(exc).__name__}: {exc}"}
+        # One Ledger snapshot for every company this tick.  Each company's
+        # signature used to read and hash the whole Ledger for itself -- five
+        # companies, five snapshots, on the writer's store thread, past the
+        # request timeout every tick once the Ledger reached ten thousand
+        # Claims.  The snapshot is taken only if a company needs it.
+        claim_snapshot: Mapping[str, Any] | None = None
         for company_ref in companies:
-            evidence = (
-                ledger_signature(self.connection) if company_ref is None else
-                f"{company_ref}|{company_ledger_signature(self.connection, company_ref)}"
-            )
+            if company_ref is None:
+                evidence = ledger_signature(self.connection)
+            else:
+                if claim_snapshot is None:
+                    from .company_dossier_cli import _ReadOnlyStoreView
+                    claim_snapshot = _ReadOnlyStoreView(
+                        self.connection).claim_index_snapshot()
+                evidence = f"{company_ref}|" + company_ledger_signature(
+                    self.connection, company_ref, snapshot=claim_snapshot)
             signature = permission_key(self.connection, self.launcher, evidence)
             clear_obsolete_permissions(self.budget, signature, company_ref)
             if signature in self._quiet_signatures:

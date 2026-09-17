@@ -1405,17 +1405,24 @@ def validate_formal_unit_provenance(
         router.rollback(); router.close()
 
 
-def dossier_company_source_fingerprint(connection: Any, company_ref: str) -> str:
+def dossier_company_source_fingerprint(
+    connection: Any, company_ref: str, *,
+    snapshot: Mapping[str, Any] | None = None,
+) -> str:
     """Hash the selected authority inputs that can change this company's prompts.
 
     This reuses the bounded material readers used by ``plan_units``. A lane
     signature assembled from counts or a second SQL projection would drift
     when prompt ranking, retirement, or quotas change.
+
+    ``snapshot`` is a Claim snapshot already read on ``connection``: a caller
+    fingerprinting every screened company in one operation reads the Ledger
+    once and passes it here, rather than once per company.
     """
 
     view = _ReadOnlyStoreView(connection)
     from .company_research_view import prepare_company_claim_query
-    claim_context = prepare_company_claim_query(view, company_ref)
+    claim_context = prepare_company_claim_query(view, company_ref, snapshot=snapshot)
     claims = {
         aspect: claim_material(view, company_ref, aspect,
                                claim_context=claim_context)

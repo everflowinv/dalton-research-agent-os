@@ -382,12 +382,28 @@ def current_entries(
     if subject_ref is not None:
         query += " AND v.subject_ref=?"
         params.append(_text(subject_ref, "subject_ref"))
-    rows = connection.execute(query, params).fetchall()
-    wanted = None if claim_version_refs is None else set(claim_version_refs)
+    if claim_version_refs is None:
+        rows = connection.execute(query, params).fetchall()
+    else:
+        # Ask SQLite for the wanted claims only.  Reading every current entry
+        # and discarding the rest decoded and re-hashed the whole index (tens
+        # of thousands of rows) for a reader that wanted one company's, and
+        # the dossier lane does that once per section.  The claim index is
+        # indexed by claim_version_ref; the batches keep the IN list well
+        # inside SQLite's bound-parameter limit.
+        wanted = sorted(set(claim_version_refs))
+        if not wanted:
+            return {}
+        rows = []
+        for offset in range(0, len(wanted), 400):
+            batch = wanted[offset:offset + 400]
+            placeholders = ",".join("?" for _ in batch)
+            rows.extend(connection.execute(
+                query + f" AND v.claim_version_ref IN ({placeholders})",
+                [*params, *batch],
+            ).fetchall())
     result: dict[str, dict[str, Any]] = {}
     for row in rows:
-        if wanted is not None and row["claim_version_ref"] not in wanted:
-            continue
         entry = _decode(row, f"ClaimIndexEntryVersion {row['version_id']}")
         result[entry["claim_version_ref"]] = entry
     return result

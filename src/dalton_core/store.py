@@ -55,20 +55,41 @@ _THESIS_CONFIDENCE_LEVELS = frozenset({"low", "medium", "high"})
 _CLAIM_FIELDS = frozenset({"subject_ref", "metric_or_aspect", "period", "basis", "normalized_statement", "claim_kind", "value", "unit", "producer_invocation_refs", "actor_ref"})
 
 
-def canonical_json(value: Any) -> str:
-    """Serialize JSON deterministically for hashes and durable payloads."""
+#: Exact classes that ``canonical_json`` passes straight to ``json.dumps``.
+#: Subclasses (an IntEnum, a str subclass) take the general path, as before.
+_CANONICAL_SCALARS = frozenset({str, int, float, bool})
+
+
+def _canonical_value(value: Any) -> Any:
+    """Normalize one value by the rules ``canonical_json`` has always applied.
+
+    Same rules in the same order: a dataclass becomes its dict, mapping keys
+    become text, tuples become lists, sets are sorted, an Enum-like object
+    contributes ``.value``.  The previous implementation serialized and
+    re-parsed JSON at every level of the tree, so hashing a Ledger snapshot
+    cost one ``json.dumps`` per node per ancestor -- six seconds for ten
+    thousand Claims.  This walks the tree once; ``json.dumps`` does the rest
+    and produces the same bytes.
+    """
+    if value is None or value.__class__ in _CANONICAL_SCALARS:
+        return value
     if dataclasses.is_dataclass(value):
         value = dataclasses.asdict(value)
     if isinstance(value, Mapping):
-        value = {str(k): v for k, v in value.items()}
-        value = {k: json.loads(canonical_json(v)) for k, v in value.items()}
-    elif isinstance(value, (tuple, list)):
-        value = [json.loads(canonical_json(v)) for v in value]
-    elif isinstance(value, set):
-        value = sorted(value)
-    elif hasattr(value, "value"):
-        value = value.value
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        return {str(k): _canonical_value(v) for k, v in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_canonical_value(v) for v in value]
+    if isinstance(value, set):
+        return sorted(value)
+    if hasattr(value, "value"):
+        return value.value
+    return value
+
+
+def canonical_json(value: Any) -> str:
+    """Serialize JSON deterministically for hashes and durable payloads."""
+    return json.dumps(_canonical_value(value), ensure_ascii=False, sort_keys=True,
+                      separators=(",", ":"), allow_nan=False)
 
 
 def content_hash(value: Any) -> str:
@@ -223,6 +244,94 @@ class authorized_flag:
 
     def __set__(self, obj: Any, value: Any) -> None:
         obj._authorization_flag.authorized = bool(value)
+
+
+class ClaimStatusProjection:
+    """Every ClaimVersion status of one immutable snapshot, indexed once.
+
+    The order of authority is the Ledger contract and is unchanged: a version
+    that is no longer its claim's latest is superseded; otherwise a
+    deterministic numeric conflict with another latest version of the same
+    semantic key is contested; otherwise only an adjudication attached to this
+    exact version applies; otherwise proposed.  ``updated_at`` is the newest
+    authority timestamp among the rows that decided the answer.
+
+    Rows are indexed by id, the latest rows are grouped by semantic key (built
+    the first time a quantitative claim asks, so a snapshot with no numbers
+    never computes a key), and the first adjudication per version is kept --
+    the same rows the one-claim walk consulted, read once instead of once per
+    claim.
+    """
+
+    def __init__(self, snapshot: Mapping[str, Any]) -> None:
+        self._rows = list(snapshot.get("claim_versions", []))
+        by_id: dict[Any, Mapping[str, Any]] = {}
+        for row in self._rows:
+            by_id.setdefault(row.get("claim_version_id"), row)
+        self._by_id = by_id
+        self._latest_refs = dict(snapshot.get("latest_claim_version_refs", {}))
+        adjudications: dict[Any, Mapping[str, Any]] = {}
+        for item in snapshot.get("latest_adjudications", []):
+            adjudications.setdefault(item.get("claim_version_ref"), item)
+        self._adjudications = adjudications
+        self._latest_by_key: dict[tuple[str, ...], list[Mapping[str, Any]]] | None = None
+
+    def _latest_rows_by_key(self) -> dict[tuple[str, ...], list[Mapping[str, Any]]]:
+        if self._latest_by_key is None:
+            groups: dict[tuple[str, ...], list[Mapping[str, Any]]] = {}
+            for other in self._rows:
+                if self._latest_refs.get(other["claim_ref"]) != other["claim_version_id"]:
+                    continue
+                key = DaltonStore._claim_semantic_key(other["claim"])
+                groups.setdefault(key, []).append(other)
+            self._latest_by_key = groups
+        return self._latest_by_key
+
+    def status(self, claim_version_id: str) -> str:
+        return self.details(claim_version_id)["status"]
+
+    def details(self, claim_version_id: str) -> dict[str, str]:
+        """Return status and the newest immutable authority timestamp used."""
+        target = self._by_id.get(claim_version_id)
+        if target is None:
+            raise NotFound(f"claim version not found: {claim_version_id}")
+        authority_times = [str(target["created_at"])]
+
+        def projected(status: str) -> dict[str, str]:
+            latest_time = max(
+                _parse_rfc3339(value, "claim status authority timestamp")
+                for value in authority_times
+            )
+            return {
+                "status": status,
+                "updated_at": latest_time.isoformat(timespec="microseconds"),
+            }
+
+        latest_ref = self._latest_refs.get(target["claim_ref"])
+        if latest_ref != claim_version_id:
+            replacement = self._by_id.get(latest_ref)
+            if replacement is not None:
+                authority_times.append(str(replacement["created_at"]))
+            return projected(AdjudicatedStatus.SUPERSEDED.value)
+        document = target["claim"]
+        if document.get("claim_kind") == ClaimKind.QUANTITATIVE.value:
+            key = DaltonStore._claim_semantic_key(document)
+            has_conflict = False
+            for other in self._latest_rows_by_key().get(key, ()):
+                if other["claim_version_id"] == claim_version_id:
+                    continue
+                if not DaltonStore._claim_values_equal(
+                    other["claim"].get("value"), document.get("value")
+                ):
+                    authority_times.append(str(other["created_at"]))
+                    has_conflict = True
+            if has_conflict:
+                return projected(AdjudicatedStatus.CONTESTED.value)
+        adjudication = self._adjudications.get(claim_version_id)
+        if adjudication is not None:
+            authority_times.append(str(adjudication["created_at"]))
+            return projected(str(adjudication["adjudication"]["adjudicated_status"]))
+        return projected("proposed")
 
 
 class DaltonStore:
@@ -2315,71 +2424,26 @@ class DaltonStore:
         return cls.project_claim_status_details(snapshot, claim_version_id)["status"]
 
     @classmethod
+    def claim_status_projection(
+        cls, snapshot: Mapping[str, Any]
+    ) -> "ClaimStatusProjection":
+        """Index one snapshot once for many ``project_claim_status`` answers.
+
+        A reader that projects every Claim of a company asks for thousands of
+        statuses from one snapshot.  Answering each by walking the whole
+        snapshot walked the Ledger once per Claim -- ten million semantic keys
+        for three thousand rows, forty seconds on the writer's store thread
+        every tick.  The projection reads the snapshot once and answers each
+        claim exactly as ``project_claim_status_details`` does.
+        """
+        return ClaimStatusProjection(snapshot)
+
+    @classmethod
     def project_claim_status_details(
         cls, snapshot: Mapping[str, Any], claim_version_id: str
     ) -> dict[str, str]:
         """Return status and the newest immutable authority timestamp used."""
-        rows = list(snapshot.get("claim_versions", []))
-        target = next(
-            (row for row in rows if row.get("claim_version_id") == claim_version_id),
-            None,
-        )
-        if target is None:
-            raise NotFound(f"claim version not found: {claim_version_id}")
-        authority_times = [str(target["created_at"])]
-
-        def projected(status: str) -> dict[str, str]:
-            latest_time = max(
-                _parse_rfc3339(value, "claim status authority timestamp")
-                for value in authority_times
-            )
-            return {
-                "status": status,
-                "updated_at": latest_time.isoformat(timespec="microseconds"),
-            }
-
-        latest_refs = dict(snapshot.get("latest_claim_version_refs", {}))
-        if latest_refs.get(target["claim_ref"]) != claim_version_id:
-            replacement = next(
-                (
-                    row for row in rows
-                    if row.get("claim_version_id") == latest_refs.get(target["claim_ref"])
-                ),
-                None,
-            )
-            if replacement is not None:
-                authority_times.append(str(replacement["created_at"]))
-            return projected(AdjudicatedStatus.SUPERSEDED.value)
-        document = target["claim"]
-        if document.get("claim_kind") == ClaimKind.QUANTITATIVE.value:
-            key = cls._claim_semantic_key(document)
-            has_conflict = False
-            for other in rows:
-                if other["claim_version_id"] == claim_version_id:
-                    continue
-                if latest_refs.get(other["claim_ref"]) != other["claim_version_id"]:
-                    continue
-                other_document = other["claim"]
-                if (
-                    cls._claim_semantic_key(other_document) == key
-                    and not cls._claim_values_equal(
-                        other_document.get("value"), document.get("value")
-                    )
-                ):
-                    authority_times.append(str(other["created_at"]))
-                    has_conflict = True
-            if has_conflict:
-                return projected(AdjudicatedStatus.CONTESTED.value)
-        adjudications = [
-            item for item in snapshot.get("latest_adjudications", [])
-            if item.get("claim_version_ref") == claim_version_id
-        ]
-        if adjudications:
-            authority_times.append(str(adjudications[0]["created_at"]))
-            return projected(
-                str(adjudications[0]["adjudication"]["adjudicated_status"])
-            )
-        return projected("proposed")
+        return ClaimStatusProjection(snapshot).details(claim_version_id)
 
     def claim_index_snapshot(
         self, *, created_at: str | None = None, reuse_read_transaction: bool = False

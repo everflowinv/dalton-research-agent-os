@@ -56,17 +56,25 @@ class CompanyClaimQueryContext:
 
 
 def prepare_company_claim_query(
-    store: DaltonStore, company_ref: str,
+    store: DaltonStore, company_ref: str, *,
+    snapshot: Mapping[str, Any] | None = None,
 ) -> CompanyClaimQueryContext:
     """Read ClaimIndex once for repeated queries within one operation.
 
     The returned value is deliberately not cached.  Its connection and company
     binding prevent a caller from carrying a projection into another authority
     or company operation.
+
+    ``snapshot`` lets one operation that projects several companies -- the
+    dossier lane fingerprinting every screened company each tick -- read the
+    Ledger once and bind each company to the same consistent read, instead of
+    taking and hashing a fresh snapshot per company.  It must have come from
+    ``store.claim_index_snapshot()`` on this same connection.
     """
 
     company_ref = _text(company_ref, "company_ref")
-    snapshot = store.claim_index_snapshot()
+    if snapshot is None:
+        snapshot = store.claim_index_snapshot()
     return CompanyClaimQueryContext(
         connection=store.connection,
         company_ref=company_ref,
@@ -147,9 +155,12 @@ def _claim_rows(
                 json.loads(evidence_row["evidence_json"]))
 
     rows: list[dict[str, Any]] = []
+    # One index over the snapshot answers every status; asking the store to
+    # project each claim alone walked the whole snapshot once per claim.
+    statuses = DaltonStore.claim_status_projection(snapshot)
     for claim_ref, version_ref, row in selected:
         claim = row["claim"]
-        status = DaltonStore.project_claim_status(snapshot, version_ref)
+        status = statuses.status(version_ref)
         retrieved: list[str] = []
         source_types: list[str] = []
         for evidence in evidence_by_version[version_ref]:
