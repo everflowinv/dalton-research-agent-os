@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from .needs_human import KINDS, collect
+from .needs_human import KINDS, LEGACY_ENVIRONMENT, collect
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -36,6 +36,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-router-db", type=Path, default=None)
     parser.add_argument("--workspace-manager-config", type=Path, default=None,
                         help="有多个研究环境时，管理配置的路径")
+    # 这份清单属于哪个研究环境。默认是 legacy：命令行默认指向老环境的 state
+    # 目录，而老环境不替别的环境代办，所以它不列任何工作区条目。给一个工作区
+    # slug，就只列那个工作区自己的事。
+    parser.add_argument("--environment", default=LEGACY_ENVIRONMENT,
+                        help="这份清单属于哪个研究环境：legacy（默认）或工作区 slug")
     parser.add_argument("--kind", action="append", choices=list(KINDS), default=None,
                         help="只看某一类；可以给多次")
     parser.add_argument("--actionable-only", action="store_true",
@@ -76,6 +81,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         scheduler_db=args.scheduler_db,
         model_router_db=args.model_router_db,
         workspace_manager_config_path=args.workspace_manager_config,
+        environment=args.environment,
     )
     items = list(result["items"])
     if args.kind:

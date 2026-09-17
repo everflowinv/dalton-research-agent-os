@@ -30,6 +30,25 @@ When the previous version was returned by a person (D2), the reviewer's own
 words are carried into the prompt, only the questions they named are re-drafted,
 and the new version's ``change_reason`` is ``reviewer_returned``.
 
+A return gets two things an ordinary run does not, and for one reason: a return
+has no second door.  An ordinary draft that is refused is redrafted whenever the
+evidence next moves and costs nobody anything in the meantime; a returned one
+has already spent the owner's attention, and the lane cannot ask them again.
+
+* **A carried-forward first answer that the file has moved past is re-drafted
+  rather than carried.**  Question one joins the set the return rewrites, with
+  the file's current classification in front of the model, so the refusal in
+  step 5 fires on what this run drafted rather than on what the last run said.
+* **A figure nothing cites is repaired once before it is a refusal.**  Between
+  steps 5 and 6, the group that wrote it is shown the exact digits, its own
+  reply and the rows it may cite, and is asked to attach a reference or drop the
+  number -- the same bargain ``draft_contract_repair`` strikes for a broken
+  reply shape.  One call, same model, same run budget; if a figure is still
+  uncited the draft is refused in step 6 exactly as before.
+
+Either way, what a held return leaves behind says which questions failed and
+why, because the person who reads that line is the only one who can act on it.
+
 Exit 0 when the run completed, including when it decided nothing needed doing.
 
 ``formal_authority_writes`` is always 0.  A gate answer is assembled *from*
@@ -76,6 +95,7 @@ from .deep_insight_gate import (
     new_refs,
     output_rubric_findings,
     questions_hash,
+    unsourced_figures,
 )
 from .deep_insight_gate_quality import (
     DeepInsightGateStandardError,
@@ -94,6 +114,7 @@ from .deep_insight_gate_review import (
     groups_to_redraft,
     questions_to_redraft,
     review_of,
+    with_stale_classification,
 )
 from .deep_insight_gate_draft import (
     MAX_COST_USD,
@@ -529,6 +550,270 @@ def demote_unresolved(
     return out, demoted
 
 
+def attempt_key(
+    *,
+    evidence_fingerprint: str,
+    standard: Mapping[str, Any],
+    decision: Mapping[str, Any] | None,
+) -> str:
+    """What "this exact attempt" is, and therefore what a held note is about.
+
+    Three things, because all three change what this run would conclude:
+
+    * **the evidence** -- the dossier version, the debate map, the twelve
+      questions -- which is the lane's own idempotency key;
+    * **the submission standard**, an input to the decision rather than only to
+      the judgement of it: an owner who relaxes a threshold has changed what
+      this run would conclude, and a note written under the old numbers must
+      not hold the lane quiet against the new ones;
+    * **the reviewer's return**, by identity *and by content*.  A decision's id
+      is ``hash(version, verdict)`` -- the same string for every return on one
+      draft -- so a return whose words changed would otherwise be keyed as the
+      return the lane already attempted, and the note written under the first
+      set of per-question notes would hold the lane silent against the second.
+      A held return has to lift when any of the three moves; a company that can
+      only be unstuck by a filing nobody expects is a company nobody can help.
+
+    Changing the *shape* of this key retires every note written under the old
+    one, which is intended: a deploy that changes what a redraft would do is a
+    reason to attempt one more redraft, not a reason to stay quiet on the
+    strength of a refusal the old code reached.
+    """
+
+    return content_hash([
+        str(evidence_fingerprint), standard_hash(standard),
+        "-" if decision is None else str(decision.get("id") or ""),
+        "-" if decision is None else str(decision.get("content_hash") or "")])
+
+
+def group_reply_wire(
+    answers: Mapping[str, Any],
+    *,
+    group: str,
+    material: Sequence[Mapping[str, Any]],
+    classification: str | None,
+) -> dict[str, Any]:
+    """One group's accepted answers, back in the shape the model sent them.
+
+    A repair prompt shows a model its own previous reply.  The raw reply text
+    is not kept past the drafting call -- the run holds the parsed answers --
+    so it is rebuilt here, and rebuilt in the model's vocabulary rather than
+    ours: the sentences carry the row *tags* that were shown, not the refs they
+    resolved to, because a model asked to fix a citation can only cite a tag.
+    """
+
+    tag_of = {row["ref"]: row["tag"] for row in material}
+    rows: list[dict[str, Any]] = []
+    for ref in GROUP_QUESTIONS[group]:
+        answer = answers[ref]
+        if answer.get("status") == "unknown":
+            unknown = answer.get("unknown") or {}
+            rows.append({
+                "question_ref": ref, "status": "unknown",
+                "missing": unknown.get("missing", ""),
+                "evidence_that_would_answer": unknown.get(
+                    "evidence_that_would_answer", ""),
+                "gaps": list(answer.get("gaps") or []),
+            })
+            continue
+        rows.append({
+            "question_ref": ref, "status": "answered",
+            "confidence": answer.get("confidence"),
+            "sentences": [
+                {"text": row["text"],
+                 "refs": [tag_of.get(item, item) for item in row["refs"]]}
+                for row in answer.get("sentences") or []
+            ],
+            "gaps": list(answer.get("gaps") or []),
+        })
+    out: dict[str, Any] = {"answers": rows}
+    if "q1" in GROUP_QUESTIONS[group]:
+        out["classification"] = classification
+    return out
+
+
+def numbers_violations(
+    answers: Mapping[str, Any], *, group: str
+) -> tuple[list[Any], dict[str, list[str]]]:
+    """Every figure in this group's prose that none of its cited rows carries.
+
+    Returned as ``draft_contract_repair`` violations because that is the shape
+    a repair prompt lists, and as a per-question map because that is what the
+    run summary and the owner's note have to say.
+    """
+
+    from .draft_contract_repair import Violation
+
+    found: dict[str, list[str]] = {}
+    violations: list[Any] = []
+    for index, ref in enumerate(GROUP_QUESTIONS[group]):
+        answer = answers.get(ref)
+        if answer is None or answer.get("status") != "answered":
+            continue
+        stray = unsourced_figures(answer)
+        if not stray:
+            continue
+        found[ref] = stray
+        violations.append(Violation(
+            path=f"answers[{index}].sentences[].text",
+            rule="numbers_without_refs",
+            detail=(f"{ref} 的正文写了 {'、'.join(stray[:6])}，"
+                    "但这一问引用的材料里没有任何一行带这个数字。"
+                    "要么补上一条确实带这个数字的引用（必须是下面列出的行标签），"
+                    "要么把这个数字从句子里删掉；其余内容一字不改。"),
+        ))
+    return violations, found
+
+
+# The extra rules a numbers repair is reminded of.  Deliberately short and
+# deliberately *only* about figures: the shape contract is restated beside it,
+# and a repair shown two long rule sets tends to satisfy the last one.
+_NUMBERS_REMINDER_LINES = (
+    "Every digit in a sentence must appear, verbatim, in one of the rows that "
+    "sentence cites. Do not convert units or scales, do not round, do not "
+    "recompute a percentage.",
+    "A figure you cannot cite is a figure you must remove. Removing it is "
+    "always allowed; inventing a citation for it never is.",
+    "Change nothing else: no judgement, no confidence, no question's status, "
+    "and no sentence the violations do not name.",
+)
+
+
+def repair_group_numbers(
+    model: Any,
+    *,
+    group: str,
+    questions: Mapping[str, str],
+    material: Sequence[Mapping[str, Any]],
+    company: Mapping[str, Any],
+    mission: Mapping[str, Any],
+    answers: Mapping[str, Any],
+    classification: str | None = None,
+    prior_answers: Mapping[str, str] | None = None,
+    notes: Sequence[str] = (),
+    review: Mapping[str, Any] | None = None,
+    budget_remaining_micros: int | None = None,
+    repair_reserve_micros: int = 0,
+) -> dict[str, Any]:
+    """One repair call for a group whose prose carries a figure nothing cites.
+
+    ``numbers_without_refs`` is a hard check and stays one: a published answer
+    whose figure traces to nothing is the failure this whole system is built to
+    prevent.  But it is also the one failure a model can fix without reading
+    anything again -- the digits either came from a row it forgot to cite or
+    from nowhere at all -- and on a **returned** draft, refusing the document
+    whole spends the owner's return on nothing.  Live on 2026-09-17, CTSH's
+    redraft of nine named questions was refused for three such figures and the
+    return produced no version at all.
+
+    So the same bargain the dossier lane strikes for a broken reply shape is
+    struck here for a broken citation: the violations are enumerated, the model
+    is shown its own reply once, and the repaired reply is checked by the same
+    deterministic code.  If a figure is still uncited the draft is refused
+    exactly as before.  One call, on the same model, out of the same run
+    budget; a repair that will not fit is refused unmade with the numbers.
+
+    A repair that moves question one's classification is refused rather than
+    accepted: it was asked to fix digits, and a repair that changes a judgement
+    is a second draft nobody authorised.
+    """
+
+    from .cockpit_model import CockpitModelError
+    from .deep_insight_gate_draft import (
+        DRAFT_PURPOSE,
+        GateDraftRefused,
+        build_group_prompt,
+        group_contract_reminder,
+        group_repair_context,
+        parse_group_output,
+    )
+    from .draft_contract_repair import (
+        ContractRepairError,
+        build_repair_prompt,
+        contract_reminder_lines,
+        repair_request_id,
+    )
+
+    # Only a group this run drafted whole can be repaired: the repair prompt is
+    # the model's own reply handed back to it, and a partial reply is not one.
+    if any(ref not in answers for ref in GROUP_QUESTIONS[group]):
+        return {"status": "ok", "group": group, "figures": {},
+                "answers": dict(answers), "cost_micros": 0,
+                "repair_attempts": 0, "reason": None}
+    violations, figures = numbers_violations(answers, group=group)
+    if not violations:
+        return {"status": "ok", "group": group, "figures": {},
+                "answers": dict(answers), "cost_micros": 0,
+                "repair_attempts": 0, "reason": None}
+    result: dict[str, Any] = {
+        "status": "refused", "group": group, "figures": figures,
+        "answers": dict(answers), "cost_micros": 0, "repair_attempts": 0,
+        "reason": None,
+    }
+    if (budget_remaining_micros is not None
+            and budget_remaining_micros < repair_reserve_micros):
+        result["status"] = "budget_refused"
+        result["reason"] = (
+            "run cost bound reached before the numbers repair: "
+            f"{max(0, budget_remaining_micros)} micros left, "
+            f"{repair_reserve_micros} reserved for one repair call")
+        return result
+    prompt = build_group_prompt(
+        group=group, questions=questions, material=material, company=company,
+        prior_answers=prior_answers, notes=notes, review=review)
+    request_id = content_hash({
+        "group": group, "company": company.get("company_ref"),
+        "prompt_sha": content_hash(prompt),
+    })[:32]
+    try:
+        repair_prompt = build_repair_prompt(
+            original_prompt=prompt,
+            reply_text=group_reply_wire(answers, group=group, material=material,
+                                        classification=classification),
+            violations=violations,
+            contract_reminder=contract_reminder_lines(_NUMBERS_REMINDER_LINES)
+            + "\n" + group_contract_reminder(group),
+            context=group_repair_context(material))
+    except ContractRepairError as exc:
+        result["reason"] = str(exc)
+        return result
+    try:
+        call = model.call(
+            purpose=DRAFT_PURPOSE, mission=mission, prompt=repair_prompt,
+            request_id=repair_request_id(
+                request_id, contract_name=f"deep-insight-gate-numbers:{group}",
+                violations=violations))
+    except CockpitModelError as exc:
+        result["status"] = "unavailable"
+        result["reason"] = f"{type(exc).__name__}: {exc}"
+        return result
+    result["repair_attempts"] = 1
+    result["cost_micros"] = int(call.get("cost_micros") or 0)
+    result["route_decision_ref"] = call.get("route_decision_ref")
+    try:
+        parsed = parse_group_output(call.get("text"), group=group,
+                                    questions=questions, material=material)
+    except GateDraftRefused as exc:
+        result["reason"] = f"the numbers repair left the reply contract: {exc}"
+        return result
+    if "q1" in GROUP_QUESTIONS[group] and parsed.get("classification") != classification:
+        result["reason"] = (
+            "the numbers repair changed question one's classification from "
+            f"{classification!r} to {parsed.get('classification')!r}; a repair "
+            "fixes digits, it does not re-decide the question")
+        return result
+    repaired = {**dict(answers), **parsed["answers"]}
+    still, remaining = numbers_violations(repaired, group=group)
+    if still:
+        result["figures"] = remaining
+        result["reason"] = ("figures are still uncited after one repair: "
+                            + "; ".join(item.line() for item in still[:3]))[:500]
+        return result
+    result["status"] = "repaired"
+    result["answers"] = repaired
+    return result
+
+
 def rubric_gate(
     connection: Any, record: Mapping[str, Any], *, prior: Mapping[str, Any] | None
 ) -> dict[str, Any]:
@@ -566,6 +851,14 @@ def rubric_gate(
             "overridden_checks": overridden,
             "checks": {item["check"]: {"status": item["status"], "count": item["count"]}
                        for item in result["checks"]},
+            # Which *question* each hard failure is about.  The counts above are
+            # what the summary carried before, and a count is not something an
+            # owner can act on: "3 numbers" sends them to read twelve answers
+            # looking for digits.  Bounded, because a refusal is a refusal
+            # however long the list is.
+            "hard_findings": {
+                item["check"]: [dict(row) for row in item["findings"][:10]]
+                for item in result["checks"] if item["check"] in failed},
         },
     }
 
@@ -754,6 +1047,13 @@ def run_gate(
         "review": None,
         "redrafted_questions": [],
         "carried_forward_questions": [],
+        # D2: question one was redrafted because the file moved under the
+        # answer that would otherwise have been carried forward.
+        "classification_refresh": None,
+        # D2: which groups wrote a figure nothing cites, and whether one repair
+        # call fixed it.  A hard check refusal that says only "3 numbers" is
+        # not something an owner can act on.
+        "numbers_repair": [],
         "answered": 0,
         "unknown": 0,
         "new_refs": 0,
@@ -905,9 +1205,8 @@ def run_gate(
             # threshold has changed what this run would conclude, and a note
             # written under the old numbers must not hold the lane quiet
             # against the new ones.
-            attempt = content_hash([
-                digest, standard_hash(standard),
-                "-" if decision is None else str(decision["id"])])
+            attempt = attempt_key(evidence_fingerprint=digest,
+                                  standard=standard, decision=decision)
             if head is not None and decision is None and fingerprint_of(head) == digest:
                 blocked[candidate] = "nothing_new"
                 continue
@@ -1032,12 +1331,43 @@ def run_gate(
         # and a return that named two questions in one group costs one call
         # rather than four.
         wanted = list(GROUPS[:max_groups])
+        # What the drafting calls are shown.  The reviewer's own words, plus --
+        # and only when the file has moved under a carried answer -- the lane's
+        # own note saying so.  ``summary["review"]`` above keeps the person's
+        # notes unmixed with ours.
+        draft_review = review
         if review is not None:
+            assessment = (assess(prior, dossier=dossier, verifier_passed=True,
+                                 standard=standard) if prior else None)
             targeted = questions_to_redraft(
-                review,
-                assessment=assess(prior, dossier=dossier, verifier_passed=True,
-                                  standard=standard) if prior else None,
-                prior=prior)
+                review, assessment=assessment, prior=prior)
+            # D2, live 2026-09-17 (ACN).  A return that does not name question
+            # one leaves question one to be carried forward, and a carried
+            # classification is an answer written against a dossier version the
+            # file may have moved several versions past.  When it has, carrying
+            # it forward is carrying an answer already known to be wrong -- and
+            # ``classification_agrees`` below then refuses the *whole* redraft
+            # over it, so the owner's return produces nothing and nothing it
+            # could produce would ever change that.  So question one is
+            # redrafted too, with the file's current word in front of the
+            # model.  The refusal keeps its teeth; it now fires on what this
+            # run drafted rather than on what the last run said.
+            filed_now = str((dossier.get("industry_classification") or {})
+                            .get("classification") or "")
+            carried_word = str((prior or {}).get("classification") or "")
+            if (targeted and "q1" not in targeted and prior is not None
+                    and not classification_agrees(
+                        {"classification": carried_word}, dossier)[0]):
+                draft_review = with_stale_classification(
+                    review, filed=filed_now, carried=carried_word)
+                targeted = questions_to_redraft(
+                    draft_review, assessment=assessment, prior=prior)
+                summary["classification_refresh"] = {
+                    "filed": filed_now,
+                    "carried": carried_word,
+                    "reason": ("上一版第一问沿用的分类与公司档案已经不一致，"
+                               "这一轮把第一问一并重写"),
+                }
             limited = [group for group in groups_to_redraft(targeted)
                        if group in wanted]
             # A return with no handle -- no question numbers, nothing short of
@@ -1063,7 +1393,7 @@ def run_gate(
                 model, group=group,
                 questions={ref: question_by_ref[ref] for ref in GROUP_QUESTIONS[group]},
                 material=rows, company=company, mission=mission,
-                prior_answers=prior_bodies, notes=notes, review=review,
+                prior_answers=prior_bodies, notes=notes, review=draft_review,
                 # WP-C1: one repair of a broken reply shape, on the same model,
                 # out of what is left of *this run's* bound -- and it has to
                 # leave the verifying call its own or it is refused unmade.
@@ -1106,6 +1436,52 @@ def run_gate(
                 "status": "succeeded", "gate_status": "classification_conflict",
                 "failure_reason": why})
             return summary
+
+        # D2, live 2026-09-17 (CTSH): a figure with no source is repaired once
+        # before it is a refusal.  Here rather than after ``rubric_gate``,
+        # where the hard check itself runs, for two reasons: the verifier has
+        # not been paid for yet, so a repair costs one call instead of two; and
+        # what the verifier signs off has to be the body that is published,
+        # which it would not be if the prose were edited after the verdict.
+        #
+        # Only on a return.  A first draft that fails this check is refused and
+        # redrafted whenever the evidence next moves, which costs nobody
+        # anything; a returned draft has no such door -- the owner has already
+        # spent their attention, and the lane cannot ask them again.
+        if review is not None:
+            for group in [name for name in wanted
+                          if group_outcomes.get(name) == "drafted"]:
+                rows, notes = plan[group]
+                outcome = repair_group_numbers(
+                    model, group=group,
+                    questions={ref: question_by_ref[ref]
+                               for ref in GROUP_QUESTIONS[group]},
+                    material=rows, company=company, mission=mission,
+                    answers=answers, classification=classification,
+                    prior_answers=prior_bodies, notes=notes, review=draft_review,
+                    budget_remaining_micros=run_cost_micros - spent,
+                    repair_reserve_micros=producer_reserve + verifier_reserve,
+                )
+                if outcome["status"] == "ok":
+                    continue
+                spent += int(outcome.get("cost_micros") or 0)
+                summary["numbers_repair"].append({
+                    "group": outcome["group"],
+                    "status": outcome["status"],
+                    "repair_attempts": outcome["repair_attempts"],
+                    "figures": {ref: list(items) for ref, items
+                                in (outcome.get("figures") or {}).items()},
+                    "cost_micros": int(outcome.get("cost_micros") or 0),
+                    "reason": outcome.get("reason"),
+                })
+                if outcome["status"] == "repaired":
+                    answers.update(outcome["answers"])
+                    # The repair is a producer call like any other, so the
+                    # verifier has to bind it or the independence check would
+                    # be signing off a reply it never saw named.
+                    if outcome.get("route_decision_ref") is not None:
+                        draft_routes.append(outcome["route_decision_ref"])
+            summary["cost_micros"] = spent
 
         resolve = family_resolver or router_family_resolver(config)
         early = independence_precheck(draft_routes=draft_routes, resolve=resolve)
@@ -1308,6 +1684,111 @@ _RETURN_HOLD_REASONS: Mapping[str, str] = {
 }
 
 
+# What a failed hard check is called in the one line the owner reads.  The
+# rubric's own names are check names -- "numbers_without_refs" tells a reader
+# what passed, not what to do -- and this page is the one place the two
+# vocabularies meet.
+_HARD_CHECK_SHORTFALLS: Mapping[str, str] = {
+    "numbers_without_refs": "正文里有数字没有可核验的出处",
+    "residual_citation_artefacts": "正文里留下了引用标记的残迹",
+}
+
+
+def _hold_assessment(summary: Mapping[str, Any], reason: str) -> dict[str, Any]:
+    """What a held return says, beyond "it did not get through".
+
+    The reason sentence used to be the whole note, so the owner's list
+    ("gate_auto_returned") and the approvals page could say a draft was held
+    without saying what was wrong with it -- and the person reading that line
+    is the only one who can do anything about it.  Everything here is already
+    in the run summary: the hard checks that failed, the groups whose replies
+    were refused, and, question by question, the figures nothing cited.
+
+    Written in the shape ``assess`` produces, because the two are read by the
+    same page and a second shape would be a second thing to keep in step.
+    """
+
+    from .deep_insight_gate import GROUP_OF
+
+    labels: list[str] = []
+    shortfalls: list[str] = []
+    gaps: list[dict[str, str]] = []
+    numbers: dict[str, list[str]] = {}
+    for item in summary.get("numbers_repair") or []:
+        for ref, figures in (item.get("figures") or {}).items():
+            numbers.setdefault(str(ref), []).extend(str(one) for one in figures)
+    rubric = summary.get("rubric") or {}
+    findings = rubric.get("hard_findings") or {}
+    # A figure in an answer this run did not draft fails the same check and
+    # cannot be repaired -- the group that wrote it was not called -- so it is
+    # named here from the rubric's own findings rather than from the repair.
+    for row in findings.get("numbers_without_refs") or []:
+        ref = str(row.get("section") or "")
+        figure = str(row.get("figure") or "")
+        if ref in QUESTION_REFS and figure:
+            listed = numbers.setdefault(ref, [])
+            if figure not in listed:
+                listed.append(figure)
+    other: dict[str, list[str]] = {}
+    for name, rows in findings.items():
+        if name == "numbers_without_refs":
+            continue
+        for row in rows:
+            ref = str(row.get("section") or "")
+            if ref in QUESTION_REFS:
+                other.setdefault(ref, []).append(
+                    _HARD_CHECK_SHORTFALLS.get(str(name), str(name)))
+    for name in rubric.get("hard_failed") or []:
+        shortfalls.append(str(name))
+        labels.append(_HARD_CHECK_SHORTFALLS.get(str(name), str(name)))
+    refused = [str(row.get("group") or "") for row in summary.get("refused") or []]
+    for group in refused:
+        shortfalls.append(f"group_refused:{group}")
+        labels.append(f"{group} 这一组的回复被整组拒绝")
+    for ref in QUESTION_REFS:
+        number = QUESTION_REFS.index(ref) + 1
+        if ref in numbers:
+            gaps.append({
+                "question_ref": ref, "question_number": str(number), "question": "",
+                "missing": (f"这一问写了 {'、'.join(numbers[ref][:6])}，"
+                            "但没有任何被引用的材料带这个数字"),
+                "next_step": "补一条确实带这个数字的引用，或者把这个数字从这一问里去掉",
+            })
+        elif ref in other:
+            gaps.append({
+                "question_ref": ref, "question_number": str(number), "question": "",
+                "missing": "、".join(dict.fromkeys(other[ref])),
+                "next_step": "重写这一问；本轮运行摘要的 rubric.hard_findings 里记了具体位置",
+            })
+        elif GROUP_OF.get(ref) in refused:
+            gaps.append({
+                "question_ref": ref, "question_number": str(number), "question": "",
+                "missing": f"这一问所在的 {GROUP_OF[ref]} 组整组被拒绝，本轮没有重写成",
+                "next_step": "重跑这一组；拒绝的原因记在本轮运行摘要的 refused 里",
+            })
+    detail = ""
+    if labels:
+        detail += "未通过的是：" + "、".join(dict.fromkeys(labels)) + "。"
+    if gaps:
+        detail += "涉及：" + "、".join(row["question_ref"] for row in gaps) + "。"
+    failure = str(summary.get("failure_reason") or "")
+    return {
+        "schema_version": "0.1",
+        "submittable": False,
+        "summary": (reason + detail)[:1000],
+        "checks": [],
+        "shortfalls": shortfalls,
+        "shortfall_labels": list(dict.fromkeys(labels)),
+        "counts": {},
+        "question_gaps": gaps,
+        # For whoever reads the file rather than the page: the run's own words
+        # for why it stopped, untranslated.
+        "gate_status": str(summary.get("gate_status") or ""),
+        "failure_reason": failure[:500],
+        "refused_groups": refused,
+    }
+
+
 def _hold_after_return(state_dir: Path, summary: Mapping[str, Any]) -> None:
     status = str(summary.get("gate_status") or "")
     company_ref = summary.get("company_ref")
@@ -1323,10 +1804,7 @@ def _hold_after_return(state_dir: Path, summary: Mapping[str, Any]) -> None:
             state_dir, company_ref=str(company_ref),
             evidence_fingerprint=str(fingerprint),
             body_hash=content_hash([status, str(company_ref)]),
-            assessment={"schema_version": "0.1", "submittable": False,
-                        "summary": reason, "checks": [], "shortfalls": [],
-                        "shortfall_labels": [], "counts": {},
-                        "question_gaps": []},
+            assessment=_hold_assessment(summary, reason),
             reviewer_questions=summary.get("redrafted_questions") or [],
         )
     except OSError:  # a note is a convenience; a run is not failed by one

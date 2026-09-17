@@ -85,7 +85,7 @@ class FakeModel:
     def __init__(self, *, route="route:draft", verdict="pass", findings=(),
                  sentence="这一问的判断由所引材料支撑。", classification=None,
                  answer_all=False, extra_number=None, break_contract=False,
-                 refuse_groups=(), cite_aspect=None):
+                 refuse_groups=(), cite_aspect=None, repair_drops_number=False):
         self.route = route
         self.verdict = verdict
         self.findings = list(findings)
@@ -100,6 +100,10 @@ class FakeModel:
         # section body; naming an aspect makes the reply cite that section's
         # Claim instead, which is what a test about a retired Claim needs.
         self.cite_aspect = cite_aspect
+        # What this model does when it is shown its own reply and the rules it
+        # broke: a model that repairs the figure it could not cite, or one that
+        # sends the same reply back, which is how the refusal is still reached.
+        self.repair_drops_number = repair_drops_number
         self.prompts: list[str] = []
         self.producer_route_decision_refs = ()
 
@@ -110,6 +114,8 @@ class FakeModel:
         if prompt.startswith("You are an independent verifier"):
             return self._envelope(json.dumps(
                 {"verdict": self.verdict, "findings": self.findings}))
+        if prompt.startswith("Your previous reply broke"):
+            return self._envelope(self._repair(prompt))
         group = next(iter(re.findall(r"^Part: (\w+) --", prompt, flags=re.MULTILINE)),
                      None)
         if self.break_contract or group in self.refuse_groups:
@@ -145,6 +151,24 @@ class FakeModel:
         if "q1" in refs:
             payload["classification"] = self.classification
         return self._envelope(json.dumps(payload, ensure_ascii=False))
+
+    def _repair(self, prompt):
+        """Answer a repair call from the reply the prompt quotes back.
+
+        A repair is not a second draft: the prompt carries no material table
+        and no question list, so this reads the previous reply out of the
+        prompt -- which is the only thing a real model has to work with either
+        -- and either drops the figure it was told it could not cite or sends
+        the same reply back unchanged.
+        """
+
+        _, _, body = prompt.partition("YOUR PREVIOUS REPLY:\n")
+        payload = json.loads(body)
+        if self.repair_drops_number:
+            for answer in payload.get("answers") or []:
+                for sentence in answer.get("sentences") or []:
+                    sentence["text"] = self.sentence
+        return json.dumps(payload, ensure_ascii=False)
 
     def _envelope(self, text):
         return {"text": text, "replayed": False, "cost_micros": 1000,
@@ -1235,6 +1259,39 @@ class CockpitTests(unittest.TestCase):
         self.assertFalse([action for action in item["actions"]
                           if action.get("disabled")])
         self.assertIn(ADVISORY_REASONS["evidence_superseded"], item["note"])
+
+    def test_evidence_that_moved_fills_in_the_return_it_recommends(self):
+        # The advisory's own recommendation is "退回，让系统按新证据重写", and a
+        # return with no words is refused -- so the card that recommends it
+        # must also hand over the sentence, the same way a below-standard draft
+        # does. Before this, the recommended action was the one action that
+        # needed the owner to compose text.
+        from dalton_core.cockpit_plane import EVIDENCE_SUPERSEDED_RETURN_REASON
+        from dalton_core.company_dossier import CompanyDossierAuthority
+        from dalton_core.deep_insight_gate_quality import STANDARD_FILE_NAME
+
+        self.harness.fixture = LedgerFixture(str(self.harness.state_dir / "core.sqlite"))
+        self.harness.store = self.harness.fixture.store
+        self.harness.dossiers = CompanyDossierAuthority(self.harness.store)
+        fresh = self.harness.fixture.add_claim(
+            "c-new", kind="qualitative", value=None, unit=None,
+            statement="新的一条定性结论")["claim_version_id"]
+        self.harness.publish_dossier(extra={"guidance_style": fresh})
+        self.harness.fixture.close()
+        item = self.gate_item(self.plane())
+        self.assertEqual(item["rationale_default"], EVIDENCE_SUPERSEDED_RETURN_REASON)
+        returns = [action for action in item["actions"]
+                   if action["decision"] == "return_for_more_work"]
+        self.assertEqual([action["label"] for action in returns], ["按新证据退回"])
+        self.assertIn("证据已更新", returns[0]["hint"])
+        # Below the standard *and* written against evidence that moved: the
+        # per-question note is the more specific instruction and wins the box.
+        (self.harness.state_dir / STANDARD_FILE_NAME).unlink()
+        both = self.gate_item(self.plane())
+        self.assertTrue(both["rationale_default"].startswith("按提交标准复核"))
+        self.assertEqual([action["label"] for action in both["actions"]
+                          if action["decision"] == "return_for_more_work"],
+                         ["按系统建议退回"])
 
     def test_a_draft_below_the_standard_offers_the_return_it_would_have_written(self):
         # H2. The four live drafts were published before the submission

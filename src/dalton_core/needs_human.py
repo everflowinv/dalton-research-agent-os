@@ -97,6 +97,14 @@ HELD_LANE_STATUSES = frozenset({"recovery_required", "not_permitted", "ungranted
 
 MAX_ITEMS = 200
 
+# Which research environment a list belongs to.  An installation can run
+# several -- the legacy environment plus one Core per workspace -- and each one
+# serves its own copy of this page.  "研究环境「X」还没有研究目标" is an errand
+# for the people looking at X, and putting it on every other environment's list
+# turns a to-do list into a noticeboard about the neighbours.  The scope is the
+# workspace slug, or this constant for the legacy environment.
+LEGACY_ENVIRONMENT = "legacy"
+
 
 def _now(clock: Any | None = None) -> datetime:
     return (clock() if clock is not None else datetime.now(timezone.utc))
@@ -669,6 +677,25 @@ def workspace_probes(manager_config_path: Path | str | None) -> list[dict[str, A
     return probes
 
 
+def workspaces_in_scope(
+    probes: Sequence[Mapping[str, Any]], environment: str | None,
+) -> list[Mapping[str, Any]]:
+    """The environments one environment's page is allowed to talk about: itself.
+
+    ``environment`` is a workspace slug, or ``LEGACY_ENVIRONMENT``/``None`` for
+    the legacy environment.  The legacy environment owns no workspace, so it
+    keeps none of the probes; a workspace keeps exactly the probe that is
+    itself.  Everything else in :func:`collect` already reads only the Core and
+    the state directory of the environment asking, so this is the one place
+    where the scope has to be said out loud.
+    """
+
+    if environment is None or environment == LEGACY_ENVIRONMENT:
+        return []
+    return [probe for probe in probes
+            if str(probe.get("slug") or "") == environment]
+
+
 # ---------------------------------------------------------------------------
 # the list
 # ---------------------------------------------------------------------------
@@ -684,6 +711,7 @@ def collect(
     model_router_db: Path | str | None = None,
     workspace_manager_config_path: Path | str | None = None,
     workspaces: Sequence[Mapping[str, Any]] | None = None,
+    environment: str | None = None,
     clock: Any | None = None,
 ) -> dict[str, Any]:
     """Everything waiting on a person, in the order they should deal with it.
@@ -692,6 +720,15 @@ def collect(
     Scheduler beside it still gets its gate decisions; a state directory with no
     governance folder still gets its sources.  Partial is the normal case and
     the list says which probes ran.
+
+    ``environment`` says whose list this is: a workspace slug, or
+    ``LEGACY_ENVIRONMENT``.  An unscoped call means the legacy environment --
+    the safe reading, because a list that names no environment cannot honestly
+    speak for one that has a slug, and because every caller that represents a
+    workspace knows its slug and passes it.  So the legacy environment lists no
+    workspace items at all and a workspace lists only its own missing research
+    goal; every other probe here already reads nothing but the Core and the
+    state directory it was handed.
     """
 
     now = _now(clock)
@@ -713,10 +750,15 @@ def collect(
 
     core = _open(core_db)
     heartbeat = None if heartbeat_path is None else _read_json(Path(heartbeat_path))
-    probes = list(workspaces or []) or workspace_probes(workspace_manager_config_path)
+    # Under a legacy scope nobody else's Core is even opened: the cheapest way
+    # to keep one environment out of another's files is not to go looking.
+    probes: Sequence[Mapping[str, Any]] = (
+        [] if environment is None or environment == LEGACY_ENVIRONMENT
+        else (list(workspaces or [])
+              or workspace_probes(workspace_manager_config_path)))
 
     items: list[dict[str, Any]] = []
-    items += workspaces_without_mission(probes)
+    items += workspaces_without_mission(workspaces_in_scope(probes, environment))
     items += gate_decisions(core, state_dir=state)
     items += held_lanes(heartbeat)
     items += provider_failures(scheduler_db, now=now, model_router_db=model_router_db)
@@ -766,6 +808,7 @@ __all__ = [
     "GOVERNANCE_DIR_NAME",
     "HELD_LANE_STATUSES",
     "KINDS",
+    "LEGACY_ENVIRONMENT",
     "MAX_ITEMS",
     "PROVIDER_ERROR_CODES",
     "PROVIDER_FAILURE_FLOOR",
@@ -783,5 +826,6 @@ __all__ = [
     "provider_failures",
     "unconnected_sources",
     "workspace_probes",
+    "workspaces_in_scope",
     "workspaces_without_mission",
 ]

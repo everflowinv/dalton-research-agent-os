@@ -21,10 +21,14 @@ import json
 import unittest
 
 from dalton_core.deep_insight_gate import (
+    GROUPS,
+    QUESTION_REFS,
     REVIEWER_RETURNED,
     DeepInsightGateValidationError,
+    answer_body,
     evidence_scope,
 )
+from dalton_core.deep_insight_gate_cli import attempt_key
 from dalton_core.deep_insight_gate_quality import (
     DEFAULT_STANDARD,
     STANDARD_FILE_NAME,
@@ -429,6 +433,305 @@ class ReturnLoopTests(unittest.TestCase):
             model_factory=lambda: FakeModel(answer_all=True))
         self.assertEqual(summary["gate_status"], "duplicate")
         self.assertEqual(self.harness.gates().counts()["drafts"], 1)
+
+
+class StaleClassificationTests(unittest.TestCase):
+    """A carried answer the file has moved past is not an answer worth carrying.
+
+    Live, 2026-09-17: ACN's owner returned q7 and q9-q12 with notes.  The lane
+    redrafted exactly those, carried question one forward from a draft written
+    against an older dossier version, and then refused the whole redraft
+    because the carried classification no longer matched the file.  The return
+    produced nothing, and nothing the lane could draft would have changed that.
+    """
+
+    def setUp(self):
+        self.harness = Harness(submission_standard={
+            "max_unknown": 12, "min_evidence_refs": 1,
+            "require_question_one_classified": False,
+            "require_classification_agrees": False,
+        })
+        self.addCleanup(self.harness.close)
+        first = self.harness.run(model_factory=lambda: FakeModel(answer_all=True))
+        self.assertEqual(first["gate_status"], "submitted")
+        self.head = self.harness.gates().latest(ACN)
+        self.assertEqual(self.head["classification"], "contract_compounder")
+
+    def _return_naming_the_market(self):
+        return self.harness.gates().decide(
+            gate_version_ref=self.head["id"],
+            gate_version_hash=self.head["content_hash"],
+            decision="return_for_more_work",
+            reason="第七问没有回答估值。", actor_ref=OWNER,
+            question_notes={"q7": "没有回答估值"})
+
+    def _reclassify(self, classification="turnaround"):
+        """The file advances a version and reaches a different classification.
+
+        Both halves matter and both are what happened live: a dossier version
+        needs new evidence to exist at all (ADR-0008), and it is exactly those
+        later versions -- the ones the gate draft was never written against --
+        that can disagree with a first answer nobody has looked at since.
+        """
+
+        fresh = self.harness.fixture.add_claim(
+            f"c-reclass-{classification}", kind="qualitative", value=None,
+            unit=None, statement="新的一条定性结论，足以改变分类"
+        )["claim_version_id"]
+        published = self.harness.publish_dossier(
+            classification=classification, extra={"guidance_style": fresh})
+        self.assertEqual(published["status"], "fresh")
+        return published
+
+    def test_a_stale_carried_classification_pulls_question_one_into_the_redraft(self):
+        self._return_naming_the_market()
+        self._reclassify()
+        model = FakeModel(answer_all=True, classification="turnaround",
+                          sentence="这一版按审阅意见重写了。")
+        summary = self.harness.run(model_factory=lambda: model)
+        self.assertEqual(summary["gate_status"], "submitted")
+        self.assertIn("q1", summary["redrafted_questions"])
+        self.assertIn("q7", summary["redrafted_questions"])
+        self.assertEqual(summary["classification_refresh"]["filed"], "turnaround")
+        self.assertEqual(summary["classification_refresh"]["carried"],
+                         "contract_compounder")
+        self.assertEqual(summary["classification"], "turnaround")
+        self.assertEqual(self.harness.gates().latest(ACN)["classification"],
+                         "turnaround")
+        # The industry group is drafted, and it is told -- in the per-question
+        # channel, marked as the system's own words -- what the file says now.
+        industry = [item for item in model.prompts if "Part: industry --" in item]
+        self.assertEqual(len(industry), 1)
+        self.assertIn("turnaround", industry[0])
+        self.assertIn("不是审阅人写的", industry[0])
+        # The reviewer's own notes are still theirs, unmixed with ours.
+        self.assertEqual(summary["review"]["question_notes"], {"q7": "没有回答估值"})
+
+    def test_a_freshly_drafted_question_one_that_still_disagrees_still_refuses(self):
+        # The refusal keeps its teeth.  What changed is what it is about: this
+        # run's own answer rather than the last run's.
+        self._return_naming_the_market()
+        self._reclassify()
+        model = FakeModel(answer_all=True, classification="contract_compounder",
+                          sentence="这一版按审阅意见重写了。")
+        summary = self.harness.run(model_factory=lambda: model)
+        self.assertEqual(summary["gate_status"], "classification_conflict")
+        self.assertIn("q1", summary["redrafted_questions"])
+        self.assertEqual(self.harness.gates().latest(ACN)["id"], self.head["id"])
+        note = read_note(self.harness.state_dir, ACN)
+        self.assertIn("第一问", note["assessment"]["summary"])
+
+    def test_a_classification_that_still_agrees_leaves_question_one_alone(self):
+        self._return_naming_the_market()
+        model = FakeModel(answer_all=True, sentence="这一版按审阅意见重写了。")
+        summary = self.harness.run(model_factory=lambda: model)
+        self.assertEqual(summary["gate_status"], "submitted")
+        self.assertEqual(summary["redrafted_questions"], ["q7"])
+        self.assertIsNone(summary["classification_refresh"])
+        self.assertEqual([item for item in model.prompts
+                          if "Part: industry --" in item], [])
+
+
+class NumbersRepairTests(unittest.TestCase):
+    """A figure nothing cites gets one repair call, not a whole-draft refusal.
+
+    Live, 2026-09-17: CTSH's redraft of nine named questions was refused with
+    ``hard checks failed: numbers_without_refs`` over three figures, and the
+    owner's return produced no version at all.
+    """
+
+    def setUp(self):
+        self.harness = Harness(submission_standard={
+            "max_unknown": 12, "min_evidence_refs": 1,
+            "require_question_one_classified": False,
+            "require_classification_agrees": False,
+        })
+        self.addCleanup(self.harness.close)
+        first = self.harness.run(model_factory=lambda: FakeModel(answer_all=True))
+        self.assertEqual(first["gate_status"], "submitted")
+        self.head = self.harness.gates().latest(ACN)
+
+    def _return(self):
+        return self.harness.gates().decide(
+            gate_version_ref=self.head["id"],
+            gate_version_hash=self.head["content_hash"],
+            decision="return_for_more_work",
+            reason="第三问把订单和收入搞混了，重写。", actor_ref=OWNER,
+            question_notes={"q3": "供给那一段没写"})
+
+    def _model(self, **kwargs):
+        return FakeModel(answer_all=True, sentence="这一版按审阅意见重写了。",
+                         extra_number="47.3 亿美元", **kwargs)
+
+    def test_an_uncited_figure_is_repaired_once_and_the_return_produces_a_version(self):
+        self._return()
+        model = self._model(repair_drops_number=True)
+        summary = self.harness.run(model_factory=lambda: model)
+        self.assertEqual(summary["gate_status"], "submitted")
+        self.assertEqual([row["group"] for row in summary["numbers_repair"]],
+                         ["industry"])
+        repair = summary["numbers_repair"][0]
+        self.assertEqual(repair["status"], "repaired")
+        self.assertEqual(repair["repair_attempts"], 1)
+        self.assertIn("q3", repair["figures"])
+        self.assertEqual(summary["rubric"]["hard_failed"], [])
+        # One draft and one repair, and the repair is a repair: it is shown the
+        # violations and its own reply, not the material table again.
+        self.assertEqual(len(model.prompts), 2)
+        self.assertIn("numbers_without_refs", model.prompts[1])
+        self.assertIn("CITABLE ROW TAGS", model.prompts[1])
+        self.assertNotIn("Statements available", model.prompts[1])
+        published = self.harness.gates().latest(ACN)
+        self.assertEqual(published["version"], 2)
+        for answer in published["answers"]:
+            self.assertNotIn("47.3", answer_body(answer))
+
+    def test_a_figure_that_survives_the_repair_still_refuses_and_the_note_says_why(self):
+        self._return()
+        model = self._model()
+        summary = self.harness.run(model_factory=lambda: model)
+        self.assertEqual(summary["gate_status"], "rubric_refused")
+        self.assertIn("numbers_without_refs", summary["failure_reason"])
+        self.assertEqual(summary["numbers_repair"][0]["status"], "refused")
+        # One repair, not a loop.
+        self.assertEqual(len(model.prompts), 2)
+        self.assertEqual(self.harness.gates().latest(ACN)["version"], 1)
+        note = read_note(self.harness.state_dir, ACN)
+        assessment = note["assessment"]
+        self.assertIn("numbers_without_refs", assessment["shortfalls"])
+        self.assertIn("数字", assessment["summary"])
+        self.assertIn("q3", assessment["summary"])
+        gaps = {row["question_ref"]: row for row in assessment["question_gaps"]}
+        self.assertIn("q3", gaps)
+        self.assertIn("47.3", gaps["q3"]["missing"])
+        self.assertTrue(gaps["q3"]["next_step"])
+        self.assertEqual(note["reviewer_questions"], summary["redrafted_questions"])
+
+    def test_a_first_draft_is_not_repaired_it_is_simply_refused(self):
+        # No return, no repair: a draft nobody is waiting on is redrafted the
+        # next time the evidence moves, and buying a repair call for it would
+        # be spending the mission's budget on a run that costs nobody anything.
+        harness = Harness(submission_standard={
+            "max_unknown": 12, "min_evidence_refs": 1,
+            "require_question_one_classified": False,
+            "require_classification_agrees": False,
+        })
+        self.addCleanup(harness.close)
+        model = FakeModel(answer_all=True, extra_number="47.3 亿美元")
+        summary = harness.run(model_factory=lambda: model)
+        self.assertEqual(summary["gate_status"], "rubric_refused")
+        self.assertEqual(summary["numbers_repair"], [])
+        self.assertEqual(len(model.prompts), len(GROUPS))
+
+
+class HeldReturnTests(unittest.TestCase):
+    """A held return is quiet, not closed.
+
+    The note that stops the lane paying for the same four calls every tick is
+    keyed on the evidence, the standard and the decision -- so it lifts when
+    any of the three moves, and a company can never be stuck behind it.
+    """
+
+    def setUp(self):
+        self.harness = Harness(submission_standard={
+            "max_unknown": 12, "min_evidence_refs": 1,
+            "require_question_one_classified": False,
+            "require_classification_agrees": False,
+        })
+        self.addCleanup(self.harness.close)
+        first = self.harness.run(model_factory=lambda: FakeModel(answer_all=True))
+        self.assertEqual(first["gate_status"], "submitted")
+        self.head = self.harness.gates().latest(ACN)
+
+    def _return(self, **kwargs):
+        return self.harness.gates().decide(
+            gate_version_ref=self.head["id"],
+            gate_version_hash=self.head["content_hash"],
+            decision="return_for_more_work", reason="整体太薄，重写。",
+            actor_ref=OWNER, **kwargs)
+
+    def _hold(self):
+        """One return, one redraft that produced nothing, and the note it left."""
+
+        self._return()
+        held = self.harness.run(model_factory=lambda: FakeModel(answer_all=True))
+        self.assertEqual(held["gate_status"], "duplicate")
+        self.assertEqual(self.harness.run()["blocked"][ACN],
+                         "returned_redraft_already_attempted")
+        return held
+
+    def _move_the_file(self):
+        fresh = self.harness.fixture.add_claim(
+            "c-new", kind="qualitative", value=None, unit=None,
+            statement="新的一条定性结论")["claim_version_id"]
+        return self.harness.publish_dossier(extra={"guidance_style": fresh})
+
+    def test_a_held_return_is_attempted_again_when_the_evidence_moves(self):
+        self._hold()
+        self._move_the_file()
+        summary = self.harness.run(model_factory=lambda: FakeModel(
+            answer_all=True, sentence="证据变厚之后重写的一版。"))
+        self.assertNotIn(ACN, summary.get("blocked") or {})
+        self.assertEqual(summary["gate_status"], "submitted")
+
+    def test_a_held_note_says_which_groups_failed_and_why(self):
+        # The note used to be the reason sentence and nothing else, so the
+        # owner's list could say a redraft was held without saying what to fix
+        # -- and they are the only person who can fix it.
+        self._return()
+        summary = self.harness.run(
+            model_factory=lambda: FakeModel(break_contract=True))
+        self.assertEqual(summary["gate_status"], "nothing_drafted")
+        assessment = read_note(self.harness.state_dir, ACN)["assessment"]
+        self.assertEqual(assessment["gate_status"], "nothing_drafted")
+        self.assertEqual(assessment["refused_groups"], list(GROUPS))
+        for group in GROUPS:
+            self.assertIn(group, "".join(assessment["shortfall_labels"]))
+        gaps = {row["question_ref"] for row in assessment["question_gaps"]}
+        self.assertEqual(gaps, set(QUESTION_REFS))
+        self.assertIn("q1", assessment["summary"])
+
+    def test_a_held_return_is_attempted_again_when_the_return_itself_changes(self):
+        # The other half of "not permanently blocked".  A decision's id is
+        # ``hash(version, verdict)`` -- the same string for every return on one
+        # draft -- so the quiet is keyed on what the return *said* as well.
+        # Otherwise a note written under one set of per-question notes would
+        # hold the lane silent against the next set, and the only way out of a
+        # held return would be a filing nobody has a reason to expect.
+        #
+        # The authority allows one decision per draft (a schema invariant: a
+        # change of mind is a new draft), so the key is checked here rather
+        # than by returning the same draft twice.
+        standard = load_standard(self.harness.state_dir)
+        returned = self.harness.gates().decision_for(self.head["id"])
+        self.assertIsNone(returned)
+        decision = self._return(question_notes={"q3": "供给那一段没写"})
+        stored = self.harness.gates().decision_for(self.head["id"])
+        rewritten = {**stored, "question_notes": {"q3": "这次说具体一点"},
+                     "content_hash": "f" * 64}
+        self.assertEqual(rewritten["id"], decision["id"])
+        self.assertNotEqual(
+            attempt_key(evidence_fingerprint="e" * 64, standard=standard,
+                        decision=stored),
+            attempt_key(evidence_fingerprint="e" * 64, standard=standard,
+                        decision=rewritten))
+        # And the three things it is keyed on are all three of them.
+        self.assertNotEqual(
+            attempt_key(evidence_fingerprint="e" * 64, standard=standard,
+                        decision=stored),
+            attempt_key(evidence_fingerprint="d" * 64, standard=standard,
+                        decision=stored))
+        self.assertNotEqual(
+            attempt_key(evidence_fingerprint="e" * 64, standard=standard,
+                        decision=stored),
+            attempt_key(evidence_fingerprint="e" * 64,
+                        standard={**standard, "max_unknown": 3},
+                        decision=stored))
+        self.assertNotEqual(
+            attempt_key(evidence_fingerprint="e" * 64, standard=standard,
+                        decision=None),
+            attempt_key(evidence_fingerprint="e" * 64, standard=standard,
+                        decision=stored))
 
 
 if __name__ == "__main__":  # pragma: no cover

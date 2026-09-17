@@ -1650,11 +1650,24 @@ def _gate_question_notes(
     except Exception:  # noqa: BLE001 - a malformed guess is simply not a note
         return {}
 
-# The two card kinds that are information rather than a decision.  They carry
-# no buttons and they do not count towards the badge.
+# The two card kinds that are information rather than a decision.  Neither is
+# built any more -- the approvals page holds decisions, and a card with no
+# buttons is an item nobody can finish -- but the badge still refuses to count
+# them, so that a kind reintroduced by mistake cannot make the number say
+# "you owe an answer" about something nobody can answer.
 INFORMATIONAL_APPROVAL_KINDS = frozenset({
     "deep_insight_gate_held", "gate_reopen_superseded",
 })
+
+# What the box says when the only thing wrong with a draft is that the
+# evidence moved under it.  The advisory already recommends returning it; a
+# recommendation whose button then asks the owner to compose the sentence
+# themselves is a recommendation that costs more than ignoring it.  Below the
+# submission standard is the more specific diagnosis and keeps its own,
+# per-question prefill.
+EVIDENCE_SUPERSEDED_RETURN_REASON = (
+    "证据已更新：这份草稿依据的公司档案／争议图已有更新版本，请按最新证据重写。"
+)
 
 GATE_RATIONALE_HINT = (
     "写清楚哪里不行。可以只写一段整体意见；想点名到具体问题时，"
@@ -1700,50 +1713,6 @@ def _gate_review_context(
     note = review_note(review_of(decision))
     if note:
         out["prior_review_note"] = note
-    return out
-
-
-def _auto_returned_items(state_dir: Any) -> list[dict[str, Any]]:
-    """D1's held-back drafts, as information cards with no buttons."""
-
-    from .deep_insight_gate_quality import read_notes
-
-    out: list[dict[str, Any]] = []
-    try:
-        notes = read_notes(state_dir)
-    except OSError:
-        return []
-    for note in notes:
-        assessment = note.get("assessment") or {}
-        counts = assessment.get("counts") or {}
-        gaps = assessment.get("question_gaps") or []
-        out.append({
-            "kind": "deep_insight_gate_held",
-            "company_ref": note.get("company_ref"),
-            "ref": f"deep-insight-gate-held:{note.get('company_ref')}",
-            "hash": None,
-            "at": note.get("created_at") or "",
-            "title": "系统判定这份深度认知评审草稿尚不足以提交",
-            "summary": str(assessment.get("summary") or ""),
-            "details": {
-                "十二问答了": counts.get("answered"),
-                "未答": counts.get("unknown"),
-                "引用材料条数": counts.get("evidence_refs"),
-                **{f"缺口 {index}": f"第 {gap.get('question_number')} 问缺"
-                                     f"{gap.get('missing')}；下一步："
-                                     f"{gap.get('next_step')}"
-                   for index, gap in enumerate(gaps[:12], start=1)},
-            },
-            "detail_labels": {
-                "十二问答了": "十二问答了", "未答": "未答",
-                "引用材料条数": "引用材料条数",
-                **{f"缺口 {index}": f"缺口 {index}"
-                   for index in range(1, min(len(gaps), 12) + 1)},
-            },
-            "actions": [],
-            "needs_rationale": False,
-            "note": "证据变化之前不会重复起草，也不会重复花模型调用。",
-        })
     return out
 
 
@@ -1852,6 +1821,13 @@ def _gate_card_notes(verdict: Mapping[str, Any],
         # Offered in the box rather than sent: the owner reads it, edits it if
         # they disagree, and presses the button that was already there.
         out["rationale_default"] = suggested_return_reason(quality)
+    elif verdict.get("advisory_code") == "evidence_superseded":
+        # The advisory's own recommendation is "退回，让系统按新证据重写"; a
+        # return with no words is refused (D2), so the card fills the box the
+        # same way the below-standard one does.  Second, not first: a draft
+        # that is also below the standard has a per-question note to send, and
+        # "this evidence moved" would overwrite the more specific instruction.
+        out["rationale_default"] = EVIDENCE_SUPERSEDED_RETURN_REASON
     if notes:
         out["note"] = " ".join(note for note in notes if note)
     return out
@@ -1878,6 +1854,7 @@ def _gate_actions(verdict: Mapping[str, Any],
     decidable = bool(verdict["decidable"])
     hint = None if decidable else str(verdict["reason"] or "")
     below_standard = bool(quality is not None and not quality.get("submittable", True))
+    evidence_moved = verdict.get("advisory_code") == "evidence_superseded"
     actions: list[dict[str, Any]] = []
     for action in GATE_ACTIONS:
         row = dict(action)
@@ -1885,6 +1862,11 @@ def _gate_actions(verdict: Mapping[str, Any],
             if below_standard:
                 row["label"] = "按系统建议退回"
                 row["hint"] = "退回理由已按提交标准逐题填好，可以直接提交，也可以改写。"
+            elif evidence_moved:
+                # Same shape, different diagnosis: the draft reads fine, the
+                # files under it moved.  The recommended action is one press.
+                row["label"] = "按新证据退回"
+                row["hint"] = "退回理由已按「证据已更新」填好，可以直接提交，也可以改写。"
         elif not decidable:
             row["disabled"] = True
             row["hint"] = hint
@@ -4836,6 +4818,13 @@ class CockpitPlane:
                 "decline": "不同意重新评估研究报告",
                 "publish": "发布了研究目标", "discard": "放弃了研究草稿",
             }
+            # A conviction call is not a thesis revision, and the table above
+            # reads the verdict without the kind: "accept" there means 接受了
+            # 论点修订, which is not what the owner just did.
+            if refs.get("kind") == "conviction_call":
+                titles = {"accept": "采纳了一条投资 call 提案",
+                          "reject": "驳回了一条投资 call 提案",
+                          "defer": "暂缓决定一条投资 call 提案"}
             if decision in titles:
                 technical = {"original_title": title, "refs": refs}
                 title = titles[decision]
@@ -4943,7 +4932,11 @@ class CockpitPlane:
             })
         for row in self.journal.rows("SELECT * FROM cockpit_events ORDER BY event_id DESC LIMIT ?", (limit,)):
             shown = self._journal_event_view(row)
-            events.append({"id": f"cockpit:{row['event_id']}", "at": row["at"], "kind": row["kind"], "lane": "你",
+            events.append({"id": f"cockpit:{row['event_id']}", "at": row["at"], "kind": row["kind"],
+                           # Everything else in this table is something the
+                           # owner did; housekeeping the system did on its own
+                           # would read as their own act under the same lane.
+                           "lane": "研究系统" if row["kind"] == "hygiene" else "你",
                            "title": shown["title"], "detail": shown["detail"],
                            "technical": shown["technical"], "state": "done", "company": None})
         heartbeat = _load_json(self.config.heartbeat_path) or {}
@@ -5125,13 +5118,13 @@ class CockpitPlane:
                     "question_refs": [item["question_ref"] for item in record["answers"]],
                     **_gate_card_notes(verdict, quality),
                 })
-            # D1: the drafts the submission standard held back.  Information,
-            # not an approval: there is nothing to press, and the reason the
-            # owner's queue is short belongs beside the queue rather than in a
-            # log nobody opens.
-            for note in _auto_returned_items(self.config.state_dir):
-                company_ref = note.pop("company_ref", None)
-                items.append({**note, "who": self._label(members, company_ref)})
+            # D1's held-back drafts used to be listed here as buttonless
+            # information.  They are not decisions, and a decision page that
+            # also carries notices is a page whose items stop meaning "you owe
+            # an answer": one from 2026-09-14 sat in the queue for days with
+            # nothing to press.  The same news is already in 需要你处理 as
+            # ``gate_auto_returned`` with the next step attached, which is
+            # where a notice belongs.
             # Investment Memo reuses MissionDeliverable and the mission stage
             # ledger. Only the active mission's current head is offered; an old
             # version remains readable under documents but cannot receive a
@@ -5242,15 +5235,20 @@ class CockpitPlane:
             # P15d: a conviction call the machine proposed and nobody has
             # answered yet.
             #
-            # D3 added the one button this card always needed. A call whose
-            # direction is "avoid", whose risk-reward is "no change" and whose
-            # own confidence is "low" is not a recommendation -- it is the
-            # machine saying it has nothing to say about this company yet --
-            # and asking the owner to write a rationale for declining to act
-            # on nothing is how a page teaches somebody to stop reading it. So
-            # that shape, and only that shape, gets a one-click dismissal and
-            # a sentence saying what it is. Everything else still waits for
-            # the full decision path.
+            # All three of the authority's decisions, on every card. The page
+            # used to offer a button only for the low-information shape and to
+            # tell everything else that the approval path was not connected
+            # yet -- but ``decide_conviction_call`` has existed the whole time
+            # and takes accept, reject and defer, so the card that said so was
+            # describing an integration gap that had already closed, and the
+            # owner was left with a proposal they could not clear.
+            #
+            # A call whose direction is "avoid", whose risk-reward is "no
+            # change" and whose own confidence is "low" is not a recommendation
+            # -- it is the machine saying it has nothing to say about this
+            # company yet -- so that shape keeps its one-click dismissal and
+            # the sentence explaining what it is, rather than asking for a
+            # written rationale for declining to act on nothing.
             for row in self._rows(core,
                 "SELECT p.* FROM conviction_call_proposals p "
                 "LEFT JOIN conviction_call_decisions d ON d.proposal_ref=p.proposal_id "
@@ -5277,12 +5275,21 @@ class CockpitPlane:
                             row["risk_reward_status"], row["risk_reward_status"]),
                         "可观察信号": [step.get("signal") for step
                                        in record.get("event_pathway") or []],
-                        **({} if low_information else {
-                            "审批状态": "等待正式研究审批流程接入；本页暂不能提交决定"}),
                     },
-                    "actions": ([{"decision": "reject", "label": "驳回这条提案"}]
-                                if low_information else []),
-                    "needs_rationale": False,
+                    "actions": [
+                        {"decision": "accept", "label": "采纳"},
+                        {"decision": "reject",
+                         "label": "驳回这条提案" if low_information else "驳回"},
+                        {"decision": "defer", "label": "暂缓"},
+                    ],
+                    # 采纳 is a position and 暂缓 is a pause somebody has to end;
+                    # both are worth a sentence.  A low-information proposal is
+                    # the exception the note below explains: dismissing nothing
+                    # should cost one click, so its box is not asked for.
+                    "needs_rationale": not low_information,
+                    "rationale_hint": ("写清楚为什么采纳、驳回或暂缓。"
+                                       "这句话会和决定一起存进判断记录，"
+                                       "以后复盘看到的就是你当时的原话。"),
                     **({"note": LOW_INFORMATION_NOTE} if low_information else {}),
                 })
         # INT2 / ADR-0007: the checkpoints the revision loop raises. Rendered
@@ -5617,27 +5624,55 @@ class CockpitPlane:
                         "actions": [], "needs_rationale": False,
                         "note": "授予 forecast_line 之后判断层可以直接改，否则要人裁决",
                     })
-            # D3: one line for everything the filter above took out.  It is not
-            # a decision and it carries no buttons; it exists so that "your
-            # to-do list is shorter than yesterday" is a sentence with a
-            # reason attached to it.
+            # D3: everything the filter above took out still has to be said
+            # somewhere -- "your to-do list is shorter than yesterday" without
+            # a reason is a broken page rather than a clean one.  It is said in
+            # the journal rather than on this page: the approvals queue holds
+            # decisions, and a buttonless card among the decisions is an item
+            # the owner can never finish.
             stale = superseded_reopen_summary(core)
             if stale is not None:
-                items.append({
-                    "kind": "gate_reopen_superseded", "ref": "gate-reopen:superseded",
-                    "hash": None, "at": stale["at"],
-                    "title": f"已自动收起 {stale['count']} 条过期的重新评估提案",
-                    "who": "研究系统",
-                    "summary": stale["detail"],
-                    "details": {"涉及公司": [self._label(members, company)
-                                             for company in stale["companies"]],
-                                "收起的条数": stale["count"],
-                                "收起的理由": stale["reason"]},
-                    "detail_labels": {"涉及公司": "涉及公司", "收起的条数": "收起的条数",
-                                      "收起的理由": "收起的理由"},
-                    "actions": [], "needs_rationale": False,
-                })
+                self._record_superseded_reopens(members, stale)
         return items
+
+    def _record_superseded_reopens(
+        self, members: Mapping[str, Any], stale: Mapping[str, Any]
+    ) -> None:
+        """Write D3's "what was set aside" line into the journal, once.
+
+        The approvals view is read by every page load and every poll, so the
+        event is keyed by exactly what it says -- how many proposals, for which
+        companies, when -- and written only if that sentence is not already in
+        the log.  A second identical row would turn one act of housekeeping
+        into a drumbeat, which is the failure the queue-side card had in a
+        different shape.
+
+        Never fatal: a journal that will not take the note is not a reason for
+        the approvals page to fail, and nothing on the page depends on it.
+        """
+
+        refs = {
+            "kind": "gate_reopen_superseded", "ref": "gate-reopen:superseded",
+            "count": stale["count"], "at": stale["at"],
+            "companies": sorted(stale["companies"]),
+            "reason": stale["reason"],
+        }
+        payload = json.dumps(refs, ensure_ascii=False, sort_keys=True)
+        try:
+            if self.journal.rows(
+                "SELECT event_id FROM cockpit_events WHERE kind='hygiene' AND refs_json=? LIMIT 1",
+                (payload,),
+            ):
+                return
+            self.journal.record_event(
+                kind="hygiene",
+                title=f"已自动收起 {stale['count']} 条过期的重新评估提案",
+                detail=(str(stale["detail"]) + " 涉及公司："
+                        + "、".join(self._label(members, company)
+                                    for company in stale["companies"])),
+                login=None, refs=refs)
+        except sqlite3.Error:
+            return
 
     # -- D4: 需要你处理 --------------------------------------------------------
 
@@ -5652,14 +5687,26 @@ class CockpitPlane:
         is the thing none of those places could add on their own, which is the
         answer to "and what do I do about it".
 
+        One environment's list, never the installation's: this Cockpit serves
+        one research environment and lists only what its own owner can act on
+        from this page, so the legacy environment shows no workspace items and
+        a workspace shows only its own missing research goal.
+
         Read-only end to end, including the databases it opens.  The cockpit
         process holds no write handle to anything (ADR-0006) and this is the
         page where that is easiest to prove.
         """
 
-        from .needs_human import collect
+        from .needs_human import LEGACY_ENVIRONMENT, collect
 
         router = self._model_router_db()
+        # Whose list this is.  The identity is the one this process was already
+        # validated against at start-up (``cockpit_workspace_context`` reads
+        # DALTON_WORKSPACE_MANIFEST and refuses a Cockpit whose paths belong to
+        # another workspace), so a workspace names its own slug and the legacy
+        # environment names itself.  A page that offered to fix the neighbours'
+        # environment would be offering work its owner cannot do from here.
+        environment = (self.workspace_context or {}).get("slug") or LEGACY_ENVIRONMENT
         return {
             **collect(
                 core_db=self.config.core_db,
@@ -5669,6 +5716,7 @@ class CockpitPlane:
                 model_router_db=None if router is None else Path(router),
                 workspace_manager_config_path=getattr(
                     self.config, "workspace_manager_config_path", None),
+                environment=environment,
                 clock=self.clock,
             ),
             "enabled": True,
@@ -5778,17 +5826,23 @@ class CockpitPlane:
             title = {"accept": "接受了论点修订", "reject": "未接受论点修订",
                      "defer": "暂缓决定论点修订"}[decision]
         elif kind == "conviction_call":
-            # D3: only the dismissal, and only from this page.  Accepting a
-            # call is a position and belongs in the full decision path that
-            # branch is still building; rejecting a low-information proposal
-            # takes nothing away, which is exactly why it can be one click.
-            if decision != "reject":
-                raise CockpitError("这条提案在本页只能驳回")
+            # All three of the authority's decisions.  This branch used to
+            # accept only ``reject``, on the theory that accepting a call
+            # belonged in a decision path still being built -- but the writer
+            # operation behind it takes accept, reject and defer, and the
+            # refusal here left the owner with cards they could not clear.
+            # The idempotency key matters most for ``defer``: it is the one
+            # decision that does not settle the call, so a dropped reply would
+            # otherwise append a second deferral on every retry.
+            if decision not in {"accept", "reject", "defer"}:
+                raise CockpitError("decision must be accept, reject or defer")
             operation, params = "decide_conviction_call", {
                 "proposal_ref": ref, "proposal_hash": digest,
-                "decision": "reject", "reason": recorded_rationale,
+                "decision": decision, "reason": recorded_rationale,
                 "idempotency_key": f"cockpit-conviction:{ref}:{request_id}"}
-            title = "驳回了一条投资 call 提案"
+            title = {"accept": "采纳了一条投资 call 提案",
+                     "reject": "驳回了一条投资 call 提案",
+                     "defer": "暂缓决定一条投资 call 提案"}[decision]
         elif kind == "gate_reopen":
             if decision not in {"approve", "decline"}:
                 raise CockpitError("decision must be approve or decline")

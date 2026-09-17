@@ -1154,6 +1154,33 @@ def gate_sections(record: Mapping[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
+def unsourced_figures(answer: Mapping[str, Any]) -> list[str]:
+    """The figures in one answer's prose that none of its cited rows carries.
+
+    The arithmetic ``numbers_without_refs`` does over the assembled artefact,
+    asked of one answer.  Built from the same rows :func:`gate_sections` builds
+    a section's ``numbers`` from, so the two can never disagree about whether a
+    question is the one that fails.
+
+    It exists so that a lane can find the *question* a hard check is about
+    before it has a record.  ``numbers_without_refs`` is a whole-draft refusal
+    with a count; a redraft that has to answer "which answer, and which digits"
+    cannot be built from a count, and the group that wrote the figure is the
+    only thing that can repair it.
+    """
+
+    from .mission_deliverable import unsourced_numbers
+
+    sources = answer.get("sources") or []
+    numbers = [
+        {"text": row["text"],
+         "claim_version_ref": row["ref"] if row["kind"] == "claim" else "",
+         "period": row.get("period")}
+        for row in sources
+    ]
+    return unsourced_numbers(answer_body(answer), numbers)
+
+
 def gate_artefact(
     record: Mapping[str, Any], *, prior: Mapping[str, Any] | None = None
 ) -> dict[str, Any]:
@@ -1713,6 +1740,7 @@ __all__ = [
     "questions_hash",
     "superseded_evidence",
     "table_exists",
+    "unsourced_figures",
     "validate_answer",
     "validate_decision",
     "validate_gate_version",

@@ -1,5 +1,17 @@
 # Dalton 项目进度
 
+## 2026-09-17 09:30 UTC：待办审批清理——页面缺陷、各环境待办隔离、认知门退回后的重写循环（待 owner 部署）
+
+owner 反馈：四张认知门卡片退回成功，DXC 那张仍报"保存决定暂时未完成"；要求把待办审批清空，且各研究环境的待办互相独立。盘点三个环境（8793 legacy、8794、8795）的 approvals + needs-human 后按主题修复（三个 opus 子代理并行）：
+
+**页面缺陷**（cockpit_plane / agenda_control）：(1) control 对 CockpitError/CockpitConflict 的 400/409 应答现在带 `display_message`（凡是写给 owner 的中文原因），页面不再把"退回补充需要写明理由…"折叠成兜底文案——DXC 失败的直接原因就是没填理由；(2) 「证据已更新」的认知门卡片预填退回理由并把按钮改为「按新证据退回」，一键即可；(3) 信息类卡片（`deep_insight_gate_held`、`gate_reopen_superseded`）退出审批页：前者在 needs-human 已有 `gate_auto_returned`，后者改记一条去重的 `hygiene` 日志（日志页归「研究系统」）；(4) 投资 call 提案卡片给全部三个决定（采纳 / 驳回 / 暂缓，`decide_conviction_call` 本来就支持），此前非"低信息"提案没有任何按钮、永远清不掉。顺带发现 `low_information_call` 读的是 `risk_reward_status`（只会是 met/not_met/unavailable/not_applicable），永远不可能为真，待 owner 决定是否改读 `decision_word`。
+
+**各环境待办隔离**（needs_human）：`collect(environment=...)`——legacy 不再列任何 workspace 的事项，workspace 只列自己的；plane 用启动时的 `workspace_context.slug` 传入；CLI 加 `--environment`。
+
+**认知门退回后的重写循环**（deep_insight_gate_cli / review / gate）：线上 ACN、CTSH 退回后的重写整份被拒并 held："第一问的分类与公司档案不一致"（q1 没被点名就沿用旧答案，而公司档案已滚了多版）和 `numbers_without_refs`（硬检查一票否决）。修复：q1 沿用答案与当前档案分类不一致时把 q1 加入重写集并在提示里写明档案现在的分类；退回路径对未过 `numbers_without_refs` 的组做一次 `draft_contract_repair` 式修复调用再判；hold 记录带上逐题缺口与失败组；attempt key 加入决定内容哈希，改写退回意见能触发重做。部署后 ACN/CTSH 会自动重试，owner 不必再退回一次。未做：已退回的草稿不能第二次退回（schema 每版一决定），需要另开工单。
+
+**线上运维项（需要 owner，见 [owner-runbook-2026-09-17-approvals-cleanup.md](reports/owner-runbook-2026-09-17-approvals-cleanup.md)）**：港交所 4 条治理记录批准命令（当前代码已认识这些连接器，本目标无港股，批准无副作用，分类器不让我代跑）；`source:company-ir`：IR 页面监视未配置（无 `ir-pages.json`，本机 changedetection.io 现在要求 API key 而客户端按设计无凭证），建议用新脚本 `scripts/set_mission_source_status.py --remove` 发布 v25 把它移出来源计划（8-K 已在 SEC 车道允许表内）；`mission_document_research` 19 条 admission 的付费恢复授权：无任何 CLI/writer 操作可下发（车道自己的说明如此），需要新开发，分类器判为付费交易类、本轮未动。
+
 ## 2026-09-17 08:10 UTC：认知门「退回补充」失败的第二个根因（writer 参数白名单缺 question_notes）
 
 第一批修复（db30f19d，运行包 b9452951…）上线后 tick 回到 42 秒、公司档案车道正常 launched、writer 无新超时，但 owner 点「按系统建议退回」仍显示"保存决定暂时未完成"。排查：writer 日志没有任何 `decide_deep_insight_gate` 记录，`writer-tokens.json` 却在 07:32 UTC 被改写过（临时 human 主体已创建又撤回），说明请求到了 writer 但在连接线程上被拒。原因：cockpit 只要退回意见里有「qN：…」逐题行就随请求发 `question_notes`，而 `OPERATION_FIELDS["decide_deep_insight_gate"]` 没列这个字段，writer 直接回 `ProtocolError("unknown operation parameter")`——不落日志，页面把它归入兜底文案。系统预填的退回意见恰好都带逐题行，所以每张卡必失败；DXC 那张（无逐题行）不受影响。修复：白名单加入 `question_notes`（authority 的 `decide()` 本就接受它），新增回归测试；另加 `scripts/cockpit_decide_probe.py`，按页面同样的会话 + CSRF 提交裁决并打印原始应答，以后页面只显示兜底文案时可用它定位。待 owner 重新构建、切换。

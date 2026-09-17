@@ -164,6 +164,52 @@ def questions_to_redraft(
     return [ref for ref in QUESTION_REFS if ref in wanted]
 
 
+# What the lane tells the next draft when the answer it was about to carry
+# forward has gone stale.  Marked as the system's own words, because it is
+# written into the same per-question channel a person writes in and a note the
+# owner did not write must never read as theirs.
+STALE_CLASSIFICATION_NOTE = (
+    "（这一条由系统补充，不是审阅人写的。）公司档案现在把这家公司归为「{filed}」，"
+    "而上一版第一问给出的分类是「{carried}」，两者已经不一致。"
+    "请按现在的档案重新回答第一问，并把 classification 填成与档案一致的那一类；"
+    "如果材料支持的确实是另一类，就把理由写清楚——第一问与档案不一致的草稿会被整份拒绝。"
+)
+
+
+def stale_classification_note(*, filed: str, carried: str) -> str:
+    """The sentence a forced first question is shown."""
+
+    return STALE_CLASSIFICATION_NOTE.format(filed=filed or "（档案没有写）",
+                                            carried=carried or "（上一版没有写）")
+
+
+def with_stale_classification(
+    review: Mapping[str, Any], *, filed: str, carried: str
+) -> dict[str, Any]:
+    """The reviewer's return, plus question one, when question one is known stale.
+
+    Live on 2026-09-17: Accenture's owner returned q7 and q9-q12 with notes.
+    The lane redrafted exactly those, carried the other seven answers forward,
+    and then refused the whole draft on ``classification_agrees`` -- because
+    the carried first answer had been written against a dossier version the
+    file has since moved past.  The return produced nothing, twice, and the
+    only way out was for the evidence to move again.
+
+    A carried answer that is *known* to be stale is not an answer worth
+    carrying.  So question one joins the set the redraft rewrites, with the
+    file's current word in front of the model, and the refusal keeps its
+    meaning: it now fires on what this run drafted rather than on what the last
+    run said.  The reviewer's own notes are untouched; the added note says in
+    its first clause that a person did not write it.
+    """
+
+    notes = dict(review.get("question_notes") or {})
+    notes["q1"] = stale_classification_note(filed=filed, carried=carried)
+    return {**dict(review),
+            "question_notes": {ref: notes[ref] for ref in QUESTION_REFS
+                               if ref in notes}}
+
+
 def groups_to_redraft(question_refs: Iterable[str]) -> list[str]:
     """The call groups those questions fall in.
 
@@ -299,6 +345,7 @@ __all__ = [
     "REJECT_FOLLOW_UP",
     "RETURN_FOLLOW_UP",
     "SCHEMA_VERSION",
+    "STALE_CLASSIFICATION_NOTE",
     "carried_forward_questions",
     "change_note",
     "changed_questions",
@@ -308,5 +355,7 @@ __all__ = [
     "review_note",
     "review_of",
     "review_prompt_lines",
+    "stale_classification_note",
     "validate_question_notes",
+    "with_stale_classification",
 ]

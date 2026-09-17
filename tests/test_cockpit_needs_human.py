@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import unittest
 
+from dalton_core.cockpit_plane import INFORMATIONAL_APPROVAL_KINDS
 from dalton_core.initial_screen_reopen_hygiene import SUPERSEDED_REASON
 from tests.test_deep_insight_gate import OWNER
 from tests.test_deep_insight_gate_lane import ACN, FakeModel, Harness
@@ -28,7 +29,7 @@ class PlaneHarness(unittest.TestCase):
         self.harness = Harness(submission_standard=self.standard)
         self.addCleanup(self.harness.close)
 
-    def plane(self):
+    def plane(self, **extra):
         from dalton_core.cockpit_plane import CockpitConfig, CockpitPlane
 
         state = self.harness.state_dir
@@ -37,6 +38,7 @@ class PlaneHarness(unittest.TestCase):
             heartbeat_path=state / "heartbeat.json",
             scheduler_db=state / "scheduler.sqlite",
             journal_path=state / "cockpit.sqlite",
+            **extra,
         )
         plane = CockpitPlane(config, writer_socket=state / "w.sock",
                              token_config=state / "t.json")
@@ -90,21 +92,35 @@ class GateCardTests(PlaneHarness):
 class HeldDraftCardTests(PlaneHarness):
     standard = None
 
-    def test_a_held_back_draft_appears_as_information_with_no_buttons(self):
+    def test_a_held_back_draft_is_a_notice_rather_than_an_approval(self):
+        # It used to be a buttonless card in 待办审批, where it sat for days:
+        # the approvals page holds decisions, and an item nobody can answer
+        # never leaves it. The same news, with the next step attached, is in
+        # 需要你处理 -- which is the page for things that are not verdicts.
+        self.assertEqual(self.harness.run()["gate_status"], "auto_returned")
+        self.harness.fixture.close()
+        plane = self.plane()
+        items = plane.approvals()["items"]
+        self.assertFalse([row for row in items
+                          if row["kind"] == "deep_insight_gate_held"])
+        # Nothing is waiting for a verdict either, because nothing was
+        # published -- and the empty queue is an empty queue.
+        self.assertFalse([row for row in items
+                          if row["kind"] == "deep_insight_gate"])
+        self.assertEqual(plane.approvals()["count"], 0)
+        held = [row for row in plane.needs_human()["items"]
+                if row["kind"] == "gate_auto_returned"]
+        self.assertEqual(len(held), 1)
+        self.assertTrue(held[0]["why_blocked"].startswith("系统判定草稿尚不足以提交"))
+
+    def test_no_approval_card_is_information_without_a_decision(self):
+        """Every card on 待办审批 is something the owner can finish."""
+
         self.assertEqual(self.harness.run()["gate_status"], "auto_returned")
         self.harness.fixture.close()
         items = self.plane().approvals()["items"]
-        held = [row for row in items if row["kind"] == "deep_insight_gate_held"]
-        self.assertEqual(len(held), 1)
-        self.assertEqual(held[0]["actions"], [])
-        self.assertFalse(held[0]["needs_rationale"])
-        self.assertTrue(held[0]["summary"].startswith("系统判定草稿尚不足以提交"))
-        # And nothing is waiting for a verdict, because nothing was published.
         self.assertFalse([row for row in items
-                          if row["kind"] == "deep_insight_gate"])
-        # The badge says zero: the card is there to explain the empty queue,
-        # not to add to it.
-        self.assertEqual(self.plane().approvals()["count"], 0)
+                          if row["kind"] in INFORMATIONAL_APPROVAL_KINDS])
 
 
 class NeedsHumanEndpointTests(PlaneHarness):
@@ -135,6 +151,108 @@ class NeedsHumanEndpointTests(PlaneHarness):
         self.assertTrue(hasattr(self.plane(), "needs_human"))
         source = AgendaControlApplication.cockpit_view.__code__.co_consts
         self.assertIn("/v1/cockpit/needs-human", source)
+
+
+def workspace_fixture(host, *slugs, with_mission=()):
+    """A host root the workspace probe can read: a manager config and two Cores.
+
+    Written by hand rather than by starting a workspace manager, because what
+    is under test is the scope of the list rather than the manager: the probe
+    reads a creation record and a Core at a known path, and that is all this
+    has to be.
+    """
+
+    import json
+    import sqlite3
+
+    (host / "creation-requests").mkdir(parents=True, exist_ok=True)
+    for slug in slugs:
+        (host / "creation-requests" / f"{slug}.json").write_text(json.dumps(
+            {"slug": slug, "name": f"研究环境 {slug}",
+             "url": f"http://127.0.0.1/{slug}"}), encoding="utf-8")
+        state = host / "workspaces" / slug / "state" / "dalton-core"
+        state.mkdir(parents=True, exist_ok=True)
+        core = state / "core.sqlite"
+        if not core.exists():
+            connection = sqlite3.connect(core)
+            if slug in with_mission:
+                connection.execute("CREATE TABLE coverage_mission_pointer("
+                                   "mission_ref TEXT, mission_version_id TEXT)")
+                connection.execute("INSERT INTO coverage_mission_pointer VALUES('m','v')")
+            connection.commit()
+            connection.close()
+    config = host / "manager.json"
+    config.write_text(json.dumps({"host_root": str(host)}), encoding="utf-8")
+    return config
+
+
+class EnvironmentScopeTests(PlaneHarness):
+    """Each environment's page lists its own errands and nobody else's.
+
+    Live, the legacy page was telling the owner that the Hyperscaler workspace
+    has no research goal, and the Hyperscaler page was saying the same about
+    its neighbour.  Neither can be acted on from the page showing it.
+    """
+
+    def setUp(self):
+        super().setUp()
+        import tempfile
+        from pathlib import Path
+
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.host = Path(folder.name) / "host"
+        self.host.mkdir()
+
+    def kinds(self, result, kind="no_active_mission"):
+        return [row for row in result["items"] if row["kind"] == kind]
+
+    def test_the_legacy_page_does_not_list_a_workspace_without_a_goal(self):
+        manager = workspace_fixture(self.host, "ws-a", "ws-b")
+        plane = self.plane(workspace_manager_config_path=manager)
+        self.assertEqual(plane.workspace_context["mode"], "legacy")
+        self.assertEqual(self.kinds(plane.needs_human()), [])
+        # The fixture is not empty: the same probes, scoped to a workspace,
+        # do produce the item this page is declining to show.
+        from dalton_core.needs_human import collect, workspace_probes
+
+        probes = workspace_probes(manager)
+        self.assertEqual(len(probes), 2)
+        self.assertEqual(len(self.kinds(collect(workspaces=probes,
+                                                environment="ws-a"))), 1)
+
+    def test_a_workspace_page_lists_only_its_own_missing_goal(self):
+        import os
+        from unittest.mock import patch
+
+        from dalton_core.cockpit_plane import CockpitConfig, CockpitPlane
+        from dalton_core.workspace import create_workspace_manifest
+
+        release = self.host / "release"
+        release.mkdir(parents=True)
+        # A real manifest, because the plane's identity is read from the one
+        # DALTON_WORKSPACE_MANIFEST names and validated against these paths.
+        mine = create_workspace_manifest(
+            self.host, "analyst-a", 18910, "release:sha256:" + "a" * 64, release)
+        # Both Cores are empty, which is what a workspace nobody has given a
+        # goal to actually looks like -- and the reason both would otherwise
+        # appear on this one page.
+        manager = workspace_fixture(self.host, "analyst-a", "analyst-b")
+        config = CockpitConfig(
+            core_db=mine.state_dir / "core.sqlite", state_dir=mine.state_dir,
+            heartbeat_path=mine.state_dir / "run" / "heartbeat.json",
+            scheduler_db=mine.state_dir / "scheduler.sqlite",
+            journal_path=mine.state_dir / "cockpit.sqlite",
+            workspace_manager_config_path=manager)
+        with patch.dict(os.environ,
+                        {"DALTON_WORKSPACE_MANIFEST": str(mine.manifest_path)}):
+            plane = CockpitPlane(config, writer_socket=mine.writer_socket,
+                                 token_config=mine.state_dir / "writer-tokens.json")
+        self.addCleanup(plane.close)
+        self.assertEqual(plane.workspace_context["slug"], "analyst-a")
+        items = self.kinds(plane.needs_human())
+        self.assertEqual([row["ref"] for row in items], ["workspace:analyst-a"])
+        self.assertEqual(items[0]["urgency"], 1)
 
 
 class PanelPlacementTests(unittest.TestCase):
@@ -225,16 +343,30 @@ class ReopenNoiseTests(unittest.TestCase):
         self.assertEqual(len(self.items(self.plane(), "gate_reopen")), 1)
         self.assertEqual(self.items(self.plane(), "gate_reopen_superseded"), [])
 
-    def test_a_superseded_proposal_leaves_the_queue_and_says_so(self):
+    def test_a_superseded_proposal_leaves_the_queue_and_says_so_in_the_log(self):
+        # D3's line still has to be said -- a to-do list that empties for
+        # invisible reasons is a broken page -- but it is not a decision, so it
+        # is said in the journal rather than as a card nobody can press.
         first, _second = self.fixture.pile_up()
         self.fixture.reissue_screen(first)
         plane = self.plane()
         self.assertEqual(self.items(plane, "gate_reopen"), [])
-        note = self.items(plane, "gate_reopen_superseded")
-        self.assertEqual(len(note), 1)
-        self.assertIn("1", note[0]["title"])
-        self.assertEqual(note[0]["actions"], [])
-        self.assertEqual(note[0]["details"]["收起的理由"], SUPERSEDED_REASON)
+        self.assertEqual(self.items(plane, "gate_reopen_superseded"), [])
+        rows = plane.journal.rows(
+            "SELECT * FROM cockpit_events WHERE kind='hygiene'")
+        self.assertEqual(len(rows), 1)
+        self.assertIn("1", rows[0]["title"])
+        self.assertIn(SUPERSEDED_REASON, rows[0]["refs_json"])
+        # Read the page again and the log does not grow: housekeeping happened
+        # once, however many times the owner reloads.
+        plane.approvals()
+        plane.approvals()
+        self.assertEqual(len(plane.journal.rows(
+            "SELECT * FROM cockpit_events WHERE kind='hygiene'")), 1)
+        shown = [event for event in plane.log()["events"]
+                 if event["kind"] == "hygiene"]
+        self.assertEqual(len(shown), 1)
+        self.assertEqual(shown[0]["lane"], "研究系统")
 
 
 if __name__ == "__main__":  # pragma: no cover

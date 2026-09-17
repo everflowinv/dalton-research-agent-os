@@ -30,11 +30,13 @@ from pathlib import Path
 
 from dalton_core.needs_human import (
     KINDS,
+    LEGACY_ENVIRONMENT,
     URGENCY,
     collect,
     governance_records,
     held_lanes,
     provider_failures,
+    workspaces_in_scope,
     workspaces_without_mission,
 )
 from dalton_core.needs_human_cli import build_parser, main, render
@@ -228,6 +230,83 @@ class WorkspaceTests(unittest.TestCase):
     def test_an_unreadable_environment_is_skipped_rather_than_guessed_at(self):
         self.assertEqual(workspaces_without_mission(
             [{"slug": "ws-x", "core_db": self.root / "absent.sqlite"}]), [])
+
+class EnvironmentScopeTests(unittest.TestCase):
+    """A to-do list belongs to the environment showing it, and to no other.
+
+    Live, every environment was showing every other environment's missing
+    research goal: the legacy page offered to fix the Hyperscaler workspace and
+    each workspace offered to fix its neighbour.  Nobody can do any of that
+    from the page they are looking at, so the item is noise everywhere except
+    on the one page that owns it.
+    """
+
+    # The same two-Core fixture as above, borrowed rather than copied; a
+    # subclass would re-run its tests for nothing.
+    setUp = WorkspaceTests.setUp
+    core = WorkspaceTests.core
+
+    def probes(self):
+        return [
+            {"slug": "ws-a", "name": "美国 Hyperscaler 研究",
+             "core_db": self.core("a", with_mission=False)},
+            {"slug": "ws-b", "name": "邻居环境",
+             "core_db": self.core("b", with_mission=False)},
+        ]
+
+    def test_the_legacy_environment_keeps_no_workspace_probe(self):
+        self.assertEqual(workspaces_in_scope(self.probes(), LEGACY_ENVIRONMENT), [])
+        # And an unscoped call means the legacy environment, which is what the
+        # docstring promises and what the command line defaults to.
+        self.assertEqual(workspaces_in_scope(self.probes(), None), [])
+
+    def test_a_workspace_keeps_only_itself(self):
+        kept = workspaces_in_scope(self.probes(), "ws-a")
+        self.assertEqual([probe["slug"] for probe in kept], ["ws-a"])
+        self.assertEqual(workspaces_in_scope(self.probes(), "ws-absent"), [])
+
+    def test_collect_under_the_legacy_scope_lists_no_workspace_item(self):
+        for environment in (LEGACY_ENVIRONMENT, None):
+            with self.subTest(environment=environment):
+                result = collect(state_dir=self.root, workspaces=self.probes(),
+                                 environment=environment, clock=clock)
+                self.assertEqual(
+                    [item for item in result["items"]
+                     if item["kind"] == "no_active_mission"], [])
+
+    def test_collect_under_a_workspace_scope_lists_only_that_workspace(self):
+        result = collect(state_dir=self.root, workspaces=self.probes(),
+                         environment="ws-a", clock=clock)
+        items = [item for item in result["items"]
+                 if item["kind"] == "no_active_mission"]
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["ref"], "workspace:ws-a")
+        self.assertIn("美国 Hyperscaler 研究", items[0]["title"])
+        # Still the most urgent thing there is, and still counted as work.
+        self.assertEqual(items[0]["urgency"], 1)
+        self.assertEqual(result["items"][0], items[0])
+        self.assertIn("美国 Hyperscaler 研究", result["headline"])
+
+    def test_a_legacy_scope_does_not_go_looking_for_other_environments(self):
+        # Not a filter at the end: under the legacy scope the manager
+        # configuration is never read and no neighbouring Core is opened.
+        opened = []
+        import dalton_core.needs_human as module
+
+        original = module.workspace_probes
+        module.workspace_probes = lambda path: opened.append(path) or []
+        self.addCleanup(setattr, module, "workspace_probes", original)
+        collect(state_dir=self.root, workspace_manager_config_path=self.root / "m.json",
+                clock=clock)
+        self.assertEqual(opened, [])
+
+    def test_the_command_line_defaults_to_the_legacy_environment(self):
+        args = build_parser().parse_args(["--state-dir", str(self.root)])
+        self.assertEqual(args.environment, LEGACY_ENVIRONMENT)
+        self.assertEqual(
+            build_parser().parse_args(
+                ["--state-dir", str(self.root), "--environment", "ws-a"]).environment,
+            "ws-a")
 
 
 class GateAndOrderTests(unittest.TestCase):

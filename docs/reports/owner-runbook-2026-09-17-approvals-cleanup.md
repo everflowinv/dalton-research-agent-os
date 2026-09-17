@@ -27,7 +27,7 @@ done
 ## 3. `mission_document_research` 车道「停着等授权」（19 条 admission，原因 paid_send_output_contract_failed）
 这些 admission 已经发起过付费模型调用、输出没过契约；系统按设计不自动重试。车道自己的说明（`OWNER_AUTHORIZATION_NOTE`）写明：目前没有任何 CLI 或 writer 操作能下发这条授权。要解除需要新开发一个 writer 人工治理操作 + CLI（按 admission 生成绑定 work order 哈希的授权、封顶费用）。本轮自动模式不允许我起草这部分（分类器判为付费交易类），需要你明确说"做这个工具"，我再开发；或者接受这 19 条一直停着（它们只影响文档研究这一条车道）。
 
-## 4. 部署本轮代码修复后，回到待办页
+## 4. 部署本轮代码修复（见 PROJECT_STATUS 09:30 条目）后，回到待办页
 - DXC 那张：退回按钮现在会预填「证据已更新」的理由，一键即可；或直接「通过」。
 - IBM 的投资 call 提案：有了「采纳 / 驳回 / 暂缓」按钮。
 - 各环境的「需要你处理」只显示本环境的事项。

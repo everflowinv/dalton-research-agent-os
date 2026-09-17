@@ -457,6 +457,7 @@ class CockpitPlaneTests(unittest.TestCase):
             ("deep_insight_gate", "approve", "decide_deep_insight_gate", "reason"),
             ("investment_memo", "approve", "decide_investment_memo", "reason"),
             ("forecast", "keep_forecast", "decide_forecast_overturn", "rationale"),
+            ("conviction_call", "accept", "decide_conviction_call", "reason"),
             ("thesis_revision_candidate", "defer",
              "decide_thesis_revision_candidate", "reason"),
             ("gate_reopen", "decline", "decide_gate_reopen", "reason"),
@@ -484,6 +485,61 @@ class CockpitPlaneTests(unittest.TestCase):
                 "kind": "thesis", "ref": "candidate:fixture", "hash": "not-a-hash",
                 "decision": "admit", "rationale": "", "request_id": "bad-hash",
             })
+
+    def test_a_conviction_call_can_be_accepted_deferred_or_rejected(self) -> None:
+        """All three of the authority's verdicts reach the writer from here.
+
+        The branch used to take ``reject`` only -- "这条提案在本页只能驳回" --
+        on the theory that accepting a call belonged in a decision path still
+        being built.  ``decide_conviction_call`` has taken accept, reject and
+        defer the whole time, so the refusal left the owner with a card that
+        could not be cleared: buttons that are not there, and a verdict the
+        page would not pass on if they were.
+        """
+
+        digest = "f" * 64
+        calls = []
+
+        def governance(*args, operation, params, **kwargs):
+            calls.append((operation, params))
+            return {"status": "recorded"}
+
+        self.c.plane.governance_call = governance
+        titles = {"accept": "采纳了一条投资 call 提案",
+                  "reject": "驳回了一条投资 call 提案",
+                  "defer": "暂缓决定一条投资 call 提案"}
+        for decision, title in titles.items():
+            with self.subTest(decision=decision):
+                result = self.c.plane.decide(self.login, {
+                    "kind": "conviction_call", "ref": "conviction-call:fixture",
+                    "hash": digest, "decision": decision,
+                    "rationale": "市场已经price in了这个时滞",
+                    "request_id": f"call-{decision}",
+                })
+                self.assertEqual(result["status"], "decided")
+                operation, params = calls[-1]
+                self.assertEqual(operation, "decide_conviction_call")
+                self.assertEqual(params["decision"], decision)
+                self.assertEqual(params["proposal_ref"], "conviction-call:fixture")
+                self.assertEqual(params["proposal_hash"], digest)
+                self.assertEqual(params["reason"], "市场已经price in了这个时滞")
+                # ``defer`` does not settle the call, so a retry must be the
+                # same deferral rather than a second one.
+                self.assertEqual(
+                    params["idempotency_key"],
+                    f"cockpit-conviction:conviction-call:fixture:call-{decision}")
+                # The log says what was decided about a *call*: the shared
+                # verdict table reads "accept" as 接受了论点修订, which is not
+                # what the owner just did.
+                row = self.c.plane.journal.rows(
+                    "SELECT * FROM cockpit_events ORDER BY event_id DESC LIMIT 1")[0]
+                self.assertEqual(
+                    self.c.plane._journal_event_view(row)["title"], title)
+        with self.assertRaisesRegex(CockpitError, "accept, reject or defer"):
+            self.c.plane.decide(self.login, {
+                "kind": "conviction_call", "ref": "conviction-call:fixture",
+                "hash": digest, "decision": "admit", "rationale": "",
+                "request_id": "call-bad"})
 
     def test_model_refusals_are_plain_and_budget_exhaustion_fails_closed(self) -> None:
         # A prompt over the input bound never reaches the router.

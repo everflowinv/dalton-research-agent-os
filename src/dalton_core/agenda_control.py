@@ -990,6 +990,33 @@ class AgendaControlApplication:
         )
 
 
+def _cockpit_error_body(error: str, exc: Exception) -> bytes:
+    """One refusal, written once, addressed to whoever it was written for.
+
+    The page's ``readableError`` shows ``display_message`` verbatim and
+    otherwise guesses from English keywords, falling back to "保存决定暂时未
+    完成，请稍后重试。".  So a refusal the plane already wrote *for the owner*
+    -- "退回补充需要写明理由：哪一问不行、为什么。" -- arrived as the generic
+    fallback and the one sentence that says how to proceed was thrown away.
+
+    A message carrying Chinese was written for a person: it is promoted to
+    ``display_message`` and shown as-is.  An English one is internal wording
+    ("decision must be approve or reject") and stays in ``message`` only, which
+    the page keeps as ``technical_detail`` -- a refusal the owner should not
+    have to read twice, in a language they did not ask for.
+    """
+
+    message = str(exc)
+    owner_facing = any(
+        "㐀" <= character <= "鿿" or "豈" <= character <= "﫿"
+        for character in message
+    )
+    payload: dict[str, Any] = {"error": error, "message": message}
+    if owner_facing:
+        payload["display_message"] = message
+    return json.dumps(payload, ensure_ascii=False).encode()
+
+
 def _handler(application: AgendaControlApplication) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         server_version = "DaltonCockpit/0.4"
@@ -1077,7 +1104,7 @@ def _handler(application: AgendaControlApplication) -> type[BaseHTTPRequestHandl
                         value = application.cockpit_view(path, login, query)
                     except CockpitError as exc:
                         self._send(HTTPStatus.BAD_REQUEST, "application/json; charset=utf-8",
-                                   json.dumps({"error": "cockpit", "message": str(exc)}, ensure_ascii=False).encode())
+                                   _cockpit_error_body("cockpit", exc))
                         return
                     value["csrf_token"] = session.csrf
                     body = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
@@ -1204,11 +1231,11 @@ def _handler(application: AgendaControlApplication) -> type[BaseHTTPRequestHandl
                 return
             except CockpitConflict as exc:
                 self._send(HTTPStatus.CONFLICT, "application/json; charset=utf-8",
-                           json.dumps({"error": "conflict", "message": str(exc)}, ensure_ascii=False).encode())
+                           _cockpit_error_body("conflict", exc))
                 return
             except CockpitError as exc:
                 self._send(HTTPStatus.BAD_REQUEST, "application/json; charset=utf-8",
-                           json.dumps({"error": "cockpit", "message": str(exc)}, ensure_ascii=False).encode())
+                           _cockpit_error_body("cockpit", exc))
                 return
             except (
                 AgendaControlError, HumanIntentError,

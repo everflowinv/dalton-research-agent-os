@@ -209,13 +209,16 @@ class CockpitLanguageTests(unittest.TestCase):
         self.assertIn("正在保存…", frontend)
         self.assertIn("保存这一类的模型顺序", frontend)
         for expected in ("投资备忘录：是否批准进入持续覆盖",
-                         "等待正式研究审批流程接入；本页暂不能提交决定",
+                         "采纳了一条投资 call 提案",
                          "暂缓决定论点修订", "重新出具初步筛查报告"):
             self.assertIn(expected, backend)
         self.assertNotIn('+ f"：{ref', backend)
         for stale in ("正在发布新的模型选择", "memo verification contract failed",
                       "Investment Memo：", "写者操作 decide_conviction_call",
-                      "把论点修订放了放", "重出 Initial Screen"):
+                      "把论点修订放了放", "重出 Initial Screen",
+                      # The call card said approval was "等待正式研究审批流程接入"
+                      # while the writer operation behind it already existed.
+                      "等待正式研究审批流程接入"):
             self.assertNotIn(stale, frontend + backend)
 
     def test_legacy_log_rows_hide_refs_and_machine_errors(self) -> None:

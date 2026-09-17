@@ -26,6 +26,7 @@ from dalton_core.agenda_control import (
     _handler,
     _parse_time,
 )
+from dalton_core.cockpit_plane import CockpitConflict, CockpitError
 from dalton_core.observability import ObservabilityStore
 from dalton_core.store import DaltonStore
 from tests.agenda_fixtures import register_perception
@@ -534,6 +535,72 @@ class AgendaControlTests(unittest.TestCase):
                 server.server_close()
             for thread in threads:
                 thread.join(timeout=5)
+
+    def test_a_refusal_written_for_the_owner_reaches_the_page_intact(self):
+        """A 400 or 409 the cockpit wrote in Chinese is shown, not guessed at.
+
+        The page's ``readableError`` prints ``display_message`` verbatim and
+        otherwise matches English keywords, falling back to "保存决定暂时未完
+        成，请稍后重试。".  So the owner who pressed 退回补充 without writing a
+        reason was told to try again later, while the sentence that said what
+        to do -- "退回补充需要写明理由" -- was thrown away at this boundary.
+        Internal English wording stays internal: it is the technical detail,
+        not something to show somebody who did not ask for it.
+        """
+
+        class Cockpit:
+            error: Exception | None = None
+
+            def overview(self):
+                return {"items": []}
+
+            def decide(self, login, value):
+                raise self.error
+
+        cockpit = Cockpit()
+        app = AgendaControlApplication(
+            self.config, self.plane, ReviewPlane(), IntentPlane(), cockpit)
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _handler(app))
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            connection = http.client.HTTPConnection(
+                "127.0.0.1", server.server_port, timeout=5)
+            headers = {"Host": "dalton.example.ts.net",
+                       "Tailscale-User-Login": LOGIN}
+            connection.request("GET", "/", headers=headers)
+            response = connection.getresponse()
+            cookie = response.getheader("Set-Cookie").split(";", 1)[0]
+            response.read()
+            connection.request("GET", "/v1/cockpit/overview",
+                               headers={**headers, "Cookie": cookie})
+            csrf = json.loads(connection.getresponse().read())["csrf_token"]
+            owner_words = ("退回补充需要写明理由：哪一问不行、为什么。"
+                           "系统会把你的原话带进下一版的起草提示。")
+            conflict_words = "这项决定没有被接受：写者拒绝了这次提交。"
+            cases = (
+                (CockpitError(owner_words), 400, "cockpit", owner_words),
+                (CockpitConflict(conflict_words), 409, "conflict", conflict_words),
+                (CockpitError("decision must be approve or reject"), 400,
+                 "cockpit", None),
+            )
+            for index, (error, status, name, shown) in enumerate(cases):
+                with self.subTest(error=str(error)):
+                    cockpit.error = error
+                    connection.request(
+                        "POST", "/v1/cockpit/decide", body=b'{"kind":"x"}',
+                        headers={**headers, "Cookie": cookie,
+                                 "Content-Type": "application/json",
+                                 "X-Dalton-CSRF": csrf})
+                    response = connection.getresponse()
+                    payload = json.loads(response.read())
+                    self.assertEqual(response.status, status)
+                    self.assertEqual(payload["error"], name)
+                    self.assertEqual(payload["message"], str(error))
+                    self.assertEqual(payload.get("display_message"), shown)
+        finally:
+            server.shutdown()
+            server.server_close()
 
     def test_single_http_surface_serves_cockpit_and_all_review_routes(self):
         review = ReviewPlane()
