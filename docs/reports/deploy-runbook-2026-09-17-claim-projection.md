@@ -20,8 +20,8 @@ R=~/.dalton/runtime/releases/$NEW
 ```zsh
 S="$HOME/Library/Application Support/Dalton/state/dalton-core"
 .venv/bin/python -m dalton_core.launch_drain --state-dir "$S"          # 期望 drained: true
-.venv/bin/python scripts/release_switch.py $R --source-commit db30f19d15b369833a3e7cbcb0886c5f72e3e96e
-.venv/bin/python scripts/release_switch.py $R --source-commit db30f19d15b369833a3e7cbcb0886c5f72e3e96e --apply
+.venv/bin/python scripts/release_switch.py $R --source-commit a9690857ea2a058d8815e860675615655afe2171
+.venv/bin/python scripts/release_switch.py $R --source-commit a9690857ea2a058d8815e860675615655afe2171 --apply
 ```
 
 ## 3. 验证（切换后等两轮 tick，约 10 分钟）
