@@ -819,15 +819,21 @@ class RedraftTests(unittest.TestCase):
                          [row["question_ref"] for row in demoted])
         self.assertTrue(third["demoted_refs"])
 
-    def test_a_freshly_drafted_answer_whose_ref_is_gone_refuses_the_whole_run(self):
-        # The dossier still names the Claim; the Ledger has retired it. Anything
-        # drafted from it this run is a bad draft, and a bad draft is refused
-        # whole rather than quietly demoted.
-        self.harness.retire_claim(self.harness.claims["c-business"])
+    def test_a_retired_claim_is_not_shown_so_a_fresh_answer_cannot_cite_it(self):
+        # The dossier still names the Claim; the Ledger has retired it.  The
+        # run used to show the row anyway and then refuse the whole draft for
+        # citing it (IBM, live 2026-09-17).  The row is now withheld: the
+        # answer rests on what is still in the Ledger, and the draft submits.
+        retired = self.harness.claims["c-business"]
+        self.harness.retire_claim(retired)
         summary = self.redraft(
             model_factory=lambda: FakeModel(cite_aspect="business_model"))
-        self.assertEqual(summary["gate_status"], "unresolvable_refs")
-        self.assertEqual(self.gates.latest(ACN)["version"], 1)
+        self.assertEqual(summary["gate_status"], "submitted")
+        latest = self.gates.latest(ACN)
+        self.assertEqual(latest["version"], 2)
+        cited = {row["ref"] for answer in latest["answers"]
+                 for row in answer.get("sources") or []}
+        self.assertNotIn(retired, cited)
 
     def test_a_returned_gate_is_redrafted_once_the_file_moves(self):
         self.decide("return_for_more_work", reason="第七问没有价格材料")

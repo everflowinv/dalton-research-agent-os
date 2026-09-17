@@ -63,7 +63,7 @@ import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Collection, Mapping, Sequence
 
 from .cockpit_model import CockpitModel
 from .call_budget import resolve_call_budget, resolve_run_budget
@@ -218,6 +218,15 @@ def valuation_rows(store: Any, company_ref: str) -> list[dict[str, Any]]:
     return rows
 
 
+#: The drafting rules this lane runs under, as one word in every company's
+#: signature.  A ``content_refused`` hold in the failure ledger is keyed by the
+#: signature, and the signature used to name only the *inputs* -- so a draft
+#: refused under an old rule stayed refused after the rule was fixed, until the
+#: dossier happened to move.  Bump this when the drafting, repair or refusal
+#: rules change and every such hold lifts on the next tick.
+GATE_DRAFTING_CONTRACT = "deep-insight-gate-drafting:2026-09-17-d2"
+
+
 def deep_insight_company_source_fingerprint(
     connection: Any, company_ref: str, *, input_paths: tuple[Path | None, ...] = (),
 ) -> str:
@@ -273,6 +282,7 @@ def deep_insight_company_source_fingerprint(
         "mission": mission, "input_files": files,
         "provider_contract": verifier_provider_contract_fingerprint(
             "deep_insight_gate_verifier"),
+        "drafting_contract": GATE_DRAFTING_CONTRACT,
         "dossier": dossier, "debate_map": debate, "prior_gate": gate,
         "prior_decision": decision,
         "numbers": number_material(view, company_ref, limit=MAX_NUMBER_ROWS),
@@ -288,18 +298,50 @@ def debate_map_version(store: DaltonStore, company_ref: str) -> dict[str, Any] |
     return DebateMapAuthority(store).current(company_ref)
 
 
+def retired_claim_refs(connection: Any) -> set[str]:
+    """Every Claim version the Ledger has retired; empty on a Core without the table."""
+
+    if not table_exists(connection, "claim_retirement_decisions"):
+        return set()
+    return {
+        str(row[0]) for row in connection.execute(
+            "SELECT claim_version_ref FROM claim_retirement_decisions "
+            "WHERE decision='retired'").fetchall()
+    }
+
+
+CLASSIFICATION_PIN_NOTE = (
+    "公司档案（本评审据以起草的文件）把这家公司归为「{filed}」。第一问的 classification "
+    "必须与档案一致，填「{filed}」；档案的分类是独立复核过的，第一问与它不一致的草稿会被整份拒绝。"
+    "如果材料明显支持另一类，在第一问的正文里说明分歧，但 classification 仍填档案的那一类。"
+)
+
+
+def classification_pin_note(filed: str) -> str:
+    """The sentence the industry group is shown about the file's classification."""
+
+    return CLASSIFICATION_PIN_NOTE.format(filed=filed)
+
+
 def group_material(
     *,
     group: str,
     dossier: Mapping[str, Any],
     map_version: Mapping[str, Any] | None,
     numbers: Sequence[Mapping[str, Any]],
+    retired: Collection[str] = (),
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """The rows one group is shown, and the notes it is told about.
 
     The union of its questions' sources, deduplicated by ref: two questions in
     the same call that both rest on ``demand_drivers`` are shown that section
     once, and both may cite it.
+
+    ``retired`` is the set of Claim versions the Ledger has since retired.  The
+    dossier's sections still name them -- the file was drafted before the
+    retirement -- and a row shown to the model is a row it may cite; a gate
+    that cited one was refused whole for "the Claim was retired" (IBM, live
+    2026-09-17).  Those rows are not shown, so they cannot be cited.
     """
 
     aspects: list[str] = []
@@ -307,7 +349,9 @@ def group_material(
     for question in GROUP_QUESTIONS[group]:
         aspects.extend(DOSSIER_SOURCES[question])
         extras.extend(EXTRA_SOURCES.get(question, ()))
-    statements = dossier_rows(dossier, aspects)
+    gone = set(retired)
+    statements = [row for row in dossier_rows(dossier, aspects)
+                  if not (row.get("kind") == "claim" and row.get("ref") in gone)]
     seen = {row["ref"] for row in statements}
     for block in ("classification", "variant_view"):
         if block not in extras:
@@ -1259,9 +1303,20 @@ def run_gate(
         numbers += valuation_rows(store, chosen)
         plan = {
             group: group_material(group=group, dossier=dossier,
-                                  map_version=map_version, numbers=numbers)
+                                  map_version=map_version, numbers=numbers,
+                                  retired=retired_claim_refs(store.connection))
             for group in GROUPS
         }
+        # The file's own classification, said to the group that answers q1.
+        # ``classification_agrees`` refuses a draft whole when q1 differs from
+        # the dossier; a model that was never told what the dossier says can
+        # only agree by luck (EPAM, live 2026-09-17: the owner returned q1, the
+        # redraft chose contract_compounder, the file says turnaround).
+        filed_now = str((dossier.get("industry_classification") or {})
+                        .get("classification") or "")
+        if filed_now:
+            rows, notes = plan["industry"]
+            plan["industry"] = (rows, [*notes, classification_pin_note(filed_now)])
         summary["material"] = {
             group: {"rows": len(rows), "notes": len(notes)}
             for group, (rows, notes) in plan.items()

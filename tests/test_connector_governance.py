@@ -419,3 +419,26 @@ class FilingsIndexDescriptorTests(unittest.TestCase):
             sec_capability_for_operation("get_company_facts"),
             "capability:dalton:connector:sec-edgar",
         )
+
+
+class HkexFilingsApprovalTests(unittest.TestCase):
+    """The owner's approve rebuilds the packaged proposal; HKEX kinds must be buildable."""
+
+    def test_hkex_records_can_be_rebuilt_and_approved(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        from dalton_core.connector_governance import build_governance_record
+        from dalton_core.connector_governance_cli import approve_governance_record
+        from dalton_core.hkex_filings_core import KIND_BY_OPERATION
+        for kind in KIND_BY_OPERATION.values():
+            proposed = build_governance_record(
+                kind, approved_by="human:packager", status="proposed",
+                effective_from="2026-09-10T00:00:00+00:00", max_lease_seconds=300, version=1)
+            self.assertEqual(proposed["status"], "proposed")
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / f"{kind}-v1.json"
+                path.write_text(json.dumps(proposed, sort_keys=True, separators=(",", ":")) + "\n")
+                approved = approve_governance_record(path, approved_by="human:owner")
+            self.assertEqual(approved["status"], "approved")
+            self.assertEqual(approved["approved_by"], "human:owner")

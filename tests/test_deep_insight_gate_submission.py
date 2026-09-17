@@ -736,3 +736,56 @@ class HeldReturnTests(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+class RetiredMaterialAndPinnedClassificationTests(unittest.TestCase):
+    """Live 2026-09-17: IBM cited a retired Claim; EPAM's fresh q1 disagreed with the file."""
+
+    def _dossier(self):
+        return {
+            "id": "company-dossier-version:x:3",
+            "industry_classification": {"classification": "turnaround"},
+            "sections": [{
+                "aspect": aspect, "status": "drafted",
+                "body": {"paragraphs": ["文件结论。"]},
+                "sources": [
+                    {"kind": "claim", "ref": f"claim-version:{aspect}-live", "text": "在册的结论", "period": None},
+                    {"kind": "claim", "ref": f"claim-version:{aspect}-gone", "text": "已退役的结论", "period": None},
+                ],
+            } for aspect in ("business_model", "demand_drivers", "competitive_position",
+                             "history", "segments_and_mix", "guidance_style",
+                             "history_of_price_drivers", "management", "capital_allocation",
+                             "unit_economics")],
+        }
+
+    def test_retired_claims_are_not_shown_so_they_cannot_be_cited(self):
+        from dalton_core.deep_insight_gate_cli import group_material
+        dossier = self._dossier()
+        gone = {row["ref"] for section in dossier["sections"] for row in section["sources"]
+                if row["ref"].endswith("-gone")}
+        for group in ("industry", "company", "market", "thesis"):
+            rows, _notes = group_material(group=group, dossier=dossier, map_version=None,
+                                          numbers=[], retired=gone)
+            refs = {row["ref"] for row in rows}
+            self.assertFalse(refs & gone, group)
+            shown, _ = group_material(group=group, dossier=dossier, map_version=None, numbers=[])
+            self.assertTrue({row["ref"] for row in shown} & gone or not
+                            [r for r in shown if r.get("kind") == "claim"], group)
+
+    def test_the_pin_note_names_the_files_classification(self):
+        from dalton_core.deep_insight_gate_cli import classification_pin_note
+        note = classification_pin_note("turnaround")
+        self.assertIn("「turnaround」", note)
+        self.assertIn("必须与档案一致", note)
+
+    def test_the_drafting_contract_is_part_of_the_signature(self):
+        import sqlite3
+        from unittest.mock import patch
+        import dalton_core.deep_insight_gate_cli as cli
+        connection = sqlite3.connect(":memory:")
+        connection.row_factory = sqlite3.Row
+        connection.execute("CREATE TABLE coverage_mission_pointer (mission_ref TEXT, mission_version_id TEXT)")
+        before = cli.deep_insight_company_source_fingerprint(connection, "company:x")
+        with patch.object(cli, "GATE_DRAFTING_CONTRACT", "deep-insight-gate-drafting:next"):
+            after = cli.deep_insight_company_source_fingerprint(connection, "company:x")
+        self.assertNotEqual(before, after)

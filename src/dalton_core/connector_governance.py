@@ -1324,6 +1324,27 @@ def build_governance_record(
             version=version,
         )
 
+    from .hkex_filings_core import (
+        KIND_BY_OPERATION as HKEX_FILINGS_KINDS,
+        build_hkex_filings_governance_record,
+    )
+
+    if kind in HKEX_FILINGS_KINDS.values():
+        # P17f registered the four Hong Kong kinds for *loading* (the writer
+        # reads their records at start-up) but not here, so the owner's
+        # ``approve`` -- which rebuilds the packaged proposal to prove the file
+        # is unaltered -- refused them as unsupported and the four records sat
+        # in 需要你处理 for a week.
+        operation = next(op for op, name in HKEX_FILINGS_KINDS.items() if name == kind)
+        return build_hkex_filings_governance_record(
+            operation=operation,
+            approved_by=approved_by,
+            status=status,
+            effective_from=effective_from,
+            max_lease_seconds=max_lease_seconds,
+            version=version,
+        )
+
     if kind != SEC_COMPANY_FACTS_KIND:  # registry guard; defensive for future kinds
         raise ConnectorGovernanceError(f"unsupported connector governance kind: {kind}")
     spec = GOVERNANCE_KIND_REGISTRY[kind]
