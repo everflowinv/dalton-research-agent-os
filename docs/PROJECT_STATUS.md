@@ -1,5 +1,9 @@
 # Dalton 项目进度
 
+## 2026-09-17 05:55 UTC：EveSSD 迁移完成（owner 已给 Python.app 完全磁盘访问）
+
+owner 在「完全磁盘访问」加入 Python.app 后，`migrate_state_dir.py` 的 launchd 访问探测（改为用 manager.json 指向的 release Python 执行，因为授权按可执行程序计）通过，迁移重跑成功：`~/Library/Application Support/Dalton/state` → `/Volumes/EveSSD/Dalton/legacy-state`，`~/.dalton/workspaces` → `/Volumes/EveSSD/Dalton/workspaces`，脚本自动改写两个 workspace 的 service.json 路径与 manifest 绑定、launchd 日志留在 `~/Library/Logs/Dalton/workspaces/<slug>/`。05:58 UTC 三个环境心跳正常，writer 已打开 SSD 上的 core.sqlite。本地保留 `*.pre-migration-20260917T055430Z`（约 11 GB），稳定几天后可删。
+
 ## 2026-09-17 05:00 UTC：第二批部署（ea6b1e54 → 运行包 3687233129fd…）；EveSSD 迁移因 TCC 回退
 
 **部署内容**：深度认知门裁决改为折叠阶梯（研究目标版本滚动后草稿不再失去按钮；stage record 写到 pointer 当前版本；证据被更新只提示不拒绝；不达标旧草稿一键「按系统建议退回」并预填逐题意见）；「需要你处理」面板移到待办审批页；feed lane 枚举结果跨 tick 持久化 + 读取/枚举分开计预算 + `launched` 如实计数（此前 327 次读取一直报 0）；定量提升跳过已入账数字后再截取 limit（此前每轮重放同一批 225 条重复项、promoted=0）；`release_switch.py` 对 launchd 半注册态自动重试。全量 9,181 项通过。切换过程中 legacy writer/controller 再次撞到 launchd 的 bootstrap I/O 错误，手动重拉后正常。

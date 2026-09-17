@@ -382,7 +382,7 @@ def rebind_workspaces(target: Path, launch_agents_dir: Path) -> list[str]:
     return actions
 
 
-def launchd_access_probe(destination: Path) -> dict[str, Any]:
+def launchd_access_probe(destination: Path, release_python: str | None = None) -> dict[str, Any]:
     """launchd 起的后台进程能不能读目标盘。
 
     macOS 的「可移动卷」隐私保护（TCC）对 launchd 后台代理单独计：交互 shell 能读的
@@ -397,12 +397,21 @@ def launchd_access_probe(destination: Path) -> dict[str, Any]:
     plist = Path(tempfile.gettempdir()) / f"{label}.plist"
     out.unlink(missing_ok=True)
     marker = destination / ".dalton-launchd-probe"
+    # 用服务真正运行的那个 Python 去探测：授权是按可执行程序给的（Python.app），
+    # /bin/sh 没有授权也不该有，用它探测会把已授权的环境误判为不可用。
+    python = str(Path(release_python)) if release_python else "/usr/bin/python3"
+    probe_code = (
+        "import os,sys\n"
+        f"d={str(destination)!r}; m={str(marker)!r}\n"
+        "try:\n"
+        "    os.chdir(d); os.listdir('.'); open(m,'w').close(); print('ok')\n"
+        "except OSError as e:\n"
+        "    print('denied', e)\n"
+    )
     with plist.open("wb") as stream:
         plistlib.dump({
             "Label": label,
-            "ProgramArguments": ["/bin/sh", "-c",
-                                 f"cd {shlex.quote(str(destination))} && ls . >/dev/null "
-                                 f"&& touch {shlex.quote(str(marker))} && echo ok || echo denied"],
+            "ProgramArguments": [python, "-c", probe_code],
             "RunAtLoad": True,
             "StandardOutPath": str(out), "StandardErrorPath": str(out),
         }, stream)
@@ -430,7 +439,13 @@ def launchd_access_probe(destination: Path) -> dict[str, Any]:
 def apply_migration(args: argparse.Namespace, prepared: dict[str, Any]) -> dict[str, Any]:
     if prepared["blocking"]:
         raise MigrationError("预检不通过：" + "；".join(prepared["blocking"]))
-    access = launchd_access_probe(Path(prepared["destination"]))
+    release_python = None
+    try:
+        manager = json.loads((Path.home() / ".dalton" / "manager.json").read_text(encoding="utf-8"))
+        release_python = str(Path(manager["release_path"]) / "bin" / "python")
+    except (OSError, ValueError, KeyError, TypeError):
+        release_python = None
+    access = launchd_access_probe(Path(prepared["destination"]), release_python)
     if not access["ok"]:
         raise MigrationError("launchd 访问探测不通过：" + json.dumps(access, ensure_ascii=False))
     probe = target_capability_probe(Path(prepared["destination"]))
