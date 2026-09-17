@@ -155,7 +155,7 @@ def plan(args: argparse.Namespace) -> dict[str, Any]:
         **state,
         "steps": [
             f"git archive {state['source_commit']} → 临时源码树（只用提交里的字节）",
-            f"{args.python} -m build --wheel（在临时源码树里）",
+            f"{wheel_python(args)} -m build --wheel（在临时源码树里）",
             "release_hash = sha256(canonical_json({dependency_lock_hash, wheel_sha256}))",
             f"{args.python} -m venv --copies {args.releases_root}/<release_hash>/venv",
             "<venv>/bin/python -m pip install <wheel>",
@@ -163,6 +163,19 @@ def plan(args: argparse.Namespace) -> dict[str, Any]:
             "写 <release>/release-manifest.json（0600）",
         ],
     }
+
+
+def wheel_python(args: argparse.Namespace) -> str:
+    """The interpreter that builds the wheel: the one running this script.
+
+    The wheel is pure Python (``py3-none-any``), so it does not have to be
+    built by the interpreter that will run it.  ``--python`` names the
+    interpreter for the release venv -- live, the Homebrew python@3.14 that
+    holds the Full Disk Access grant -- and that interpreter has no ``build``
+    module and should not need one.  The dev venv this script runs from does.
+    ``--wheel-python`` overrides for a caller that wants something else.
+    """
+    return args.wheel_python or sys.executable
 
 
 def build(args: argparse.Namespace) -> dict[str, Any]:
@@ -183,7 +196,7 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         if completed.returncode != 0:
             raise BuildError("git archive 失败：" + completed.stderr.decode()[:500])
         run(["tar", "-xf", str(archive), "-C", str(source)])
-        run([args.python, "-m", "build", "--wheel", "--outdir", str(work / "dist")],
+        run([wheel_python(args), "-m", "build", "--wheel", "--outdir", str(work / "dist")],
             cwd=source)
         wheels = sorted((work / "dist").glob("*.whl"))
         if len(wheels) != 1:
@@ -253,6 +266,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dependency-lock", type=Path, default=DEFAULT_LOCK)
     parser.add_argument("--python", default=DEFAULT_PYTHON,
                         help="用来建 venv 的解释器（线上是 Homebrew python@3.14）")
+    parser.add_argument("--wheel-python", default=None,
+                        help="构建 wheel 用的解释器（缺省用运行本脚本的解释器，它装有 build）")
     parser.add_argument("--allow-dirty", action="store_true")
     parser.add_argument("--allow-dependency-drift", action="store_true")
     parser.add_argument("--apply", action="store_true",
