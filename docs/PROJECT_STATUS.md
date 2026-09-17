@@ -1,5 +1,9 @@
 # Dalton 项目进度
 
+## 2026-09-17 08:10 UTC：认知门「退回补充」失败的第二个根因（writer 参数白名单缺 question_notes）
+
+第一批修复（db30f19d，运行包 b9452951…）上线后 tick 回到 42 秒、公司档案车道正常 launched、writer 无新超时，但 owner 点「按系统建议退回」仍显示"保存决定暂时未完成"。排查：writer 日志没有任何 `decide_deep_insight_gate` 记录，`writer-tokens.json` 却在 07:32 UTC 被改写过（临时 human 主体已创建又撤回），说明请求到了 writer 但在连接线程上被拒。原因：cockpit 只要退回意见里有「qN：…」逐题行就随请求发 `question_notes`，而 `OPERATION_FIELDS["decide_deep_insight_gate"]` 没列这个字段，writer 直接回 `ProtocolError("unknown operation parameter")`——不落日志，页面把它归入兜底文案。系统预填的退回意见恰好都带逐题行，所以每张卡必失败；DXC 那张（无逐题行）不受影响。修复：白名单加入 `question_notes`（authority 的 `decide()` 本就接受它），新增回归测试；另加 `scripts/cockpit_decide_probe.py`，按页面同样的会话 + CSRF 提交裁决并打印原始应答，以后页面只显示兜底文案时可用它定位。待 owner 重新构建、切换。
+
 ## 2026-09-17 07:30 UTC：公司档案车道拖垮 writer（源码 db30f19d，待 owner 部署）
 
 **症状**：Mac 重启后 owner 反馈研究目标页读取慢、待办页点「退回补充」显示"保存决定暂时未完成"。排查：SSD 挂载、软链、10 个服务、release 一致性都正常；真正的堵点是 writer 单一 store 线程——tick 记录显示 05:38 UTC 起 `dispatch_company_dossier` 每轮都 `writer did not finish the request in time`（30 秒超时后处理仍在继续占线程），tick 从 50 秒涨到 111–144 秒；cockpit 的 `decide_deep_insight_gate` 也排这条线程，排不进就超时；overview 在 tick 间隙 5.9 秒、tick 期间 28 秒（前端 30 秒放弃）。五张认知门卡片仍在待办，那次退回没有保存。

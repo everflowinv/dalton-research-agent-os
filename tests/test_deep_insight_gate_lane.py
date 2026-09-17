@@ -879,6 +879,31 @@ class DecisionOperationTests(unittest.TestCase):
             [row for row in self.stage_records(server)
              if row[0] == "deep_insight_gate"], [])
 
+    def test_a_return_with_per_question_notes_passes_the_protocol_and_is_kept(self):
+        # Live, the cockpit sent ``question_notes`` whenever the reviewer's
+        # text named a question -- which the system-suggested return always
+        # does -- and the writer, whose field list did not name it, answered
+        # "unknown operation parameter" from the connection thread, unlogged.
+        # Every suggested return on the approvals page failed as "暂时未完成".
+        from dalton_core.writer_server import OPERATION_FIELDS, Principal
+        from dalton_core.writer_server import HUMAN_GOVERNANCE_OPERATIONS
+
+        params = {"gate_version_ref": self.draft["id"],
+                  "gate_version_hash": self.draft["content_hash"],
+                  "decision": "return_for_more_work",
+                  "reason": "q7：缺少五到十年的股价与盈利序列",
+                  "question_notes": {"q7": "缺少五到十年的股价与盈利序列"}}
+        self.assertEqual(set(params) - OPERATION_FIELDS["decide_deep_insight_gate"], set())
+        server = self.server()
+        principal = Principal("coverage-governance", "t",
+                              HUMAN_GOVERNANCE_OPERATIONS, actor_ref=OWNER)
+        bound = server._authorized_params(principal, "decide_deep_insight_gate", params)
+        result = self.on_store(server, lambda: server._op_decide_deep_insight_gate(bound))
+        self.assertEqual(result["decision"], "return_for_more_work")
+        decision = self.on_store(
+            server, lambda: server._deep_insight_gates().decision_for(self.draft["id"]))
+        self.assertEqual(decision["question_notes"], {"q7": "缺少五到十年的股价与盈利序列"})
+
     def test_rejecting_records_a_failed_gate(self):
         server = self.server()
         self.decide(server, "reject", reason="覆盖价值不够")

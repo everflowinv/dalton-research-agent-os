@@ -1110,6 +1110,12 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     "acknowledge_model_fallback_notice": frozenset({"notice_id", "actor_ref"}),
     "decide_deep_insight_gate": frozenset({
         "gate_version_ref", "gate_version_hash", "decision", "reason", "actor_ref",
+        # D2: the per-question instructions a return carries.  The cockpit
+        # sends them whenever the reviewer's text names a question, which the
+        # system-suggested return always does; a writer that did not list the
+        # field answered "unknown operation parameter" from the connection
+        # thread, unlogged, and every suggested return failed as "暂时未完成".
+        "question_notes",
     }),
     "decide_investment_memo": frozenset({
         "memo_version_ref", "memo_version_hash", "decision", "reason", "actor_ref",
