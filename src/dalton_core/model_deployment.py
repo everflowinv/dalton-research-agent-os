@@ -1018,6 +1018,61 @@ def upgrade_openclaw_broker_catalog(
     }
 
 
+#: The routing-policy lineages a resident service configuration pins but no
+#: lane model configuration reaches.  ``thesis_impact`` pins three of them --
+#: the shared broker policy, the assessment pin and the verifier pin -- and a
+#: workspace's router is built from the *lane* configurations only, so those
+#: three lineages were simply never created there.  The result was that every
+#: model save in a workspace cockpit died on ``RoutingPolicyNotFound`` for a
+#: stage the owner had not touched.  Listed in chain order because a lineage is
+#: append-only: v3 cannot be registered before v2, and v2 not before v1.
+RUNTIME_POLICY_BUILDERS = (
+    openclaw_policy,
+    _legacy_openclaw_broker_policy,
+    openclaw_broker_policy,
+    openclaw_assessment_policy,
+    openclaw_verifier_policy,
+)
+
+
+def runtime_policy_lineages(*, checked_at: datetime) -> list[dict[str, Any]]:
+    """The packaged policy versions a resident service pin resolves through.
+
+    Pure: it builds the bodies and touches no database, so a dry run can list
+    exactly what an ``--apply`` would append.
+    """
+
+    return [builder(created_at=checked_at) for builder in RUNTIME_POLICY_BUILDERS]
+
+
+def ensure_runtime_policy_lineages(
+    router_path: str | Path, *, checked_at: datetime
+) -> dict[str, Any]:
+    """Create the service-pinned policy lineages in one router, idempotently.
+
+    Deliberately policies only, no profiles.  A policy's allowlist is a filter,
+    not a dependency: the lineage has to exist for ``get_policy`` to answer,
+    and which profiles that router actually holds is the separate question the
+    model runtime template already answers.  Registering profiles here would
+    quietly widen what a workspace may route to.
+
+    ``_register_policy_once`` is reused rather than reimplemented, so a router
+    that already holds one of these under different content is a refusal and
+    not a silent overwrite.
+    """
+
+    path = Path(router_path)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    created: list[str] = []
+    present: list[str] = []
+    with ModelRouter(path) as router:
+        for desired in runtime_policy_lineages(checked_at=checked_at):
+            outcome = _register_policy_once(router, desired)
+            ref = desired["policy_version_ref"]
+            (present if outcome.get("status") == "duplicate" else created).append(ref)
+    return {"router_path": str(path), "created": created, "present": present}
+
+
 def _register_policy_once(
     router: ModelRouter, desired: dict[str, Any]
 ) -> dict[str, Any]:

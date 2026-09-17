@@ -299,6 +299,33 @@ def _publish_playbook(workspace: Any, actor_ref: str) -> dict[str, str]:
     return {"ref": published["id"], "hash": published["content_hash"]}
 
 
+def _service_pinned_policy_lineages(workspace: Any) -> dict[str, Any]:
+    """Create the routing-policy lineages this workspace's service.json will pin.
+
+    The workspace router is built by the model runtime template, which copies
+    only the lineages its twenty-one *lane* model configurations reach.  The
+    service template then writes three more pins into ``service.json`` --
+    ``thesis_impact``'s shared broker policy, its assessment pin and its
+    verifier pin -- for lineages nothing ever created here.  Live consequence:
+    ``set_tier_selection`` iterates every pinned ref and calls
+    ``router.get_policy``, so *every* model save in a workspace cockpit died on
+    ``RoutingPolicyNotFound: model-routing-policy-version:dalton-openclaw-
+    assessment:1``, and ``scripts/align_model_routing.py --apply`` failed for
+    both workspaces.
+
+    Built from the packaged deployment contract rather than read out of the
+    service template, because it is the same contract the template's source
+    host got them from -- and because this runs before the service template is
+    installed, so there is nothing to read yet.
+    """
+
+    from .model_deployment import ensure_runtime_policy_lineages
+
+    return ensure_runtime_policy_lineages(
+        workspace.state_dir / "model-router.sqlite",
+        checked_at=datetime.now(timezone.utc))
+
+
 def _host_lane_inputs(workspace: Any, actor_ref: str,
                       host_sources: Mapping[str, Path] | None,
                       enabled: bool) -> dict[str, Any]:
@@ -380,6 +407,7 @@ def install(workspace_manifest: str | Path, *, actor_ref: str,
     connectors, unsupported = _connector_records(workspace, actor_ref)
     host_lanes = _host_lane_inputs(workspace, actor_ref, host_sources,
                                    stage_host_lanes)
+    routing_policies = _service_pinned_policy_lineages(workspace)
     debate_hash = content_hash(DEBATE_POLICY)
     conviction_hash = content_hash(CONVICTION_POLICY)
     playbook_template = {
@@ -490,6 +518,8 @@ def install(workspace_manifest: str | Path, *, actor_ref: str,
         # What this machine supplied, recorded so the provenance of a lane that
         # nobody in this workspace approved by hand is readable afterwards.
         "host_lane_inputs": host_lanes,
+        "service_pinned_policy_lineages": sorted(
+            [*routing_policies["created"], *routing_policies["present"]]),
     }
     foundation = {**foundation_body, "content_hash": content_hash(foundation_body)}
     files["research-foundation.json"] = _atomic_seed(
@@ -499,6 +529,7 @@ def install(workspace_manifest: str | Path, *, actor_ref: str,
             "connector_governance_records": connectors,
             "unsupported_shared_capabilities": unsupported,
             "host_lane_inputs": host_lanes,
+            "routing_policy_lineages": routing_policies,
             "research_state_copied": False, "legacy_approvals_copied": False}
 
 

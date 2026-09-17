@@ -198,7 +198,8 @@ def render_plan(plan: dict[str, Any]) -> str:
         lines.append(f"将新增 {len(plan['actions'])} 个文件：")
         for action in plan["actions"]:
             verb = {"link": "链接", "governance": "批准并写入",
-                    "mission_plan": "按任务生成", "seed": "写入默认值"}[action["kind"]]
+                    "mission_plan": "按任务生成", "seed": "写入默认值",
+                    "routing_policy": "补登记策略血统"}[action["kind"]]
             lines.append(f"  [{verb}] {action['target']}")
             if action["kind"] == "link":
                 lines.append(f"      来源：{action['detail']}")

@@ -609,6 +609,51 @@ class RuntimeSetupStagingTests(unittest.TestCase):
         self.assertNotIn("source:xueqiu", plan)
         self.assertNotIn("--crowd-source-map", writer_lane_flags(self.state))
 
+    def test_install_creates_the_policy_lineages_service_json_will_pin(self):
+        """The defect: service.json pins three lineages the router never had.
+
+        The workspace router is built from the twenty-one lane model
+        configurations; ``thesis_impact``'s three pins reach none of them. Live
+        that made every model save in a workspace cockpit fail with
+        ``RoutingPolicyNotFound`` for a stage the owner had not touched.
+        """
+
+        from datetime import datetime, timezone
+
+        from dalton_core.model_deployment import runtime_policy_lineages
+        from dalton_core.model_router import ModelRouter
+        from dalton_core.workspace_runtime_setup import install
+
+        result = install(self.manifest, actor_ref="human:owner@example.com",
+                         stage_host_lanes=False)
+        expected = [policy["policy_version_ref"] for policy in
+                    runtime_policy_lineages(checked_at=datetime.now(timezone.utc))]
+        self.assertEqual(result["routing_policy_lineages"]["created"], expected)
+        foundation = json.loads(
+            (self.state / "research-foundation.json").read_text(encoding="utf-8"))
+        self.assertEqual(foundation["service_pinned_policy_lineages"],
+                         sorted(expected))
+        with ModelRouter(self.state / "model-router.sqlite") as router:
+            for ref in expected:
+                self.assertEqual(router.get_policy(ref)["policy_version_ref"], ref)
+        # The three the live service.json actually pins, named so a rename of
+        # the deployment contract has to come past this test.
+        for ref in ("model-routing-policy-version:dalton-openclaw:3",
+                    "model-routing-policy-version:dalton-openclaw-assessment:1",
+                    "model-routing-policy-version:dalton-openclaw-verifier:1"):
+            self.assertIn(ref, expected)
+
+    def test_installing_twice_appends_no_second_policy_version(self):
+        from dalton_core.workspace_runtime_setup import install
+
+        first = install(self.manifest, actor_ref="human:owner@example.com",
+                        stage_host_lanes=False)
+        second = install(self.manifest, actor_ref="human:owner@example.com",
+                         stage_host_lanes=False)
+        self.assertEqual(second["routing_policy_lineages"]["created"], [])
+        self.assertEqual(second["routing_policy_lineages"]["present"],
+                         first["routing_policy_lineages"]["created"])
+
     def test_the_first_mission_generates_the_plans_its_lanes_need(self):
         from dalton_core.workspace import load_workspace_manifest
         from dalton_core.workspace_mission_setup import (
@@ -703,6 +748,56 @@ class RepairPlannerTests(unittest.TestCase):
             launch_agents_dir=self.root / "agents",
             actor_ref="human:owner@example.com",
             source_state_dir=None, lanes=None)
+
+    def test_the_dry_run_names_the_missing_policy_lineages(self):
+        """An existing workspace's router is repaired offline, listed first.
+
+        The three ``thesis_impact`` pins are the live case: with them absent
+        the cockpit could save no model at all, so the dry run has to say the
+        refs out loud rather than leave the owner reading a stack trace.
+        """
+
+        import os
+
+        from dalton_core.model_deployment import runtime_policy_lineages
+
+        # The bootstrapped workspace router is exactly the live shape: the lane
+        # lineages the model template copied, and none of the service pins.
+        self.assertTrue((self.state / "model-router.sqlite").is_file())
+        os.environ["DALTON_OPENCLAW_WORKSPACE"] = str(
+            self.sources["feeds/company-wiki"])
+        try:
+            plan = self._plan()
+        finally:
+            del os.environ["DALTON_OPENCLAW_WORKSPACE"]
+        routing = [action for action in plan["actions"]
+                   if action["kind"] == "routing_policy"]
+        self.assertEqual(len(routing), 1)
+        for policy in runtime_policy_lineages(
+                checked_at=__import__("datetime").datetime.now(
+                    __import__("datetime").timezone.utc)):
+            self.assertIn(policy["policy_version_ref"], routing[0]["detail"])
+        self.assertIn(routing[0]["target"], self.script.render_plan(plan))
+
+    def test_applying_registers_the_lineages_and_then_plans_nothing(self):
+        from dalton_core.model_router import ModelRouter
+        from dalton_core.workspace_lane_parity import apply_parity_actions
+
+        plan = self._plan()
+        routing = [action for action in plan["_actions"]
+                   if action.kind == "routing_policy"]
+        performed = apply_parity_actions(
+            routing, actor_ref="human:owner@example.com", mission=MISSION)
+        self.assertEqual([row["result"] for row in performed], ["registered"])
+        with ModelRouter(self.state / "model-router.sqlite") as router:
+            self.assertEqual(
+                router.get_policy(
+                    "model-routing-policy-version:dalton-openclaw-assessment:1"
+                )["id"],
+                "model-routing-policy:dalton-openclaw-assessment")
+        self.assertEqual(
+            [action for action in self._plan()["_actions"]
+             if action.kind == "routing_policy"], [])
 
     def test_the_dry_run_names_every_file_and_its_reason(self):
         import os

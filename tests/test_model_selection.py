@@ -2403,3 +2403,102 @@ class PurposeCoverageTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AbsentPolicyLineageTests(StateDirectoryCase):
+    """W7: a pin this router has no lineage for must not fail the whole save.
+
+    Live on 2026-09-17: both workspaces' ``service.json`` pinned
+    ``dalton-openclaw``, ``-assessment`` and ``-verifier`` -- inherited from the
+    environment their runtime template was exported from -- while their routers
+    only ever received the lineages their lane model configurations reach. Every
+    tier save, and ``scripts/align_model_routing.py --apply``, died on the first
+    ``router.get_policy`` with ``RoutingPolicyNotFound``. So the owner could
+    change no model at all in that workspace because of one stage they had never
+    touched.
+    """
+
+    def _config_with_absent_lineage(self) -> Path:
+        path = self.root / "claim-index-model-config.json"
+        path.write_text(json.dumps({
+            **self.model_config,
+            "routing_policy_ref": "model-routing-policy-version:dalton-openclaw-assessment:1",
+        }), encoding="utf-8")
+        return path
+
+    def test_a_tier_save_skips_the_absent_pin_and_saves_the_rest(self) -> None:
+        absent = self._config_with_absent_lineage()
+        before = absent.read_text(encoding="utf-8")
+        result = set_tier_selection(
+            self.root, tier="brain", mode="explicit",
+            chain=["profile:gpt-6-astra", "profile:claude-fable-5-1"], now=NOW)
+        self.assertEqual(result["status"], "published")
+        self.assertIn("research-planner-model-config.json",
+                      result["model_configs_repointed"])
+        self.assertEqual(
+            [row["name"] for row in result["model_configs_skipped"]],
+            ["claim-index-model-config.json"])
+        row = result["model_configs_skipped"][0]
+        self.assertEqual(
+            row["routing_policy_ref"],
+            "model-routing-policy-version:dalton-openclaw-assessment:1")
+        self.assertIn("策略血统", row["reason"])
+        self.assertIn("model_configs_skipped", result["reload_note"])
+        # Skipped means untouched, not rewritten to somebody else's selection.
+        self.assertEqual(absent.read_text(encoding="utf-8"), before)
+
+    def test_a_purpose_save_skips_the_absent_pin_the_same_way(self) -> None:
+        self._config_with_absent_lineage()
+        result = set_model_selection(
+            self.root, purpose="plan", mode="explicit",
+            chain=["profile:claude-fable-5-1"], now=NOW)
+        self.assertEqual(result["status"], "published")
+        self.assertEqual(
+            [row["name"] for row in result["model_configs_skipped"]],
+            ["claim-index-model-config.json"])
+
+    def test_nothing_is_reported_skipped_when_every_lineage_is_there(self) -> None:
+        result = set_tier_selection(
+            self.root, tier="brain", mode="explicit",
+            chain=["profile:gpt-6-astra", "profile:claude-fable-5-1"], now=NOW)
+        self.assertEqual(result["model_configs_skipped"], [])
+        self.assertNotIn("model_configs_skipped", result["reload_note"])
+
+    def test_registering_the_lineage_makes_the_pin_saveable_again(self) -> None:
+        from dalton_core.model_deployment import ensure_runtime_policy_lineages
+
+        absent = self._config_with_absent_lineage()
+        outcome = ensure_runtime_policy_lineages(
+            self.root / "model-router.sqlite", checked_at=NOW)
+        self.assertIn("model-routing-policy-version:dalton-openclaw-assessment:1",
+                      outcome["created"])
+        result = set_tier_selection(
+            self.root, tier="brain", mode="explicit",
+            chain=["profile:gpt-6-astra", "profile:claude-fable-5-1"], now=NOW)
+        self.assertEqual(result["model_configs_skipped"], [])
+        self.assertIn("claim-index-model-config.json",
+                      result["model_configs_repointed"])
+        self.assertNotEqual(
+            json.loads(absent.read_text(encoding="utf-8"))["routing_policy_ref"],
+            "model-routing-policy-version:dalton-openclaw-assessment:1")
+
+    def test_the_lineage_installer_is_idempotent_and_chain_ordered(self) -> None:
+        from dalton_core.model_deployment import (
+            ensure_runtime_policy_lineages, runtime_policy_lineages,
+        )
+
+        router = self.root / "model-router.sqlite"
+        first = ensure_runtime_policy_lineages(router, checked_at=NOW)
+        self.assertEqual(
+            first["created"],
+            [policy["policy_version_ref"]
+             for policy in runtime_policy_lineages(checked_at=NOW)])
+        second = ensure_runtime_policy_lineages(router, checked_at=NOW)
+        self.assertEqual(second["created"], [])
+        self.assertEqual(second["present"], first["created"])
+        # v3 sits on v2 sits on v1; the router refuses any other order, so a
+        # successful install is itself the proof the chain was built in one.
+        self.assertEqual(
+            self.router.get_policy(
+                "model-routing-policy-version:dalton-openclaw:3")["prior_version_ref"],
+            "model-routing-policy-version:dalton-openclaw:2")

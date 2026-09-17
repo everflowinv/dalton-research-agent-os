@@ -720,7 +720,56 @@ def plan_parity_actions(
             if action is not None and all(
                     action.target != existing.target for existing in actions):
                 actions.append(action)
+    if selected is None:
+        actions.extend(_routing_policy_actions(state))
     return actions
+
+
+def _routing_policy_actions(state: Path) -> list[ParityAction]:
+    """The routing-policy lineages this environment's service.json pins.
+
+    Not a lane, and here anyway: it is the same class of defect and the same
+    repair. The workspace router was built from the lane model configurations
+    only, so the three lineages ``thesis_impact`` pins were never created --
+    and the owner met that as "every model save in this workspace fails", with
+    a ``RoutingPolicyNotFound`` naming a stage they had not touched.
+
+    Reading the router is enough to plan; nothing is opened for writing until
+    ``apply_parity_actions``, and the owner is asked to stop the services
+    first because a live writer holds this file.
+    """
+
+    from .model_deployment import runtime_policy_lineages
+
+    router = state / "model-router.sqlite"
+    if not router.is_file():
+        return []
+    # A plain read-only URI rather than ``ModelRouter``: the router's own
+    # read-only mode needs the WAL sidecars to already exist, and opening it
+    # for writing to *ask a question* would make a dry run write.
+    try:
+        connection = sqlite3.connect(f"file:{router}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return []
+    try:
+        present = {
+            row[0] for row in connection.execute(
+                "SELECT policy_version_ref FROM model_routing_policy_versions")
+        }
+    except sqlite3.Error:
+        return []
+    finally:
+        connection.close()
+    missing = [policy["policy_version_ref"]
+               for policy in runtime_policy_lineages(checked_at=datetime.now(timezone.utc))
+               if policy["policy_version_ref"] not in present]
+    if not missing:
+        return []
+    return [ParityAction(
+        kind="routing_policy", target=str(router), detail="、".join(missing),
+        reason="模型路由：service.json 固定了这些策略血统，但本环境的路由库里没有，"
+               "于是驾驶舱里任何一次模型保存都会整体失败。补上血统本身（不动可选模型）。",
+    )]
 
 
 def _mission_plan_action(state: Path, lane: LaneParity,
@@ -761,6 +810,14 @@ def apply_parity_actions(
                 continue
             os.symlink(Path(action.detail), target)
             performed.append({**action.as_wire(), "result": "linked"})
+            continue
+        if action.kind == "routing_policy":
+            from .model_deployment import ensure_runtime_policy_lineages
+
+            outcome = ensure_runtime_policy_lineages(
+                target, checked_at=datetime.now(timezone.utc))
+            performed.append({**action.as_wire(), "result": "registered",
+                              "detail": "、".join(outcome["created"]) or "（已齐全）"})
             continue
         if action.kind == "seed":
             _write_json(target, SEED_FILES[action.detail])

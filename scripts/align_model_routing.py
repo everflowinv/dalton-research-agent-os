@@ -274,9 +274,21 @@ def apply_plan(
                 # would drop stage pins this run was about to write. The other
                 # environments are untouched and the script is idempotent.
                 break
+            # W7: a save may now legitimately skip a pin whose policy lineage
+            # this environment's router does not hold. That is not a failure --
+            # the other stages were saved -- but it must not vanish: an owner
+            # reading "aligned" has to know which stage this run did not reach.
+            skipped = ((outcome or {}).get("model_configs_skipped") or []
+                       if isinstance(outcome, Mapping) else [])
             published.append({"request": params,
                               "status": (outcome or {}).get("status", "published")
-                              if isinstance(outcome, Mapping) else "published"})
+                              if isinstance(outcome, Mapping) else "published",
+                              **({"skipped": [
+                                  {"name": row.get("name"),
+                                   "routing_policy_ref": row.get("routing_policy_ref"),
+                                   "reason": row.get("reason")}
+                                  for row in skipped if isinstance(row, Mapping)]}
+                                 if skipped else {})})
         results.append({"environment_id": target["environment_id"],
                         "name": target["name"],
                         "status": ("failed" if any(item["status"] == "failed"
@@ -396,6 +408,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(render(result, verbose=args.verbose))
         for applied in result.get("applied", []):
             print(f"已处理 {applied['environment_id']}：{applied['status']}")
+            for item in applied.get("published", []):
+                for row in item.get("skipped", []):
+                    print(f"  未改动 {row['name']}（{row['routing_policy_ref']}）："
+                          f"{row['reason']}")
         residual = result.get("residual")
         if residual:
             print(residual.get("note") or residual.get("reason", ""))

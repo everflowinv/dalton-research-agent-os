@@ -50,6 +50,7 @@ from .model_fallback_chain import (
 )
 from .model_router import (
     ModelRouter,
+    RoutingPolicyNotFound,
     canonical_json,
     declared_tier_chain,
     live_links,
@@ -660,6 +661,34 @@ def publish_tier_selection(
     }
 
 
+def _skipped_absent_lineage(name: str, policy_ref: str, router_db: str) -> dict[str, str]:
+    """One pin this save cannot touch, said in the owner's words.
+
+    W7: a workspace's service.json inherited three policy pins from the
+    environment it was exported from -- ``dalton-openclaw``,
+    ``-assessment`` and ``-verifier`` -- while its own router only ever
+    received the lineages reachable from its lane model configurations.  Every
+    tier save then died on the first ``get_policy`` with
+    ``RoutingPolicyNotFound``, so the owner could not change *any* model in
+    that workspace because of one stage they had not touched.
+
+    A pin whose lineage is not in this router is a stage this save does not
+    reach, exactly like a stage the host does not configure.  It is reported
+    rather than swallowed: silently repointing the others would leave the
+    owner believing a save covered a stage it did not.
+    """
+
+    return {
+        "name": name,
+        "routing_policy_ref": policy_ref,
+        "model_router_db": router_db,
+        "reason": f"这个环境的模型路由库里没有 {policy_ref} 这条策略血统，"
+                  "这个环节本次没有改动；其余环节已照常保存。"
+                  "要把它一起管起来，先补上这条血统"
+                  "（scripts/repair_workspace_lane_parity.py 会做）。",
+    }
+
+
 def set_tier_selection(
     state_dir: str | Path,
     *,
@@ -707,6 +736,7 @@ def set_tier_selection(
     prepared: list[tuple[dict[str, Any], str, str, str]] = []
     repointed: list[str] = []
     unchanged: list[str] = []
+    skipped: list[dict[str, str]] = []
     # Validate every router and pinned policy before appending any immutable
     # version. An invalid late config must not leave half the roles selected.
     for item in configs:
@@ -718,7 +748,12 @@ def set_tier_selection(
                 f"{item['name']} names a model router database that is not here"
             )
         with ModelRouter(router_db, read_only=True) as router:
-            pinned = router.get_policy(policy_ref)
+            try:
+                pinned = router.get_policy(policy_ref)
+            except RoutingPolicyNotFound:
+                skipped.append(
+                    _skipped_absent_lineage(item["name"], policy_ref, router_db))
+                continue
             latest = _latest_policy(router, pinned["id"])
             try:
                 validate_selection(
@@ -799,6 +834,7 @@ def set_tier_selection(
         "status": "published" if repointed else "unchanged",
         "tier": tier,
         "mode": mode,
+        "model_configs_skipped": skipped,
         "actor_ref": actor_ref,
         "chain": list(chain) if mode == "explicit" else list(tier_chain(tier)),
         "purposes": members,
@@ -813,6 +849,8 @@ def set_tier_selection(
             ("该类里有常驻服务固定的环节，需要重启常驻服务后完全生效；service.json 已原子更新。" if runtimes
              else "不用重启：每条流水线下一次调用时会读到新的策略版本。")
             + "回滚就是把上一版的选择再发布一次。"
+            + (f"另有 {len(skipped)} 个环节的策略血统不在本环境的路由库里，本次没有改动，"
+               "详见 model_configs_skipped。" if skipped else "")
         ),
     }
 
@@ -856,6 +894,7 @@ def set_model_selection(
     prepared: list[tuple[dict[str, Any], str, str, str]] = []
     repointed: list[str] = []
     unchanged: list[str] = []
+    skipped: list[dict[str, str]] = []
     # Validate every router and pinned policy before appending any immutable
     # version. An invalid late config must not leave half the roles selected.
     for item in configs:
@@ -867,7 +906,14 @@ def set_model_selection(
                 f"{item['name']} names a model router database that is not here"
             )
         with ModelRouter(router_db, read_only=True) as router:
-            pinned = router.get_policy(policy_ref)
+            try:
+                pinned = router.get_policy(policy_ref)
+            except RoutingPolicyNotFound:
+                # Same rule as the tier save: a pin this router has no lineage
+                # for is a stage out of reach, reported rather than fatal.
+                skipped.append(
+                    _skipped_absent_lineage(item["name"], policy_ref, router_db))
+                continue
             latest = _latest_policy(router, pinned["id"])
             try:
                 validate_selection(
@@ -925,6 +971,7 @@ def set_model_selection(
         "purpose": purpose,
         "tier": tier_for(purpose),
         "mode": mode,
+        "model_configs_skipped": skipped,
         "actor_ref": actor_ref,
         "chain": list(chain) if mode == "explicit" else [],
         "policy_versions": [
@@ -938,6 +985,8 @@ def set_model_selection(
             ("需要重启常驻服务后生效；service.json 已原子更新。" if runtime is not None
              else "不用重启：每条流水线下一次调用时会读到新的策略版本。")
             + "回滚就是把上一版的选择再发布一次。"
+            + (f"另有 {len(skipped)} 个环节的策略血统不在本环境的路由库里，本次没有改动，"
+               "详见 model_configs_skipped。" if skipped else "")
         ),
     }
 
