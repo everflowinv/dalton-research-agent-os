@@ -179,9 +179,18 @@ def launchctl(action: str, label: str, plist_path: Path) -> str:
     return f"{' '.join(command)} -> {completed.returncode} {completed.stderr.strip()[:200]}"
 
 
+def rsync_flags() -> list[str]:
+    """macOS 自带的是 openrsync：没有 -A/-X，扩展属性用长选项。"""
+
+    probe = subprocess.run(["rsync", "--version"], capture_output=True, text=True, check=False)
+    if "openrsync" in (probe.stdout + probe.stderr):
+        return ["-aH", "--extended-attributes", "--delete"]
+    return ["-aHAX", "--delete"]
+
+
 def rsync(source: Path, target: Path) -> str:
     target.parent.mkdir(parents=True, exist_ok=True)
-    command = ["rsync", "-aHAX", "--delete", f"{source}/", f"{target}/"]
+    command = ["rsync", *rsync_flags(), f"{source}/", f"{target}/"]
     completed = subprocess.run(command, capture_output=True, text=True, check=False)
     if completed.returncode != 0:
         raise MigrationError(f"rsync 失败：{completed.stderr.strip()[:1000]}")
@@ -282,7 +291,7 @@ def plan(args: argparse.Namespace) -> dict[str, Any]:
             "停止全部 LaunchAgent（先 controller / control，再 writer）",
             "对每个 *.sqlite 做 PRAGMA wal_checkpoint(TRUNCATE) 并 integrity_check",
             "在目标盘上做一次能力探测（权限位、属主、软链、WAL）",
-            "rsync -aHAX --delete 每一组到目标盘",
+            "rsync（openrsync: -aH --extended-attributes --delete）每一组到目标盘",
             "把原目录改名为 <dir>.pre-migration-<时间戳>（保留，供回滚）",
             "在原路径建立指向目标盘的符号链接",
             "启动全部 LaunchAgent",
@@ -350,15 +359,23 @@ def apply_migration(args: argparse.Namespace, prepared: dict[str, Any]) -> dict[
                              + json.dumps(bad, ensure_ascii=False))
     moved = []
     marker = stamp()
-    for row in prepared["units"]:
-        source = Path(row["source"])
-        target = Path(row["target"])
-        actions.append(rsync(source, target))
-        kept = source.with_name(f"{source.name}.pre-migration-{marker}")
-        os.rename(source, kept)
-        os.symlink(target, source)
-        moved.append({"name": row["name"], "source": str(source),
-                      "target": str(target), "preserved": str(kept)})
+    try:
+        for row in prepared["units"]:
+            source = Path(row["source"])
+            target = Path(row["target"])
+            actions.append(rsync(source, target))
+            kept = source.with_name(f"{source.name}.pre-migration-{marker}")
+            os.rename(source, kept)
+            os.symlink(target, source)
+            moved.append({"name": row["name"], "source": str(source),
+                          "target": str(target), "preserved": str(kept)})
+    except Exception as exc:
+        # rsync 在改名之前失败时源目录原封不动；已经改名的组软链是完整的。
+        # 无论哪种情况服务都必须回来，不能让一次复制失败变成整套系统停机。
+        for label, path in agents:
+            actions.append(launchctl("start", label, path))
+        raise MigrationError(
+            f"{exc}；服务已重新启动，已迁移的组：{[row['name'] for row in moved]}") from exc
     for label, path in agents:
         actions.append(launchctl("start", label, path))
     time.sleep(args.start_settle_seconds)
