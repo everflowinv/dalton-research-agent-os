@@ -126,6 +126,10 @@ def verify_dependencies(venv: Path, lock: dict[str, Any]) -> dict[str, Any]:
     installed = installed_distributions(venv)
     expected = locked_distributions(lock)
     installed.pop("dalton-core", None)
+    # venv 自带的引导包不属于依赖集（历史发布的 venv 里同样有 pip）。
+    for bootstrap in ("pip", "setuptools", "wheel"):
+        if bootstrap not in expected:
+            installed.pop(bootstrap, None)
     missing = sorted(set(expected) - set(installed))
     extra = sorted(set(installed) - set(expected))
     changed = sorted(name for name in set(expected) & set(installed)
@@ -195,8 +199,14 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         release.mkdir(parents=True)
         os.chmod(release, 0o755)
         run([args.python, "-m", "venv", "--copies", str(venv)])
+        # 核心包本身不带依赖（全部是 optional extras）；依赖集按锁定清单精确安装，
+        # 否则 venv 里只有 dalton_core 一个包，与历史发布不一致。
+        pinned = work / "lock-requirements.txt"
+        pinned.write_text("\n".join(
+            f"{name}=={version}" for name, version in sorted(locked_distributions(lock).items()))
+            + "\n", encoding="utf-8")
         run([str(venv / "bin" / "python"), "-m", "pip", "install", "--no-input",
-             str(wheel)])
+             str(wheel), "-r", str(pinned)])
         dependencies = verify_dependencies(venv, lock)
         if not dependencies["matches"] and not args.allow_dependency_drift:
             shutil.rmtree(release, ignore_errors=True)
