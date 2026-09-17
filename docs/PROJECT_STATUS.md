@@ -1,5 +1,15 @@
 # Dalton 项目进度
 
+## 2026-09-17 07:30 UTC：公司档案车道拖垮 writer（源码 db30f19d，待 owner 部署）
+
+**症状**：Mac 重启后 owner 反馈研究目标页读取慢、待办页点「退回补充」显示"保存决定暂时未完成"。排查：SSD 挂载、软链、10 个服务、release 一致性都正常；真正的堵点是 writer 单一 store 线程——tick 记录显示 05:38 UTC 起 `dispatch_company_dossier` 每轮都 `writer did not finish the request in time`（30 秒超时后处理仍在继续占线程），tick 从 50 秒涨到 111–144 秒；cockpit 的 `decide_deep_insight_gate` 也排这条线程，排不进就超时；overview 在 tick 间隙 5.9 秒、tick 期间 28 秒（前端 30 秒放弃）。五张认知门卡片仍在待办，那次退回没有保存。
+
+**根因**（用线上 release 的 Python 直接对 Core 计时 + cProfile）：`dossier_company_source_fingerprint` 每家公司 9–19 秒、五家 58 秒/轮，全部在 store 线程上同步执行。分解：(1) `project_claim_status_details` 对每条 Claim 走一遍整个快照，一家公司 3,031 条 × 3,400 条最新版本 ≈ 1,000 万次 `_claim_semantic_key`（39 秒）；(2) `current_entries` 为每个章节把 2.9 万条索引全部解码并重算哈希（10 章节 10 秒）；(3) 每家公司各取一份 Ledger 快照并做 `content_hash`，而 `canonical_json` 每层 dumps+loads（6 秒/份）。定量结论入账把 Ledger 推到 1 万条后越过了 30 秒阈值。
+
+**修复**（`db30f19d`，全量 9,181 项通过 + 新增 10 项）：`ClaimStatusProjection` 对快照建一次索引（按 id、最新版本按语义键分组、每版本首条裁定），逐条答案与旧算法逐字节相同；`current_entries` 的 `claim_version_refs` 下推为 SQL `IN` 批次（走既有 `claim_index_entries_by_claim` 索引）；`dispatch_once` 每轮只取一份快照并沿 `company_ledger_signature → dossier_company_source_fingerprint → prepare_company_claim_query` 传入；`canonical_json` 改为单趟遍历后一次 dumps（同字节）。线上 Core 实测：单家指纹 55 秒 → 1.4 秒，一轮五家 58 秒 → 4.7 秒，快照哈希 6.2 秒 → 0.5 秒。
+
+**待 owner 执行**：构建与切换被自动模式的部署分类器拦下，步骤见 [deploy-runbook-2026-09-17-claim-projection.md](reports/deploy-runbook-2026-09-17-claim-projection.md)（两条命令 + 验证）。切换后再去待办页处理五张认知门卡片。**顺带观察**：writer 下有 17 个 `<defunct>` 子进程在积累（reap 在车道 dispatch 路径里，store 线程被占时不跑），预期随本修复回落，切换后验证。
+
 ## 2026-09-17 05:55 UTC：EveSSD 迁移完成（owner 已给 Python.app 完全磁盘访问）
 
 owner 在「完全磁盘访问」加入 Python.app 后，`migrate_state_dir.py` 的 launchd 访问探测（改为用 manager.json 指向的 release Python 执行，因为授权按可执行程序计）通过，迁移重跑成功：`~/Library/Application Support/Dalton/state` → `/Volumes/EveSSD/Dalton/legacy-state`，`~/.dalton/workspaces` → `/Volumes/EveSSD/Dalton/workspaces`，脚本自动改写两个 workspace 的 service.json 路径与 manifest 绑定、launchd 日志留在 `~/Library/Logs/Dalton/workspaces/<slug>/`。05:58 UTC 三个环境心跳正常，writer 已打开 SSD 上的 core.sqlite。本地保留 `*.pre-migration-20260917T055430Z`（约 11 GB），稳定几天后可删。
