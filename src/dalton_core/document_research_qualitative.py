@@ -85,7 +85,12 @@ def draft_prompt(*, question: str, search_proof: Mapping[str, Any]) -> str:
             "facts; do not convert one into another. Readability and a term match do not prove "
             "company relevance. If the excerpts do not answer the question, return "
             "insufficient_evidence with a null candidate and say exactly what is missing. "
-            "Otherwise return one draft-only qualitative candidate; do not assert numeric authority."
+            "Otherwise return one draft-only qualitative candidate; do not assert numeric authority. "
+            "Keep every quantity out of normalized_statement -- no figures, percentages, currency "
+            "amounts, ratios or counts (a period label such as FY2025 or Q3 and the form name of "
+            "the document such as 10-K are fine): numbers belong to a separate numeric authority, "
+            "and a statement carrying one is refused without being committed. Put the quantitative "
+            "detail that supports the statement in basis instead."
         ),
         "question": question, "search_proof": search_proof,
         "output_schema": DRAFT_OUTPUT_SCHEMA,

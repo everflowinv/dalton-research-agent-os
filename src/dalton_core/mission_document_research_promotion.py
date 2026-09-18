@@ -17,6 +17,17 @@ _SCHEMA_PATH = Path(__file__).with_name("mission_document_research_promotion_sch
 _RATIONALE = "Exact mission-directed original-document research with independent model verification, source replay and accounted execution (ADR-0005)."
 
 
+def ensure_promotion_authority(connection: Any) -> None:
+    """Provision the promotion tables of an install that promotes documents.
+
+    Called on the refusal path too: the lane reads the absence of this table
+    on a promoting install as missing authority, and the first admission of a
+    fresh install may well be one the rule refuses.
+    """
+
+    connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
+
+
 def _need(condition: Any, reason: str) -> None:
     from .research_auto_commit import ResearchAutoCommitRejected
     if not condition:

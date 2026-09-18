@@ -158,6 +158,54 @@ class MissionDocumentResearchExecutorError(RuntimeError):
     pass
 
 
+def read_mission_document_research_candidate_rejections(
+    connection: Any,
+) -> list[dict[str, Any]]:
+    """Every admission whose one candidate the qualitative rule refused.
+
+    A refused candidate is a settled admission, not a failure to retry: the
+    lane reads these so it neither re-dispatches the same draft nor keeps a
+    hold open for a decision the rule already made.
+    """
+
+    try:
+        rows = connection.execute(
+            "SELECT * FROM mission_document_research_candidate_rejections "
+            "ORDER BY created_at,rejection_id").fetchall()
+    except Exception as exc:
+        # A state copied before refusals were recorded has no such table.
+        if "no such table" in str(exc).lower():
+            return []
+        raise
+    result = []
+    for row in rows:
+        try:
+            wire = json.loads(row["record_json"])
+        except (TypeError, ValueError, RecursionError) as exc:
+            raise MissionDocumentResearchExecutorError(
+                "stored directed-document candidate rejection is invalid") from exc
+        body = dict(wire) if isinstance(wire, Mapping) else {}
+        asserted = body.pop("content_hash", None)
+        columns = {
+            "id": row["rejection_id"], "admission_ref": row["admission_ref"],
+            "outcome_ref": row["outcome_ref"], "rule_ref": row["rule_ref"],
+            "reason": row["reason"],
+            "candidate_claim_ref": row["candidate_claim_ref"],
+            "candidate_claim_hash": row["candidate_claim_hash"],
+            "created_at": row["created_at"],
+        }
+        if (not isinstance(wire, Mapping)
+                or wire.get("schema_version") != SCHEMA_VERSION
+                or wire.get("research_status") != "candidate_rejected"
+                or any(wire.get(key) != value for key, value in columns.items())
+                or asserted != row["content_hash"] or asserted != content_hash(body)
+                or canonical_json(wire) != row["record_json"]):
+            raise MissionDocumentResearchExecutorError(
+                "stored directed-document candidate rejection drifted")
+        result.append(wire)
+    return result
+
+
 def read_mission_document_research_observations(
     connection: Any, *, mission_version_ref: str | None = None,
 ) -> list[dict[str, Any]]:
@@ -3280,11 +3328,85 @@ class MissionDocumentResearchExecutor:
         return {"status": "complete", **records, "outcome_ref": body["id"],
                 "outcome_hash": body["content_hash"]}
 
+    def _candidate_rejection(self, admission, records, outcome, reason):
+        """Write down the one refused candidate, so the run can end complete.
+
+        Live, a single candidate the qualitative rule would not commit raised
+        out of the child process: the run wrote `failed` with zero outcomes,
+        spent its automatic re-entry on a condition no retry can change, and
+        reached the owner's needs-human list as if it were a judgement call.
+        It is not one: the rule read the candidate and said no.  The refusal
+        is durable (the staged candidate stays staged and reviewable, and this
+        row names the reason), the admission is settled, and the child exits
+        complete with the refusal among its outcomes.
+        """
+
+        from .research_auto_commit import DOCUMENT_QUALITATIVE_RULE_REF
+
+        body = {"schema_version": SCHEMA_VERSION,
+                "id": _ref("mission-document-research-candidate-rejection", {
+                    "outcome": outcome["outcome_ref"],
+                    "rule_ref": DOCUMENT_QUALITATIVE_RULE_REF, "reason": reason}),
+                "admission_ref": admission["id"],
+                "admission_hash": admission["content_hash"],
+                "outcome_ref": outcome["outcome_ref"],
+                "outcome_hash": outcome["outcome_hash"],
+                "question_version_ref": admission["question_version_ref"],
+                "question_version_hash": admission["question_version_hash"],
+                "candidate_evidence_ref": records["candidate_evidence_ref"],
+                "candidate_evidence_hash": records["candidate_evidence_hash"],
+                "candidate_claim_ref": records["candidate_claim_ref"],
+                "candidate_claim_hash": records["candidate_claim_hash"],
+                "research_status": "candidate_rejected",
+                "rule_ref": DOCUMENT_QUALITATIVE_RULE_REF, "reason": reason,
+                "created_at": admission["created_at"]}
+        body["content_hash"] = content_hash(body)
+        row = self.connection.execute(
+            "SELECT record_json,content_hash FROM "
+            "mission_document_research_candidate_rejections WHERE rejection_id=?",
+            (body["id"],)).fetchone()
+        if row is None:
+            with self._transaction() as cur:
+                cur.execute(
+                    "INSERT INTO mission_document_research_candidate_rejections "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (body["id"], admission["id"], outcome["outcome_ref"],
+                     DOCUMENT_QUALITATIVE_RULE_REF, reason,
+                     records["candidate_claim_ref"], records["candidate_claim_hash"],
+                     canonical_json(body), body["content_hash"],
+                     admission["created_at"]))
+        elif (row["record_json"] != canonical_json(body)
+              or row["content_hash"] != body["content_hash"]):
+            raise MissionDocumentResearchExecutorError(
+                "stored candidate rejection drifted")
+        return {**outcome, "research_status": "candidate_rejected",
+                "rejection_ref": body["id"], "rejection_hash": body["content_hash"],
+                "rejection_rule_ref": DOCUMENT_QUALITATIVE_RULE_REF,
+                "rejection_reason": reason}
+
     def _finish_candidate(self, admission, works, records):
         outcome = self._outcome(admission, works, records)
         if self.fault_injector is not None:
             self.fault_injector("after_candidate_outcome")
-        from .mission_document_research_promotion import promote_document_candidate
+        from .mission_document_research_promotion import (
+            ensure_promotion_authority, promote_document_candidate,
+        )
+        from .research_auto_commit import (
+            document_qualitative_content_rejection, policy_lists_document_rule,
+        )
+        if policy_lists_document_rule(self.authority.store.active_policy()):
+            if self.connection.in_transaction:
+                raise MissionDocumentResearchExecutorError(
+                    "document promotion cannot nest an open transaction")
+            ensure_promotion_authority(self.connection)
+            claim = self.staging.exact_candidate_bundle(
+                evidence_ref=records["candidate_evidence_ref"],
+                claim_ref=records["candidate_claim_ref"],
+                idempotency_key=(
+                    f"mission-document-research-candidate:{admission['id']}"))["claim"]
+            reason = document_qualitative_content_rejection(claim)
+            if reason is not None:
+                return self._candidate_rejection(admission, records, outcome, reason)
         return promote_document_candidate(self, admission, works, records, outcome)
 
     def run_once(self, admission_ref: str):
@@ -3384,5 +3506,6 @@ __all__ = ["AUTHORITY_KIND",
            "MissionDocumentResearchExecutorError",
            "exact_mission_document_model_execution_authority",
            "effective_mission_document_work_orders",
+           "read_mission_document_research_candidate_rejections",
            "read_mission_document_research_observations",
            "validate_mission_document_work_authority"]

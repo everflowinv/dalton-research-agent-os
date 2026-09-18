@@ -507,13 +507,26 @@ def verified_original(writer, review, row, limits, receipt_reader):
 # quarter, half or fiscal year it is about.  Every other digit, percent or
 # currency sign is a value, and values belong to the SEC lane.
 _PERIOD_TOKEN_RE = re.compile(r"\b(?:FY\s?(?:19|20)?\d{2}|(?:19|20)\d{2}|[QH][1-4]|[1-4]Q)\b", re.IGNORECASE)
+# Nor is the name of the filing the statement was read out of.  A regulatory
+# form name is an identifier with no quantity sense: "the 10-K discloses the
+# policy" asserts nothing numeric.  Live, four directed-document candidates
+# were refused as numeric statements solely because they named the 10-K they
+# came from, and every one of them was qualitative.  The list is closed on
+# purpose -- an unknown "X-3" is still a number until somebody says otherwise.
+_FORM_TOKEN_RE = re.compile(
+    r"\b(?:10-[KQ]|8-K|6-K|11-K|20-F|40-F|13[DFG]|[SF]-[134]|424B[1-9]|N-CSR|N-PX)"
+    r"(?:/A)?\b",
+    re.IGNORECASE,
+)
 _VALUE_RE = re.compile(r"[0-9%$]")
 
 
 def statement_asserts_a_value(statement: str) -> bool:
     """True when a normalized statement carries a number beyond a period label."""
 
-    return _VALUE_RE.search(_PERIOD_TOKEN_RE.sub("", statement)) is not None
+    return _VALUE_RE.search(
+        _PERIOD_TOKEN_RE.sub("", _FORM_TOKEN_RE.sub("", statement))
+    ) is not None
 
 
 # Live, the first day's automation admitted broker disclaimers as Claims

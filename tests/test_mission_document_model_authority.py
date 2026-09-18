@@ -61,6 +61,89 @@ class MissionDocumentModelAuthorityTests(unittest.TestCase):
             executions["verifier"]["budget_policy_ref"],
         )
 
+    def _flaky_budget(self, failures, error):
+        """Replace the budget store with one that loses `failures` races."""
+
+        import dalton_core.mission_document_model_authority as module
+
+        real = module.ThesisImpactBudgetStore
+        opens = []
+
+        def flaky(path, **kwargs):
+            opens.append(path)
+            if len(opens) <= failures:
+                raise error
+            return real(path, **kwargs)
+
+        return module, flaky, opens
+
+    def test_a_budget_ledger_lost_to_a_writer_is_retried_not_failed(self):
+        """Live: two admissions died on a policy that was there all along.
+
+        The budget ledger is a live WAL database another lane writes; the
+        read lost the race and a blanket failure turned it into a dead run
+        that a person then had to look at.
+        """
+
+        import sqlite3
+        from unittest.mock import patch
+
+        fixture = self._fixture()
+        module, flaky, opens = self._flaky_budget(
+            1, sqlite3.OperationalError("database is locked"))
+        waits = []
+        resolver = MissionDocumentModelAuthority(
+            state_dir=fixture.state, router=fixture.router,
+            clock=fixture.harness.clock, budget_retry_sleep=waits.append,
+        )
+        with patch.object(module, "ThesisImpactBudgetStore", flaky):
+            _executions, proof = resolver()
+        # One lost race, one short wait, then both stages read their ceiling.
+        self.assertEqual((len(opens), waits), (3, [0.5]))
+        for stage in ("draft", "verifier"):
+            self.assertGreater(
+                proof[stage]["budget_policy_ceiling"]["day_cap_micros"], 0)
+
+    def test_a_ledger_that_stays_locked_reports_the_underlying_error(self):
+        import sqlite3
+        from unittest.mock import patch
+
+        fixture = self._fixture()
+        module, flaky, opens = self._flaky_budget(
+            99, sqlite3.OperationalError("database is locked"))
+        waits = []
+        resolver = MissionDocumentModelAuthority(
+            state_dir=fixture.state, router=fixture.router,
+            clock=fixture.harness.clock, budget_retry_sleep=waits.append,
+        )
+        with patch.object(module, "ThesisImpactBudgetStore", flaky):
+            with self.assertRaisesRegex(
+                MissionDocumentModelAuthorityError,
+                "draft budget policy is unavailable: OperationalError: database is locked",
+            ):
+                resolver()
+        self.assertEqual((len(opens), waits), (3, [0.5, 0.5]))
+
+    def test_an_unregistered_budget_policy_still_fails_on_the_first_read(self):
+        fixture = self._fixture()
+        for name in (DRAFT_MODEL_CONFIG_NAME, VERIFIER_MODEL_CONFIG_NAME):
+            path = fixture.state / name
+            value = json.loads(path.read_text(encoding="utf-8"))
+            value["budget_policy_ref"] = "thesis-impact-day-budget-policy:absent"
+            path.write_text(canonical_json(value) + "\n", encoding="utf-8")
+            os.chmod(path, 0o600)
+        waits = []
+        with self.assertRaisesRegex(
+            MissionDocumentModelAuthorityError,
+            "budget policy is unavailable: ThesisImpactBudgetConflict: "
+            "budget policy is not registered",
+        ):
+            MissionDocumentModelAuthority(
+                state_dir=fixture.state, router=fixture.router,
+                clock=fixture.harness.clock, budget_retry_sleep=waits.append,
+            )()
+        self.assertEqual(waits, [])
+
     def test_missing_generic_configs_never_fall_back_to_annual_configs(self):
         fixture = MissionAnnualFixture(self)
         with self.assertRaisesRegex(

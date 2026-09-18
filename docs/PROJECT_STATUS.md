@@ -1,5 +1,17 @@
 # Dalton 项目进度
 
+## 2026-09-19 01:30 UTC：一条被规则拒收的候选不再让整个子进程算失败（源码，待部署）
+
+**一、先把被拒的那几句话读出来。** 两个环境一共 7 条 `ResearchAutoCommitRejected: document qualitative rule admits no numeric statement`（legacy 4 条、Hyperscaler 工作区 3 条），草稿都还在 `research-review/candidate-staging.sqlite` 里（按 `mission-document-research-candidate:<admission>` 这把幂等键能原样取回）。逐句核对：**4 条是误判**——它们整句话里唯一的数字是 **`10-K`** 这个表名（"EPAM 的 10-K 并未披露盈亏平衡收入增速"、"AMZN 2025 财年 10-K 文档本身包含可提取的财务数字"这种），`_VALUE_RE = [0-9%$]` 只把期间标签（FY2025 / Q3 / 2024）挖掉，表名里的数字就被当成了数值断言；**3 条是真的在断言数值**（`76.8%、76.7%、74.3%`；Amazon 那条把现金流量表整张抄进了 `normalized_statement`；还有一条 `figures 为 0`）。也就是说：一半以上的钱花在了一个正则的误判上，剩下的是模型确实把数字写进了定性陈述。
+
+**二、被拒收 ≠ 这次运行失败。** 以前这条异常从 `promote_document_candidate` 一路抛穿子进程，summary 写 `status: failed` + `outcomes: []`（前面付过钱的两次模型调用连一条 outcome 都不留），车道把它当失败挂起、烧掉那一次自动重入、最后进 owner 的 needs-human——而这根本不是判断题，规则已经判完了。现在治理规则里"看候选自己内容"的那三条（数值字段、数值语句、免责声明）抽成 `research_auto_commit.document_qualitative_content_rejection`，执行器在入账**之前**先问一次：拒了就写一行 `mission_document_research_candidate_rejections`（append-only、要执行器授权才能插、记着 admission / outcome / 候选 claim / 规则 ref / 原文理由），返回 `status: complete, research_status: candidate_rejected`，子进程退出码 0、这条拒收就在 summary 的 outcomes 里。治理不变：入账那道门自己仍旧问同一个问题（数值永远进不了 Ledger），候选**继续留在 staging 里**可被人复看，没有任何一条被悄悄丢掉。车道那边：有拒收记录的 admission 视为已了结（不再进 `_admissions()`、老的 hold 一并清掉、不再重派），后面的 admission 照常跑。
+
+**三、正则只收紧有原则的那一处。** 监管表名（10-K/10-Q/8-K/6-K/11-K/20-F/40-F/13D/13F/13G/S-1/S-3/S-4/F-1/424Bx/N-CSR/N-PX，含 `/A`）和期间标签一起在扫描前挖掉——表名是文档标识、不带数量含义。`S/4HANA`、`Windows 11`、`Tier 1` 这类产品/版本号没有可靠判据，**不动**，交给第二条（记一行、继续跑）兜。草稿提示词补了明确的一句：`normalized_statement` 里不许出现任何数字、百分比、金额、比率、计数（期间标签与表名可以），量化细节写进 `basis`——以前只有一句含糊的"不要主张数值权威"。
+
+**四、顺手修掉预算策略的瞬时读失败。** `mission_document_model_authority` 读 `ThesisImpactBudgetStore(..., read_only=True).policy(ref)` 时用的是一个大 `except Exception` → "budget policy is unavailable"，两个环境各有一条 admission 就死在这上面（legacy 7d5480bd… 20:38Z、Hyperscaler af62a216… 11:15Z），而那把策略 `…:d204f1266fce4f90a6d7527fa6df06db` 一直好好地在库里——109MB 的 WAL 账本另有写者，这一读输掉了竞争。现在只对**瞬时**条件（OperationalError 里的 locked / busy，以及 checkpoint 瞬间 WAL 边车文件不在的那个窗口）退避重试 3 次 × 0.5s；策略真的没登记、或者记录漂移，仍旧第一次就报错，且错误信息现在带上底层异常原文。
+
+**测试**：数值草稿 → 运行 `complete` 且写下拒收（无 promotion、无 Claim 版本、候选仍在 staging、重进幂等且不再调用模型）、免责声明草稿 → 各自的理由、只提到 `10-K` 的那句现在正常入账；车道：有拒收记录的 admission 不再被派、hold 被清、下一条照跑；正则：表名不算数值断言而真数字仍然算；预算：输一次竞争会重试成功（1 次等待）、一直锁着则 3 次后带原文报错、没登记的策略一次就报错且不等待。全量测试通过。
+
 ## 2026-09-18 23:20 UTC：升级到人手里的那 8 条不是判断题，是签一次预算就死一批（源码，待部署）
 
 **一、真正的原因。** legacy 8 条 `reentry_failed_after_automatic_rebind` 全部同一个死法：重入的子进程**真的跑起来了**，然后在发任何请求之前挂在 `MissionDocumentResearchError: directed document research requires the active mission`。admission 绑的是它的计划当时那一版 mission，而每次预算修订、每次政策签署都会把 mission 版本往前滚一格——今天改了一次 source plan，所有停着的 admission 就一起死了，还把自己那一次自动重试也烧在这上面。这是缺陷，不是该问 owner 的事。现在 `mission_document_research._mission` 接受**同一条 mission 血统的旧版本**：身份（plan / 登记 / planner WorkOrder 都绑在它上面）仍然是被 admit 的那一版，而**宇宙、source plan、autonomy、绑定、预算一律按当前生效版本校验**，公司不在当前宇宙、来源不再 connected、换了行业或自动化主体，才照旧拒绝；`resolve_for_execution` 相应允许 `mandate_binding` / `outer_budget` 这层「治理外壳」随版本滚动（每次调用都重新完整校验，不是不查），其余每个字段仍须逐字节一致。

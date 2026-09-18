@@ -192,6 +192,33 @@ def _decision(policy_version: Mapping[str, Any], *, claim_wire: Mapping[str, Any
     return validate_policy_commit_decision(base)
 
 
+def document_qualitative_content_rejection(
+    claim_wire: Mapping[str, Any],
+) -> str | None:
+    """The content reasons the document qualitative rule refuses a candidate.
+
+    Only the three that are decided by the candidate's own words: a numeric
+    field, a statement carrying a value, disclaimer text.  They are the
+    reasons a caller can know *before* asking for the commit, so an executor
+    can record one refused candidate and finish its run instead of dying on
+    the write gate; the gate below still asks the same question itself, so
+    nothing numeric enters the Ledger under this rule either way.
+    """
+
+    if any(claim_wire.get(field) is not None
+           for field in ("value", "unit", "scale", "currency")):
+        return "document qualitative rule admits no numeric assertion"
+    statement = claim_wire.get("normalized_statement")
+    if not isinstance(statement, str) or not statement.strip():
+        return "document qualitative rule requires a normalized statement"
+    from .document_extraction import statement_asserts_a_value, statement_is_boilerplate
+    if statement_asserts_a_value(statement):
+        return "document qualitative rule admits no numeric statement"
+    if statement_is_boilerplate(statement):
+        return "document qualitative rule admits no disclaimer or boilerplate"
+    return None
+
+
 def _authorize_document_qualitative(
     *, connection: sqlite3.Connection, policy_version: Mapping[str, Any],
     evidence_wire: Mapping[str, Any], claim_wire: Mapping[str, Any],
@@ -221,13 +248,9 @@ def _authorize_document_qualitative(
     actor = claim_wire["actor_ref"]
     if not isinstance(actor, str) or not actor.startswith("automation:") or evidence_wire["actor_ref"] != actor:
         raise ResearchAutoCommitRejected("document qualitative rule admits only mission automation candidates")
-    if any(claim_wire.get(field) is not None for field in ("value", "unit", "scale", "currency")):
-        raise ResearchAutoCommitRejected("document qualitative rule admits no numeric assertion")
-    from .document_extraction import statement_asserts_a_value, statement_is_boilerplate
-    if statement_asserts_a_value(claim_wire["normalized_statement"]):
-        raise ResearchAutoCommitRejected("document qualitative rule admits no numeric statement")
-    if statement_is_boilerplate(claim_wire["normalized_statement"]):
-        raise ResearchAutoCommitRejected("document qualitative rule admits no disclaimer or boilerplate")
+    content_rejection = document_qualitative_content_rejection(claim_wire)
+    if content_rejection is not None:
+        raise ResearchAutoCommitRejected(content_rejection)
     from .research_verification import MISSION_DOCUMENT_AUTHORITY_MODE
     if material is not None and material.get("provenance_mode") == MISSION_DOCUMENT_AUTHORITY_MODE:
         from .mission_document_research_promotion import authorize_document_candidate
@@ -1344,6 +1367,7 @@ __all__ = [
     "ResearchAutoCommitRejected",
     "authorize_policy_candidate",
     "DOCUMENT_QUALITATIVE_RULE_REF",
+    "document_qualitative_content_rejection",
     "policy_lists_document_rule",
     "validate_policy_commit_decision",
 ]

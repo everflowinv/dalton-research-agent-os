@@ -460,19 +460,34 @@ class MissionDocumentResearchCoordinator:
                 raise MissionDocumentResearchLaneError(
                     "document research promotion authority is unavailable"
                 )
+            has_rejections = self.store.connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='mission_document_research_candidate_rejections'"
+            ).fetchone() is not None
             joins = where = ""
             if has_outcomes:
                 joins = (
                     "LEFT JOIN mission_document_research_outcomes o "
                     "ON o.admission_ref=a.admission_id "
                 )
-                where = "WHERE o.outcome_id IS NULL "
+                pending = "o.outcome_id IS NULL"
                 if promotion_required:
                     joins += (
                         "LEFT JOIN mission_document_research_promotions p "
                         "ON p.admission_ref=a.admission_id "
                     )
-                    where = "WHERE o.outcome_id IS NULL OR p.promotion_id IS NULL "
+                    pending = "o.outcome_id IS NULL OR p.promotion_id IS NULL"
+                where = f"WHERE {pending} "
+                if has_rejections:
+                    # An admission whose one candidate the governance rule
+                    # refused is settled: it has an outcome and never will
+                    # have a promotion, and re-dispatching it would only buy
+                    # the same refusal a second time.
+                    joins += (
+                        "LEFT JOIN mission_document_research_candidate_rejections r "
+                        "ON r.admission_ref=a.admission_id "
+                    )
+                    where = f"WHERE ({pending}) AND r.rejection_id IS NULL "
             query = (
                 "SELECT a.* FROM mission_document_research_admissions a "
                 + joins + where + "ORDER BY a.created_at,a.admission_id"
@@ -1278,6 +1293,7 @@ class MissionDocumentResearchCoordinator:
         # Reconcile only from the latest fully validated observation; a later
         # recovery_required observation must remain visible.
         from .mission_document_research_executor import (
+            read_mission_document_research_candidate_rejections,
             read_mission_document_research_observations,
         )
         latest_observation: dict[str, Mapping[str, Any]] = {}
@@ -1291,6 +1307,16 @@ class MissionDocumentResearchCoordinator:
             if observation["outcome"] in {
                 "query_miss", "no_verified_claim",
             }
+        }
+        # A candidate the governance rule refused settles its admission the
+        # same way: the child completed, the refusal is written down, and a
+        # hold left over from the older failing runs has nothing left to wait
+        # for.
+        completed_refs |= {
+            rejection["admission_ref"]
+            for rejection in read_mission_document_research_candidate_rejections(
+                self.store.connection
+            )
         }
         admissions = [
             admission for admission in admissions

@@ -155,6 +155,99 @@ class DocumentPromotionTests(unittest.TestCase):
         self.assertEqual(fixture.store.connection.execute(
             'SELECT count(*) FROM mission_document_research_promotions').fetchone()[0], 1)
 
+    def _drafted(self, statement, *, metric='utilization disclosure'):
+        """Drive one admission whose draft says exactly this statement."""
+
+        fixture, authority, args, _, _ = self._fixture(auto_commit=True)
+        admission = authority.admit_from_plan(**args)
+        draft_adapter = fixtures.RouteBoundCountingFakeAdapter({
+            'schema_version': '0.1', 'status': 'answered', 'answer': statement,
+            'candidate': {'normalized_statement': statement,
+                          'metric_or_aspect': metric, 'period': 'FY2025',
+                          'basis': 'reported', 'cited_match_indexes': [0]},
+            'missing': [],
+        })
+        verifier_adapter = fixtures.RouteBoundCountingFakeAdapter({
+            'schema_version': '0.1', 'verdict': 'pass',
+            'verified_statement': statement, 'findings': [],
+        })
+        executor, draft, verifier = self._executor(
+            fixture, authority, draft_adapter=draft_adapter,
+            verifier_adapter=verifier_adapter)
+        outcome = self._drive(executor, admission)
+        return fixture, executor, admission, outcome, draft, verifier
+
+    def test_refused_candidate_completes_the_run_and_is_written_down(self):
+        """Live: one refused candidate failed the whole child run.
+
+        Four directed-document runs died with ``ResearchAutoCommitRejected``
+        after both model calls were paid for: zero outcomes, the admission's
+        one automatic re-entry spent on a refusal no retry can change, and a
+        person asked to look at a decision the rule had already made.  The
+        refusal is a per-candidate outcome now.
+        """
+
+        from dalton_core.mission_document_research_executor import (
+            read_mission_document_research_candidate_rejections,
+        )
+
+        statement = 'Utilization was 76.8% in FY2025.'
+        fixture, executor, admission, outcome, draft, verifier = self._drafted(statement)
+        self.assertEqual(outcome['status'], 'complete')
+        self.assertEqual(outcome['research_status'], 'candidate_rejected')
+        self.assertEqual(outcome['rejection_reason'],
+                         'document qualitative rule admits no numeric statement')
+        self.assertEqual(
+            outcome['rejection_rule_ref'],
+            'research-auto-commit:mission-document-qualitative:v1')
+        # Nothing numeric entered the Ledger, and nothing was promoted.
+        self.assertEqual(fixture.store.connection.execute(
+            'SELECT count(*) FROM mission_document_research_promotions').fetchone()[0], 0)
+        self.assertEqual(fixture.store.connection.execute(
+            'SELECT count(*) FROM claim_versions').fetchone()[0], 0)
+        # The refusal is durable, and it names the candidate and the reason.
+        rejections = read_mission_document_research_candidate_rejections(
+            fixture.store.connection)
+        self.assertEqual(len(rejections), 1)
+        self.assertEqual(
+            (rejections[0]['admission_ref'], rejections[0]['reason'],
+             rejections[0]['candidate_claim_ref']),
+            (admission['id'], outcome['rejection_reason'],
+             outcome['candidate_claim_ref']))
+        # The candidate itself is still staged, so a person can still read it.
+        bundle = executor.staging.exact_candidate_bundle(
+            evidence_ref=outcome['candidate_evidence_ref'],
+            claim_ref=outcome['candidate_claim_ref'],
+            idempotency_key=f"mission-document-research-candidate:{admission['id']}")
+        self.assertEqual(bundle['claim']['normalized_statement'], statement)
+        # Re-entering the same admission converges without a second model call.
+        self.assertEqual(executor.run_once(admission['id']), outcome)
+        self.assertEqual((draft.calls, verifier.calls), (1, 1))
+
+    def test_a_statement_that_only_names_its_filing_still_promotes(self):
+        """A form name is an identifier, not a quantity.
+
+        Live, four of the seven refused candidates were refused for the digits
+        in ``10-K`` alone; every one of them was qualitative.
+        """
+
+        statement = ("EPAM's 10-K discloses the cost structure and utilization "
+                     'language but no breakeven revenue growth rate.')
+        fixture, _executor, _admission, outcome, _draft, _verifier = self._drafted(statement)
+        self.assertEqual(outcome['research_status'], 'canonical_claim_promoted')
+        self.assertEqual(fixture.store.connection.execute(
+            'SELECT count(*) FROM mission_document_research_candidate_rejections'
+        ).fetchone()[0], 0)
+
+    def test_refused_boilerplate_is_recorded_with_its_own_reason(self):
+        fixture, _executor, _admission, outcome, _draft, _verifier = self._drafted(
+            'This report is for informational purposes only.')
+        self.assertEqual(outcome['status'], 'complete')
+        self.assertEqual(outcome['rejection_reason'],
+                         'document qualitative rule admits no disclaimer or boilerplate')
+        self.assertEqual(fixture.store.connection.execute(
+            'SELECT count(*) FROM mission_document_research_promotions').fetchone()[0], 0)
+
     def test_json_candidate_cannot_supply_execution_authority(self):
         fixture, executor, admission, _, records, _, _, _ = self._completed()
         bundle = executor.staging.exact_candidate_bundle(

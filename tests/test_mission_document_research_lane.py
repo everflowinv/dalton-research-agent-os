@@ -76,6 +76,43 @@ class _Store:
         self.connection.commit()
         return wire
 
+    def refused(self, admission_ref: str) -> dict:
+        """Record the refusal an executor writes for a candidate the rule declined."""
+
+        self.connection.execute(
+            "CREATE TABLE IF NOT EXISTS "
+            "mission_document_research_candidate_rejections("
+            "rejection_id TEXT PRIMARY KEY,admission_ref TEXT NOT NULL UNIQUE,"
+            "outcome_ref TEXT NOT NULL UNIQUE,rule_ref TEXT NOT NULL,"
+            "reason TEXT NOT NULL,candidate_claim_ref TEXT NOT NULL,"
+            "candidate_claim_hash TEXT NOT NULL,record_json TEXT NOT NULL,"
+            "content_hash TEXT NOT NULL UNIQUE,created_at TEXT NOT NULL)"
+        )
+        digest = content_hash(admission_ref)
+        body = {
+            "schema_version": "0.1",
+            "id": "mission-document-research-candidate-rejection:" + digest[:32],
+            "admission_ref": admission_ref,
+            "outcome_ref": "mission-document-research-outcome:" + digest[:24],
+            "rule_ref": "research-auto-commit:mission-document-qualitative:v1",
+            "reason": "document qualitative rule admits no numeric statement",
+            "candidate_claim_ref": "candidate-claim-version:" + digest,
+            "candidate_claim_hash": digest,
+            "research_status": "candidate_rejected",
+            "created_at": "2026-09-17T04:02:03.184671+00:00",
+        }
+        wire = {**body, "content_hash": content_hash(body)}
+        self.connection.execute(
+            "INSERT INTO mission_document_research_candidate_rejections "
+            "VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (wire["id"], wire["admission_ref"], wire["outcome_ref"],
+             wire["rule_ref"], wire["reason"], wire["candidate_claim_ref"],
+             wire["candidate_claim_hash"], canonical_json(wire),
+             wire["content_hash"], wire["created_at"]),
+        )
+        self.connection.commit()
+        return wire
+
     def started(self, admission_ref: str) -> None:
         self.connection.execute(
             "INSERT INTO mission_document_research_starts VALUES(?,?)",
@@ -521,6 +558,58 @@ class MissionDocumentResearchLaneTests(unittest.TestCase):
         )
         self.store.connection.commit()
         self.assertEqual(self.lane._admissions(), [])
+
+    def test_refused_candidate_settles_its_admission_and_frees_the_lane(self) -> None:
+        """A refusal is not a failure to retry and not a question for a person.
+
+        Live, the same admission was re-dispatched, refused again, held, and
+        finally listed for the owner -- for a decision the governance rule had
+        already made.  Once the refusal is written down the admission is
+        settled: its hold goes, it is never dispatched again, and the next
+        admission runs.
+        """
+
+        self.store.auto_commit = True
+        self.store.connection.execute(
+            "CREATE TABLE mission_document_research_promotions("
+            "promotion_id TEXT PRIMARY KEY,admission_ref TEXT NOT NULL UNIQUE)"
+        )
+        refused = self.store.add(1)
+        other = self.store.add(2)
+        self.store.completed(refused["id"])
+        ticket_ref = "mission-document-research:" + "d" * 24
+        self.launcher.tickets[ticket_ref] = {
+            "id": ticket_ref, "status": "failed",
+            "summary": {
+                "status": "failed", "outcomes": [],
+                "error": ("ResearchAutoCommitRejected: document qualitative rule "
+                          "admits no numeric statement"),
+            },
+        }
+        _write_latest(self.lane.latest_path, refused, ticket_ref)
+
+        # Before the refusal is recorded: held for a person, the next
+        # admission launched in its place.
+        first = self.lane.dispatch_once()
+        self.assertEqual(first["status"], "launched")
+        self.assertEqual(first["admission_ref"], other["id"])
+        holds = json.loads(self.lane.holds_path.read_text(encoding="utf-8"))["holds"]
+        self.assertIn(refused["id"], holds)
+
+        # The re-run completes and writes the refusal down.
+        self.launcher.tickets[ticket_ref]["summary"] = {
+            "status": "complete",
+            "outcomes": [{"status": "complete",
+                          "research_status": "candidate_rejected"}],
+        }
+        self.store.refused(refused["id"])
+
+        self.assertEqual([item["id"] for item in self.lane._admissions()],
+                         [other["id"]])
+        self.lane.dispatch_once()
+        holds = json.loads(self.lane.holds_path.read_text(encoding="utf-8"))["holds"]
+        self.assertNotIn(refused["id"], holds)
+        self.assertEqual(len(self.launcher.started), 1)
 
     def test_tampered_latest_and_hold_authority_fail_closed(self) -> None:
         admission = self.store.add(1)

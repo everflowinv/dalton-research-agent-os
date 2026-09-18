@@ -571,6 +571,26 @@ class OutputContractTests(unittest.TestCase):
         self.assertIn("generic disclaimers", prompt)
         self.assertIn("revenue recognition", prompt)
 
+    def test_the_name_of_a_filing_is_not_a_numeric_assertion(self) -> None:
+        """Live, four directed-document candidates were refused for "10-K".
+
+        A regulatory form name is an identifier with no quantity sense, so it
+        is struck out with the period labels before the value scan.  Anything
+        the form name does not explain is still a value.
+        """
+
+        from dalton_core.document_extraction import statement_asserts_a_value
+
+        for ok in ("EPAM's 10-K discloses the cost structure but no breakeven rate.",
+                   "The company filed an 8-K and a 10-Q/A after the 20-F.",
+                   "AMZN 2025 财年 10-K 文档本身包含可提取的财务数字。",
+                   "The S-1 describes the concentration of the customer base."):
+            self.assertFalse(statement_asserts_a_value(ok), ok)
+        for bad in ("The 10-K reports utilization of 76.8% in 2025.",
+                    "The 10-K lists 4,000 delivery professionals.",
+                    "Free cash flow of $11.2 billion is reconciled in the 10-K."):
+            self.assertTrue(statement_asserts_a_value(bad), bad)
+
 
 class WebAdmissionTests(unittest.TestCase):
     """ADR-0005 / P9d-17c: a fetched page's draft becomes a Claim through the same chain."""

@@ -57,6 +57,53 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+# The budget ledger is a live WAL database another lane is usually writing.
+# Live, two admissions (one per environment) failed on a policy that was
+# registered and readable a second later: the read lost a race with a writer,
+# and a blanket failure turned a hiccup into a dead run.  Only the transient
+# conditions are retried -- a locked/busy page, and the window in which a
+# checkpointing writer leaves the WAL sidecars missing.  A policy that is not
+# registered, or one whose record drifted, still fails on the first read.
+_BUDGET_RETRY_ATTEMPTS = 3
+_BUDGET_RETRY_BACKOFF_SECONDS = 0.5
+_BUDGET_RETRYABLE_TEXT = ("locked", "busy", "wal requires existing wal/shm")
+
+
+def _budget_read_is_retryable(exc: BaseException) -> bool:
+    import sqlite3
+
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    message = str(exc).lower()
+    return any(text in message for text in _BUDGET_RETRYABLE_TEXT)
+
+
+def _installed_budget_policy(
+    budget_db: Any, policy_ref: str, *, stage: str,
+    sleep: Callable[[float], None] | None = None,
+) -> dict[str, Any]:
+    """Read one registered day-budget policy through a transient lock."""
+
+    import time
+
+    sleep = time.sleep if sleep is None else sleep
+    for attempt in range(1, _BUDGET_RETRY_ATTEMPTS + 1):
+        try:
+            with ThesisImpactBudgetStore(budget_db, read_only=True) as budget:
+                return budget.policy(policy_ref)
+        except Exception as exc:
+            if attempt < _BUDGET_RETRY_ATTEMPTS and _budget_read_is_retryable(exc):
+                sleep(_BUDGET_RETRY_BACKOFF_SECONDS)
+                continue
+            raise MissionDocumentModelAuthorityError(
+                f"installed mission document {stage} budget policy is unavailable: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
+    raise MissionDocumentModelAuthorityError(
+        f"installed mission document {stage} budget policy is unavailable"
+    )
+
+
 def load_mission_document_model_configs(
     state_dir: str | Path,
     *,
@@ -110,6 +157,7 @@ class MissionDocumentModelAuthority:
         clock: Callable[[], datetime] = _now,
         draft_config_path: str | Path | None = None,
         verifier_config_path: str | Path | None = None,
+        budget_retry_sleep: Callable[[float], None] | None = None,
     ) -> None:
         if getattr(router, "connection", None) is None or not hasattr(router, "path"):
             raise TypeError("router must expose its exact authority connection and path")
@@ -118,6 +166,8 @@ class MissionDocumentModelAuthority:
         self.clock = clock
         self.draft_config_path = draft_config_path
         self.verifier_config_path = verifier_config_path
+        # Tests wait on a counter rather than on the wall clock.
+        self._budget_retry_sleep = budget_retry_sleep
 
     def _router_record(
         self, table: str, ref_column: str, ref: str,
@@ -314,13 +364,10 @@ class MissionDocumentModelAuthority:
                 "routing_policy_hash": policy["content_hash"],
                 "configured_candidate_profiles": candidates,
             }
-            try:
-                with ThesisImpactBudgetStore(execution["budget_db"], read_only=True) as budget:
-                    budget_policy = budget.policy(execution["budget_policy_ref"])
-            except Exception as exc:
-                raise MissionDocumentModelAuthorityError(
-                    f"installed mission document {stage} budget policy is unavailable"
-                ) from exc
+            budget_policy = _installed_budget_policy(
+                execution["budget_db"], execution["budget_policy_ref"], stage=stage,
+                sleep=self._budget_retry_sleep,
+            )
             required_micros = int(execution["max_cost_usd"] * 1_000_000)
             if budget_policy["day_cap_micros"] < required_micros:
                 raise MissionDocumentModelAuthorityError(
