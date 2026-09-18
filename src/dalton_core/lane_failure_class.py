@@ -83,6 +83,28 @@ DEFAULT_MAX_TRANSIENT_FAILURES = 3
 # interval.
 PARK_PROBE_INTERVAL_SECONDS = 1800
 
+# How long a *terminal* verdict, or an exhausted transient budget, keeps an
+# item out -- when a lane asks for a bound at all.  ``None``, the default, is
+# the behaviour every lane had before: both live for ever in this process and,
+# for the terminal half, across restarts through the ledger replay.
+#
+# That was right when the only thing that could change a content verdict was
+# the content, and the item key named the content.  It stopped being right as
+# soon as the *rules* the verdict was reached under started moving: the company
+# model specification lane refused Accenture and Cognizant on 2026-09-17 under
+# one list of repairable structure rules, recorded it, and then reported
+# ``held: every pending company is durably held`` on every tick after -- so a
+# reviewed change to that list could never be tried, because nothing would ever
+# ask the question again.  Two things fix that, and a lane wants both: the
+# contract belongs in the item key (a verdict reached under other rules is
+# about other work), and a block that nobody has re-examined should expire.
+#
+# A lane that sets this is saying "after this long, ask again" -- one more run,
+# priced at whatever one run costs, against a refusal that may well repeat.
+# That is the trade the six-hour figure is picked for; see
+# ``mission_dossier_lane.CONTENT_REFUSAL_COOLDOWN_SECONDS``.
+DEFAULT_BLOCK_TTL_SECONDS: int | None = None
+
 UNKNOWN_DEPENDENCY = "unknown"
 
 
@@ -116,6 +138,23 @@ class Classification:
             "dependency": self.dependency,
             "status": self.status,
         }
+
+
+def _recorded_at(row: Mapping[str, Any]) -> datetime | None:
+    """When the ledger says this event happened, in UTC, or ``None``."""
+
+    value = row.get("recorded_at") or row.get("at")
+    if isinstance(value, datetime):
+        return (value if value.tzinfo is not None
+                else value.replace(tzinfo=timezone.utc)).astimezone(timezone.utc)
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        moment = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return (moment if moment.tzinfo is not None
+            else moment.replace(tzinfo=timezone.utc)).astimezone(timezone.utc)
 
 
 @dataclass(frozen=True)
@@ -157,6 +196,14 @@ RULES: tuple[Rule, ...] = (
     Rule("ticket_gone", "lane ticket is no longer on disk", TRANSIENT),
     Rule("child_busy", "child_slot_busy", TRANSIENT),
     Rule("child_conflict", "lanechildconflict", TRANSIENT),
+    # The Scheduler already holds a lease on this exact request, so a second
+    # child asked for a judgement that is being paid for right now.  Not an
+    # outage and not a refusal: the right answer is to come back, which is what
+    # a transient retry is.  Named rather than left ``unmapped`` so it does not
+    # read as "the model is unavailable" -- it did, live on the Hyperscaler
+    # environment (META, 2026-09-18T09:52Z), which parked the whole ``model``
+    # dependency for thirty minutes over a lease that had seconds left.
+    Rule("request_in_flight", "this request is already running", TRANSIENT),
 
     # Governance is a human/configuration boundary. Repeating the same work
     # cannot grant it and must consume neither a retry nor model budget.
@@ -429,12 +476,15 @@ class LaneFailureBudget:
         self, lane: str, *,
         max_transient_failures: int = DEFAULT_MAX_TRANSIENT_FAILURES,
         probe_interval_seconds: int = PARK_PROBE_INTERVAL_SECONDS,
+        block_ttl_seconds: int | None = DEFAULT_BLOCK_TTL_SECONDS,
         ledger: Any | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.lane = str(lane)
         self.max_transient_failures = int(max_transient_failures)
         self.probe_interval_seconds = int(probe_interval_seconds)
+        self.block_ttl_seconds = (None if block_ttl_seconds is None
+                                  else int(block_ttl_seconds))
         self.ledger = ledger
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self._failures: dict[str, int] = {}
@@ -448,6 +498,11 @@ class LaneFailureBudget:
         # five parked companies must not mean five probes at a dead page.
         self._down_since: dict[str, datetime] = {}
         self._probe_spent: dict[str, bool] = {}
+        # When each item's terminal verdict or exhausted transient budget was
+        # reached.  Replayed from the ledger's own ``recorded_at`` so a restart
+        # does not hand a stale block a fresh lifetime -- which would be the
+        # one way to make an expiring block live for ever after all.
+        self._blocked_since: dict[str, datetime] = {}
         self._ledger_status: str = "unused"
 
     # -- writing -----------------------------------------------------------
@@ -473,6 +528,11 @@ class LaneFailureBudget:
             self._parked.pop(item, None)
             self._failures.pop(item, None)
             self._reason[item] = found.reason
+            # Stamped on the *first* terminal only.  A verdict repeated is the
+            # same verdict; letting it restart the clock would make a lane that
+            # re-asks every tick hold the item for ever, which is the thing a
+            # bound exists to stop.
+            self._blocked_since.setdefault(item, self.clock())
             self._append("terminal", item, found)
             return BudgetDecision("terminal", found, 0)
         if found.failure_class == DEPENDENCY_UNAVAILABLE:
@@ -493,6 +553,7 @@ class LaneFailureBudget:
         self._failures[item] = count
         self._reason[item] = found.reason
         if count >= self.max_transient_failures:
+            self._blocked_since.setdefault(item, self.clock())
             self._append("held", item, found)
             return BudgetDecision("held", found, count)
         return BudgetDecision("retry", found, count)
@@ -518,6 +579,7 @@ class LaneFailureBudget:
         item = str(item_key)
         self._failures.pop(item, None)
         self._reason.pop(item, None)
+        self._blocked_since.pop(item, None)
         permission = self._not_permitted.pop(item, None)
         if permission is not None:
             self._append("permission_ok", item, permission)
@@ -543,6 +605,7 @@ class LaneFailureBudget:
         self._terminal.pop(item, None)
         self._failures.pop(item, None)
         self._reason.pop(item, None)
+        self._blocked_since.pop(item, None)
         return True
 
     def dependency_answered(self, dependency: str) -> list[str]:
@@ -591,6 +654,11 @@ class LaneFailureBudget:
             return BudgetDecision("not_permitted", found, 0)
         found = self._terminal.get(item)
         if found is not None:
+            if self._block_expired(item):
+                self.retire(item, reason=(
+                    "the terminal verdict has not been re-examined for "
+                    f"{self.block_ttl_seconds}s; asking once more"))
+                return None
             return BudgetDecision("terminal", found, 0)
         found = self._parked.get(item)
         if found is not None:
@@ -605,6 +673,17 @@ class LaneFailureBudget:
             return BudgetDecision("parked", found, self._failures.get(item, 0))
         count = self._failures.get(item, 0)
         if count >= self.max_transient_failures:
+            if self._block_expired(item):
+                # An exhausted transient budget is the *other* way an item can
+                # be blocked for ever: the count never decays and the reason
+                # was never a statement about content in the first place.  The
+                # live company-model-specification holds were all of this kind
+                # -- a structural refusal classified ``unmapped``, counted three
+                # times, then held with nothing left that could clear it.
+                self.retire(item, reason=(
+                    f"the transient budget was spent {self.block_ttl_seconds}s "
+                    "ago and nothing has re-examined it; asking once more"))
+                return None
             return BudgetDecision(
                 "held",
                 Classification(TRANSIENT, self._reason.get(item, "repeated failures"),
@@ -635,6 +714,52 @@ class LaneFailureBudget:
             return False
         self._down_since[dependency] = self.clock()
         return True
+
+    def _block_expired(self, item: str) -> bool:
+        """Whether this item's block has outlived the lane's bound.
+
+        A lane that asked for no bound never expires anything, which is what
+        every lane did before and what most of them still want: "these bytes do
+        not parse" is not a statement with a shelf life.  A block whose stamp is
+        missing -- replayed from a ledger row too old to read, say -- is treated
+        as expired rather than as immortal: the failure mode being fixed here is
+        a hold nobody can clear, and one extra run is the cheaper mistake.
+        """
+
+        if self.block_ttl_seconds is None:
+            return False
+        since = self._blocked_since.get(item)
+        if since is None:
+            return True
+        return (self.clock() - since).total_seconds() >= self.block_ttl_seconds
+
+    def blocked_items(self) -> list[dict[str, Any]]:
+        """Every item this lane is currently refusing to attempt, and why.
+
+        One list rather than four, because a caller retiring the work of a
+        superseded contract does not care which of the four ways an item came
+        to be blocked -- it cares that the key names work nobody will ask about
+        again.
+        """
+
+        rows: list[dict[str, Any]] = []
+        for item, found in self._not_permitted.items():
+            rows.append({"item_key": item, "action": "not_permitted",
+                         "reason": found.reason, "rule": found.rule})
+        for item, found in self._terminal.items():
+            rows.append({"item_key": item, "action": "terminal",
+                         "reason": found.reason, "rule": found.rule})
+        for item, found in self._parked.items():
+            rows.append({"item_key": item, "action": "parked",
+                         "reason": found.reason, "rule": found.rule,
+                         "dependency": found.dependency or UNKNOWN_DEPENDENCY})
+        for item, count in self._failures.items():
+            if count >= self.max_transient_failures:
+                rows.append({"item_key": item, "action": "held",
+                             "reason": self._reason.get(item, "repeated failures"),
+                             "rule": "held"})
+        rows.sort(key=lambda row: (row["item_key"], row["action"]))
+        return rows
 
     def attempts(self, item_key: str) -> int:
         """How much of the transient budget this item has spent."""
@@ -761,6 +886,13 @@ class LaneFailureBudget:
             elif event == "terminal":
                 self._terminal[item] = found
                 self._parked.pop(item, None)
+                # The verdict keeps the moment it was *reached*, not the moment
+                # this writer read it back.  A restart that handed every
+                # replayed block a fresh lifetime would turn an expiring hold
+                # into a permanent one on any writer that restarts often enough.
+                stamp = _recorded_at(row)
+                if stamp is not None:
+                    self._blocked_since.setdefault(item, stamp)
             elif event == "not_permitted":
                 self._not_permitted[item] = found
                 self._parked.pop(item, None)
@@ -778,6 +910,7 @@ class LaneFailureBudget:
                 self._not_permitted.pop(item, None)
                 self._terminal.pop(item, None)
                 self._reason.pop(item, None)
+                self._blocked_since.pop(item, None)
         return self
 
 

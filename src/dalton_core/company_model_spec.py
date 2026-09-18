@@ -345,7 +345,7 @@ class CompanyModelSpecError(ValueError):
 # agree, which is the one thing it must never be asked to do.  So the list is
 # an allow-list keyed on the rule's own message, anything unrecognised stays
 # ``semantic``, and adding to it is a reviewed decision with a version.
-REPAIRABLE_STRUCTURE_RULES_REF = "rule:company-model-spec-repairable-structure:0.2"
+REPAIRABLE_STRUCTURE_RULES_REF = "rule:company-model-spec-repairable-structure:0.3"
 REPAIRABLE_STRUCTURE_RULES: tuple[str, ...] = (
     "a derived line cannot claim a filed concept",
     "a filed subtotal may only be actual/tie authority or unavailable",
@@ -361,6 +361,14 @@ REPAIRABLE_STRUCTURE_RULES: tuple[str, ...] = (
     # -- ``diluted_eps_numerator`` is one of them -- and neither is arithmetic
     # about the filings.
     "EPS numerator must use the company-specific diluted EPS numerator role",
+    # 0.3, live 2026-09-18 09:24Z (GOOGL, Hyperscaler): a line carrying the
+    # company-presented *component* role must be ``filed`` and one carrying the
+    # company-presented *subtotal* role must be ``derived``.  Both halves are
+    # enumerated fields the model chose from a list it was shown, and the rule
+    # names which one it got wrong; it is the same kind of wiring choice as "a
+    # derived line cannot claim a filed concept", which has been repairable
+    # since 0.1.  Nothing here asks the model to make a number agree.
+    "company-presented components must be filed and subtotals must be derived",
 )
 
 

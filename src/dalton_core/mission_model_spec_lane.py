@@ -21,7 +21,10 @@ from __future__ import annotations
 
 from typing import Any, Callable, Mapping
 
-from .company_model_cli import choose_company, filed_classifications
+from .company_model_cli import (
+    REPAIR_CONTRACT_HASH, REPAIR_CONTRACT_REF, REQUEST_IN_FLIGHT_STATUS,
+    choose_company, filed_classifications,
+)
 from .company_model_state import (
     DEFAULT_MODEL_SPEC_PROMPT_BYTES, CompanyModelPromptBudgetError,
 )
@@ -39,6 +42,73 @@ from .lane_child_launcher import (
 
 MAX_FAILURE_DETAIL_CHARS = 500
 DRIVER_KEY = "mission_model_spec"
+# Six hours, the same number the dossier and gate lanes use for the same
+# purpose.  A refusal this lane recorded keeps the company out for that long
+# and is then asked once more, instead of for ever.
+#
+# Live on 2026-09-18 the lane answered ``held: every pending company is durably
+# held`` on every tick, and its last two runs were from 2026-09-17 02:43 and
+# 02:59 -- both ``spec_status: "refused"`` on a *structure* rule.  A structural
+# refusal classifies as ``transient``/``unmapped``, so three ticks spent the
+# transient budget and the item was ``held`` with nothing in the system that
+# could ever clear it: the count does not decay, and the key named the company,
+# the disclosure, the task and the repair *policy* -- not the repair contract
+# the verdict was actually reached under.
+CONTENT_REFUSAL_COOLDOWN_SECONDS = 6 * 60 * 60
+
+
+def business_key(
+    *, company_ref: str, state_hash: str, task_hash: str,
+    repair_policy_hash: str, validation_hash: str,
+    repair_contract_hash: str = REPAIR_CONTRACT_HASH,
+) -> str:
+    """What a refusal of this company's specification was *about*.
+
+    The company and the disclosure, obviously.  The task hash, because a
+    different question is different work.  And -- new -- the repair contract:
+    which structural rules the model was allowed to be shown and asked to fix.
+    A refusal reached when ``EPS numerator must use the company-specific
+    diluted EPS numerator role`` was a whole refusal is not a statement about a
+    system in which that rule is repaired once before anyone gives up, and
+    keeping the old verdict keyed as though it were is exactly what made a
+    reviewed change to those rules unreachable.
+    """
+
+    return (
+        f"{company_ref}|{state_hash}|{task_hash}|{repair_policy_hash}|"
+        f"financial-validation:{validation_hash}|"
+        f"repair-contract:{repair_contract_hash}"
+    )
+
+
+def retire_superseded_contracts(budget: Any, current: str) -> list[str]:
+    """Retire this company's blocks that were decided under other contracts.
+
+    The key already changed, so those blocks can never be consulted again; this
+    is what keeps them from accumulating in the ledger and in the tick result's
+    ``failure_budget`` counts, and what puts a readable ``superseded`` row in
+    the ledger saying *why* a durable hold stopped applying.  Matched on the
+    part of the key that names the work -- the company, the disclosure and the
+    task -- so a genuinely different judgement is never retired by accident.
+    """
+
+    prefix = "|".join(current.split("|")[:3]) + "|"
+    marker = f"repair-contract:{REPAIR_CONTRACT_HASH}"
+    retired = []
+    for row in budget.blocked_items():
+        item = str(row["item_key"])
+        if not item.startswith(prefix):
+            continue
+        # ``current`` itself, and everything the permission control decorates
+        # it with, is this contract's own bookkeeping.  Retiring that would
+        # abolish the failure budget rather than age it out.
+        if item.startswith(current) or marker in item:
+            continue
+        if budget.retire(item, reason=(
+                "decided under a superseded repair contract; the current "
+                f"one is {REPAIR_CONTRACT_REF}")):
+            retired.append(item)
+    return sorted(retired)
 
 
 class MissionModelSpecLaneCoordinator:
@@ -51,6 +121,7 @@ class MissionModelSpecLaneCoordinator:
         launcher: Any,
         mission: Callable[[], dict[str, Any] | None],
         failure_ledger_dir: Any | None = None,
+        cooldown_seconds: int = CONTENT_REFUSAL_COOLDOWN_SECONDS,
     ) -> None:
         self.missions = missions
         self.launcher = launcher
@@ -63,7 +134,9 @@ class MissionModelSpecLaneCoordinator:
         # doomed company does not consume the slot every five minutes. Held for
         # this process only: a restart is nearly always a deploy, which is the
         # most likely thing to have fixed whatever it was.
-        self.budget = lane_budget(DRIVER_KEY, state_dir=failure_ledger_dir)
+        self.budget = lane_budget(
+            DRIVER_KEY, state_dir=failure_ledger_dir,
+            block_ttl_seconds=int(cooldown_seconds))
 
     def _settle(self, ticket_ref: str) -> dict[str, Any] | None:
         try:
@@ -119,7 +192,18 @@ class MissionModelSpecLaneCoordinator:
         if settled is None or settled.get("status") == "running":
             return settled
         self._open = None
-        failed = settled.get("status") != "succeeded" or settled.get("spec_status") in (
+        spec_status = settled.get("spec_status")
+        # Nothing was refused and nothing was spent: the Scheduler is holding a
+        # lease on this exact request because another process is paying for
+        # this judgement right now.  Charging a failure budget for that turns a
+        # five-minute wait into a durable hold -- and the wait is free, because
+        # the claim fails before any model call is made.
+        if spec_status == REQUEST_IN_FLIGHT_STATUS:
+            settled["waiting"] = (
+                "another process holds the Scheduler lease on this request; "
+                "the next tick replays its result rather than paying again")
+            return settled
+        failed = settled.get("status") != "succeeded" or spec_status in (
             "refused", "model_unavailable", "busy", "failed", "gated",
             "stale_input",
         )
@@ -130,11 +214,10 @@ class MissionModelSpecLaneCoordinator:
         validation_hash = settled.get("financial_validation_contract_hash")
         if (failed and company_ref and state_hash and task_hash
                 and repair_policy_hash and validation_hash):
-            key = (
-                f"{company_ref}|{state_hash}|{task_hash}|{repair_policy_hash}|"
-                f"financial-validation:{validation_hash}"
-            )
-            spec_status = settled.get("spec_status")
+            key = business_key(
+                company_ref=company_ref, state_hash=state_hash,
+                task_hash=task_hash, repair_policy_hash=repair_policy_hash,
+                validation_hash=validation_hash)
             reason = settled.get("failure_reason") or f"last run: {spec_status or settled.get('status')}"
             if "PROVIDER_BUDGET_EXCEEDED" in (settled.get("failure_codes") or []):
                 reason += " [PROVIDER_BUDGET_EXCEEDED]"
@@ -146,9 +229,10 @@ class MissionModelSpecLaneCoordinator:
             ).as_wire()
         elif (company_ref and state_hash and task_hash and repair_policy_hash
               and validation_hash):
-            settled["resumed"] = self.budget.clear(
-                f"{company_ref}|{state_hash}|{task_hash}|{repair_policy_hash}|"
-                f"financial-validation:{validation_hash}")
+            settled["resumed"] = self.budget.clear(business_key(
+                company_ref=company_ref, state_hash=state_hash,
+                task_hash=task_hash, repair_policy_hash=repair_policy_hash,
+                validation_hash=validation_hash))
         return settled
 
     def settle_only(self) -> dict[str, Any]:
@@ -174,6 +258,7 @@ class MissionModelSpecLaneCoordinator:
                     "settled": settled}
         excluded: set[str] = set()
         held_companies: dict[str, Any] = {}
+        superseded: list[str] = []
         try:
             repair_policy_hash = self.launcher.repair_policy_hash()
             if hasattr(self.launcher, "state_projection_config"):
@@ -229,33 +314,42 @@ class MissionModelSpecLaneCoordinator:
             if company_ref is None:
                 if held_companies:
                     result = {"status": "held", "settled": settled,
-                              "reason": "every pending company is durably held",
+                              "reason": "every pending company is held",
                               "held": held_companies}
+                    if superseded:
+                        result["superseded"] = superseded
                     if len(held_companies) == 1:
                         ref, failure = next(iter(held_companies.items()))
                         result.update({"company_ref": ref, "failure": failure,
                                        "reason": failure["reason"]})
                     return result
                 return {"status": "idle", "settled": settled,
+                        **({} if not superseded else {"superseded": superseded}),
                         "reason": "every company has a current specification"}
             # The hash comes from the projection the chooser already built.
             # Keeping that exact state beside the company also lets a held
             # first candidate be skipped without rebuilding a different one.
             state_hash = state["state_hash"]
-            business_key = (
-                f"{company_ref}|{state_hash}|{TASK_HASH}|{repair_policy_hash}|"
-                f"financial-validation:"
-                f"{self.launcher.financial_validation_contract_hash()}"
-            )
+            key = business_key(
+                company_ref=company_ref, state_hash=state_hash,
+                task_hash=TASK_HASH, repair_policy_hash=repair_policy_hash,
+                validation_hash=self.launcher.financial_validation_contract_hash())
+            # A verdict reached under an older repair contract is about work
+            # nobody will ask this question of again: its key no longer
+            # matches, so retire it rather than leaving it in the ledger and in
+            # the tick's ``failure_budget`` counts for ever.
+            retired = retire_superseded_contracts(self.budget, key)
+            if retired:
+                superseded.extend(retired)
 
             permission = current_permission(
-                self.budget, business_key, mission, self.launcher,
+                self.budget, key, mission, self.launcher,
                 connection=authority_connection(
                     getattr(self, "store", None), getattr(self, "missions", None),
                     getattr(self, "models", None)))
 
             held = self.budget.blocked(permission)
-            budget_park = self.budget.parked(business_key)
+            budget_park = self.budget.parked(key)
             if (
                 held is None and budget_park is not None
                 and budget_park.classification.dependency == "model_budget"
@@ -272,14 +366,14 @@ class MissionModelSpecLaneCoordinator:
                 recovery = getattr(self.launcher, "controlled_budget_reentry", None)
                 controlled_reentry = (
                     None if recovery is None else recovery(
-                        business_key=business_key, current_permission=permission,
+                        business_key=key, current_permission=permission,
                         mission=dict(mission), company_ref=company_ref,
                         state_hash=state_hash, task_hash=TASK_HASH,
                         repair_policy_hash=repair_policy_hash))
                 if controlled_reentry is not None:
                     held = None
             if held is None and controlled_reentry is None:
-                held = self.budget.blocked(business_key)
+                held = self.budget.blocked(key)
             if held is None:
                 break
             held_companies[company_ref] = held.as_wire()
@@ -303,7 +397,9 @@ class MissionModelSpecLaneCoordinator:
             "status": "launched", "company_ref": company_ref,
             "state_hash": state_hash, "ticket_ref": ticket["id"],
             "repair_policy_hash": repair_policy_hash,
+            "repair_contract_ref": REPAIR_CONTRACT_REF,
             "settled": settled, "held": held_companies,
+            **({} if not superseded else {"superseded": superseded}),
         }
 
 
@@ -408,8 +504,12 @@ LANE = register_lane(LaneSpec(
 
 __all__ = [
     "LANE", "settle",
+    "CONTENT_REFUSAL_COOLDOWN_SECONDS",
     "LAUNCHER_KWARG",
     "MAX_FAILURE_DETAIL_CHARS",
+    "REQUEST_IN_FLIGHT_STATUS",
+    "business_key",
+    "retire_superseded_contracts",
     "MODEL_SPEC_MODEL_CONFIG",
     "MissionModelSpecLaneCoordinator",
     "add_arguments",

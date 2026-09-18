@@ -204,8 +204,12 @@ class MissionDeepInsightLaneCoordinator:
         # is nearly always a deploy, which is the likeliest thing to have fixed
         # it.
         self._quiet_signatures: set[str] = set()
+        # The same bound the company cooldown uses, one step down: a
+        # signature-keyed terminal verdict otherwise lives for ever, so a
+        # company whose evidence stops moving could never be asked again.
         self.budget = lane_budget("deep_insight_gate", state_dir=failure_ledger_dir,
-                                  clock=failure_clock)
+                                  clock=failure_clock,
+                                  block_ttl_seconds=self.cooldown_seconds)
 
     # -- the company-scoped back-off -----------------------------------------
 

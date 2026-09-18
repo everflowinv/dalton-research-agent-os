@@ -1,5 +1,30 @@
 # Dalton 项目进度
 
+## 2026-09-18 17:40 UTC：停着等人的 admission 现在一定会出现在「需要你处理」，而且真的有得按（源码，待部署）
+
+上一条部署一小时后线上暴露两件事：
+
+**一、名单看不见。** Hyperscaler 环境的 hold 账本里明明有一条 `recovery_required reentry_failed_after_automatic_rebind:...`，`/v1/cockpit/needs-human` 却是空的——因为 `needs_human.held_lanes` 只读车道**本轮 tick 的结果**，而那一轮车道正好在恢复**另一条** admission，于是本轮状态是 `resumed`。一件等着人的事，不会因为车道那一秒找到了别的事做就不再等。现在改成读车道自己的 hold 账本（`<state>/mission-document-research-runs/holds.json`，年报车道同理）：每条已经升级的 admission 单独一件（带 admission ref 和账本里的原文），再加一件车道级汇总（held / waiting_on_owner / 账本路径）；没有账本的车道仍旧走原来的 tick 结果那条路。
+
+**二、一次性凭据被白白用掉。** 线上又多了 2 条 `controlled_reentry_unavailable:controlled reentry was already attempted` 和 1 条同样后缀的升级态。原因是 `LaneChildLauncher` 的一次性 marker 是**在启动子进程之前**写的（这个顺序本身是对的，它挡的是并发重入），所以「认领了、但子进程还没起来就被拒」会留下一个用掉的 marker 和零次真正的重入；把它读成「已经试过」，就等于一次没试过的失败被永久记成试过了。现在把「认领过」和「真的跑过一次」分开（新 `lane_reentry_claim.py`）：只有当有一条能解释这次认领的启动记录——原票据在认领之后重新启动过，或者账本里有票据记着 `rebound_from_ticket_ref` 指向它——才算真的试过；否则这条 admission 的那一次自动重入还在，下一轮直接把它补完（不重复认领）。车道的升级判断也跟着从「认领过」改成「真的跑过」。
+
+**三、升级之后有得按。** 新增 owner 门：writer 操作 `authorize_mission_document_reentry`（human-only，actor 必须是 `human:*`）+ CLI `python -m dalton_core.document_recovery_cli`。`holds` 子命令只读地列出账本里所有停着的 admission；`authorize-reentry --admission-ref <ref>` 不加 `--apply` 是只读预览，加 `--apply --actor human:<owner>` 才通过 writer 的临时人类主体下发一次授权，写成车道票据目录里的一次性 grant，被下一次重入消费掉（消费后改名留痕，记着是谁批的）。车道没升级的 hold 一律拒绝授权——那是车道自己还在处理的事，不该让 owner 替它做。
+
+**部署后那 3 条升级态会怎样**：它们的 marker 都属于「认领了但没跑过」，所以下一轮车道会把那次重入补完（真正启动一次子进程），不再需要人；只有当那一次**真的跑起来又失败**，才会重新升级，而这次 owner 手里有 `document_recovery_cli authorize-reentry` 可按。测试覆盖：账本里有升级态而 tick 结果是 resumed 时名单照样列出、账本无升级态只出汇总、有账本的车道不再重复走 tick 路径；认领未跑过不算重试（车道自己再试）、真的跑过才升级、owner grant 放行一次且只放一次、CLI 的只读/拒绝/经 writer 下发。全量测试通过。
+
+## 2026-09-18 21:10 UTC：改了规则却永远试不到——拒绝现在按「当时的契约」记账，并且会到期（源码，待部署）
+
+上一条把三条车道的修复规则改宽了，但线上 company_model_spec 车道每轮仍然回 `held: every pending company is durably held`，最后两次运行还停在 **2026-09-17 02:43 / 02:59**（`1a4fab24801920d91c8f9839` ACN、`a2f25086778f02675411523e` CTSH，都是 `spec_status: refused`、都是结构规则、`repair_policy_hash` = `content_hash({"max_attempts": 1})`，也就是那套环境**本来就开着**一次修复——上一条里「默认 0 所以从没跑过」这个判断对 legacy 并不成立，只对没设这个键的环境成立）。真正的原因有两个，而且都不是模型的问题：
+
+1. **拒绝的账记在一把不含契约的钥匙上**。业务键是 `公司|披露 state_hash|TASK_HASH|repair_policy_hash|financial-validation:…`，可修复规则清单改了两版，这五段一段都不动，所以新规则永远不会被问到。现在键里多一段 `repair-contract:{REPAIR_CONTRACT_HASH}`（契约本身就含那份规则清单），**在别的契约下作出的拒绝就不是同一件工作**；每轮开始时把同公司、同披露、同任务但契约不同的旧条目 `retire` 掉（账本里留一行 `superseded`，写明当前契约是哪一版），不让它们在 `failure_budget` 计数里越积越多。
+2. **挡住它的其实是 `held` 不是 `terminal`**。结构性拒绝在分类器里落到 `transient`/`unmapped`，三轮用光重试预算就 `held`，而这个计数**永远不衰减**——没有任何东西能把它清掉。所以 `LaneFailureBudget` 新增可选的 `block_ttl_seconds`（默认 `None` = 行为完全不变，其它车道一律不受影响）：到期的 `terminal` 与用光的 `transient` 都会被 `retire` 掉、再问一次，账本里同样留一行写清「多久没人复看了」。同一个verdict重复记不会重新计时（否则每轮都记一次就等于永久），replay 时用账本自己的 `recorded_at` 而不是重启时刻（否则频繁重启的 writer 会把会过期的 hold 变成永久的）。档案、Gate、模型规格三条车道都按 6 小时启用。
+
+**GOOGL（Hyperscaler 09:24Z）**：`financial_statement_structure is invalid: company-presented components must be filed and subtotals must be derived；缺口…`，`repair_attempts: 0`。这是一条纯接线规则——带「公司自列组成项」角色的行必须是 `filed`、带「公司自列小计」角色的必须是 `derived`，两边都是模型从给它看过的枚举里挑的，报错也点名了挑错哪一个，和 0.1 起就可修复的「derived 行不能认领 filed concept」是同一类。补进 `REPAIRABLE_STRUCTURE_RULES`（0.3，契约随之到 0.4）。消息尾巴上的 `；缺口…`（这家公司确实缺某一行报表数据）保持原样并有用例钉住：它是给人看的说明，不能因此让规则匹配不上；而「这家公司缺数据」这类拒绝现在也走 6 小时到期，不再是永久 hold。
+
+**META（Hyperscaler 09:52Z）**：`CockpitModelError: this request is already running`。来源不是修复调用复用了父 request id（修复的 id 是按 binding 内容寻址的，必然不同），而是**同一个 request id 的两个子进程**：模型规格的 request id 按披露与修复策略内容寻址（这是对的——同一个判断只该买一次），而 launcher 的「一次只跑一个子进程」索引 `_live_ticket_locked` 只读**进程内**的 `_running_index`；writer 一重启，索引空了，上一个子进程还挂在那儿跑，新子进程就撞上 Scheduler 还握着的租约。处理方式是**等**，不是换个 id（换 id 等于把同一个判断买两次）：子进程现在报 `spec_status: request_in_flight`，车道**不记任何失败预算**、下一轮照常再问一次——那时租约要么已经结束（正式结果直接免费 replay），要么还在（再等一轮，全程零调用）；分类器也给了它自己的规则名，不再被读成 `model_unavailable` 而把整条车道的 `model` 依赖 park 三十分钟。`_live_ticket_locked` 只认进程内索引这件事本身没有在这次改动里动（它是所有车道共用的）——记在这里当作下一件事。
+
+**测试**：GOOGL 规则可修复（含 `缺口` 尾巴、以及「关于报表数字的算术」仍然不可修复）、契约进业务键与旧契约条目被 retire（同时钉住本契约自己的权限键不会被误删、别的公司不会被误删）、`terminal` 与用光的 `transient` 都会到期、重复记不重新计时、replay 用账本时间、默认不设 TTL 时行为一字不变、in-flight 不记账且同位置的真拒绝照记。全量测试通过。
+
 ## 2026-09-19 00:40 UTC：Guidepoint / 销售笔记 / 公司 wiki / 历史投研拿到自己的引用授权，读完之后能真的记账（源码，待部署）
 
 上一条把门打开了：这四个来源能读、能引、能出建议。但它们**每一份读完之后都带着理由 `dismissed`，零正式写入**——候选链绑的是 AlphaEngine 的文档血统、或者网页那条更正授权，这四个一条都没有。线上 Hyperscaler 148 份、legacy 388 份，全楼里大部分的研究材料，付费读完之后一条 Claim 都不留。

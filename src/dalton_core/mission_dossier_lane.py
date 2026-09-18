@@ -265,8 +265,14 @@ class MissionDossierLaneCoordinator:
         )
         kwargs = {} if probe_interval is None else {
             "probe_interval_seconds": probe_interval}
+        # The same bound the company cooldown uses, for the same reason one
+        # step down: a signature-keyed terminal verdict, or an exhausted
+        # transient budget, otherwise lives for ever -- so a company whose
+        # evidence stops moving can never be asked about again even after the
+        # refusal has been fixed.
         self.budget = lane_budget("company_dossier", state_dir=failure_ledger_dir,
-                                  clock=failure_clock, **kwargs)
+                                  clock=failure_clock,
+                                  block_ttl_seconds=self.cooldown_seconds, **kwargs)
 
     # -- the company-scoped back-off -----------------------------------------
 

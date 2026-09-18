@@ -83,7 +83,7 @@ MAX_OUTPUT_TOKENS = int(DEFAULT_MODEL_SPEC_CALL_BUDGET["max_output_tokens"])
 # structure rather than to look frugal.
 MAX_COST_USD = float(DEFAULT_MODEL_SPEC_CALL_BUDGET["max_cost_usd"])
 TIMEOUT_SECONDS = int(DEFAULT_MODEL_SPEC_CALL_BUDGET["timeout_seconds"])
-REPAIR_CONTRACT_REF = "contract:company-model-spec-structured-output-repair:0.3"
+REPAIR_CONTRACT_REF = "contract:company-model-spec-structured-output-repair:0.4"
 # One repair call, which is the number every other lane in this repository
 # uses for the same bargain (``draft_contract_repair.MAX_REPAIR_ATTEMPTS``).
 DEFAULT_REPAIR_ATTEMPTS = 1
@@ -113,6 +113,26 @@ _REPAIR_AUTHORITY_KEYS = {
     "work_order_ref", "work_order_hash", "result_envelope_ref",
     "result_envelope_hash", "invocation_ref", "route_decision_ref",
 }
+
+
+# What the Scheduler says when a lease is already held on this exact request.
+# The request id is content addressed on the disclosure and the repair policy,
+# so two children asked for the same judgement -- which happens when the writer
+# restarts and leaves an orphaned child still running, since the launcher's
+# "one child at a time" index is in memory only.  Live on the Hyperscaler
+# environment (META, 2026-09-18T09:52Z).
+#
+# Nothing is refused and nothing is spent: the claim fails before any model
+# call is made.  The honest report is "somebody else is doing this", and the
+# lane waits a tick -- at which point the formal result is on the Scheduler and
+# is replayed for free.  Deriving a *different* request id instead would be the
+# one wrong answer: it would buy the same judgement twice.
+REQUEST_IN_FLIGHT_MESSAGE = "this request is already running"
+REQUEST_IN_FLIGHT_STATUS = "request_in_flight"
+
+
+def _request_in_flight(exc: BaseException) -> bool:
+    return REQUEST_IN_FLIGHT_MESSAGE in str(exc)
 
 
 def _scheduler_failure_codes(
@@ -798,6 +818,12 @@ def run_model_spec(
                             "failure_reason": f"{type(exc).__name__}: {exc}"})
             return summary
         except CockpitModelError as exc:
+            if _request_in_flight(exc):
+                summary.update({
+                    "status": "succeeded",
+                    "spec_status": REQUEST_IN_FLIGHT_STATUS,
+                    "failure_reason": f"{type(exc).__name__}: {exc}"})
+                return summary
             failure_codes = _scheduler_failure_codes(exc, model.scheduler_db)
             summary.update({
                 "status": "succeeded",
@@ -827,7 +853,8 @@ def run_model_spec(
         except CockpitModelError as exc:
             summary.update({
                 "status": "succeeded",
-                "spec_status": lane_status_for(exc, "model_unavailable"),
+                "spec_status": (REQUEST_IN_FLIGHT_STATUS if _request_in_flight(exc)
+                                else lane_status_for(exc, "model_unavailable")),
                 "failure_reason": f"{type(exc).__name__}: {exc}"})
             return summary
         except CompanyModelSpecError as exc:
@@ -949,6 +976,8 @@ if __name__ == "__main__":  # pragma: no cover - exercised as a subprocess
 
 
 __all__ = [
+    "REQUEST_IN_FLIGHT_MESSAGE",
+    "REQUEST_IN_FLIGHT_STATUS",
     "MAX_COST_USD", "build_parser", "choose_company", "main",
     "model_spec_request_id", "model_spec_request_identity", "run_model_spec",
     "structured_output_repair_config", "validate_model_spec_request_identity",
