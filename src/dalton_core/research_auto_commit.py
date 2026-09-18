@@ -243,13 +243,31 @@ def _authorize_document_qualitative(
             evidence_wire=evidence_wire, claim_wire=claim_wire,
             material=material, source_verification=source_verification,
         )
+    from .acquired_source_authority import (
+        ACQUIRED_SOURCE_KIND_BY_EVIDENCE_TYPE,
+        acquired_source_binding_is_exact,
+    )
+    # P13aq: the four acquired sources that had no citation authority until
+    # now.  Their pairing of evidence type and source ref is the same closed
+    # table the correction authority and the Ledger writer read.
+    acquired = ACQUIRED_SOURCE_KIND_BY_EVIDENCE_TYPE.get(evidence_wire["source_type"])
+    if acquired is not None and evidence_wire["source_ref"] != acquired["source_ref"]:
+        raise ResearchAutoCommitRejected(
+            "document candidate evidence type does not match the source it names"
+        )
     expected_operation = {
         (TRANSCRIPT_EVIDENCE_SOURCE_TYPE, "source:alphaengine"): "get_document",
         ("public_web", "source:public-web"): "fetch_get",
+        **{
+            (entry["evidence_source_type"], entry["source_ref"]): entry["operation"]
+            for entry in ACQUIRED_SOURCE_KIND_BY_EVIDENCE_TYPE.values()
+        },
     }.get((evidence_wire["source_type"], evidence_wire["source_ref"]))
     if expected_operation is None:
         raise ResearchAutoCommitRejected(
-            "document qualitative rule requires an acquired AlphaEngine original or a fetched public-web page"
+            "document qualitative rule requires an acquired AlphaEngine original, a "
+            "fetched public-web page or an acquired Guidepoint/sales-note/wiki/"
+            "prior-research original"
         )
     refs = evidence_wire["artifact_refs"]
     if len(refs) != 2 or not refs[1]["ref"].startswith("transcript-claim-citation-binding:"):
@@ -285,6 +303,18 @@ def _authorize_document_qualitative(
         or source.get("source") != evidence_wire["source_ref"] or source.get("operation") != expected_operation
     ):
         raise ResearchAutoCommitRejected("document candidate source is not the acquired original")
+    if acquired is not None and not acquired_source_binding_is_exact(
+        evidence_source_type=evidence_wire["source_type"],
+        source_record_refs=source.get("source_record_refs"),
+        document_ref=correction_set.get("document_ref"),
+        source=source.get("source"), operation=source.get("operation"),
+    ):
+        # The envelope has to be the acquisition *of this document*: a
+        # one-document read named exactly it, a Guidepoint search named the
+        # page of excerpts one of which it is.
+        raise ResearchAutoCommitRejected(
+            "document candidate source envelope did not return the cited document"
+        )
     return _decision(
         policy_version, claim_wire=claim_wire, evidence_wire=evidence_wire,
         rule_ref=DOCUMENT_QUALITATIVE_RULE_REF,

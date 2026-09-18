@@ -1,5 +1,19 @@
 # Dalton 项目进度
 
+## 2026-09-19 00:40 UTC：Guidepoint / 销售笔记 / 公司 wiki / 历史投研拿到自己的引用授权，读完之后能真的记账（源码，待部署）
+
+上一条把门打开了：这四个来源能读、能引、能出建议。但它们**每一份读完之后都带着理由 `dismissed`，零正式写入**——候选链绑的是 AlphaEngine 的文档血统、或者网页那条更正授权，这四个一条都没有。线上 Hyperscaler 148 份、legacy 388 份，全楼里大部分的研究材料，付费读完之后一条 Claim 都不留。
+
+**这次给它们一条同形状的闭合链**（新 `acquired_source_authority.py` 是唯一的那张表：来源 → 连接器操作 → 文档 ref 前缀 → manifest 家族 → 证据类型 → 信封绑定方式）：采集 manifest 与它声明的内容寻址对象**就是**授权。`TranscriptCorrectionAuthority._source` 新增一条分支，拿 manifest 回 spool 把字节读回来、重新哈希（历史投研还要把原始文件重新渲染一遍），引文跨度照旧按 `automation_verified_raw_span` 逐字节核对——也就是说引文仍然是"这份文档里真有这句话"，只是"这份文档"是对象而不是一次可以再问一遍的 provider 调用。候选那一侧是新的 `acquired_source_core_authority` 模式与它自己的 verifier：Core 侧仍然逐条复核 SourceEnvelope / Invocation / Profile / 原始 ArtifactVersion（线上实测这四个来源在 Core 里这套收据是齐的，`source_type` 都是 `authenticated_library`），另外多两条本模式独有的判定——**引文绑的就是这份 manifest**，以及**这个对象现在重新读、重新哈希还是那段被引的正文**。Guidepoint 一次搜索返回二十条摘录，所以它的信封按"包含"绑定、其余三个按"只有这一条"绑定，这条差别写在表里而不是散在四处。Ledger 入账侧加了对应的一条绑定分支（笔记正文是 markdown、连接器原始响应是外面那层 JSON，两者本来就不该相等），auto-commit 规则加了这四对 `(证据类型, 来源)` → 操作。
+
+**AlphaEngine 与网页一个字节没动**：两条 source kind 的常量、两个 verifier 的哈希都有测试逐字段钉住；`SOURCE_KIND_MODES` 是一张表，加一种来源而不决定它走哪个 verifier 会在构造时报错，不会悄悄借用别人的。
+
+**排序**（`claim_index_tagging.SOURCE_TYPE_IMPORTANCE`）：销售笔记 `sell_side`，公司 wiki 与历史投研 `internal_prior`，Guidepoint `other`——`IMPORTANCE_TIERS` 里**没有** `expert` 这一级，新增一级会把索引里所有 Claim 重排，那是 owner 的决定不是这次的；`document_provenance.TIER_EXPERT` 管的是阅读顺序，与 Claim 的权重是两件事。另外发现销售笔记车道写的 spec 是单数 `sales-note`，而 `SPEC_IMPORTANCE` 里只有 AlphaEngine 券商搜索那个 `sell-side-reports`——以前这些文档根本出不了 Claim，所以没人发现只列了一种拼写，一并补上。
+
+**一个行为变化要说清楚**：这四个来源的 review 现在不再"读完即 `dismissed`"，而是和 AlphaEngine 文档走同一条路——治理 policy 里没签 `research-auto-commit:mission-document-qualitative:v1` 的环境会 `held`。新工作区的第一个 mission 已经自带这条规则，老环境用 `scripts/sign_auto_commit_rules.py` 签。
+
+**测试**：新增 `tests/test_acquired_source_claims.py`（四个来源各一条从采集到 Claim 的完整链路，跑真协调器、真子进程、真抽取 child：证据类型、importance、引文绑定的 manifest ref/hash/正文哈希、review 归为 `extraction_staged`、读完凭证落库；对象字节漂移则读不出来，采集收据的原始 artifact 漂移则读得出来但**入不了账**，理由点名 `raw_artifact_bytes`；AlphaEngine 与网页两种 kind 与 verifier 哈希逐字段冻结）与 `tests/test_acquired_source_authority.py`（表本身：来源/证据类型一一对应、manifest 家族与声明来源不符则拒、用别的来源的操作或文档前缀则拒、信封绑定的四种失配、证据类型不能挪到别的来源上）。`tests/test_corpus_document_reading.py` 那条 sweep 用例的终点从"带理由归档"改成"签了规则就入账"。全量测试通过。
+
 ## 2026-09-18 23:55 UTC：抽取车道能读的不再只有 AlphaEngine 与网页——Guidepoint、销售笔记、公司 wiki、历史投研全部打开（源码，待部署）
 
 线上 Hyperscaler 工作区最近一轮扫了 143 条 review，**115 条**被同一句话挡在门外：`only acquired AlphaEngine documents and fetched public-web pages can be viewed here`；legacy 环境 156 条里挡了 139 条。这 115 份（销售笔记 59、Guidepoint 摘录 37、公司 wiki 20）**每一份的正文都好端端躺在内容寻址 spool 里**，manifest 写着它自己的哈希、ticket 目录记着是哪次采集写的——只是门关着。cockpit 的 `read` 因此冻在 54，文档来源的 Claim 接近于零。

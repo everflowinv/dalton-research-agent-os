@@ -241,6 +241,21 @@ class ExtractionHost:
         )
         return authority, manifest
 
+    def _acquired_source_corrections(self, source_manifest: Any, spool: Any) -> tuple[Any, dict[str, Any]]:
+        """P13aq: mirrors WriterServer._acquired_source_corrections.
+
+        The spool comes from the caller because the corpora children write into
+        their own root, which is the same resolution the reading path already
+        does for this document.
+        """
+
+        from .acquired_source_authority import acquired_source_correction_authority
+
+        return acquired_source_correction_authority(
+            self.store, spool=spool, manifest=source_manifest,
+            evidence_resolver=self._transcript_support_authority,
+        )
+
     def close(self) -> None:
         for handle in reversed(self._keepalive):
             try:

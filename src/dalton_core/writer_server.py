@@ -2219,6 +2219,24 @@ class WriterServer:
         )
         return authority, manifest
 
+    def _acquired_source_corrections(
+        self, source_manifest: Mapping[str, Any], spool: Any
+    ) -> tuple[TranscriptCorrectionAuthority, dict[str, Any]]:
+        """P13aq: the correction authority over one acquired original.
+
+        The spool is a parameter rather than ``self._transcript_spool`` because
+        the feed and Guidepoint children write into their own root; the caller
+        resolved which one that is the same way the reading path does, and
+        every object read through it is re-hashed against the manifest.
+        """
+
+        from .acquired_source_authority import acquired_source_correction_authority
+
+        return acquired_source_correction_authority(
+            self.store, spool=spool, manifest=source_manifest,
+            evidence_resolver=self._transcript_support_authority,
+        )
+
     @property
     def thesis_impact_control(self) -> ResearchPlanThesisImpactCoordinator:
         if self._thesis_impact_control is None:

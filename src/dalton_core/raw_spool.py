@@ -302,7 +302,49 @@ class RawSpool:
         return (self._objects / content_hash[:2] / content_hash).read_bytes()
 
 
+class MultiRootRawSpoolReader:
+    """The objects of one lane, read from whichever root that lane wrote them to.
+
+    P13ap moved the reading side onto "wherever this lane's child actually
+    wrote": the AlphaEngine and fetch children are handed the writer's spool,
+    the feed and Guidepoint children are not and fall back to their own default
+    under the state directory.  Live on 2026-09-18 every one of the 522 queued
+    corpus documents' bytes were in ``<state>/connector-spool`` while the
+    reading side held only the transcript spool.
+
+    Which root answered is not a question about what is true: an object is
+    named by its own hash, and every caller re-hashes what it gets against the
+    manifest that named it before a word of it is quoted.  Read-only by
+    construction -- there is no write or reservation method here to pick a root
+    for.
+    """
+
+    def __init__(self, roots) -> None:
+        self._roots = list(roots)
+        if not self._roots:
+            raise RawSpoolError("a multi-root raw spool reader needs at least one root")
+
+    def read_object(self, content_hash: str) -> bytes:
+        first = None
+        for root in self._roots:
+            try:
+                return root.read_object(content_hash)
+            except Exception as exc:  # noqa: BLE001 - the next root may hold it
+                first = first or exc
+        raise first
+
+    def object_exists(self, content_hash: str) -> bool:
+        return any(root.object_exists(content_hash) for root in self._roots)
+
+
+#: Everything a caller may hand a correction or candidate authority to read
+#: content-addressed objects back out of.  Named rather than duck-typed so that
+#: "which objects may a Claim be cited from" stays a closed question.
+READABLE_RAW_SPOOLS = (RawSpool, RawSpoolReader, MultiRootRawSpoolReader)
+
+
 __all__ = [
-    "BoundedRawSink", "RawObject", "RawSpool", "RawSpoolCapacityError",
+    "BoundedRawSink", "MultiRootRawSpoolReader", "READABLE_RAW_SPOOLS",
+    "RawObject", "RawSpool", "RawSpoolCapacityError",
     "RawSpoolError", "RawSpoolLimitExceeded", "RawSpoolReader",
 ]

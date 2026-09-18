@@ -20,6 +20,7 @@ from typing import Any
 from .alphaengine_document_acquisition import validate_alphaengine_document_acquisition_manifest
 from .budget_pools import POOL_EXHAUSTED_STATUS, mission_pool_scope
 from .contracts import WorkOrder, ResultEnvelope, ModelInvocation, InvocationGranularity
+from .raw_spool import MultiRootRawSpoolReader
 from .connector_authority_port import ConnectorCompletionReceiptReader
 from .live_mcp_connector import alphaengine_document_page_from_raw_response
 from .feed_acquisition import (
@@ -31,6 +32,10 @@ from .feed_acquisition import (
 from .guidepoint_acquisition import (
     GUIDEPOINT_SOURCE_REF,
     verified_guidepoint_source,
+)
+from .acquired_source_authority import (
+    ACQUIRED_SOURCE_KIND_BY_SOURCE_REF,
+    acquired_source_kind,
 )
 from .lane_child_launcher import TICKET_DID_NOT_COMPLETE
 from .public_web_extraction_source import verified_public_web_source
@@ -87,13 +92,22 @@ SUPPORTED_SOURCE_REFS = (
     frozenset({ALPHAENGINE_SOURCE_REF, GUIDEPOINT_SOURCE_REF})
     | FETCHED_SOURCE_REFS | FEED_SOURCE_REFS
 )
-# P13ap: reading is not staging.  Every source above can be read, quoted and
-# drafted from, but the candidate chain binds AlphaEngine document lineage (or,
+# P13ap: reading is not staging.  Every source above could be read, quoted and
+# drafted from, but the candidate chain bound AlphaEngine document lineage (or,
 # for a fetched page, the public-web correction authority); a Guidepoint
-# excerpt and a local corpus document have neither yet, so a draft from one is
-# a suggestion a human can see and never an automatic Claim.
+# excerpt and a local corpus document had neither, so a draft from one was a
+# suggestion a human could see and never an automatic Claim.
+#
+# P13aq closes that: ``acquired_source_authority`` gives those four sources a
+# citation authority of their own, whose original is the content-addressed
+# object their acquisition manifest declares.  The reason string stays -- a
+# source outside the table below is still gated with it, rather than crashing
+# into a validator that was never asked about it.
 SOURCE_STAGING_GATE_REASON = "acquired_source_candidate_staging_not_supported"
-STAGEABLE_SOURCE_REFS = frozenset({ALPHAENGINE_SOURCE_REF}) | FETCHED_SOURCE_REFS
+STAGEABLE_SOURCE_REFS = (
+    frozenset({ALPHAENGINE_SOURCE_REF}) | FETCHED_SOURCE_REFS
+    | frozenset(ACQUIRED_SOURCE_KIND_BY_SOURCE_REF)
+)
 OUTPUT_SCHEMA = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "title": "DocumentExtractionSuggestionsV0.1",
@@ -385,35 +399,10 @@ def completed_acquisition_manifest(launcher, *, ticket_ref, document_ref):
 CHILD_DEFAULT_SPOOL_NAME = "connector-spool"
 
 
-class _AcquisitionSpool:
-    """The objects of one lane, read from whichever root that lane wrote them to.
-
-    The AlphaEngine and fetch children are handed the writer's spool; the feed
-    and Guidepoint children are not, and fall back to their own default under
-    the state directory.  Live on 2026-09-18 that is where every one of the 522
-    queued corpus documents' bytes were -- ``<state>/connector-spool`` -- while
-    the reading side held only the transcript spool, so opening the door
-    without this would have turned one refusal into another.
-
-    Which root answered is not a question about what is true: an object is
-    named by its own hash, and every caller below re-hashes what it gets
-    against the manifest that named it before a word of it is quoted.
-    """
-
-    def __init__(self, roots):
-        self._roots = list(roots)
-
-    def read_object(self, content_hash):
-        first = None
-        for root in self._roots:
-            try:
-                return root.read_object(content_hash)
-            except Exception as exc:  # noqa: BLE001 - the next root may hold it
-                first = first or exc
-        raise first
-
-    def object_exists(self, content_hash):
-        return any(root.object_exists(content_hash) for root in self._roots)
+#: P13aq: the multi-root reader lives in ``raw_spool`` now, because the
+#: correction and candidate authorities read acquired originals through it too
+#: and "which readers may a Claim be cited from" is a closed question there.
+_AcquisitionSpool = MultiRootRawSpoolReader
 
 
 def acquisition_spool(writer, launcher, source_ref):
@@ -2027,8 +2016,10 @@ class DocumentExtractionService:
         ``commit_policy_candidate`` under the mission document qualitative
         rule.  Every step is idempotent, so a re-run reports duplicates and
         writes nothing new.  A suggestion the policy refuses is reported with
-        its reason and never retried for money.  Public-web sources are gated
-        until they have a citation authority of their own (P9d-17c).
+        its reason and never retried for money.  Every source with a citation
+        authority of its own goes through here -- AlphaEngine (ADR-0005), a
+        fetched page (P9d-17c), and the four acquired originals (P13aq); a
+        source outside that set is gated with a reason rather than attempted.
         """
 
         if not isinstance(actor_ref, str) or not actor_ref.startswith("automation:"):
@@ -2084,10 +2075,29 @@ class DocumentExtractionService:
             (self.writer.coverage_mission.document_review(review_id)["discovered_document_ref"],),
         ).fetchone()
         web = context["source_ref"] in FETCHED_SOURCE_REFS
+        acquired = acquired_source_kind(context["source_ref"])
         launcher = acquisition_ticket_reader(self.writer, context["source_ref"])
         manifest = completed_acquisition_manifest(
             launcher, ticket_ref=row["ticket_ref"], document_ref=context["document_ref"])
-        if web:
+        # What staging reads the acquired bytes back through.  For AlphaEngine
+        # and a fetched page this is the writer's own spool, exactly as before;
+        # for the four acquired sources it is whichever root their child wrote
+        # to, which is the same resolution the reading path already does.
+        staging_spool = acquisition_spool(self.writer, launcher, context["source_ref"])
+        artifact_reader = self.writer._read_transcript_artifact
+        source_manifest = None
+        if acquired is not None:
+            # P13aq: the acquisition manifest and its content-addressed object
+            # are the authority.  Same correction authority, same raw-span
+            # citation, same quote-in-text check -- over an original that is
+            # re-read out of the spool and re-hashed rather than re-fetched,
+            # because a sales note has no provider to ask twice.
+            authority, _ = self.writer._acquired_source_corrections(manifest, staging_spool)
+            source_kind, source_envelope_ref = acquired, None
+            source_manifest = manifest
+            artifact_reader = (
+                lambda artifact: staging_spool.read_object(artifact["artifact_content_hash"]))
+        elif web:
             # ADR-0005 / P9d-17c: the same correction authority over the
             # fetched page; its original is the verified rendering.
             authority, _ = self.writer._public_web_corrections(manifest)
@@ -2146,10 +2156,11 @@ class DocumentExtractionService:
                         subject_ref=subject_ref, metric_or_aspect=suggestion["metric_or_aspect"],
                         period=suggestion["period"], basis=suggestion["basis"],
                         normalized_statement=suggestion["normalized_statement"], actor_ref=actor_ref,
-                        idempotency_key=key, artifact_reader=self.writer._read_transcript_artifact,
+                        idempotency_key=key, artifact_reader=artifact_reader,
                         candidate_evidence_ref=f"candidate-evidence:{source_kind}:" + pair_key,
                         candidate_claim_ref=f"candidate-claim:{source_kind}:" + pair_key,
-                        source_kind=source_kind, source_envelope_ref=source_envelope_ref)
+                        source_kind=source_kind, source_envelope_ref=source_envelope_ref,
+                        source_manifest=source_manifest, spool=staging_spool)
                     bundle = reviewer.candidate_authority_bundle(staged["claim"]["id"])
                     promotion = self.writer.store.commit_policy_candidate(**bundle, idempotency_key="policy-ledger:" + key)
                     entry.update({"status": "duplicate" if promotion.get("status") == "duplicate" else "admitted",
@@ -2190,9 +2201,12 @@ class DocumentExtractionService:
                 "and dismissed, but not staged as candidates yet"
             )
         if context["source_ref"] != ALPHAENGINE_SOURCE_REF:
-            # Same rule, said once for every other source this queue can now
-            # read: a Guidepoint excerpt and a local corpus document have no
-            # citation authority of their own either.
+            # Same rule, said once for every other source this queue can read.
+            # P13aq gave the four acquired sources a citation authority, but
+            # this is the *human* staging entry point and it still binds the
+            # AlphaEngine manifest validator directly; the mission automation
+            # path (``admit_suggestions``) is the one that dispatches on
+            # source.  Widening this one is a separate, human-facing change.
             raise ResearchVerificationError(
                 f"{SOURCE_STAGING_GATE_REASON}: {context['source_ref']} documents can be "
                 "read, drafted from and dismissed, but not staged as candidates yet"

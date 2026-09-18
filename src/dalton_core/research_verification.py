@@ -35,7 +35,6 @@ from .research_coordinator import (
     validate_research_checkpoint,
 )
 from .store import canonical_json, content_hash
-from .transcript_correction import TRANSCRIPT_EVIDENCE_SOURCE_TYPE
 
 
 SCHEMA_VERSION = "0.1"
@@ -74,9 +73,17 @@ TRANSCRIPT_CORE_AUTHORITY_MODE = "transcript_core_authority"
 PUBLIC_WEB_CORE_AUTHORITY_MODE = "public_web_core_authority"
 REGISTERED_ANNUAL_REPORT_AUTHORITY_MODE = "registered_annual_report_authority"
 MISSION_DOCUMENT_AUTHORITY_MODE = "mission_document_research_authority"
+# P13aq: and the same chain again for the four sources the extraction lane
+# could read but never publish from -- a Guidepoint excerpt, a sell-side sales
+# note, a company-wiki page, this fund's own prior research.  Their citable
+# original is the content-addressed object their acquisition manifest declares,
+# re-read out of the spool and re-hashed by that source's own ``verified_*``
+# before a span is admitted.
+ACQUIRED_SOURCE_AUTHORITY_MODE = "acquired_source_core_authority"
 CITED_CORE_AUTHORITY_MODES = frozenset({
     TRANSCRIPT_CORE_AUTHORITY_MODE, PUBLIC_WEB_CORE_AUTHORITY_MODE,
     REGISTERED_ANNUAL_REPORT_AUTHORITY_MODE, MISSION_DOCUMENT_AUTHORITY_MODE,
+    ACQUIRED_SOURCE_AUTHORITY_MODE,
 })
 # ADR-0007: whether a cited original may carry a number into the Ledger.
 #
@@ -233,7 +240,7 @@ _AUTHORITY_PROVENANCE_MODES = frozenset({
     "connector_authority", TRANSCRIPT_CORE_AUTHORITY_MODE,
     PUBLIC_WEB_CORE_AUTHORITY_MODE, REGISTERED_ANNUAL_REPORT_AUTHORITY_MODE,
     MISSION_DOCUMENT_AUTHORITY_MODE, "mission_figure_authority",
-    SEC_STATEMENT_LINE_AUTHORITY_MODE,
+    SEC_STATEMENT_LINE_AUTHORITY_MODE, ACQUIRED_SOURCE_AUTHORITY_MODE,
 })
 PUBLIC_WEB_SOURCE_VERIFIER_REF = "verifier:public-web-core-authority-source:0.1"
 REGISTERED_ANNUAL_REPORT_SOURCE_VERIFIER_REF = (
@@ -272,6 +279,21 @@ PUBLIC_WEB_SOURCE_VERIFIER_HASH = content_hash({
         "persisted-citation-eligibility", "correction-set-lineage",
         "core-source-envelope", "core-invocation-execution", "core-raw-artifact",
         "alphaengine-document-digest-binding", "profile-source-type", "schema",
+        "citation-projection", "time-order",
+    ],
+})
+# P13aq.  Same Core chain as the two above plus the two rules that are the
+# whole point of this mode: the citation binds the exact acquisition manifest,
+# and the object that manifest declares still re-reads and re-hashes to the
+# text the span was taken from.
+ACQUIRED_SOURCE_VERIFIER_REF = "verifier:acquired-source-core-authority-source:0.1"
+ACQUIRED_SOURCE_VERIFIER_HASH = content_hash({
+    "ref": ACQUIRED_SOURCE_VERIFIER_REF,
+    "rules": [
+        "persisted-citation-eligibility", "correction-set-lineage",
+        "core-source-envelope", "core-invocation-execution", "core-raw-artifact",
+        "acquired-document-record-binding", "acquisition-manifest-binding",
+        "acquisition-object-rehash", "profile-source-type", "schema",
         "citation-projection", "time-order",
     ],
 })
@@ -686,6 +708,7 @@ def validate_verification_bundle(value: Mapping[str, Any]) -> dict[str, Any]:
             (MISSION_FIGURE_SOURCE_VERIFIER_REF, MISSION_FIGURE_SOURCE_VERIFIER_HASH),
             (SEC_STATEMENT_LINE_SOURCE_VERIFIER_REF,
              SEC_STATEMENT_LINE_SOURCE_VERIFIER_HASH),
+            (ACQUIRED_SOURCE_VERIFIER_REF, ACQUIRED_SOURCE_VERIFIER_HASH),
         }
         if wire["kind"] == "source"
         else {
@@ -1438,6 +1461,8 @@ def build_candidate_evidence(
             MISSION_DOCUMENT_AUTHORITY_MODE:
                 (MISSION_DOCUMENT_SOURCE_VERIFIER_REF,
                  MISSION_DOCUMENT_SOURCE_VERIFIER_HASH),
+            ACQUIRED_SOURCE_AUTHORITY_MODE:
+                (ACQUIRED_SOURCE_VERIFIER_REF, ACQUIRED_SOURCE_VERIFIER_HASH),
         }[verification_mode]
         if (
             material_wire["schema_version"] != "0.2"
@@ -1814,11 +1839,19 @@ class CandidateStagingStore:
         verification_mode = _text(verification_mode, "verification_mode")
         qualitative = claim_wire["claim_kind"] == "qualitative"
         # ADR-0005 / P9d-17c: a fetched public-web page cited through the
-        # same correction authority is cited evidence too.
+        # same correction authority is cited evidence too.  P13aq adds the four
+        # acquired originals, cited through that same authority over their own
+        # acquisition manifests.
+        # Imported here rather than at module scope: ``transcript_correction``
+        # and the acquired-source table both sit downstream of this module's
+        # own error classes, so a module-level import would be a cycle.
+        from .acquired_source_authority import ACQUIRED_EVIDENCE_SOURCE_TYPES
+        from .transcript_correction import TRANSCRIPT_EVIDENCE_SOURCE_TYPE
         transcript_evidence = (
             verification_mode != MISSION_DOCUMENT_AUTHORITY_MODE
             and evidence_wire["source_type"] in (
-                TRANSCRIPT_EVIDENCE_SOURCE_TYPE, "public_web"
+                {TRANSCRIPT_EVIDENCE_SOURCE_TYPE, "public_web"}
+                | ACQUIRED_EVIDENCE_SOURCE_TYPES
             )
         )
         annual_report_evidence = (
@@ -2067,7 +2100,10 @@ class CandidateStagingStore:
         }]
         if transcript_evidence:
             transcript_shape = (
-                verification_mode in {"connector_authority", TRANSCRIPT_CORE_AUTHORITY_MODE, PUBLIC_WEB_CORE_AUTHORITY_MODE}
+                verification_mode in {
+                    "connector_authority", TRANSCRIPT_CORE_AUTHORITY_MODE,
+                    PUBLIC_WEB_CORE_AUTHORITY_MODE, ACQUIRED_SOURCE_AUTHORITY_MODE,
+                }
                 and material_wire["source_type"] != "recorded_fixture"
                 and len(evidence_wire["artifact_refs"]) == 2
                 and evidence_wire["artifact_refs"][:1] == expected_artifacts
@@ -2322,6 +2358,8 @@ __all__ = [
     "REGISTERED_ANNUAL_REPORT_SOURCE_VERIFIER_HASH",
     "MISSION_DOCUMENT_AUTHORITY_MODE", "MISSION_DOCUMENT_SOURCE_VERIFIER_REF",
     "MISSION_DOCUMENT_SOURCE_VERIFIER_HASH",
+    "ACQUIRED_SOURCE_AUTHORITY_MODE", "ACQUIRED_SOURCE_VERIFIER_REF",
+    "ACQUIRED_SOURCE_VERIFIER_HASH",
     "build_source_verification_material", "build_authority_source_material",
     "validate_source_verification_material",
     "validate_numeric_verification_spec", "validate_verification_bundle",

@@ -21,7 +21,7 @@ from typing import Any
 from .alphaengine_document_acquisition import (
     validate_alphaengine_document_acquisition_manifest,
 )
-from .raw_spool import RawSpool
+from .raw_spool import READABLE_RAW_SPOOLS, RawSpool
 from .store import canonical_json, content_hash
 
 
@@ -33,7 +33,22 @@ TRANSCRIPT_EVIDENCE_SOURCE_TYPE = "authenticated_transcript"
 # hash and the renderer identity is part of what re-verification binds.
 PUBLIC_WEB_EVIDENCE_SOURCE_TYPE = "public_web"
 PUBLIC_WEB_MANIFEST_PREFIX = "public-web-fetch-manifest:"
-CITED_EVIDENCE_SOURCE_TYPES = frozenset({TRANSCRIPT_EVIDENCE_SOURCE_TYPE, PUBLIC_WEB_EVIDENCE_SOURCE_TYPE})
+# P13aq: the four acquired sources that had no citation authority of their own
+# until now -- a Guidepoint excerpt, a sell-side sales note, a company-wiki
+# page and this fund's own prior research.  Their originals are cited exactly
+# the way a fetched page is: the acquisition manifest and the content-addressed
+# object it declares are the authority, the bytes are re-read and re-hashed
+# here before any span is admitted, and the span's own hash is checked against
+# the text that came back.  ``acquired_source_authority`` holds the table.
+from .acquired_source_authority import (  # noqa: E402 - closed vocabulary, no cycle
+    ACQUIRED_EVIDENCE_SOURCE_TYPES,
+    ACQUIRED_SOURCE_KIND_BY_EVIDENCE_TYPE,
+    is_acquired_source_manifest_ref,
+)
+
+CITED_EVIDENCE_SOURCE_TYPES = frozenset(
+    {TRANSCRIPT_EVIDENCE_SOURCE_TYPE, PUBLIC_WEB_EVIDENCE_SOURCE_TYPE}
+) | ACQUIRED_EVIDENCE_SOURCE_TYPES
 _SCHEMA_PATH = Path(__file__).with_name("transcript_correction_schema.sql")
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _HUMAN_RE = re.compile(r"^human:[A-Za-z0-9][A-Za-z0-9._/@:-]*$")
@@ -407,6 +422,14 @@ def bind_candidate_evidence_to_transcript_citation(
     if source_type not in CITED_EVIDENCE_SOURCE_TYPES:
         raise TranscriptCorrectionValidationError("cited evidence source type is closed")
     evidence_wire = validate_candidate_evidence(evidence)
+    acquired = ACQUIRED_SOURCE_KIND_BY_EVIDENCE_TYPE.get(source_type)
+    if acquired is not None and evidence_wire["source_ref"] != acquired["source_ref"]:
+        # P13aq: the label says what the cited original is, so it may not be
+        # put on material from another source.  A wiki page relabelled as an
+        # expert call would rank as one in the claim index.
+        raise TranscriptCorrectionValidationError(
+            "cited evidence source type does not match the acquired source it names"
+        )
     binding = validate_transcript_claim_citation_binding(citation_binding)
     if not binding["claim_eligible"]:
         raise TranscriptCorrectionConflict(
@@ -456,8 +479,14 @@ class TranscriptCorrectionAuthority:
     ) -> None:
         if not hasattr(store, "connection") or not hasattr(store, "_transaction"):
             raise TypeError("TranscriptCorrectionAuthority requires a DaltonStore")
-        if not isinstance(spool, RawSpool):
-            raise TypeError("TranscriptCorrectionAuthority requires a RawSpool")
+        if not isinstance(spool, READABLE_RAW_SPOOLS):
+            # P13aq widens this to the read-only spool readers: the feed and
+            # Guidepoint children write into their own root and the reading
+            # side has to follow the bytes there.  Not a weakening -- every
+            # object read through any of these is re-hashed against the
+            # manifest that named it before a word of it is quoted -- and the
+            # AlphaEngine and public-web callers still hand in a RawSpool.
+            raise TypeError("TranscriptCorrectionAuthority requires a readable raw spool")
         if not callable(manifest_resolver) or not callable(evidence_resolver):
             raise TypeError("correction resolvers must be callable")
         self.store = store
@@ -573,6 +602,9 @@ class TranscriptCorrectionAuthority:
     ) -> tuple[dict[str, Any], str]:
         if source_manifest_ref.startswith(PUBLIC_WEB_MANIFEST_PREFIX):
             return self._web_source(source_manifest_ref, source_manifest_hash, source_content_hash)
+        if is_acquired_source_manifest_ref(source_manifest_ref):
+            return self._acquired_source(
+                source_manifest_ref, source_manifest_hash, source_content_hash)
         try:
             manifest = validate_alphaengine_document_acquisition_manifest(
                 self.manifest_resolver(source_manifest_ref)
@@ -644,6 +676,55 @@ class TranscriptCorrectionAuthority:
             # A renderer change or drifted bytes changes the hash: fail closed
             # rather than cite text the reviewer never saw.
             raise TranscriptCorrectionConflict("correction source rendering drifted")
+        return manifest, original
+
+    def _acquired_source(
+        self,
+        source_manifest_ref: str,
+        source_manifest_hash: str,
+        source_content_hash: str,
+    ) -> tuple[dict[str, Any], str]:
+        """P13aq: a Guidepoint excerpt, a sales note, a wiki page, prior work.
+
+        The manifest is the authority and the object it declares is the
+        original.  Nothing the manifest asserts about its own text is believed:
+        the bytes come back out of the content-addressed spool the acquisition
+        child wrote them to and are re-hashed, and a prior-research manifest
+        additionally re-renders the original file and compares.  A hash that
+        moved is a refusal here rather than a quote of text nobody acquired.
+        """
+
+        from .acquired_source_authority import verified_acquired_source
+        from .connector import ConnectorStore
+        from .connector_authority_port import ConnectorCompletionReceiptReader
+        from .observability import ObservabilityStore
+
+        try:
+            manifest = self.manifest_resolver(source_manifest_ref)
+        except Exception as exc:  # noqa: BLE001 - re-raised as a closed refusal
+            raise TranscriptCorrectionNotFound(
+                f"source manifest {source_manifest_ref} is unavailable or invalid"
+            ) from exc
+        if not isinstance(manifest, Mapping) or manifest.get("id") != source_manifest_ref:
+            raise TranscriptCorrectionNotFound(
+                f"source manifest {source_manifest_ref} is unavailable or invalid"
+            )
+        if manifest.get("content_hash") != source_manifest_hash:
+            raise TranscriptCorrectionConflict(
+                "correction source is not exact complete authority"
+            )
+        reader = ConnectorCompletionReceiptReader(
+            connectors=ConnectorStore(self.store), observability=ObservabilityStore(self.store)
+        )
+        try:
+            manifest, original, _entry = verified_acquired_source(
+                self.store, self.spool, manifest, reader)
+        except Exception as exc:  # noqa: BLE001 - one closed refusal for the caller
+            raise TranscriptCorrectionConflict(
+                f"acquired original could not be re-verified: {exc}"
+            ) from exc
+        if not original or hashlib.sha256(original.encode("utf-8")).hexdigest() != source_content_hash:
+            raise TranscriptCorrectionConflict("correction source bytes drifted")
         return manifest, original
 
     def _evidence_binding(self, value: Any, name: str) -> dict[str, str]:

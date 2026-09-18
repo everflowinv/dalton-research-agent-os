@@ -1810,7 +1810,33 @@ class DaltonStore:
                         and source_doc.get("source_record_refs") == [document_ref]
                         and source_doc.get("raw_response_hash") == artifact["artifact_content_hash"]
                     )
-                    if not (alphaengine_document_binding or direct_raw_binding or public_web_binding):
+                    # P13aq: an acquired Guidepoint excerpt, sales note, wiki
+                    # page or prior-research document cites the
+                    # content-addressed object its acquisition declared, not
+                    # the connector's raw response: the note is markdown, the
+                    # raw response is the host tool's JSON around it.  So the
+                    # envelope has to be the acquisition of this document and
+                    # the raw artifact has to be that envelope's own bytes --
+                    # which is exactly the public-web shape, generalised.  The
+                    # citation's own hash was checked against the re-read,
+                    # re-hashed object by the correction authority when the
+                    # span was admitted and again by the candidate resolver.
+                    from .acquired_source_authority import (
+                        acquired_source_binding_is_exact,
+                    )
+                    acquired_source_binding = (
+                        acquired_source_binding_is_exact(
+                            evidence_source_type=evidence_wire["source_type"],
+                            source_record_refs=source_doc.get("source_record_refs"),
+                            document_ref=document_ref,
+                            source=source_doc.get("source"),
+                            operation=source_doc.get("operation"),
+                        )
+                        and source_doc.get("raw_response_hash")
+                        == artifact["artifact_content_hash"]
+                    )
+                    if not (alphaengine_document_binding or direct_raw_binding
+                            or public_web_binding or acquired_source_binding):
                         raise GateRejected(
                             "transcript citation does not bind the exact raw ArtifactVersion"
                         )

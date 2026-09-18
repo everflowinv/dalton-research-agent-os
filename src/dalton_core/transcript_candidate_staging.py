@@ -29,7 +29,15 @@ import sqlite3
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from .acquired_source_authority import (
+    ACQUIRED_SOURCE_KINDS,
+    acquisition_object_hash,
+    verified_acquired_source,
+)
 from .research_verification import (
+    ACQUIRED_SOURCE_AUTHORITY_MODE,
+    ACQUIRED_SOURCE_VERIFIER_HASH,
+    ACQUIRED_SOURCE_VERIFIER_REF,
     PUBLIC_WEB_CORE_AUTHORITY_MODE,
     PUBLIC_WEB_SOURCE_VERIFIER_HASH,
     PUBLIC_WEB_SOURCE_VERIFIER_REF,
@@ -79,6 +87,42 @@ SOURCE_KINDS: dict[str, dict[str, Any]] = {
         "operation": PUBLIC_WEB_FETCH_OPERATION, "material_prefix": "source-material:public-web-core:",
         "bundle_prefix": "verification-bundle:public-web-core-source:",
         "candidate_prefix": "public-web", "evidence_source_type": PUBLIC_WEB_EVIDENCE_SOURCE_TYPE,
+        "record_binding": "exact",
+    },
+    # P13aq: the four acquired sources.  Same Core chain -- envelope,
+    # invocation, profile, raw artifact -- plus the acquisition manifest and
+    # the content-addressed object it declares, which is what makes a local
+    # corpus document citable at all.  Their table lives in
+    # ``acquired_source_authority`` so the correction authority, the
+    # auto-commit rule and the Ledger writer read the same one.
+    **{
+        kind: {
+            "document_prefix": entry["document_prefix"],
+            "source_ref": entry["source_ref"],
+            "operation": entry["operation"],
+            "material_prefix": entry["material_prefix"],
+            "bundle_prefix": entry["bundle_prefix"],
+            "candidate_prefix": entry["candidate_prefix"],
+            "evidence_source_type": entry["evidence_source_type"],
+            "record_binding": entry["record_binding"],
+            "acquired": True,
+        }
+        for kind, entry in ACQUIRED_SOURCE_KINDS.items()
+    },
+}
+#: Which closed verification mode and deterministic verifier each kind travels
+#: under.  A table rather than a conditional so that adding a kind without
+#: deciding this is a KeyError at construction, not a silent reuse of another
+#: source's verifier.
+SOURCE_KIND_MODES: dict[str, tuple[str, tuple[str, str]]] = {
+    "alphaengine": (TRANSCRIPT_CORE_AUTHORITY_MODE,
+                    (TRANSCRIPT_SOURCE_VERIFIER_REF, TRANSCRIPT_SOURCE_VERIFIER_HASH)),
+    "public_web": (PUBLIC_WEB_CORE_AUTHORITY_MODE,
+                   (PUBLIC_WEB_SOURCE_VERIFIER_REF, PUBLIC_WEB_SOURCE_VERIFIER_HASH)),
+    **{
+        kind: (ACQUIRED_SOURCE_AUTHORITY_MODE,
+               (ACQUIRED_SOURCE_VERIFIER_REF, ACQUIRED_SOURCE_VERIFIER_HASH))
+        for kind in ACQUIRED_SOURCE_KINDS
     },
 }
 
@@ -138,6 +182,8 @@ class TranscriptCoreAuthorityResolver:
         *,
         artifact_reader: Callable[[Mapping[str, Any]], bytes] | None = None,
         source_kind: str = "alphaengine",
+        source_manifest: Mapping[str, Any] | None = None,
+        spool: Any | None = None,
     ) -> None:
         connection = getattr(core, "connection", None)
         if not isinstance(connection, sqlite3.Connection):
@@ -145,18 +191,25 @@ class TranscriptCoreAuthorityResolver:
         if artifact_reader is not None and not callable(artifact_reader):
             raise TypeError("artifact_reader must be callable")
         if source_kind not in SOURCE_KINDS:
-            raise TypeError("source_kind must be alphaengine or public_web")
+            raise TypeError("source_kind is not one of " + ", ".join(sorted(SOURCE_KINDS)))
+        self.core = core
         self.connection = connection
         self.artifact_reader = artifact_reader
         self.source_kind = source_kind
         self.kind = SOURCE_KINDS[source_kind]
-        self.provenance_mode = (
-            TRANSCRIPT_CORE_AUTHORITY_MODE if source_kind == "alphaengine" else PUBLIC_WEB_CORE_AUTHORITY_MODE
-        )
-        self.verifier = (
-            (TRANSCRIPT_SOURCE_VERIFIER_REF, TRANSCRIPT_SOURCE_VERIFIER_HASH) if source_kind == "alphaengine"
-            else (PUBLIC_WEB_SOURCE_VERIFIER_REF, PUBLIC_WEB_SOURCE_VERIFIER_HASH)
-        )
+        self.provenance_mode, self.verifier = SOURCE_KIND_MODES[source_kind]
+        # P13aq: an acquired original is cited against its own acquisition, so
+        # the manifest and the spool that holds its bytes are not optional for
+        # these kinds.  Refused at construction rather than producing a bundle
+        # that verified everything except the thing being quoted.
+        self.acquired = bool(self.kind.get("acquired"))
+        if self.acquired and (source_manifest is None or spool is None):
+            raise TranscriptCoreAuthorityError(
+                f"{source_kind} candidates require their acquisition manifest and "
+                "the spool its bytes were written to"
+            )
+        self.source_manifest = source_manifest
+        self.spool = spool
 
     # -- Core reads -------------------------------------------------------
 
@@ -272,11 +325,19 @@ class TranscriptCoreAuthorityResolver:
 
         binding, correction_set = self.citation(citation_ref)
         if source_envelope_ref is None:
-            if self.source_kind != "alphaengine":
+            if self.acquired:
+                # The acquisition itself names the envelope (Guidepoint) or the
+                # invocation Core holds exactly one envelope for (the corpora).
+                from .acquired_source_authority import acquisition_source_envelope_ref
+
+                source_envelope_ref = acquisition_source_envelope_ref(
+                    self.connection, self.source_manifest)
+            elif self.source_kind != "alphaengine":
                 raise TranscriptCoreAuthorityError("a fetched page's SourceEnvelope must be named explicitly")
-            source_envelope_ref = self.locate_source_envelope(
-                correction_set["document_ref"], binding["source_content_hash"]
-            )
+            else:
+                source_envelope_ref = self.locate_source_envelope(
+                    correction_set["document_ref"], binding["source_content_hash"]
+                )
         authority = self._authority(_text(source_envelope_ref, "source_envelope_ref"))
         source = authority["source"]
         artifact = authority["artifact"]
@@ -321,6 +382,45 @@ class TranscriptCoreAuthorityResolver:
         base["content_hash"] = content_hash(base)
         return validate_source_verification_material(base)
 
+    # -- the acquisition an acquired original is cited against ------------
+
+    def _check_acquisition(self, check: Callable[..., None], binding: Mapping[str, Any],
+                           document_ref: str) -> None:
+        """P13aq: the manifest is exact and its object still is the text.
+
+        Three findings, in the order a reader would ask them: is this the
+        acquisition the citation was taken against, is it an acquisition of
+        *this* document, and do the bytes it declared still come back out of
+        the spool and hash to the text the span was cut from.  The last one is
+        the reason this mode exists: a local corpus document has no provider to
+        re-ask, so the content-addressed object is the only original there is.
+        """
+
+        manifest = self.source_manifest
+        check("acquisition_manifest_binding",
+              (manifest.get("id"), manifest.get("content_hash")),
+              (binding["source_manifest_ref"], binding["source_manifest_hash"]),
+              "material.acquisition_manifest",
+              "the citation binds this exact acquisition manifest")
+        check("acquisition_document", manifest.get("document_ref"), document_ref,
+              "material.acquisition_document",
+              "the acquisition is an acquisition of the cited document")
+        from .connector import ConnectorStore
+        from .connector_authority_port import ConnectorCompletionReceiptReader
+        from .observability import ObservabilityStore
+
+        reader = ConnectorCompletionReceiptReader(
+            connectors=ConnectorStore(self.core), observability=ObservabilityStore(self.core)
+        )
+        verified, text, _entry = verified_acquired_source(
+            self.core, self.spool, manifest, reader)
+        check("acquisition_object_rehash",
+              (_sha256_bytes(text.encode("utf-8"), "acquired original"),
+               acquisition_object_hash(verified)),
+              (binding["source_content_hash"], binding["source_content_hash"]),
+              "acquisition.object",
+              "the acquired object still re-reads and re-hashes to the cited original")
+
     # -- deterministic verifier -------------------------------------------
 
     def verify_source_material(self, material: Mapping[str, Any]) -> dict[str, Any]:
@@ -364,7 +464,22 @@ class TranscriptCoreAuthorityResolver:
             check("source_is_cited_original", (source["source"], source["operation"]),
                   (self.kind["source_ref"], self.kind["operation"]), "source.operation",
                   f"SourceEnvelope is a {self.source_kind} original")
-            if self.source_kind == "alphaengine":
+            if self.acquired:
+                # P13aq.  A one-document read named exactly this document; a
+                # Guidepoint search named the page of excerpts the acquisition
+                # derived this one from, and the manifest's ordinal was already
+                # checked against those same bytes by verified_guidepoint_source.
+                refs = source["source_record_refs"]
+                if self.kind["record_binding"] == "member":
+                    check("source_record_binds_acquired_document",
+                          document_ref in refs, True, "source.source_record_refs",
+                          "the acquisition's SourceEnvelope returned the cited document")
+                else:
+                    check("source_record_binds_acquired_document", refs, [document_ref],
+                          "source.source_record_refs",
+                          "the acquisition's SourceEnvelope is exactly this document")
+                self._check_acquisition(check, binding, document_ref)
+            elif self.source_kind == "alphaengine":
                 check("source_record_binds_document_digest", source["source_record_refs"],
                       [f"{document_ref}:sha256:{binding['source_content_hash']}"],
                       "source.source_record_refs",
@@ -551,6 +666,8 @@ def stage_transcript_qualitative_candidate(
     source_envelope_ref: str | None = None,
     artifact_reader: Callable[[Mapping[str, Any]], bytes] | None = None,
     source_kind: str = "alphaengine",
+    source_manifest: Mapping[str, Any] | None = None,
+    spool: Any | None = None,
 ) -> dict[str, Any]:
     """Read Core, build the qualitative candidate pair and stage it.
 
@@ -561,7 +678,9 @@ def stage_transcript_qualitative_candidate(
     them to the Cockpit without re-reading.
     """
 
-    resolver = TranscriptCoreAuthorityResolver(core, artifact_reader=artifact_reader, source_kind=source_kind)
+    resolver = TranscriptCoreAuthorityResolver(
+        core, artifact_reader=artifact_reader, source_kind=source_kind,
+        source_manifest=source_manifest, spool=spool)
     kind = SOURCE_KINDS[source_kind]
     binding, _correction_set = resolver.citation(citation_ref)
     if binding["correction_set_version_ref"] != _text(correction_set_ref, "correction_set_ref"):

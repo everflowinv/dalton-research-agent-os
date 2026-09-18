@@ -76,6 +76,86 @@ from tests.test_s1_human_feeds import (
 )
 
 
+def sign_document_qualitative_rule(core, *, version: int = 2) -> str:
+    """List the mission document qualitative rule in the active policy.
+
+    The same thing ``workspace_mission_setup.prepare_first_mission_bindings``
+    does for a new workspace and ``scripts/sign_auto_commit_rules.py`` does for
+    an existing one; a fixture Core boots without it.
+    """
+
+    from dalton_core.research_auto_commit import DOCUMENT_QUALITATIVE_RULE_REF
+    from tests.test_document_extraction import OWNER
+
+    core.create_policy(
+        {**core.active_policy_version().policy,
+         "research_candidate_auto_commit": {
+             "enabled": True, "max_records": 20,
+             "rules": [DOCUMENT_QUALITATIVE_RULE_REF]}},
+        policy_version_id=f"policy:synthetic-document-qualitative:{version}",
+        actor_ref=OWNER,
+        change_reason="ADR-0005 fixture: list the mission document qualitative rule",
+    )
+    return DOCUMENT_QUALITATIVE_RULE_REF
+
+
+def run_hermetic_sweep(case, *, state, root, quote_id, normalized_statement,
+                       metric_or_aspect, basis, period="not specified in this window",
+                       max_windows=4, spool_dir=None):
+    """One real extraction run against a hermetic model fixture.
+
+    Everything the child needs -- router, model config, budget -- with the one
+    suggestion the fixture returns supplied by the caller.  Shared so the
+    reading cases and the P13aq claim cases drive exactly the same sweep.
+    """
+
+    from datetime import datetime, timezone
+
+    from dalton_core.document_extraction_cli import run_extraction
+    from dalton_core.model_router import ModelRouter
+    from tests.test_transcript_polish_model_worker import policy, profile
+
+    pr = profile()
+    pr["provider"] = "hermetic-fixture"
+    pr["cost"]["input_per_million_usd"] = pr["cost"]["output_per_million_usd"] = 0
+    now = datetime.now(timezone.utc)
+    pr["availability"]["checked_at"] = now.isoformat()
+    pr["availability"]["valid_until"] = (now + timedelta(days=2)).isoformat()
+    if not (root / "router.sqlite").exists():
+        with ModelRouter(str(root / "router.sqlite")) as router:
+            router.register_profile(pr)
+            router.register_policy(policy())
+    config_path = root / "extraction-model-config.json"
+    config_path.write_text(json.dumps({
+        "routing_policy_ref": policy()["policy_version_ref"],
+        "credential_slot_refs": [profile()["credential_slot_ref"]],
+        "model_router_db": str(root / "router.sqlite"),
+        "broker_socket": str(root / "none.sock"),
+        "broker_auth_key": str(root / "none.key"),
+        "broker_client_id": "client:dalton-core", "expected_agent_id": "chem",
+        "budget_db": str(root / "budget.sqlite"),
+        "budget_policy_ref": "thesis-impact-day-budget-policy:production:1",
+    }), encoding="utf-8")
+    fixture = root / "fixture.json"
+    fixture.write_text(json.dumps({"schema_version": "0.1", "suggestions": [{
+        "quote_id": quote_id,
+        "normalized_statement": normalized_statement,
+        "metric_or_aspect": metric_or_aspect,
+        "period": period,
+        "basis": basis,
+    }]}), encoding="utf-8")
+    return run_extraction(
+        state_dir=state, model_config_path=config_path,
+        summary_dir=root / "extraction-summary",
+        spool_dir=(state / "spool") if spool_dir is None else spool_dir,
+        scheduler_db=root / "scheduler.sqlite",
+        connector_governance=None, web_fetch_governance=None,
+        max_windows=max_windows, max_numeric_windows=0, max_discovery_windows=0,
+        requested_by=None, hermetic_fixture=fixture,
+        candidate_staging=root / "staging.sqlite",
+    )
+
+
 class FeedReadingHarness(unittest.TestCase):
     """One feed lane, one tick, and everything in one state directory.
 
@@ -278,50 +358,18 @@ class SalesNotesReadingTests(FeedReadingHarness):
                       str(caught.exception))
 
     def test_the_sweep_reads_the_note_and_closes_its_review(self) -> None:
-        from datetime import datetime, timezone
-
-        from dalton_core.document_extraction_cli import run_extraction
-        from dalton_core.model_router import ModelRouter
-        from tests.test_transcript_polish_model_worker import policy, profile
-
         review = self.review(ACN_NOTE)
         context = self.view(review)["context"]
-        pr = profile()
-        pr["provider"] = "hermetic-fixture"
-        pr["cost"]["input_per_million_usd"] = pr["cost"]["output_per_million_usd"] = 0
-        now = datetime.now(timezone.utc)
-        pr["availability"]["checked_at"] = now.isoformat()
-        pr["availability"]["valid_until"] = (now + timedelta(days=2)).isoformat()
-        with ModelRouter(str(self.root / "router.sqlite")) as router:
-            router.register_profile(pr)
-            router.register_policy(policy())
-        config_path = self.root / "extraction-model-config.json"
-        config_path.write_text(json.dumps({
-            "routing_policy_ref": policy()["policy_version_ref"],
-            "credential_slot_refs": [profile()["credential_slot_ref"]],
-            "model_router_db": str(self.root / "router.sqlite"),
-            "broker_socket": str(self.root / "none.sock"),
-            "broker_auth_key": str(self.root / "none.key"),
-            "broker_client_id": "client:dalton-core", "expected_agent_id": "chem",
-            "budget_db": str(self.root / "budget.sqlite"),
-            "budget_policy_ref": "thesis-impact-day-budget-policy:production:1",
-        }), encoding="utf-8")
-        fixture = self.root / "fixture.json"
-        fixture.write_text(json.dumps({"schema_version": "0.1", "suggestions": [{
-            "quote_id": context["quotes"][0]["quote_id"],
-            "normalized_statement": "The note described cautious client decisions.",
-            "metric_or_aspect": "aspect:client-decisions",
-            "period": "not specified in this window",
-            "basis": "fixture sell-side commentary",
-        }]}), encoding="utf-8")
-        summary = run_extraction(
-            state_dir=self.state, model_config_path=config_path,
-            summary_dir=self.root / "extraction-summary",
-            spool_dir=self.state / "spool", scheduler_db=self.root / "scheduler.sqlite",
-            connector_governance=None, web_fetch_governance=None,
-            max_windows=4, max_numeric_windows=0, max_discovery_windows=0,
-            requested_by=None, hermetic_fixture=fixture,
-            candidate_staging=self.root / "staging.sqlite",
+        # P13aq: the sales note now has a citation authority of its own, so the
+        # end of this sweep is a Claim rather than a dismissal.  Sign the rule
+        # the workspace's own first mission signs, or the review is held on the
+        # policy exactly as an AlphaEngine document would be.
+        sign_document_qualitative_rule(self.core)
+        summary = run_hermetic_sweep(
+            self, state=self.state, root=self.root, quote_id=context["quotes"][0]["quote_id"],
+            normalized_statement="The note described cautious client decisions.",
+            metric_or_aspect="aspect:client-decisions",
+            basis="fixture sell-side commentary",
         )
         # The queue reaches the note: nothing is refused at the door any more.
         self.assertEqual(
@@ -332,15 +380,11 @@ class SalesNotesReadingTests(FeedReadingHarness):
                    if item.get("source_ref") == SALES_NOTES]
         self.assertTrue(drafted, summary["drafted"])
         self.assertEqual({item["status"] for item in drafted}, {"succeeded"})
-        # Read and closed: a source with no citation authority is not staged,
-        # and is not left open to be paid for again every five minutes either.
         resolved = {item["review_id"]: item for item in summary["resolved_reviews"]}
         self.assertTrue(resolved, summary)
-        for item in resolved.values():
-            self.assertEqual(item["status"], "dismissed", item)
-            self.assertIn(SOURCE_STAGING_GATE_REASON, item.get("reason", ""))
-        self.assertEqual(summary["formal_authority_writes"], 0)
-        self.assertEqual(summary["admitted"], [])
+        self.assertNotIn(
+            SOURCE_STAGING_GATE_REASON,
+            "".join(str(item.get("reason", "")) for item in resolved.values()))
         # And the number the cockpit calls "read" moves, which is the whole
         # point: the document was read to the end and proved window by window.
         proofs = self.core.connection.execute(

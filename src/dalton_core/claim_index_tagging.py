@@ -146,6 +146,12 @@ SPEC_IMPORTANCE: Mapping[str, str] = {
     # and below management, and it is the one tier that can be downgraded for
     # age -- see ``STALE_AFTER_DAYS``.
     "prior-research": "internal_prior",
+    # P13aq: the sales-notes lane files its documents under the singular
+    # ``sales-note`` (``mission_feed_lane.SALE_NOTE_SPEC_REF``); the plural
+    # above is the AlphaEngine broker-research search.  Both are a broker
+    # writing, and until these documents could produce Claims at all nothing
+    # noticed that only one of the two spellings was listed.
+    "sales-note": "sell_side",
 }
 
 # The fallback when the provenance chain does not reach a discovery spec --
@@ -157,6 +163,22 @@ SOURCE_TYPE_IMPORTANCE: Mapping[str, str] = {
     "official_filing": "filing",
     "authenticated_transcript": "management_statement",
     "public_web": "news",
+    # P13aq: the four acquired sources that can now produce Claims.  Unlike
+    # the three above, these types say exactly what the document is, so they
+    # are the primary answer here rather than a weak fallback -- a sales note
+    # is a broker writing whatever search found it, and a wiki page is ours.
+    #
+    # ``expert_network`` is ``other`` rather than a tier of its own: the ladder
+    # in ``claim_index_authority`` has no ``expert`` rung, and inventing one
+    # would re-rank every claim in the index for a question nobody has asked
+    # the owner yet.  ``document_provenance.TIER_EXPERT`` already sorts expert
+    # material for reading order; this is the weight a *Claim* carries, and
+    # "we do not rank a paid expert call against management" is the honest
+    # answer until it is decided.
+    "sell_side_note": "sell_side",
+    "expert_network": "other",
+    "internal_wiki": "internal_prior",
+    "internal_prior_research": "internal_prior",
 }
 
 
