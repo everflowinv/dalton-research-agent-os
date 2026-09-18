@@ -1,4 +1,4 @@
-# 2026-09-18 部署 runbook（源码 916e462e）
+# 2026-09-18 部署 runbook（源码 3f8b23c9）
 
 本批内容见 `docs/PROJECT_STATUS.md` 顶部各条（新环境自动采用方案、文档研究自动重试扩展、来源信封冲突、结论索引宽松解析、交付物修复与冷却、车道变化键与僵尸回收）。
 
@@ -10,7 +10,7 @@ cd ~/Projects/dalton-research-agent-os
 ```zsh
 .venv/bin/python scripts/build_release.py --apply | tee /tmp/dalton-build-20260918b.json
 NEW=$(python3 -c "import json;print(json.load(open('/tmp/dalton-build-20260918b.json'))['release_hash'])"); echo $NEW
-.venv/bin/python scripts/release_switch.py ~/.dalton/runtime/releases/$NEW --source-commit 916e462e564c33ff719bfb6cf41ccae17df83962 --apply
+.venv/bin/python scripts/release_switch.py ~/.dalton/runtime/releases/$NEW --source-commit 3f8b23c943811f8a8b08a6761983ea9741960b7a --apply
 ```
 
 ## 2. 现有 Hyperscaler 环境补齐凭证槽（新建环境已自动处理；这一步要停它的服务）
