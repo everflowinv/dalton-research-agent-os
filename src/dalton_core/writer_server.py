@@ -738,6 +738,7 @@ HUMAN_GOVERNANCE_OPERATIONS = frozenset({
     "mission_source_discoveries", "mission_discovered_documents",
     "mission_document_reviews", "resolve_mission_document_review",
     "reopen_mission_document_review",
+    "authorize_mission_document_reentry",
     "mission_stage_checklist", "claim_retirement_challenges", "decide_claim_retirement",
     "mission_deliverables",
     "mission_document_evidence", "generate_document_extraction", "stage_document_extraction",
@@ -1190,6 +1191,7 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     "reopen_mission_document_review": frozenset({
         "review_id", "expected_review_hash", "decision_ref", "failed_windows", "actor_ref",
     }),
+    "authorize_mission_document_reentry": frozenset({"admission_ref", "actor_ref"}),
 
     "forecast_reconciliations": frozenset({
         "company_ref", "claim_version_ref", "forecast_line_ref", "created_from", "created_to",
@@ -1401,6 +1403,7 @@ OPERATION_ACTOR_FIELDS: dict[str, str] = {
     "publish_first_workspace_mission": "actor_ref",
     "resolve_mission_document_review": "actor_ref",
     "reopen_mission_document_review": "actor_ref",
+    "authorize_mission_document_reentry": "actor_ref",
     "mission_document_evidence": "actor_ref",
     "document_extraction_preflight": "actor_ref",
     "generate_document_extraction": "actor_ref",
@@ -5626,6 +5629,16 @@ class WriterServer:
             failed_windows=values["failed_windows"],
             formal_reader=FailedDocumentWindowReader(self._scheduler),
         )
+
+    def _op_authorize_mission_document_reentry(self, p: Mapping[str, Any]) -> Any:
+        # The owner's door for a document-research admission whose controlled
+        # re-entry the lane has already tried and given up on.  It writes a
+        # one-shot grant in the lane's own ticket directory, which is writer
+        # state, so it has to happen here rather than in whatever process the
+        # owner typed the command into.
+        from .mission_document_research_lane import authorize_reentry
+
+        return authorize_reentry(self, dict(p))
 
     def _op_bounded_alphaengine_probe(self, p: Mapping[str, Any]) -> Any:
         # Executes in the writer: the acquisition subprocess writes Core

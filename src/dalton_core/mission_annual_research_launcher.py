@@ -178,6 +178,8 @@ class MissionAnnualResearchLauncher(LaneChildLauncher):
                 )
             rebound_from = prior_ticket_ref
             prior_ticket_ref = expected
+        reentry = self._controlled_reentry_plan(
+            rebound_from or prior_ticket_ref, authorization, admission_ref)
         if rebound_from is not None and not self._ticket_path(
             prior_ticket_ref
         ).is_file():
@@ -187,7 +189,8 @@ class MissionAnnualResearchLauncher(LaneChildLauncher):
             # summary and log stays where the prior run is -- and then start
             # the new identity as a fresh run.  Claiming it there is also what
             # makes the rebinding automatic exactly once.
-            self.claim_controlled_reentry(rebound_from, authorization)
+            if reentry is not None:
+                self.claim_controlled_reentry(rebound_from, authorization)
             ticket = self.spawn(
                 digest=digest,
                 record={**record, "rebound_from_ticket_ref": rebound_from},
@@ -211,7 +214,8 @@ class MissionAnnualResearchLauncher(LaneChildLauncher):
             digest=digest,
             record=record if rebound_from is None else {
                 **record, "rebound_from_ticket_ref": rebound_from},
-            _controlled_reentry=(prior_ticket_ref, authorization),
+            _controlled_reentry=(
+                None if reentry is None else (prior_ticket_ref, authorization)),
             admission_ref=admission_ref,
             admission_hash=admission_hash,
             configuration=configuration,
@@ -219,6 +223,62 @@ class MissionAnnualResearchLauncher(LaneChildLauncher):
         if rebound_from is None:
             return ticket
         return {**ticket, "rebound_from_ticket_ref": rebound_from}
+
+    def controlled_reentry_consumed(self, ticket_ref: str, authorization: str) -> bool:
+        """Whether this authorization's claim ever actually started a child.
+
+        ``controlled_reentry_claimed`` answers "was the marker taken", which is
+        the right question for the marker's own uniqueness and the wrong one
+        for "has this admission had its automatic attempt".
+        """
+
+        from .lane_reentry_claim import claim_consumed
+
+        return claim_consumed(self, ticket_ref, authorization)
+
+    def _controlled_reentry_plan(self, claim_ticket_ref: str, authorization: str,
+                                 admission_ref: str) -> str | None:
+        """Decide what the one-shot marker for this authorization still allows.
+
+        ``"claim"`` -- nothing has been claimed; take the marker as usual.
+        ``None`` -- the marker exists but nothing ever ran under it (or the
+        owner has granted one more), so complete that attempt instead of
+        re-claiming a name that is already taken.  Otherwise the attempt has
+        really happened and this refuses, exactly as it always did.
+        """
+
+        from .lane_reentry_claim import (
+            claim_consumed, consume_grant, marker, read_claim,
+        )
+
+        if read_claim(self, claim_ticket_ref, authorization) is None:
+            return "claim"
+        if not claim_consumed(self, claim_ticket_ref, authorization):
+            # Claimed by an attempt that was refused before any child existed.
+            # That bought nothing; this admission still has its one attempt.
+            return None
+        if consume_grant(self, admission_ref, marker(authorization)) is None:
+            raise LaneChildRejected("controlled reentry was already attempted")
+        return None
+
+    def authorize_controlled_reentry(self, admission_ref: str, *, actor_ref: str,
+                                     granted_at: str) -> dict[str, Any]:
+        """Record one owner grant of one further controlled re-entry."""
+
+        from .lane_reentry_claim import write_grant
+
+        if not isinstance(actor_ref, str) or not actor_ref.startswith("human:"):
+            raise LaneChildRejected("a controlled re-entry grant needs a human actor")
+        if not isinstance(admission_ref, str) or not admission_ref.startswith(
+            "mission-annual-research-admission:"
+        ):
+            raise LaneChildRejected(
+                "admission_ref is not a mission annual admission")
+        try:
+            return write_grant(self, admission_ref, actor_ref=actor_ref,
+                               granted_at=granted_at)
+        except ValueError as exc:
+            raise LaneChildRejected(str(exc)) from exc
 
     def status(self, ticket_ref: str) -> dict[str, Any]:
         ticket = super().status(ticket_ref)

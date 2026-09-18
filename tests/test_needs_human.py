@@ -165,6 +165,95 @@ class LaneTests(unittest.TestCase):
         self.assertIn("自动重试过一次", items[0]["title"])
         self.assertIn("自动改绑", items[0]["why_blocked"])
 
+    def _ledger(self, root, holds):
+        directory = Path(root) / "mission-document-research-runs"
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "holds.json").write_text(
+            json.dumps({"schema_version": "0.1", "holds": holds}), encoding="utf-8")
+        return directory / "holds.json"
+
+    def test_an_escalated_hold_is_listed_even_when_the_tick_resumed_another(self):
+        """The live gap: the ledger says wait, the tick said resumed."""
+
+        with tempfile.TemporaryDirectory() as name:
+            path = self._ledger(name, {
+                "mission-document-research-admission:" + "a" * 32: {
+                    "admission_hash": "b" * 64, "ticket_ref": None,
+                    "reason": ("reentry_failed_after_automatic_rebind:"
+                               "controlled reentry was already attempted"),
+                    "disposition": "recovery_required", "retry_at": None,
+                },
+                "mission-document-research-admission:" + "c" * 32: {
+                    "admission_hash": "d" * 64, "ticket_ref": None,
+                    "reason": "send_state_unproved",
+                    "disposition": "recovery_required", "retry_at": None,
+                },
+            })
+            heartbeat = {"bounded_planner": {
+                "last_completed_at": "2026-09-18T16:00:00+00:00",
+                "last_result": {"mission_document_research": {
+                    "status": "resumed",
+                    "ticket_ref": "mission-document-research:" + "e" * 24,
+                    "admission_ref": "mission-document-research-admission:" + "f" * 32,
+                }}}}
+            items = held_lanes(heartbeat, state_dir=Path(name))
+        # One per escalated admission, plus the lane's aggregate.  The lane
+        # having resumed some other admission this tick changes nothing.
+        refs = [item["ref"] for item in items]
+        self.assertEqual(refs, [
+            "lane:mission_document_research:"
+            "mission-document-research-admission:" + "a" * 32,
+            "lane:mission_document_research",
+        ])
+        first = items[0]
+        self.assertEqual(first["detail"]["admission_ref"],
+                         "mission-document-research-admission:" + "a" * 32)
+        self.assertIn("自动改绑", first["why_blocked"])
+        self.assertIn("document_recovery_cli", first["action"])
+        self.assertEqual(items[1]["detail"]["held"], 2)
+        self.assertEqual(items[1]["detail"]["escalated"], 1)
+        self.assertEqual(items[1]["detail"]["holds_path"], str(path))
+        self.assertIn("resumed", items[1]["why_blocked"])
+
+    def test_a_ledger_without_escalations_still_says_how_many_are_held(self):
+        with tempfile.TemporaryDirectory() as name:
+            self._ledger(name, {
+                "mission-document-research-admission:" + "a" * 32: {
+                    "admission_hash": "b" * 64, "ticket_ref": None,
+                    "reason": "send_state_unproved",
+                    "disposition": "recovery_required", "retry_at": None,
+                },
+                "mission-document-research-admission:" + "c" * 32: {
+                    "admission_hash": "d" * 64, "ticket_ref": None,
+                    "reason": "existing_lease",
+                    "disposition": "recovery_wait", "retry_at": "2026-09-18T17:00:00+00:00",
+                },
+            })
+            items = held_lanes(None, state_dir=Path(name))
+        self.assertEqual([item["ref"] for item in items],
+                         ["lane:mission_document_research"])
+        # A timed wait is the lane's own business and is not counted.
+        self.assertEqual(items[0]["detail"]["held"], 1)
+        self.assertEqual(items[0]["detail"]["escalated"], 0)
+
+    def test_a_lane_with_a_ledger_is_not_also_read_from_its_tick_result(self):
+        with tempfile.TemporaryDirectory() as name:
+            self._ledger(name, {
+                "mission-document-research-admission:" + "a" * 32: {
+                    "admission_hash": "b" * 64, "ticket_ref": None,
+                    "reason": "send_state_unproved",
+                    "disposition": "recovery_required", "retry_at": None,
+                },
+            })
+            heartbeat = {"bounded_planner": {
+                "last_completed_at": "2026-09-18T16:00:00+00:00",
+                "last_result": {"mission_document_research": {
+                    "status": "recovery_required", "held": 1,
+                    "reason": "no unstarted document research admission"}}}}
+            items = held_lanes(heartbeat, state_dir=Path(name))
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["ref"], "lane:mission_document_research")
+
     def test_an_idle_lane_is_not_a_to_do(self):
         self.assertEqual(held_lanes({"bounded_planner": {"last_result": {
             "deep_insight_gate": {"status": "idle"}}}}), [])
@@ -172,6 +261,108 @@ class LaneTests(unittest.TestCase):
     def test_no_heartbeat_is_not_an_error(self):
         self.assertEqual(held_lanes(None), [])
         self.assertEqual(held_lanes({}), [])
+
+
+class DocumentRecoveryCliTests(unittest.TestCase):
+    """The owner's door: the escalation has to lead somewhere pressable."""
+
+    def setUp(self):
+        self._dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._dir.cleanup)
+        self.state = Path(self._dir.name)
+        self.admission = "mission-document-research-admission:" + "a" * 32
+        directory = self.state / "mission-document-research-runs"
+        directory.mkdir(parents=True)
+        (directory / "holds.json").write_text(json.dumps({
+            "schema_version": "0.1",
+            "holds": {
+                self.admission: {
+                    "admission_hash": "b" * 64, "ticket_ref": None,
+                    "reason": ("reentry_failed_after_automatic_rebind:"
+                               "controlled reentry was already attempted"),
+                    "disposition": "recovery_required", "retry_at": None,
+                },
+                "mission-document-research-admission:" + "c" * 32: {
+                    "admission_hash": "d" * 64, "ticket_ref": None,
+                    "reason": "send_state_unproved",
+                    "disposition": "recovery_required", "retry_at": None,
+                },
+            },
+        }), encoding="utf-8")
+
+    def test_holds_lists_the_ledger_and_writes_nothing(self):
+        from dalton_core.document_recovery_cli import holds
+
+        value = holds(self.state)["mission_document_research"]
+        self.assertEqual(value["held"], 2)
+        self.assertEqual(value["waiting_on_owner"], 1)
+        self.assertEqual(value["escalated"][0]["admission_ref"], self.admission)
+        self.assertEqual(value["other"][0]["reason"], "send_state_unproved")
+
+    def test_a_dry_run_names_the_operation_and_calls_no_writer(self):
+        from dalton_core import document_recovery_cli
+
+        code = document_recovery_cli.main([
+            "authorize-reentry", "--state-dir", str(self.state),
+            "--admission-ref", self.admission])
+        self.assertEqual(code, 0)
+
+    def test_an_admission_the_lane_has_not_escalated_is_refused(self):
+        from dalton_core import document_recovery_cli
+
+        code = document_recovery_cli.main([
+            "authorize-reentry", "--state-dir", str(self.state),
+            "--admission-ref", "mission-document-research-admission:" + "c" * 32,
+            "--apply", "--actor", "human:lumos"])
+        # Not a refusal of the owner: a hold the lane has not given up on is
+        # one it is still working through by itself.
+        self.assertEqual(code, 1)
+
+    def test_apply_goes_through_the_writers_ephemeral_human_principal(self):
+        from unittest import mock
+
+        from dalton_core import document_recovery_cli
+
+        with mock.patch("dalton_core.governance_cli.ephemeral_call") as call:
+            call.return_value = {"status": "granted"}
+            code = document_recovery_cli.main([
+                "authorize-reentry", "--state-dir", str(self.state),
+                "--admission-ref", self.admission,
+                "--apply", "--actor", "human:lumos"])
+        self.assertEqual(code, 0)
+        self.assertEqual(call.call_count, 1)
+        kwargs = call.call_args.kwargs
+        self.assertEqual(kwargs["actor_ref"], "human:lumos")
+        self.assertEqual(kwargs["operation"], "authorize_mission_document_reentry")
+        self.assertEqual(kwargs["params"], {
+            "admission_ref": self.admission, "actor_ref": "human:lumos"})
+        self.assertEqual(call.call_args.args[0], self.state / "writer-tokens.json")
+
+    def test_the_writer_exposes_it_as_a_human_only_operation(self):
+        from dalton_core.writer_server import (
+            HUMAN_GOVERNANCE_OPERATIONS, OPERATION_ACTOR_FIELDS, OPERATION_FIELDS,
+            WriterServer,
+        )
+
+        name = "authorize_mission_document_reentry"
+        self.assertIn(name, HUMAN_GOVERNANCE_OPERATIONS)
+        self.assertEqual(OPERATION_FIELDS[name],
+                         frozenset({"admission_ref", "actor_ref"}))
+        self.assertEqual(OPERATION_ACTOR_FIELDS[name], "actor_ref")
+        self.assertTrue(hasattr(WriterServer, "_op_" + name))
+
+    def test_the_lane_handler_says_so_when_the_lane_is_not_installed(self):
+        from dalton_core.mission_document_research_lane import authorize_reentry
+
+        class _Server:
+            def lane_launcher(self, _kwarg):
+                return None
+
+        self.assertEqual(
+            authorize_reentry(_Server(), {"admission_ref": self.admission,
+                                          "actor_ref": "human:lumos"}),
+            {"status": "unconfigured", "reason": "document research lane is absent"},
+        )
 
 
 class ProviderTests(unittest.TestCase):

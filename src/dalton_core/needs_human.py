@@ -102,6 +102,17 @@ HELD_LANE_STATUSES = frozenset({"recovery_required", "not_permitted", "ungranted
 CONTRACT_RETRIED_REASON = "contract_failed_after_automatic_retry"
 UNPROVED_SEND_RETRIED_REASON = "unproved_send_failed_after_automatic_retry"
 REENTRY_REBOUND_REASON = "reentry_failed_after_automatic_rebind"
+ESCALATED_HOLD_REASONS: tuple[str, ...] = (
+    CONTRACT_RETRIED_REASON, UNPROVED_SEND_RETRIED_REASON, REENTRY_REBOUND_REASON,
+)
+# The lanes that keep their own durable hold ledger beside their tickets, and
+# the directory each keeps it in.  Read directly, because a tick result only
+# describes the one admission the lane touched this pass.
+HOLDS_LEDGER_FILE = "holds.json"
+LANE_HOLD_LEDGERS: Mapping[str, str] = MappingProxyType({
+    "mission_document_research": "mission-document-research-runs",
+    "mission_annual_research": "mission-annual-research-runs",
+})
 
 MAX_ITEMS = 200
 
@@ -382,26 +393,166 @@ def unconnected_sources(core: Any) -> list[dict[str, Any]]:
     return out
 
 
-def held_lanes(heartbeat: Mapping[str, Any] | None) -> list[dict[str, Any]]:
-    """Lanes that stopped and named an authorisation they are waiting for.
+def lane_hold_ledgers(
+    state_dir: Path | None,
+) -> dict[str, dict[str, Any]]:
+    """Each lane's own hold ledger, as the lane left it.
 
-    Read from the tick result the controller already writes, in the lane's own
-    words.  This module deliberately does not try to translate every lane's
-    reason into a recommended action -- it cannot know them all, and a wrong
-    instruction is worse than the lane's own sentence.  What it adds is the
-    framing: this is a thing a person has to authorise, here is where it lives.
+    The ledger is the durable fact; a tick result is a snapshot of one pass.
+    Live on 2026-09-18 a workspace held one escalated admission for hours and
+    this list was empty the whole time, because in that tick the lane had
+    resumed a *different* admission and its result therefore said "resumed".
+    A thing waiting on a person does not stop waiting because the lane found
+    something else to do that second.
     """
 
-    if not isinstance(heartbeat, Mapping):
-        return []
-    planner = heartbeat.get("bounded_planner")
+    if state_dir is None:
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for lane, dirname in LANE_HOLD_LEDGERS.items():
+        path = Path(state_dir) / dirname / HOLDS_LEDGER_FILE
+        record = _read_json(path)
+        holds = record.get("holds") if isinstance(record, Mapping) else None
+        if not isinstance(holds, Mapping):
+            continue
+        waiting = []
+        for admission_ref, value in sorted(holds.items()):
+            if (not isinstance(value, Mapping)
+                    or value.get("disposition") != "recovery_required"):
+                continue
+            waiting.append({
+                "admission_ref": str(admission_ref),
+                "reason": str(value.get("reason") or ""),
+                "ticket_ref": value.get("ticket_ref"),
+            })
+        try:
+            at = _iso(datetime.fromtimestamp(path.stat().st_mtime, timezone.utc))
+        except OSError:
+            at = ""
+        out[lane] = {"path": str(path), "at": at, "waiting": waiting,
+                     "escalated": [item for item in waiting
+                                   if _escalated_reason(item["reason"])]}
+    return out
+
+
+def _escalated_reason(reason: str) -> bool:
+    """Has the lane already spent its own automatic attempt on this hold?"""
+
+    return any(name in reason for name in ESCALATED_HOLD_REASONS)
+
+
+def _retry_words(reason: str) -> tuple[str, str]:
+    """What the lane already tried for this reason, and what to do next.
+
+    The ask has to say what has already been bought, or the owner authorises
+    the same purchase a second time without knowing the first one happened.
+    """
+
+    if CONTRACT_RETRIED_REASON in reason:
+        return (
+            "模型回复不符合输出契约，系统已经按上限自动重试过一次（同样的预算上限、"
+            "只放一条新 WorkOrder），重试回来的回复仍然不合契约，所以才轮到人。",
+            "先看模型或提示词为什么连续两次给不出合契约的回复；确认值得再买一次，"
+            "再按车道原文里写的那条 authorize_paid_contract_recovery 授权最后一次。",
+        )
+    if UNPROVED_SEND_RETRIED_REASON in reason:
+        return (
+            "这次调用是否真的送达/计费无法证明，系统已经按上限自动重试过一次"
+            "（同样的预算上限、只放一条新 WorkOrder）；重试也失败了。"
+            "最坏情况是先前那次其实已经计费，也就是这个阶段最多已经花了两次调用，"
+            "所以系统不再自动买第三次。",
+            "先看模型或线路为什么连续两次都拿不回可用结果；确认值得再买一次，"
+            "再按车道原文里写的那条 authorize_unproved_send_recovery 授权最后一次。",
+        )
+    if REENTRY_REBOUND_REASON in reason:
+        return (
+            "子进程票据身份变过（通常是发布或配置换了），系统已经自动改绑到新票据"
+            "并重新进入过一次，重新进入又失败了，所以才轮到人。",
+            "先看原因里那条 LaneChildRejected 原文说的是什么（配置文件、工作区绑定、"
+            "票据占用）；修好之后用 `python -m dalton_core.document_recovery_cli "
+            "authorize-reentry --state-dir <state> --admission-ref <ref> "
+            "--apply --actor human:<owner>` 放行一次重新进入。"
+            "（先不加 --apply 是只读预览；`holds` 子命令列出账本里所有停着的 admission。）",
+        )
+    return (
+        "它不会自己重新开始。",
+        "打开「运行」页找到这个车道，按它写的原因给出一次受控恢复授权；"
+        "如果原因看不懂，把这句原文发给维护者。",
+    )
+
+
+def _escalated_hold_item(
+    lane: str, hold: Mapping[str, Any], *, at: str, path: str,
+) -> dict[str, Any]:
+    """One admission the lane has already tried and handed to a person."""
+
+    reason = str(hold.get("reason") or "")
+    why, action = _retry_words(reason)
+    admission_ref = str(hold.get("admission_ref") or "")
+    return _item(
+        "controlled_recovery", ref=f"lane:{lane}:{admission_ref}", at=at,
+        title=f"研究 admission 自动重试过一次仍然失败，等人决定：{_short(admission_ref)}",
+        why=(f"车道 {lane} 的 admission {admission_ref} 停在 recovery_required，"
+             f"账本里记的原因是：{reason or '未说明'}。" + why),
+        action=action,
+        consequence="不处理，这条 admission 不会再自己动，它要回答的那个问题一直没有答案。",
+        where="运行",
+        detail={"lane": lane, "admission_ref": admission_ref, "reason": reason,
+                "ticket_ref": hold.get("ticket_ref"), "holds_path": path},
+    )
+
+
+def held_lanes(
+    heartbeat: Mapping[str, Any] | None, *, state_dir: Path | None = None,
+) -> list[dict[str, Any]]:
+    """Lanes that stopped and named an authorisation they are waiting for.
+
+    Two sources, in this order.  A lane that keeps a hold ledger beside itself
+    is read from that ledger -- one item per admission the lane has already
+    tried and given up on, plus one aggregate for the lane -- because the
+    ledger survives a tick that did something else.  A lane with no ledger is
+    read from the tick result the controller writes, in the lane's own words.
+
+    This module deliberately does not try to translate every lane's reason into
+    a recommended action -- it cannot know them all, and a wrong instruction is
+    worse than the lane's own sentence.  What it adds is the framing: this is a
+    thing a person has to authorise, here is where it lives.
+    """
+
+    ledgers = lane_hold_ledgers(state_dir)
+    planner = (heartbeat or {}).get("bounded_planner") if isinstance(
+        heartbeat, Mapping) else None
     result = (planner or {}).get("last_result") if isinstance(planner, Mapping) else None
-    if not isinstance(result, Mapping):
-        return []
+    result = result if isinstance(result, Mapping) else {}
     at = str((planner or {}).get("last_completed_at") or "")
     out: list[dict[str, Any]] = []
+    for lane in sorted(ledgers):
+        ledger = ledgers[lane]
+        for hold in ledger["escalated"]:
+            out.append(_escalated_hold_item(
+                lane, hold, at=at or ledger["at"], path=ledger["path"]))
+        if not ledger["waiting"]:
+            continue
+        tick = result.get(lane) if isinstance(result.get(lane), Mapping) else {}
+        out.append(_item(
+            "controlled_recovery", ref=f"lane:{lane}", at=at or ledger["at"],
+            title=f"研究车道有 {len(ledger['waiting'])} 条 admission 停着等授权：{lane}",
+            why=(f"这个车道的 hold 账本里有 {len(ledger['waiting'])} 条 admission 处于 "
+                 f"recovery_required，其中 {len(ledger['escalated'])} 条是系统已经"
+                 "自动试过一次、仍然失败才交给人的。"
+                 f"本轮车道自己的状态是「{tick.get('status') or '未报告'}」——"
+                 "车道这一轮在忙别的 admission 不代表这些不再等着。"),
+            action=("逐条看下面按 admission 列出的那几件；账本在 "
+                    f"{ledger['path']}。"),
+            consequence="不处理，这些 admission 不会再自己动，它们负责的研究一直不产出。",
+            where="运行",
+            detail={"lane": lane, "held": len(ledger["waiting"]),
+                    "escalated": len(ledger["escalated"]),
+                    "holds_path": ledger["path"],
+                    "status": tick.get("status")},
+        ))
     for lane, value in sorted(result.items()):
-        if not isinstance(value, Mapping):
+        if not isinstance(value, Mapping) or lane in ledgers:
             continue
         status = str(value.get("status") or "")
         if status not in HELD_LANE_STATUSES:
@@ -416,37 +567,15 @@ def held_lanes(heartbeat: Mapping[str, Any] | None) -> list[dict[str, Any]]:
         # it still asks for a person, the ask has to say that, or the owner
         # authorises the same purchase a second time without knowing the first
         # one already happened.
-        contract_retried = CONTRACT_RETRIED_REASON in reason
-        unproved_retried = UNPROVED_SEND_RETRIED_REASON in reason
-        rebound = REENTRY_REBOUND_REASON in reason
-        retried = contract_retried or unproved_retried or rebound
+        retried = _escalated_reason(reason)
+        why, action = _retry_words(reason)
         out.append(_item(
             "controlled_recovery", ref=f"lane:{lane}", at=at,
             title=(f"研究车道自动重试过一次仍然失败，等人决定：{lane}" if retried
                    else f"研究车道停着等授权：{lane}"),
             why=(f"这个车道本轮的状态是「{status}」，它给出的原因是：{reason or '未说明'}。"
-                 + ("模型回复不符合输出契约，系统已经按上限自动重试过一次（同样的预算上限、"
-                    "只放一条新 WorkOrder），重试回来的回复仍然不合契约，所以才轮到人。"
-                    if contract_retried else
-                    "这次调用是否真的送达/计费无法证明，系统已经按上限自动重试过一次"
-                    "（同样的预算上限、只放一条新 WorkOrder）；重试也失败了。"
-                    "最坏情况是先前那次其实已经计费，也就是这个阶段最多已经花了两次调用，"
-                    "所以系统不再自动买第三次。"
-                    if unproved_retried else
-                    "子进程票据身份变过（通常是发布或配置换了），系统已经自动改绑到新票据"
-                    "并重新进入过一次，重新进入又失败了，所以才轮到人。"
-                    if rebound else "它不会自己重新开始。")),
-            action=("先看模型或提示词为什么连续两次给不出合契约的回复；确认值得再买一次，"
-                    "再按车道原文里写的那条 authorize_paid_contract_recovery 授权最后一次。"
-                    if contract_retried else
-                    "先看模型或线路为什么连续两次都拿不回可用结果；确认值得再买一次，"
-                    "再按车道原文里写的那条 authorize_paid_contract_recovery 授权最后一次。"
-                    if unproved_retried else
-                    "先看车道原因里那条 LaneChildRejected 原文说的是什么（配置文件、"
-                    "工作区绑定、票据占用），修好之后这条会自己继续。"
-                    if rebound else
-                    "打开「运行」页找到这个车道，按它写的原因给出一次受控恢复授权；"
-                    "如果原因看不懂，把这句原文发给维护者。"),
+                 + why),
+            action=action,
             consequence="不授权，这个车道每一轮都会重复报同样的状态，它负责的研究一直不产出。",
             where="运行",
             detail={"lane": lane, "status": status, "reason": reason,
@@ -797,7 +926,7 @@ def collect(
     items: list[dict[str, Any]] = []
     items += workspaces_without_mission(workspaces_in_scope(probes, environment))
     items += gate_decisions(core, state_dir=state)
-    items += held_lanes(heartbeat)
+    items += held_lanes(heartbeat, state_dir=state)
     items += provider_failures(scheduler_db, now=now, model_router_db=model_router_db)
     items += unconnected_sources(core)
     items += governance_records(None if governance_dir is None else Path(governance_dir))
@@ -843,8 +972,12 @@ def _short(company_ref: str) -> str:
 __all__ = [
     "APPROVED_GOVERNANCE_STATUSES",
     "CONTRACT_RETRIED_REASON",
+    "ESCALATED_HOLD_REASONS",
+    "HOLDS_LEDGER_FILE",
+    "LANE_HOLD_LEDGERS",
     "REENTRY_REBOUND_REASON",
     "UNPROVED_SEND_RETRIED_REASON",
+    "lane_hold_ledgers",
     "GOVERNANCE_DIR_NAME",
     "HELD_LANE_STATUSES",
     "KINDS",

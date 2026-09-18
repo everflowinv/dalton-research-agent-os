@@ -488,14 +488,20 @@ class MissionAnnualResearchCoordinator:
                 return REENTRY_ESCALATED_REASON + ":" + str(exc)
         except Exception:  # noqa: BLE001 - an unreadable ticket asks a person
             return REENTRY_ESCALATED_REASON + ":" + str(exc)
+        # "Claimed" is not "attempted".  The launcher writes its one-shot
+        # marker before it starts the child, so a re-entry refused in between
+        # leaves a spent marker and no run; escalating on that would hand a
+        # person an admission the lane never actually retried, which is what
+        # three live admissions did within an hour of the rebinding shipping.
+        consumed = getattr(self.launcher, "controlled_reentry_consumed", None)
         try:
-            claimed = self.launcher.controlled_reentry_claimed(
+            attempted = bool(consumed(
                 ticket_ref,
                 self._reentry_authorization(admission, ticket_ref, recovery),
-            )
+            )) if consumed is not None else False
         except Exception:  # noqa: BLE001 - no claim ledger, no escalation
-            claimed = False
-        if claimed:
+            attempted = False
+        if attempted:
             return REENTRY_ESCALATED_REASON + ":" + str(exc)
         return "controlled_reentry_unavailable:" + str(exc)
 

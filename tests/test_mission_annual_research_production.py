@@ -9,7 +9,7 @@ import sqlite3
 import sys
 import unittest
 from unittest import mock
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from dalton_core.store import canonical_json, content_hash
@@ -280,18 +280,65 @@ class MissionAnnualResearchProductionTests(unittest.TestCase):
         self.assertNotEqual(rebound["id"], prior_ref)
         self.assertEqual(len(spawned), 1)
         self.assertEqual(spawned[0]["record"]["rebound_from_ticket_ref"], prior_ref)
-        # The one-shot re-entry claim is archived against the prior run, so
-        # the rebinding is automatic exactly once for this authorization.
+        # The one-shot re-entry claim is archived against the prior run.
         markers = sorted(ticket_path.parent.glob("controlled-reentry-*.json"))
         self.assertEqual(len(markers), 1)
+        # ``spawn`` was stubbed, so nothing ran under that claim.  A claim that
+        # bought nothing is not an attempt: the next tick completes it rather
+        # than telling a person the lane already tried.
         with mock.patch.object(launcher, "spawn", side_effect=fake_spawn):
-            with self.assertRaises(LaneChildRejected):
+            again = launcher.resume(
+                admission_ref=admission["id"],
+                admission_hash=admission["content_hash"],
+                prior_ticket_ref=prior_ref,
+                authorization="test:exact-scheduler-replay")
+        self.assertEqual(again["rebound_from_ticket_ref"], prior_ref)
+        self.assertEqual(len(spawned), 2)
+        self.assertEqual(
+            len(sorted(ticket_path.parent.glob("controlled-reentry-*.json"))), 1)
+        # A child really runs under the claim: from here the attempt happened.
+        moved = launcher.configuration()
+        rebound_path = launcher._ticket_path(rebound["id"])
+        rebound_path.parent.mkdir(parents=True, exist_ok=True)
+        write_owner_only(rebound_path, {
+            "schema_version": "0.1", "id": rebound["id"],
+            "admission_ref": admission["id"],
+            "admission_hash": admission["content_hash"],
+            "configuration": moved, "configuration_hash": content_hash(moved),
+            "rebound_from_ticket_ref": prior_ref,
+            "started_at": (datetime.now(timezone.utc)
+                           + timedelta(minutes=5)).isoformat(),
+            "pid": 1, "command": ["true"], "status": "failed",
+            "exit_code": 1, "completed_at": None,
+        })
+        with mock.patch.object(launcher, "spawn", side_effect=fake_spawn):
+            with self.assertRaisesRegex(LaneChildRejected, "already attempted"):
                 launcher.resume(
                     admission_ref=admission["id"],
                     admission_hash=admission["content_hash"],
                     prior_ticket_ref=prior_ref,
                     authorization="test:exact-scheduler-replay")
-        self.assertEqual(len(spawned), 1)
+        self.assertEqual(len(spawned), 2)
+        # The owner door: one more re-entry, once, recorded with who said so.
+        granted = launcher.authorize_controlled_reentry(
+            admission["id"], actor_ref="human:lumos", granted_at=now)
+        with mock.patch.object(launcher, "spawn", side_effect=fake_spawn):
+            allowed = launcher.resume(
+                admission_ref=admission["id"],
+                admission_hash=admission["content_hash"],
+                prior_ticket_ref=prior_ref,
+                authorization="test:exact-scheduler-replay")
+        self.assertEqual(allowed["rebound_from_ticket_ref"], prior_ref)
+        self.assertEqual(len(spawned), 3)
+        self.assertFalse(Path(granted["grant_path"]).exists())
+        with mock.patch.object(launcher, "spawn", side_effect=fake_spawn):
+            with self.assertRaisesRegex(LaneChildRejected, "already attempted"):
+                launcher.resume(
+                    admission_ref=admission["id"],
+                    admission_hash=admission["content_hash"],
+                    prior_ticket_ref=prior_ref,
+                    authorization="test:exact-scheduler-replay")
+        self.assertEqual(len(spawned), 3)
         # A moved admission is a different thing entirely and is still refused.
         with mock.patch.object(launcher, "spawn", side_effect=fake_spawn):
             with self.assertRaisesRegex(
@@ -301,7 +348,7 @@ class MissionAnnualResearchProductionTests(unittest.TestCase):
                     admission_ref=admission["id"], admission_hash="0" * 64,
                     prior_ticket_ref=prior_ref,
                     authorization="test:other-authorization")
-        self.assertEqual(len(spawned), 1)
+        self.assertEqual(len(spawned), 3)
 
     def test_production_budget_refusal_is_visible_to_writer_without_broker_io(self):
         fixture = MissionAnnualFixture(self)

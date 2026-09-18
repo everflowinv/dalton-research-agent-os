@@ -1547,18 +1547,79 @@ class MissionDocumentResearchTests(unittest.TestCase):
         self.assertNotEqual(rebound["id"], prior_ref)
         self.assertEqual(len(spawned), 1)
         self.assertEqual(spawned[0]["record"]["rebound_from_ticket_ref"], prior_ref)
-        # The one-shot re-entry claim is archived against the prior run, so the
-        # rebinding is automatic exactly once for this authorization.
+        # The one-shot re-entry claim is archived against the prior run.
         markers = sorted(ticket_path.parent.glob("controlled-reentry-*.json"))
         self.assertEqual(len(markers), 1)
+        # ``spawn`` was stubbed, so nothing ever ran under that claim.  A claim
+        # that bought nothing is not an attempt: the next tick completes it
+        # rather than telling a person the lane already tried.  This is the
+        # live 2026-09-18 shape -- three admissions held on
+        # "controlled reentry was already attempted" having never re-entered.
         with patch.object(launcher, "spawn", side_effect=fake_spawn):
-            with self.assertRaises(LaneChildRejected):
+            again = launcher.resume(
+                admission_ref=admission["id"],
+                admission_hash=admission["content_hash"],
+                prior_ticket_ref=prior_ref,
+                authorization="test:exact-scheduler-replay")
+        self.assertEqual(again["rebound_from_ticket_ref"], prior_ref)
+        self.assertEqual(len(spawned), 2)
+        self.assertEqual(
+            len(sorted(ticket_path.parent.glob("controlled-reentry-*.json"))), 1)
+        # Now a child really runs under that claim: the rebound ticket exists
+        # and started after it.  From here the attempt has happened.
+        rebound_path = launcher._ticket_path(rebound["id"])
+        rebound_path.parent.mkdir(parents=True, exist_ok=True)
+        moved = launcher.configuration()
+        write_owner_only(rebound_path, {
+            "schema_version": "0.1", "id": rebound["id"],
+            "admission_ref": admission["id"],
+            "admission_hash": admission["content_hash"],
+            "configuration": moved,
+            "configuration_hash": content_hash(moved),
+            "rebound_from_ticket_ref": prior_ref,
+            "started_at": (datetime.now(timezone.utc)
+                           + timedelta(minutes=5)).isoformat(),
+            "pid": 1, "command": ["true"], "status": "failed",
+            "exit_code": 1, "completed_at": None,
+        })
+        with patch.object(launcher, "spawn", side_effect=fake_spawn):
+            with self.assertRaisesRegex(
+                LaneChildRejected, "already attempted",
+            ):
                 launcher.resume(
                     admission_ref=admission["id"],
                     admission_hash=admission["content_hash"],
                     prior_ticket_ref=prior_ref,
                     authorization="test:exact-scheduler-replay")
-        self.assertEqual(len(spawned), 1)
+        self.assertEqual(len(spawned), 2)
+        # The owner door: one more re-entry, once, recorded with who said so.
+        granted = launcher.authorize_controlled_reentry(
+            admission["id"], actor_ref="human:lumos",
+            granted_at=NOW.isoformat())
+        self.assertEqual(granted["status"], "granted")
+        self.assertEqual(granted["actor_ref"], "human:lumos")
+        with patch.object(launcher, "spawn", side_effect=fake_spawn):
+            allowed = launcher.resume(
+                admission_ref=admission["id"],
+                admission_hash=admission["content_hash"],
+                prior_ticket_ref=prior_ref,
+                authorization="test:exact-scheduler-replay")
+        self.assertEqual(allowed["rebound_from_ticket_ref"], prior_ref)
+        self.assertEqual(len(spawned), 3)
+        self.assertFalse(Path(granted["grant_path"]).exists())
+        self.assertEqual(len(sorted(
+            launcher.tickets_dir.glob("controlled-reentry-grant-*-used-*.json"))), 1)
+        # And the grant is spent: the next one is refused again.
+        with patch.object(launcher, "spawn", side_effect=fake_spawn):
+            with self.assertRaisesRegex(
+                LaneChildRejected, "already attempted",
+            ):
+                launcher.resume(
+                    admission_ref=admission["id"],
+                    admission_hash=admission["content_hash"],
+                    prior_ticket_ref=prior_ref,
+                    authorization="test:exact-scheduler-replay")
+        self.assertEqual(len(spawned), 3)
         # A moved admission is a different thing entirely and is still refused.
         with patch.object(launcher, "spawn", side_effect=fake_spawn):
             with self.assertRaisesRegex(
@@ -1568,7 +1629,7 @@ class MissionDocumentResearchTests(unittest.TestCase):
                     admission_ref=admission["id"], admission_hash="0" * 64,
                     prior_ticket_ref=prior_ref,
                     authorization="test:other-authorization")
-        self.assertEqual(len(spawned), 1)
+        self.assertEqual(len(spawned), 3)
 
     def test_automatic_contract_retry_replays_its_own_authorization_after_a_crash(self):
         """One failed Work carries one authorization, even across a crash.

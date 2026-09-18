@@ -113,7 +113,9 @@ class _Launcher:
         }
         return dict(self.tickets[self.rebind_to])
 
-    def controlled_reentry_claimed(self, ticket_ref: str, authorization: str) -> bool:
+    def controlled_reentry_consumed(self, ticket_ref: str, authorization: str) -> bool:
+        # "Consumed" is "a child actually ran under this claim", not "the
+        # marker was taken"; the lane escalates only on the former.
         return (ticket_ref, authorization) in self.claims
 
 
@@ -447,6 +449,52 @@ class MissionAnnualResearchLaneTests(unittest.TestCase):
         holds = json.loads(self.lane.holds_path.read_text(encoding="utf-8"))
         self.assertTrue(holds["holds"][admission["id"]]["reason"].startswith(
             "controlled_reentry_unavailable:"))
+
+    def test_a_claim_that_never_ran_a_child_is_not_an_attempt(self) -> None:
+        """The live 2026-09-18 shape: marker taken, nothing ever re-entered."""
+
+        from dalton_core.lane_child_launcher import LaneChildRejected
+        from dalton_core.mission_annual_research_lane import REENTRY_ESCALATED_REASON
+
+        admission = self.store.add(1)
+        self.store.started(admission["id"])
+        self._scheduler_work(admission)
+        ticket_ref = "mission-annual-research:" + "2" * 24
+        self.launcher.tickets[ticket_ref] = {
+            "id": ticket_ref, "status": "failed",
+            "summary": {"status": "incomplete"},
+            "admission_ref": admission["id"],
+            "admission_hash": admission["content_hash"],
+        }
+        _write_latest(self.lane.latest_path, admission, ticket_ref)
+        recovery = {
+            "action": "resume", "reason": "typed_recovery_due",
+            "work_order_ref": "work:resumable",
+        }
+        self.lane._execution_state = lambda _admission: dict(recovery)
+        self.launcher.resume_error = LaneChildRejected(
+            "controlled reentry was already attempted")
+
+        # The marker exists but no child ever ran under it: the lane keeps this
+        # to itself and tries again, rather than handing a person an admission
+        # it never actually retried.
+        result = self.lane.dispatch_once()
+
+        self.assertEqual(result["status"], "recovery_required")
+        holds = json.loads(self.lane.holds_path.read_text(encoding="utf-8"))
+        self.assertTrue(holds["holds"][admission["id"]]["reason"].startswith(
+            "controlled_reentry_unavailable:"))
+
+        # Once a child really ran under that claim it is an attempt, and the
+        # next refusal is a person's problem.
+        self.launcher.claims.add((
+            ticket_ref,
+            self.lane._reentry_authorization(admission, ticket_ref, recovery),
+        ))
+        self.lane.dispatch_once()
+        holds = json.loads(self.lane.holds_path.read_text(encoding="utf-8"))
+        self.assertTrue(holds["holds"][admission["id"]]["reason"].startswith(
+            REENTRY_ESCALATED_REASON))
 
     def test_proved_capacity_terminal_is_visible_as_recovery_required(self) -> None:
         admission = self.store.add(1)
