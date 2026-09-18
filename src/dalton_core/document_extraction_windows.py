@@ -68,6 +68,16 @@ UNCERTAIN_ERROR_CODES = frozenset({
 # the UTC midnight boundary, so the window is deferred, not excluded.
 DEFERRED_BUDGET_STATUSES = frozenset({"rejected"})
 
+# C2-3: why a secondary pass is finished with a whole review.
+#
+#   windows_exhausted -- every window of it replayed and recorded nothing, so
+#                        walking it again can only re-derive the same document
+#                        to learn the same nothing.
+#   not_attributed    -- the document names no company this lane covers.  That
+#                        verdict is taken over the whole document, not the
+#                        window, so it can never differ window to window.
+EXHAUSTION_REASONS = frozenset({"windows_exhausted", "not_attributed"})
+
 
 class ExtractionWindowError(ValueError):
     pass
@@ -198,6 +208,31 @@ class ExtractionWindowLedger:
             active[int(record["window_offset"])] = record
         return active
 
+    def exhausted_reviews(
+        self, pass_ref: str, *, model_config_hash: str | None = None,
+    ) -> dict[tuple[str, str], dict[str, Any]]:
+        """(review_id, source_review_hash) -> this pass's terminal verdict.
+
+        Scoped exactly like :meth:`exclusions`: a review whose row changed is a
+        different review, and a verdict reached under one model configuration
+        does not carry over to the next one.  A caller that does not know its
+        configuration passes ``None`` and every verdict applies, which is the
+        conservative reading -- it reads less, never more.
+        """
+
+        active: dict[tuple[str, str], dict[str, Any]] = {}
+        for row in self.connection.execute(
+            "SELECT * FROM document_extraction_review_exhaustion WHERE pass_ref=?",
+            (str(pass_ref),),
+        ).fetchall():
+            record = dict(row)
+            if (model_config_hash is not None
+                    and record["model_config_hash"] is not None
+                    and record["model_config_hash"] != model_config_hash):
+                continue  # a different model; the verdict does not carry over
+            active[(record["review_id"], record["source_review_hash"])] = record
+        return active
+
     def count_active(self) -> int:
         return int(self.connection.execute(
             "SELECT COUNT(*) FROM document_extraction_window_exclusions "
@@ -289,6 +324,70 @@ class ExtractionWindowLedger:
         row = self.connection.execute(
             "SELECT * FROM document_extraction_window_exclusions WHERE exclusion_id=?",
             (exclusion_id,),
+        ).fetchone()
+        return dict(row)
+
+    def exhaust(
+        self,
+        *,
+        review_id: str,
+        source_review_hash: str,
+        pass_ref: str,
+        reason: str,
+        detail: str,
+        windows: int = 0,
+        document_ref: str | None = None,
+        company_ref: str | None = None,
+        model_config_hash: str | None = None,
+    ) -> dict[str, Any]:
+        """Write down that this pass has nothing left to take from this review.
+
+        Idempotent by ``(review_id, source_review_hash, pass_ref)``.  The row is
+        not a failure: it is the end of a document, and the reason says which
+        kind of end it was so the owner can tell "read it all, it held nothing"
+        from "it was never about this company".
+        """
+
+        if not isinstance(review_id, str) or not review_id:
+            raise ExtractionWindowError("review_id is required")
+        if not isinstance(source_review_hash, str) or _SHA.fullmatch(source_review_hash) is None:
+            raise ExtractionWindowError("source_review_hash must be a SHA-256 hex digest")
+        if not isinstance(pass_ref, str) or not pass_ref:
+            raise ExtractionWindowError("pass_ref is required")
+        if reason not in EXHAUSTION_REASONS:
+            raise ExtractionWindowError(
+                f"reason must be one of {sorted(EXHAUSTION_REASONS)}")
+        if type(windows) is not int or isinstance(windows, bool) or windows < 0:
+            raise ExtractionWindowError("windows must be a non-negative integer")
+        at = self.clock().astimezone(timezone.utc).isoformat(timespec="microseconds")
+        exhaustion_id = "document-extraction-review-exhaustion:" + content_hash({
+            "review_id": review_id, "source_review_hash": source_review_hash,
+            "pass_ref": pass_ref,
+        })[:32]
+        self._authorization.authorized = True
+        try:
+            self.connection.execute(
+                "INSERT INTO document_extraction_review_exhaustion("
+                "exhaustion_id,review_id,source_review_hash,pass_ref,model_config_hash,"
+                "reason,detail,windows,document_ref,company_ref,hit_count,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,1,?,?) "
+                "ON CONFLICT(review_id,source_review_hash,pass_ref) DO UPDATE SET "
+                "hit_count=hit_count+1, updated_at=excluded.updated_at, "
+                "model_config_hash=excluded.model_config_hash, reason=excluded.reason, "
+                "detail=excluded.detail, windows=excluded.windows",
+                (exhaustion_id, review_id, source_review_hash, str(pass_ref),
+                 model_config_hash, reason, str(detail or reason), windows,
+                 document_ref, company_ref, at, at),
+            )
+            self.connection.commit()
+        except Exception:
+            self.connection.rollback()
+            raise
+        finally:
+            self._authorization.authorized = False
+        row = self.connection.execute(
+            "SELECT * FROM document_extraction_review_exhaustion WHERE exhaustion_id=?",
+            (exhaustion_id,),
         ).fetchone()
         return dict(row)
 
@@ -437,6 +536,7 @@ def plan_rank_for(
 __all__ = [
     "CERTAIN_BUDGET_STATUSES",
     "DEFERRED_BUDGET_STATUSES",
+    "EXHAUSTION_REASONS",
     "ExtractionWindowError",
     "ExtractionWindowLedger",
     "PLAN_ANY_COMPANY",

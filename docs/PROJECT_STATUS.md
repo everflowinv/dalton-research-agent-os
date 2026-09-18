@@ -1,5 +1,21 @@
 # Dalton 项目进度
 
+## 2026-09-18 22:15 UTC：文档抽取车道不再把同四份读完的文档反复重走；「读完了」成为终局状态（源码，待部署）
+
+线上「美国 Hyperscaler 研究」工作区的抽取车道两个多小时零进展：`awaiting` 114、cockpit 的 `read` 卡在 54、`waiting` 从 53 涨到 117，模型调用量从 339/小时掉到 7/小时。05:43Z 起的每一轮 summary 形状完全一样：`numeric` 107 个窗口、只落在同样四个 review 上，其中 106 个 `replayed: true`、`recorded: 0`、`verified: 0`，`numeric_fresh: 0`；第 107 个是一份 AlphaEngine 文档，答 `not_attributed`；`admitted` 与 `drafted` 全空。
+
+**根因（三条，互相独立）**：
+
+1. **重放是免费的，但「走一遍」不是。** 2026-09-16 的 `(review_id, offset)` 持久去重只保证不二次付费，没有任何机制说「这份文档已经读完了」。`_secondary_sweep` 里重放窗口不扣 allowance，于是每一轮都把这四份 10-K 的 107 个窗口**重新派生一遍 context**——重新取回、重新渲染、重新哈希整份文档——才发现答案早在盘上。现在：一份 review 的窗口**全部重放且什么都没记下**，就是这条 pass 的终局（`windows_exhausted`），写进新的 `document_extraction_review_exhaustion` 表，作用域与窗口排除完全一致（review 字节哈希 + 模型配置哈希，重新获取或换模型都会重新打开）。去重本身一个字没动。
+2. **`not_attributed` 每轮重付。** 归属判定（`document_names_subject`）读的是**整份文档**并按文档记忆，所以它对每个窗口的答案必然相同——车道却每 5 分钟为每个窗口重新派生一次 context 去问同一句话（legacy 环境一轮 87 个这样的窗口）。现在第一次答 `not_attributed` 就记一次终局并停止走这份文档的其余窗口。
+3. **`recorded: 0` 不是「文档里没有数字」，是契约把答案全扔了。** 当前模型配置下这三份 10-K 的 106 个窗口共返回 **20 个 figure**，20 个全被 `verify_numeric_candidate` 拒掉，理由都是同一句 `value is not a decimal number`：提示词明写「按文档原样写数字」，文档写的是 `716,924`，而 `_decimal` 直接 `Decimal("716,924")`。引文那一侧的 `numbers_in` 早就把千分位折掉了，候选这一侧没有。补上后拿线上已存的回答重放：**18/20 通过**，剩下 2 条是模型引错了 quote，属于真拒绝。
+
+**新的计数器**：summary 里加 `exhausted_reviews`（本轮判定终局的 review，含原因与窗口数）与 `advanced_to`（每条 secondary pass 第一个真正付费的窗口、付费窗口数、跳过的终局 review 数）；launcher 的 tick 结果里一并上报。另外，一个窗口 `recorded` 为 0 但有拒绝时，拒绝理由写进 summary 条目（`refusal_reasons`）——这次的「被吞掉的零」正是只有一个 0 可看。
+
+**legacy 环境对照**：同样的病、规模更大（一轮 214 个重放读 + 87 个 `not_attributed`、156 条队列里 139 条根本无法查看），但它 `numeric_fresh` 每轮仍有 10，所以卡在别处，不在本次改动范围。
+
+**测试**：新增 `tests/test_extraction_queue_exhaustion.py`（重放读完的 review 与从未读过的文档同队 → 选中从未读过的那份、前者被判 `windows_exhausted`；下一轮完全不碰它；记下过东西 / 走到一半就停 / 窗口打不开的都不算读完；`not_attributed` 只记一次；另一条 pass 不受影响；`exhausted_reviews` 与 `advanced_to` 计数；终局记录的作用域、幂等、不可删除；千分位数字能对上自己的引文而 `1,2` 仍被拒）。全量测试通过。
+
 ## 2026-09-18 21:40 UTC：档案与辩论图两条车道每轮不再重算五家公司的指纹；写入进程每轮回收所有僵尸子进程（源码，待部署）
 
 线上每一轮 `dispatch_company_dossier` 与 `dispatch_debate_map` 都是 `busy ... over_budget_seconds 8–12`，writer 日志最近 300 行里有 12 + 7 次 30 秒超时。在只读挂上线上 Core（13,816 条 Claim）实测，两条车道每轮**在写入进程那一根 store 线程上**花的时间是：

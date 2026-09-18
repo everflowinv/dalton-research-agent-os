@@ -480,6 +480,16 @@ class DocumentExtractionCoordinator:
                 # like one whose directives are obeyed unless somebody counts.
                 result["last"]["plan_directed_windows"] = int(
                     summary.get("plan_directed_windows") or 0)
+                # C2-3: how many documents a secondary pass finished with this
+                # run, and where each pass got to.  A lane re-reading the same
+                # four reviews forever reports ``advanced_to`` with no review
+                # and a rising skipped count; it used to report nothing at all.
+                exhausted = summary.get("exhausted_reviews")
+                result["last"]["exhausted_reviews"] = (
+                    len(exhausted) if isinstance(exhausted, list) else 0)
+                advanced = summary.get("advanced_to")
+                result["last"]["advanced_to"] = (
+                    advanced if isinstance(advanced, dict) else {})
                 if latest.get("settled") is not True:
                     latest = {**latest, "settled": True, "status": ticket["status"],
                               "drafted": result["last"]["drafted"], "stop_reason": summary.get("stop_reason"),

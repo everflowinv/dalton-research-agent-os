@@ -317,6 +317,17 @@ def run_extraction(
         # Windows a previous run already proved dead, stepped over without
         # re-rendering the document.  Live this was 24% of all window reads.
         "windows_skipped_by_exclusion": 0,
+        # C2-3: the reviews a secondary pass finished with this tick, and why.
+        # One entry per review, written to the ledger as well, so the same
+        # document is not re-derived on the next tick to learn the same
+        # nothing.  Live this was four reviews and 107 windows, every five
+        # minutes, for two hours.
+        "exhausted_reviews": [],
+        # C2-3: where each secondary pass actually got to -- the first window
+        # it newly paid for, how many it paid for, and how many reviews it
+        # stepped over as already exhausted.  A lane that is stuck reads
+        # ``review_id: null`` with a rising ``reviews_skipped_exhausted``.
+        "advanced_to": {},
         # C2-2: how the tick's windows were actually divided.
         "priority_windows": {"high_tier": 0, "other": 0, "high_tier_reserved": 0},
         # G1: windows this tick spent on a document the mission's latest
@@ -779,6 +790,7 @@ def run_extraction(
                 spent_key="numeric_fresh",
                 require_open=False,
                 directed_reviews=numeric_directed,
+                ledger=windows, model_config_hash=window_config_hash,
             )
         if stop_reason != "systemic_model_failure" and secondary_failure is None:
             secondary_failure = _secondary_sweep(
@@ -790,6 +802,7 @@ def run_extraction(
                 total=("metrics_observed", "recorded"),
                 spent_key="discovery_fresh",
                 require_open=False,
+                ledger=windows, model_config_hash=window_config_hash,
             )
         # ADR-0005 / P9d-17b: every fully drafted review is staged and
         # policy-admitted, then closed.  Idempotent: a re-run reports
@@ -1132,6 +1145,8 @@ def _secondary_sweep(
     spent_key: str,
     require_open: bool = True,
     directed_reviews: Any = None,
+    ledger: Any = None,
+    model_config_hash: str | None = None,
 ) -> dict[str, Any] | None:
     """Spend one secondary allowance on the documents that pass its own gate.
 
@@ -1140,16 +1155,69 @@ def _secondary_sweep(
     paid for, and does not consume the allowance: replay is free, so an
     allowance spent on it would be an allowance not spent on a window nobody
     has read yet.
+
+    C2-3: free is not the same as finished.  Live on 2026-09-18 the figures
+    pass walked 107 windows over the same four reviews every five minutes for
+    two hours -- 106 of them replayed, nothing recorded, nothing verified --
+    while 114 documents nobody had read waited behind them.  Replay costs no
+    model call, but every one of those windows still re-derived its context,
+    which means re-fetching, re-rendering and re-hashing the whole document.
+    So a review whose every window replayed and recorded nothing is terminal
+    for this pass (``windows_exhausted``), as is one whose document names no
+    company this lane covers (``not_attributed``), and ``ledger`` remembers
+    that across ticks so the queue moves on.  The de-duplication itself is
+    untouched: it is what stops the lane paying twice.
     """
 
     if limit <= 0:
         return None
     spent = 0
+    pass_ref = str(entries)
+    known: dict[tuple[str, str], dict[str, Any]] = {}
+    if ledger is not None:
+        try:
+            known = ledger.exhausted_reviews(
+                pass_ref, model_config_hash=model_config_hash)
+        except Exception:  # noqa: BLE001 - the ledger is not a gate
+            known = {}
+    skipped_exhausted = 0
+    advanced: dict[str, Any] | None = None
+
+    def mark_exhausted(review: Mapping[str, Any], review_hash: str, *,
+                       reason: str, detail: str, windows: int) -> None:
+        """Write the verdict down once, and report it in this tick's summary."""
+
+        record = {
+            "review_id": review["review_id"], "pass": pass_ref, "reason": reason,
+            "detail": detail, "windows": windows,
+            "document_ref": review.get("document_ref"),
+            "source_ref": review.get("source_ref"),
+        }
+        if ledger is not None:
+            try:
+                ledger.exhaust(
+                    review_id=review["review_id"], source_review_hash=review_hash,
+                    pass_ref=pass_ref, reason=reason, detail=detail, windows=windows,
+                    document_ref=review.get("document_ref"),
+                    company_ref=review.get("company_ref"),
+                    model_config_hash=model_config_hash,
+                )
+            except Exception as exc:  # noqa: BLE001 - the ledger is not a gate
+                record["not_recorded"] = f"{type(exc).__name__}: {exc}"
+        known[(review["review_id"], review_hash)] = record
+        summary.setdefault("exhausted_reviews", []).append(record)
 
     def done() -> None:
         # What this pass actually paid for, so the coordinator can tell a lane
         # with nothing left to read from one whose prose queue merely drained.
         summary[spent_key] = summary.get(spent_key, 0) + spent
+        # C2-3: and where the queue got to, so "the lane is stuck on the same
+        # four documents" is a thing the owner can read rather than infer.
+        summary.setdefault("advanced_to", {})[pass_ref] = {
+            **(advanced or {"review_id": None, "document_ref": None, "offset": None}),
+            "fresh_windows": spent,
+            "reviews_skipped_exhausted": skipped_exhausted,
+        }
 
     method = getattr(service, call)
     for actor, reviews, specs in lanes:
@@ -1160,7 +1228,17 @@ def _secondary_sweep(
             if not wanted(review, specs.get(review["document_ref"])):
                 continue
             review_hash = content_hash(review)
+            if (review["review_id"], review_hash) in known:
+                # Terminal for this pass under these bytes and this model.
+                skipped_exhausted += 1
+                continue
             offset = 0
+            # C2-3: what this review turned out to be worth, this walk.
+            windows_walked = 0
+            windows_replayed = 0
+            produced = 0
+            walked_to_end = False
+            exhausted_here: tuple[str, str] | None = None
             while spent < limit:
                 try:
                     context = service.view(
@@ -1188,6 +1266,10 @@ def _secondary_sweep(
                 # may be taken from at all.
                 if not result.get("replayed") and status not in FREE_STATUSES:
                     spent += 1
+                    if advanced is None:
+                        advanced = {"review_id": review["review_id"],
+                                    "document_ref": review.get("document_ref"),
+                                    "offset": offset}
                     if directed_reviews and review["review_id"] in directed_reviews:
                         # G1: a figures window the plan asked for, paid for.
                         summary["plan_directed_windows"] = (
@@ -1202,8 +1284,20 @@ def _secondary_sweep(
                 # of the last silent failure was eventually found; put it there.
                 if result.get("requirements_error"):
                     entry["requirements_error"] = result["requirements_error"]
+                # C2-3: a window that verified nothing but refused something is
+                # not an empty document, it is an answer the contract threw
+                # away.  Live, every one of the twenty figures three 10-Ks
+                # produced was refused for the same reason, and the summary
+                # said only ``recorded: 0``.
+                reasons = _refusal_reasons(result)
+                if reasons and not result.get(total[1]):
+                    entry["refusal_reasons"] = reasons
                 summary[entries].append(entry)
                 summary[total[0]] += len(result.get(total[1], []))
+                windows_walked += 1
+                if result.get("replayed"):
+                    windows_replayed += 1
+                produced += len(result.get(total[1], []) or ())
                 if status in {"failed", "no_result"} and not result.get("replayed"):
                     done()
                     return {
@@ -1211,11 +1305,45 @@ def _secondary_sweep(
                         "error_code": result.get("error_code"),
                         "work_order_ref": result.get("work_order_ref"),
                     }
+                if status == "not_attributed":
+                    # Attribution is decided over the whole document, not the
+                    # window, so every later window would answer identically.
+                    # Pay for that finding once rather than every five minutes.
+                    exhausted_here = ("not_attributed", str(
+                        "the document names no company this lane covers; "
+                        "no window of it can be attributed"))
+                    break
                 if context["next_offset"] is None:
+                    walked_to_end = True
                     break
                 offset = context["next_offset"]
+            if exhausted_here is not None:
+                mark_exhausted(review, review_hash, reason=exhausted_here[0],
+                               detail=exhausted_here[1], windows=windows_walked)
+            elif (walked_to_end and windows_walked > 0
+                  and windows_replayed == windows_walked and produced == 0):
+                mark_exhausted(
+                    review, review_hash, reason="windows_exhausted",
+                    detail=(
+                        f"all {windows_walked} windows replayed an answer already "
+                        "stored and recorded nothing; re-reading can only re-derive "
+                        "the same document for the same nothing"
+                    ),
+                    windows=windows_walked,
+                )
     done()
     return None
+
+
+def _refusal_reasons(result: Mapping[str, Any]) -> list[str]:
+    """The distinct reasons a window's candidates were thrown away, if any."""
+
+    refused = result.get("refused")
+    if not isinstance(refused, list):
+        return []
+    reasons = {str(item["reason"]) for item in refused
+               if isinstance(item, Mapping) and item.get("reason")}
+    return sorted(reasons)[:3]
 
 
 def _admit_complete_reviews(host: ExtractionHost, service: DocumentExtractionService,

@@ -177,11 +177,36 @@ def _text(value: Any, name: str, *, maximum: int) -> str:
     return stripped
 
 
+# A number written the way a filing writes it: three-digit groups behind a
+# separator.  ``numbers_in`` below has always folded exactly this away on the
+# *quote* side, and the prompt tells the model to "report the number exactly as
+# the document writes it" -- but the candidate side parsed the string raw, so
+# "716,924" was refused as "value is not a decimal number" while the same
+# digits sat in the citation it came from.  Live on 2026-09-18 that refused
+# 20 of 20 figures three 10-Ks produced, and the run reported ``recorded: 0``.
+#
+# Deliberately strict: the groups must be exactly three digits, so a decimal
+# comma ("1,2") is still not a number this lane will read.
+_GROUPED_THOUSANDS = re.compile(
+    r"\A[+-]?\d{1,3}(?:[,    ]\d{3})+(?:\.\d+)?\Z")
+_GROUP_SEPARATORS = str.maketrans(
+    {",": None, " ": None, " ": None, " ": None, " ": None})
+
+
+def _ungrouped(text: str) -> str:
+    """The same digits, without the thousands separators a document prints."""
+
+    stripped = unicodedata.normalize("NFKC", text).strip()
+    if _GROUPED_THOUSANDS.fullmatch(stripped) is None:
+        return text
+    return stripped.translate(_GROUP_SEPARATORS)
+
+
 def _decimal(value: Any, name: str) -> Decimal:
     if isinstance(value, bool) or not isinstance(value, (int, str)):
         raise NumericCandidateError(f"{name} must be a number written as a string or integer")
     try:
-        parsed = Decimal(str(value))
+        parsed = Decimal(_ungrouped(str(value)))
     except (InvalidOperation, ValueError) as exc:
         raise NumericCandidateError(f"{name} is not a decimal number") from exc
     if not parsed.is_finite():
