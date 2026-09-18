@@ -1,5 +1,15 @@
 # Dalton 项目进度
 
+## 2026-09-18 23:20 UTC：升级到人手里的那 8 条不是判断题，是签一次预算就死一批（源码，待部署）
+
+**一、真正的原因。** legacy 8 条 `reentry_failed_after_automatic_rebind` 全部同一个死法：重入的子进程**真的跑起来了**，然后在发任何请求之前挂在 `MissionDocumentResearchError: directed document research requires the active mission`。admission 绑的是它的计划当时那一版 mission，而每次预算修订、每次政策签署都会把 mission 版本往前滚一格——今天改了一次 source plan，所有停着的 admission 就一起死了，还把自己那一次自动重试也烧在这上面。这是缺陷，不是该问 owner 的事。现在 `mission_document_research._mission` 接受**同一条 mission 血统的旧版本**：身份（plan / 登记 / planner WorkOrder 都绑在它上面）仍然是被 admit 的那一版，而**宇宙、source plan、autonomy、绑定、预算一律按当前生效版本校验**，公司不在当前宇宙、来源不再 connected、换了行业或自动化主体，才照旧拒绝；`resolve_for_execution` 相应允许 `mandate_binding` / `outer_budget` 这层「治理外壳」随版本滚动（每次调用都重新完整校验，不是不查），其余每个字段仍须逐字节一致。
+
+**二、那 8 条部署后会自己恢复。** `lane_reentry_claim` 现在把「认领了但没跑过」和「跑过但死在系统性条件上」一起算作「这次认领什么也没买到」（`SYSTEMIC_CHILD_FAILURES`：`requires the active mission`、`is no longer executable`）——两条车道的 `_controlled_reentry_plan` 在补完之前先写一枚 `controlled-reentry-systemic-*.json`，所以**只补一次**：修好之后下一轮直接重跑，再死同一个条件才升级给人。
+
+**三、升级之后有得按（真正的失败还是需要人）。** 新增两个 human-only writer 操作 `authorize_mission_document_paid_recovery` / `authorize_mission_document_unproved_recovery`，参数 `{admission_ref, max_cost_usd（可选上限）, actor_ref}`：在 writer 进程里用车道自己那套配置装出执行器（绝不另起进程去开这些库），按执行器要求的闭合格式生成授权记录（actor `operator:owner-authorized-document-recovery`、只放一条新 WorkOrder、`max_cost_usd` 等于那条失败 WorkOrder 自己的预算），重放幂等（按 admission+stage 找回已写的那一行，不会第二次买）。CLI 加 `authorize-paid` / `authorize-unproved`（不加 `--apply` 是只读预览，理由对不上会直接告诉你该按哪个门）和 `authorize-all-escalated --max-total-cost-usd N`（按最早停的先来，每条用剩余额度当自己的上限，超了就停，逐条打印结果和累计花费）。`needs_human` 里每条升级项的「该做什么」现在写的是可以直接复制的那一行命令，不再是一个 owner 根本没法调用的执行器方法名。
+
+**四、Hyperscaler 那 3 条是另一个缺陷，仍然停着。** 它们的重入也真的跑了，但死在 `ResearchAutoCommitRejected: document qualitative rule admits no numeric statement`——模型产出的定性陈述被判定在断言数值，auto-commit 规则拒收。这不是「再买一次调用」能解决的（钱已经花了，结果不合规则），所以故意没有纳入系统性自动补跑；需要单独看 `research_auto_commit._authorize_document_qualitative` 与 `statement_asserts_a_value` 的判定和那条草稿提示词。
+
 ## 2026-09-18 17:40 UTC：停着等人的 admission 现在一定会出现在「需要你处理」，而且真的有得按（源码，待部署）
 
 上一条部署一小时后线上暴露两件事：

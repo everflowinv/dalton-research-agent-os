@@ -119,8 +119,9 @@ class DeadlockEscapeTests(unittest.TestCase):
         self._hold(admission, reason="send_state_unproved", started=True)
         result = self.lane.dispatch_once()
         self.assertIn("send_state_unproved", result["reason"])
-        self.assertIn("authorize_paid_contract_recovery", result["reason"])
-        self.assertIn("operator:owner-authorized-document-recovery", result["reason"])
+        # The owner reads a command they can paste, not an executor method name.
+        self.assertIn("dalton_core.document_recovery_cli holds", result["reason"])
+        self.assertNotIn("authorize_paid_contract_recovery(", result["reason"])
         self.assertEqual(result["reason"][-len(OWNER_AUTHORIZATION_NOTE):],
                          OWNER_AUTHORIZATION_NOTE)
 
@@ -176,7 +177,7 @@ class DeadlockEscapeTests(unittest.TestCase):
         self.assertEqual(result["waiting_on_owner"], 1)
         self.assertIn("contract_failed_after_automatic_retry", result["reason"])
         self.assertIn("已经自动重试过一次", result["reason"])
-        self.assertIn("authorize_paid_contract_recovery", result["reason"])
+        self.assertIn("dalton_core.document_recovery_cli authorize-paid", result["reason"])
         self.assertEqual(result["reason"][-len(CONTRACT_ESCALATION_NOTE):],
                          CONTRACT_ESCALATION_NOTE)
         self.assertEqual(result["holds"][0]["owner_action"], CONTRACT_ESCALATION_NOTE)

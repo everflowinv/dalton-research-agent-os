@@ -739,6 +739,8 @@ HUMAN_GOVERNANCE_OPERATIONS = frozenset({
     "mission_document_reviews", "resolve_mission_document_review",
     "reopen_mission_document_review",
     "authorize_mission_document_reentry",
+    "authorize_mission_document_paid_recovery",
+    "authorize_mission_document_unproved_recovery",
     "mission_stage_checklist", "claim_retirement_challenges", "decide_claim_retirement",
     "mission_deliverables",
     "mission_document_evidence", "generate_document_extraction", "stage_document_extraction",
@@ -1192,6 +1194,10 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
         "review_id", "expected_review_hash", "decision_ref", "failed_windows", "actor_ref",
     }),
     "authorize_mission_document_reentry": frozenset({"admission_ref", "actor_ref"}),
+    "authorize_mission_document_paid_recovery": frozenset({
+        "admission_ref", "max_cost_usd", "actor_ref"}),
+    "authorize_mission_document_unproved_recovery": frozenset({
+        "admission_ref", "max_cost_usd", "actor_ref"}),
 
     "forecast_reconciliations": frozenset({
         "company_ref", "claim_version_ref", "forecast_line_ref", "created_from", "created_to",
@@ -1404,6 +1410,8 @@ OPERATION_ACTOR_FIELDS: dict[str, str] = {
     "resolve_mission_document_review": "actor_ref",
     "reopen_mission_document_review": "actor_ref",
     "authorize_mission_document_reentry": "actor_ref",
+    "authorize_mission_document_paid_recovery": "actor_ref",
+    "authorize_mission_document_unproved_recovery": "actor_ref",
     "mission_document_evidence": "actor_ref",
     "document_extraction_preflight": "actor_ref",
     "generate_document_extraction": "actor_ref",
@@ -5639,6 +5647,24 @@ class WriterServer:
         from .mission_document_research_lane import authorize_reentry
 
         return authorize_reentry(self, dict(p))
+
+    def _op_authorize_mission_document_paid_recovery(self, p: Mapping[str, Any]) -> Any:
+        # The owner's door for a document-research admission whose output
+        # contract failed again after the lane's own bounded retry.  It runs
+        # here for the same reason the re-entry door does: the executor, the
+        # Scheduler and the staging store are writer state, and the escalation
+        # used to name a method in a process the owner does not have.
+        from .mission_document_research_lane import authorize_paid_recovery
+
+        return authorize_paid_recovery(self, dict(p))
+
+    def _op_authorize_mission_document_unproved_recovery(self, p: Mapping[str, Any]) -> Any:
+        # Same door, for the send nobody could prove happened.  The worst case
+        # is that the earlier call was charged too, which is why only a person
+        # may buy the third one.
+        from .mission_document_research_lane import authorize_unproved_recovery
+
+        return authorize_unproved_recovery(self, dict(p))
 
     def _op_bounded_alphaengine_probe(self, p: Mapping[str, Any]) -> Any:
         # Executes in the writer: the acquisition subprocess writes Core

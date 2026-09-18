@@ -365,6 +365,221 @@ class DocumentRecoveryCliTests(unittest.TestCase):
         )
 
 
+class EscalatedRecoveryDoorTests(unittest.TestCase):
+    """The two doors the retry escalations lead to, and the pile-clearing one."""
+
+    PAID = "mission-document-research-admission:" + "e" * 32
+    UNPROVED = "mission-document-research-admission:" + "f" * 32
+    PAID_TWO = "mission-document-research-admission:" + "1" * 32
+    REENTRY = "mission-document-research-admission:" + "a" * 32
+
+    def setUp(self):
+        self._dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._dir.cleanup)
+        self.state = Path(self._dir.name)
+        self.runs = self.state / "mission-document-research-runs"
+        self.runs.mkdir(parents=True)
+        holds = {}
+        for admission, reason, digest, started in (
+            (self.UNPROVED, "unproved_send_failed_after_automatic_retry",
+             "unproved00", "2026-09-18T08:00:00+00:00"),
+            (self.PAID, "contract_failed_after_automatic_retry",
+             "paid000000", "2026-09-18T09:00:00+00:00"),
+            (self.PAID_TWO, "contract_failed_after_automatic_retry",
+             "paid222222", "2026-09-18T09:30:00+00:00"),
+            (self.REENTRY, "reentry_failed_after_automatic_rebind:"
+             "controlled reentry was already attempted", None, None),
+        ):
+            holds[admission] = {
+                "admission_hash": "b" * 64,
+                "ticket_ref": (None if digest is None
+                               else "mission-document-research:" + digest),
+                "reason": reason, "disposition": "recovery_required",
+                "retry_at": None,
+            }
+            if digest is not None:
+                (self.runs / digest).mkdir()
+                (self.runs / digest / "ticket.json").write_text(
+                    json.dumps({"id": "mission-document-research:" + digest,
+                                "started_at": started}), encoding="utf-8")
+        (self.runs / "holds.json").write_text(
+            json.dumps({"schema_version": "0.1", "holds": holds}),
+            encoding="utf-8")
+
+    def test_escalated_holds_come_back_oldest_run_first(self):
+        from dalton_core.document_recovery_cli import escalated_holds
+
+        items = escalated_holds(self.state)
+        self.assertEqual([item["admission_ref"] for item in items],
+                         [self.UNPROVED, self.PAID, self.PAID_TWO, self.REENTRY])
+        self.assertEqual(
+            [item["operation"] for item in items],
+            ["authorize_mission_document_unproved_recovery",
+             "authorize_mission_document_paid_recovery",
+             "authorize_mission_document_paid_recovery",
+             "authorize_mission_document_reentry"])
+
+    def test_a_dry_run_calls_no_writer(self):
+        from unittest import mock
+
+        from dalton_core import document_recovery_cli
+
+        with mock.patch("dalton_core.governance_cli.ephemeral_call") as call:
+            code = document_recovery_cli.main([
+                "authorize-paid", "--state-dir", str(self.state),
+                "--admission-ref", self.PAID, "--max-cost-usd", "0.5"])
+        self.assertEqual(code, 0)
+        self.assertEqual(call.call_count, 0)
+
+    def test_the_wrong_door_for_this_reason_is_refused_before_it_costs_anything(self):
+        from unittest import mock
+
+        from dalton_core import document_recovery_cli
+
+        with mock.patch("dalton_core.governance_cli.ephemeral_call") as call:
+            code = document_recovery_cli.main([
+                "authorize-paid", "--state-dir", str(self.state),
+                "--admission-ref", self.UNPROVED, "--apply",
+                "--actor", "human:lumos"])
+        self.assertEqual(code, 1)
+        self.assertEqual(call.call_count, 0)
+
+    def test_apply_sends_the_cap_through_the_ephemeral_human_principal(self):
+        from unittest import mock
+
+        from dalton_core import document_recovery_cli
+
+        with mock.patch("dalton_core.governance_cli.ephemeral_call") as call:
+            call.return_value = {"status": "admitted", "max_cost_usd": 0.4}
+            code = document_recovery_cli.main([
+                "authorize-unproved", "--state-dir", str(self.state),
+                "--admission-ref", self.UNPROVED, "--max-cost-usd", "0.5",
+                "--apply", "--actor", "human:lumos"])
+        self.assertEqual(code, 0)
+        kwargs = call.call_args.kwargs
+        self.assertEqual(kwargs["operation"],
+                         "authorize_mission_document_unproved_recovery")
+        self.assertEqual(kwargs["actor_ref"], "human:lumos")
+        self.assertEqual(kwargs["params"], {
+            "admission_ref": self.UNPROVED, "actor_ref": "human:lumos",
+            "max_cost_usd": 0.5})
+
+    def test_apply_without_a_human_actor_is_refused(self):
+        from dalton_core import document_recovery_cli
+
+        with self.assertRaises(SystemExit):
+            document_recovery_cli.main([
+                "authorize-paid", "--state-dir", str(self.state),
+                "--admission-ref", self.PAID, "--apply",
+                "--actor", "automation:document-research"])
+
+    def test_all_escalated_walks_oldest_first_and_stops_at_the_total_cap(self):
+        from unittest import mock
+
+        from dalton_core import document_recovery_cli
+
+        seen = []
+
+        def _call(_tokens, _socket, *, actor_ref, operation, params):
+            seen.append((operation, params.get("max_cost_usd")))
+            if operation == "authorize_mission_document_reentry":
+                return {"status": "granted"}
+            return {"status": "admitted", "max_cost_usd": 0.4}
+
+        with mock.patch("dalton_core.governance_cli.ephemeral_call",
+                        side_effect=_call):
+            code = document_recovery_cli.authorize_all_escalated(
+                self.state, actor="human:lumos", apply=True,
+                max_total_cost_usd=0.5)
+        self.assertEqual(code, 0)
+        # Oldest first, each one capped by what is left, and the walk ends the
+        # moment the next paid door would go over the total.
+        self.assertEqual(seen, [
+            ("authorize_mission_document_unproved_recovery", 0.5),
+            ("authorize_mission_document_paid_recovery", 0.1),
+        ])
+
+    def test_all_escalated_dry_run_calls_no_writer(self):
+        from unittest import mock
+
+        from dalton_core import document_recovery_cli
+
+        with mock.patch("dalton_core.governance_cli.ephemeral_call") as call:
+            document_recovery_cli.authorize_all_escalated(
+                self.state, actor=None, apply=False, max_total_cost_usd=1.0)
+        self.assertEqual(call.call_count, 0)
+
+    def test_the_writer_exposes_both_doors_as_human_only_operations(self):
+        from dalton_core.writer_server import (
+            HUMAN_GOVERNANCE_OPERATIONS, OPERATION_ACTOR_FIELDS, OPERATION_FIELDS,
+            WriterServer,
+        )
+
+        for name in ("authorize_mission_document_paid_recovery",
+                     "authorize_mission_document_unproved_recovery"):
+            with self.subTest(name=name):
+                self.assertIn(name, HUMAN_GOVERNANCE_OPERATIONS)
+                self.assertEqual(
+                    OPERATION_FIELDS[name],
+                    frozenset({"admission_ref", "max_cost_usd", "actor_ref"}))
+                self.assertEqual(OPERATION_ACTOR_FIELDS[name], "actor_ref")
+                self.assertTrue(hasattr(WriterServer, "_op_" + name))
+
+    def test_a_non_human_principal_is_refused_before_anything_opens(self):
+        from dalton_core.mission_document_research_lane import (
+            MissionDocumentResearchLaneError, authorize_paid_recovery,
+            authorize_unproved_recovery,
+        )
+
+        class _Server:
+            def lane_launcher(self, _kwarg):
+                raise AssertionError("must not reach the lane")
+
+        for door in (authorize_paid_recovery, authorize_unproved_recovery):
+            with self.subTest(door=door.__name__):
+                with self.assertRaises(MissionDocumentResearchLaneError):
+                    door(_Server(), {"admission_ref": self.PAID,
+                                     "actor_ref": "automation:document-research"})
+                with self.assertRaises(MissionDocumentResearchLaneError):
+                    door(_Server(), {"admission_ref": "not-an-admission",
+                                     "actor_ref": "human:lumos"})
+
+    def test_an_uninstalled_lane_says_so_instead_of_opening_databases(self):
+        from dalton_core.mission_document_research_lane import (
+            MissionDocumentResearchLaneError, authorize_paid_recovery,
+        )
+
+        class _Server:
+            def lane_launcher(self, _kwarg):
+                return None
+
+        with self.assertRaisesRegex(
+            MissionDocumentResearchLaneError, "document research lane is absent",
+        ):
+            authorize_paid_recovery(_Server(), {"admission_ref": self.PAID,
+                                                "actor_ref": "human:lumos"})
+
+    def test_the_owner_list_names_the_exact_command_per_reason(self):
+        from dalton_core.needs_human import held_lanes
+
+        items = {item["detail"]["admission_ref"]: item
+                 for item in held_lanes(None, state_dir=self.state)
+                 if item["detail"].get("admission_ref")}
+        for admission, subcommand in (
+            (self.PAID, "authorize-paid"),
+            (self.UNPROVED, "authorize-unproved"),
+            (self.REENTRY, "authorize-reentry"),
+        ):
+            with self.subTest(admission=admission):
+                action = items[admission]["action"]
+                self.assertIn(
+                    f"python -m dalton_core.document_recovery_cli {subcommand} "
+                    f"--state-dir {self.state} --admission-ref {admission}",
+                    action)
+                self.assertIn("--apply --actor human:<owner>", action)
+                self.assertNotIn("MissionDocumentResearchExecutor", action)
+
+
 class ProviderTests(unittest.TestCase):
     def setUp(self):
         self._dir = tempfile.TemporaryDirectory()

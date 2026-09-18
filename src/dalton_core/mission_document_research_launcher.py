@@ -266,13 +266,18 @@ class MissionDocumentResearchLauncher(LaneChildLauncher):
 
         from .lane_reentry_claim import (
             claim_consumed, consume_grant, marker, read_claim,
+            record_systemic_completion,
         )
 
         if read_claim(self, claim_ticket_ref, authorization) is None:
             return "claim"
         if not claim_consumed(self, claim_ticket_ref, authorization):
-            # Claimed by an attempt that was refused before any child existed.
-            # That bought nothing; this admission still has its one attempt.
+            # Claimed by an attempt that was refused before any child existed,
+            # or by one that started and died on a systemic condition.  Either
+            # way it bought nothing and this admission still has its one
+            # attempt -- but the systemic completion is itself one-shot, so
+            # write it down before spending it.
+            record_systemic_completion(self, claim_ticket_ref, authorization)
             return None
         if consume_grant(self, admission_ref, marker(authorization)) is None:
             raise LaneChildRejected("controlled reentry was already attempted")

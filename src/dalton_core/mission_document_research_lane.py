@@ -59,11 +59,8 @@ OWNER_AUTHORIZATION_NOTE = (
     "（系统会自动重试一次的只有两种：一是「已经证明送达并结算、仅仅是回复不符合输出"
     "契约」，二是「送达/计费状态无法证明」；这一条都不是。）"
     "需要 owner 授权一次受控恢复："
-    "MissionDocumentResearchExecutor.authorize_paid_contract_recovery("
-    "admission_ref, authorization)，其中 authorization 的 actor_ref 必须是 "
-    "\"operator:owner-authorized-document-recovery\"、stage_ordinal 为 2 或 3、"
-    "max_fresh_work_orders 为 1、max_cost_usd 等于该 WorkOrder 自己的 budget.max_cost_usd。"
-    "目前没有任何 CLI 或 writer 操作可以下发这条授权，只能由 owner 运行脚本。"
+    "`python -m dalton_core.document_recovery_cli holds --state-dir <state>` "
+    "先看它到底停在什么原因上；属于下面两类之一时才有对应的门可以按。"
 )
 # The words for the unproved send that the lane has already retried once by
 # itself.  The ask must say the retry happened, and must say the worst case:
@@ -76,14 +73,16 @@ UNPROVED_SEND_ESCALATION_NOTE = (
     "最坏情况：先前那次无法证明的调用其实已经送达并计费，加上这次自动重试，"
     "这个阶段最多已经花掉两次调用——所以系统不会再自动买第三次。"
     "先看模型/线路为什么连续两次都拿不回可用结果；确认值得再买一次时，"
-    "由 owner 授权最后一次受控恢复："
-    "MissionDocumentResearchExecutor.authorize_unproved_send_recovery("
-    "admission_ref, authorization)，其中 authorization 的 actor_ref 必须是 "
-    "\"operator:owner-authorized-document-recovery\"、stage_ordinal 为 2 或 3、"
-    "max_fresh_work_orders 为 1、max_cost_usd 等于那条失败 WorkOrder 自己的 "
-    "budget.max_cost_usd（注意此时失败的是自动重试放出来的那条 WorkOrder）。"
+    "由 owner 授权最后一次受控恢复，执行："
+    "`python -m dalton_core.document_recovery_cli authorize-unproved "
+    "--state-dir <state> --admission-ref <ref> --max-cost-usd <上限美元> "
+    "--apply --actor human:<owner>`"
+    "（不加 --apply 是只读预览；--max-cost-usd 是愿意花的上限，"
+    "那一阶段自己的预算超过它就直接拒绝。授权记录由 writer 按执行器要求的闭合格式生成，"
+    "actor_ref 是 \"operator:owner-authorized-document-recovery\"、只放一条新 WorkOrder、"
+    "max_cost_usd 等于那条失败 WorkOrder 自己的 budget.max_cost_usd。）"
     "（如果那条重试失败的原因是「已证明送达并结算、只是回复不合契约」，"
-    "则改用 authorize_paid_contract_recovery，车道给出的原因里会写明是哪一种。）"
+    "则改用 authorize-paid，车道给出的原因里会写明是哪一种。）"
 )
 # The words for a controlled re-entry that failed again after the lane already
 # rebound the admission onto a new ticket identity by itself.
@@ -105,12 +104,12 @@ CONTRACT_ESCALATION_NOTE = (
     "重试买回来的回复仍然不合契约，所以才升级给人。"
     "先看模型或提示词为什么连续两次给不出合契约的回复——连续两次同样失败通常是契约/提示词"
     "的问题，再买一次大概率还是同一个结果。"
-    "确认值得再买一次时，由 owner 授权最后一次受控恢复："
-    "MissionDocumentResearchExecutor.authorize_paid_contract_recovery("
-    "admission_ref, authorization)，其中 authorization 的 actor_ref 必须是 "
-    "\"operator:owner-authorized-document-recovery\"、stage_ordinal 为 2 或 3、"
-    "max_fresh_work_orders 为 1、max_cost_usd 等于那条失败 WorkOrder 自己的 "
-    "budget.max_cost_usd（注意此时失败的是自动重试放出来的那条 WorkOrder）。"
+    "确认值得再买一次时，由 owner 授权最后一次受控恢复，执行："
+    "`python -m dalton_core.document_recovery_cli authorize-paid "
+    "--state-dir <state> --admission-ref <ref> --max-cost-usd <上限美元> "
+    "--apply --actor human:<owner>`"
+    "（不加 --apply 是只读预览；--max-cost-usd 是愿意花的上限，"
+    "那一阶段自己的预算超过它就直接拒绝，不会偷偷少买。）"
 )
 
 
@@ -1569,6 +1568,247 @@ def authorize_reentry(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
     )
 
 
+OWNER_RECOVERY_ACTOR = "operator:owner-authorized-document-recovery"
+# Which model stage each escalated observation belongs to, in the ordinals the
+# executor's authorization rows use (2 = draft, 3 = independent verifier).
+STAGE_ORDINALS: Mapping[str, int] = {
+    "qualitative_model_draft": 2,
+    "independent_qualitative_verifier": 3,
+}
+
+
+def _recovery_doors() -> dict[str, dict[str, Any]]:
+    from .mission_document_research_executor import (
+        CONTRACT_FAILED_AFTER_AUTOMATIC_RETRY,
+        UNPROVED_SEND_FAILED_AFTER_AUTOMATIC_RETRY,
+    )
+
+    return {
+        "paid": {
+            "reason": CONTRACT_FAILED_AFTER_AUTOMATIC_RETRY,
+            "prefix": "mission-document-paid-recovery-authorization",
+            "method": "authorize_paid_contract_recovery",
+            "cli": "authorize-paid",
+        },
+        "unproved": {
+            "reason": UNPROVED_SEND_FAILED_AFTER_AUTOMATIC_RETRY,
+            "prefix": "mission-document-unproved-send-recovery-authorization",
+            "method": "authorize_unproved_send_recovery",
+            "cli": "authorize-unproved",
+        },
+    }
+
+
+def _escalated_stage_ordinal(
+    connection: Any, admission: Mapping[str, Any], reason: str,
+) -> int | None:
+    """The stage whose *second* failure is the one waiting on a person."""
+
+    from .mission_document_research_executor import (
+        read_mission_document_research_observations,
+    )
+
+    matching = [
+        item for item in read_mission_document_research_observations(
+            connection, mission_version_ref=admission["mission_version_ref"])
+        if item["admission_ref"] == admission["id"]
+        and item["outcome"] == "recovery_required"
+        and isinstance(item.get("recovery"), Mapping)
+        and item["recovery"].get("reason") == reason
+    ]
+    if not matching:
+        return None
+    return STAGE_ORDINALS.get(str(matching[-1].get("stage")))
+
+
+def _existing_owner_authorization(
+    executor: Any, admission_ref: str, stage_ordinal: int, prefix: str,
+) -> dict[str, Any] | None:
+    """Replay the owner row already written for this admission and stage.
+
+    Every authorization id is a hash of its own body, instant included, so a
+    second call that minted a fresh one would be a *different* authorization
+    on a stage that already has the owner's -- refused, not idempotent.  It is
+    keyed by (admission, stage) rather than by the failed Work because opening
+    the door moves the effective Work forward: the replacement WorkOrder is
+    the stage's Work from the next call onwards, and it has no row of its own.
+    """
+
+    rows = executor.connection.execute(
+        "SELECT record_json FROM "
+        "mission_document_research_controlled_recovery_authorizations "
+        "WHERE admission_ref=? AND stage_ordinal=? ORDER BY created_at",
+        (admission_ref, stage_ordinal),
+    ).fetchall()
+    for row in rows:
+        try:
+            record = json.loads(row["record_json"])
+        except (TypeError, ValueError, RecursionError):
+            continue
+        if isinstance(record, Mapping) and str(
+                record.get("id", "")).startswith(prefix + ":"):
+            return dict(record)
+    return None
+
+
+def authorize_owner_recovery(
+    executor: Any, admission_ref: str, *, door: str, actor_ref: str,
+    max_cost_usd: Any = None, now: datetime | None = None,
+) -> dict[str, Any]:
+    """Open one of the two escalated recovery doors, by hand, exactly once.
+
+    The lane retries a contract failure and an unproved send once each by
+    itself and then stops.  Until this existed the escalation told the owner
+    to call an executor method, in a process that must not open these
+    databases -- an instruction nobody could follow.  This builds the exact
+    authorization the executor demands (same closed shape, same hash rules,
+    same ``operator:owner-authorized-document-recovery`` actor as the
+    automatic doors write for themselves) and hands it to that same door, in
+    the writer, which is the process that owns this state.
+
+    ``max_cost_usd`` is a ceiling on what the owner is agreeing to spend, not
+    the amount: the authorization must carry the failed WorkOrder's own
+    ``budget.max_cost_usd``, so a stage that costs more than the cap is
+    refused rather than quietly trimmed.
+    """
+
+    from decimal import Decimal
+
+    from .mission_document_research_executor import (
+        _effective_stage, _formal_hash, _formal_ref, _ref,
+    )
+    from .store import content_hash as _content_hash
+
+    spec = _recovery_doors()[door]
+    admission = executor.authority.resolve_for_execution(admission_ref)
+    ordinal = _escalated_stage_ordinal(
+        executor.authority.connection, admission, spec["reason"])
+    if ordinal is None:
+        # Not a refusal of the owner: this admission is not in the state this
+        # door opens, and authorising it would buy a call for a failure that
+        # never happened.
+        return {"status": "not_escalated", "admission_ref": admission_ref,
+                "door": door, "reason": spec["reason"]}
+    index = ordinal - 1
+    worker = executor.draft_worker if index == 1 else executor.verifier_worker
+    work, _links = _effective_stage(
+        executor.authority, executor.scheduler, admission, index, worker=worker)
+    ceiling = work["budget"]["max_cost_usd"]
+    if max_cost_usd is not None and Decimal(str(ceiling)) > Decimal(str(max_cost_usd)):
+        return {
+            "status": "refused", "admission_ref": admission_ref, "door": door,
+            "reason": "stage_budget_exceeds_authorized_cap",
+            "stage_ordinal": ordinal, "max_cost_usd": ceiling,
+            "authorized_cap_usd": max_cost_usd,
+        }
+    authorization = _existing_owner_authorization(
+        executor, admission["id"], ordinal, spec["prefix"])
+    if authorization is None:
+        formal = executor.scheduler.formal_result(work["id"])
+        if formal is None:
+            return {"status": "refused", "admission_ref": admission_ref,
+                    "door": door, "reason": "failed_stage_result_unavailable",
+                    "stage_ordinal": ordinal}
+        moment = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        body = {
+            "schema_version": "0.1",
+            "actor_ref": OWNER_RECOVERY_ACTOR,
+            "admission_ref": admission["id"],
+            "admission_hash": admission["content_hash"],
+            "stage_ordinal": ordinal,
+            "failed_work_order_ref": work["id"],
+            "failed_work_order_hash": _content_hash(work),
+            "formal_result_ref": _formal_ref(formal),
+            "formal_result_hash": _formal_hash(formal),
+            "max_fresh_work_orders": 1,
+            "max_cost_usd": ceiling,
+            "authorized_at": moment.isoformat(timespec="microseconds"),
+        }
+        authorization = {**body, "id": _ref(spec["prefix"], body)}
+        authorization["content_hash"] = _content_hash(authorization)
+    result = getattr(executor, spec["method"])(admission["id"], authorization)
+    return {
+        "status": result.get("status", "admitted"),
+        "admission_ref": admission["id"], "door": door,
+        "stage_ordinal": ordinal,
+        "authorization_ref": authorization["id"],
+        "authorized_by": actor_ref,
+        "work_order_ref": result.get("work_order_ref"),
+        "model_calls": result.get("model_calls"),
+        "max_cost_usd": ceiling,
+    }
+
+
+def _open_writer_executor(server: Any, admission_ref: str) -> Any:
+    """Build this lane's executor inside the writer, out of the writer's state.
+
+    The child process the lane normally launches assembles exactly this from
+    exactly these files.  The owner's door has to reach the same executor
+    without a second process opening the Ledger, the Scheduler and the staging
+    store behind the writer's back, so it is assembled here instead, from the
+    launcher's own configuration -- the same paths, proved the same way.
+    """
+
+    launcher = server.lane_launcher(LAUNCHER_KWARG)
+    if launcher is None:
+        raise MissionDocumentResearchLaneError("document research lane is absent")
+    row = server.store.connection.execute(
+        "SELECT content_hash FROM mission_document_research_admissions "
+        "WHERE admission_id=?", (admission_ref,),
+    ).fetchone()
+    if row is None:
+        raise MissionDocumentResearchLaneError(
+            "mission document admission is unavailable")
+    from .mission_document_research_runtime import MissionDocumentResearchRuntime
+
+    return MissionDocumentResearchRuntime(
+        state_dir=launcher.state_dir,
+        staging_path=launcher.staging_path,
+        planner_scheduler_db=launcher.planner_scheduler_db,
+        planner_model_config_path=launcher.planner_model_config_path,
+        document_config_path=launcher.document_config_path,
+        draft_config_path=launcher.draft_model_config_path,
+        verifier_config_path=launcher.verifier_model_config_path,
+        admission_ref=admission_ref,
+        expected_admission_hash=row["content_hash"],
+    )
+
+
+def _authorize_recovery(
+    server: Any, params: Mapping[str, Any], *, door: str,
+) -> dict[str, Any]:
+    actor_ref = params["actor_ref"]
+    if not isinstance(actor_ref, str) or not actor_ref.startswith("human:"):
+        raise MissionDocumentResearchLaneError(
+            "a controlled recovery authorization needs a human actor")
+    admission_ref = params["admission_ref"]
+    if (not isinstance(admission_ref, str)
+            or not admission_ref.startswith(
+                "mission-document-research-admission:")):
+        raise MissionDocumentResearchLaneError(
+            "admission_ref is not a mission document research admission")
+    runtime = _open_writer_executor(server, admission_ref)
+    try:
+        return authorize_owner_recovery(
+            runtime.executor, admission_ref, door=door, actor_ref=actor_ref,
+            max_cost_usd=params.get("max_cost_usd"),
+        )
+    finally:
+        runtime.close()
+
+
+def authorize_paid_recovery(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
+    """Owner door for a contract failure the lane has already retried once."""
+
+    return _authorize_recovery(server, params, door="paid")
+
+
+def authorize_unproved_recovery(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
+    """Owner door for an unproved send the lane has already retried once."""
+
+    return _authorize_recovery(server, params, door="unproved")
+
+
 def dispatch(server: Any, _params: Mapping[str, Any]) -> dict[str, Any]:
     launcher = server.lane_launcher(LAUNCHER_KWARG)
     coordinator = server.lane_state.get(LAUNCHER_KWARG)
@@ -1697,7 +1937,12 @@ LANE = register_lane(LaneSpec(
 
 __all__ = [
     "CONTRACT_ESCALATION_NOTE",
+    "OWNER_RECOVERY_ACTOR",
+    "STAGE_ORDINALS",
+    "authorize_owner_recovery",
+    "authorize_paid_recovery",
     "authorize_reentry",
+    "authorize_unproved_recovery",
     "DEADLOCK_ESCAPE_AFTER",
     "ESCAPES_FILE",
     "MAX_ESCAPES_PER_ADMISSION",

@@ -38,6 +38,13 @@ WORKFLOW_CONTRACT_REF = "workflow:mission-directed-document-research:0.1"
 _SCHEMA_PATH = Path(__file__).with_name("mission_document_research_schema.sql")
 
 
+# The two identity fields that carry the governance envelope rather than the
+# work itself.  A mandate version or a daily ceiling that has been re-signed
+# since the admission was written rolls the mission version; the admission is
+# still the same piece of research.
+GOVERNANCE_ENVELOPE_FIELDS = ("mandate_binding", "outer_budget")
+
+
 class MissionDocumentResearchError(RuntimeError):
     pass
 
@@ -285,35 +292,85 @@ class MissionDocumentResearchAuthority:
         finally:
             self._authorized = False
 
+    def _governing_mission(self, mission: Mapping[str, Any]) -> dict[str, Any]:
+        """The mission version whose governance this admission runs under.
+
+        An admission names the mission version its plan was written against,
+        and that version is immutable.  The pointer is not: every budget
+        revision and every policy signing rolls the mission to a new version,
+        and until 2026-09-18 that silently killed every admission older than
+        the last signing -- six live legacy admissions and their whole
+        automatic-retry budget died on ``requires the active mission`` without
+        a single model call, for a change that had nothing to do with them.
+
+        The admission is the thing that must not move.  So a prior version of
+        the *same* mission lineage still runs, under the active version's
+        governance: the active mission's universe, source plan, autonomy,
+        bindings and budget are what is checked, and the refusal is kept for
+        what it was always for -- a company or a source the mission no longer
+        covers, or a version that is not this lineage at all.
+        """
+
+        missions = self._missions
+        active = missions.active_mission(mission["mission_ref"])
+        if active["id"] == mission["id"]:
+            return dict(active)
+        seen, cursor = set(), active
+        while cursor["id"] != mission["id"]:
+            prior = cursor.get("prior_version_ref")
+            if not isinstance(prior, str) or prior in seen:
+                raise MissionDocumentResearchError(
+                    "directed document research requires the active mission")
+            seen.add(prior)
+            try:
+                cursor = missions.mission(prior)
+            except Exception as exc:  # noqa: BLE001 - a broken chain is a refusal
+                raise MissionDocumentResearchError(
+                    "directed document research requires the active mission") from exc
+            if cursor["mission_ref"] != mission["mission_ref"]:
+                raise MissionDocumentResearchError(
+                    "directed document research requires the active mission")
+        if cursor["content_hash"] != mission["content_hash"]:
+            raise MissionDocumentResearchError(
+                "directed document research requires the active mission")
+        if (active["industry_ref"] != mission["industry_ref"]
+                or active["autonomy"]["automation_principal"]
+                != mission["autonomy"]["automation_principal"]):
+            # A different industry or a different automation principal is a
+            # different mandate for the work, not a rolled envelope around it.
+            raise MissionDocumentResearchError(
+                "directed document research requires the active mission")
+        return dict(active)
+
     def _mission(self, ref: str, digest: str, company_ref: str, source_ref: str) -> dict[str, Any]:
         missions = self._missions
         mission = missions.mission(ref)
-        active = missions.active_mission(mission["mission_ref"])
-        if active["id"] != ref or active["content_hash"] != digest:
+        if mission["content_hash"] != digest:
             raise MissionDocumentResearchError("directed document research requires the active mission")
-        if company_ref not in {item["company_ref"] for item in mission["universe"]}:
+        governing = self._governing_mission(mission)
+        if company_ref not in {item["company_ref"] for item in governing["universe"]}:
             raise MissionDocumentResearchError("company is outside the active mission universe")
-        source = next((item for item in mission["source_plan"] if item["source_ref"] == source_ref), None)
+        source = next((item for item in governing["source_plan"] if item["source_ref"] == source_ref), None)
         if source is None or source["status"] != "connected":
             raise MissionDocumentResearchError("selected document source is not connected")
         required = {"research_task", "model_run", "stage_record"}
-        if not required.issubset(set(mission["autonomy"]["may_write"])):
+        if not required.issubset(set(governing["autonomy"]["may_write"])):
             raise MissionDocumentResearchError("mission does not grant directed document execution")
         cur = self.connection.cursor()
         try:
-            missions._validate_playbook_binding(cur, mission["bindings"]["playbook_version"])
+            missions._validate_playbook_binding(cur, governing["bindings"]["playbook_version"])
             constitution = missions._validate_constitution_binding(
-                cur, mission["bindings"]["constitution_version"], mission["industry_ref"]
+                cur, governing["bindings"]["constitution_version"], governing["industry_ref"]
             )
             mandate = missions._validate_mandate_binding(
-                cur, mission["bindings"]["mandate_version"], mission["industry_ref"]
+                cur, governing["bindings"]["mandate_version"], governing["industry_ref"]
             )
         finally:
             cur.close()
         policy = self.store.active_policy_version().to_dict()
         bound = constitution["bindings"]["governance_policy_version"]
         if (
-            constitution["bindings"]["mandate_version"] != mission["bindings"]["mandate_version"]
+            constitution["bindings"]["mandate_version"] != governing["bindings"]["mandate_version"]
             or policy["id"] != bound["ref"]
             or policy["content_hash"] != bound["hash"]
         ):
@@ -340,11 +397,26 @@ class MissionDocumentResearchAuthority:
             if not research_budget_shape_valid(cap):
                 raise MissionDocumentResearchError(f"{name} lacks closed research budget authority")
             for key in budget_fields:
-                if mission["budget"][key] > cap[key]:
+                if governing["budget"][key] > cap[key]:
                     raise MissionDocumentResearchError(f"mission exceeds {name} research budget")
             caps.append(cap)
         return {
+            # Identity stays with the version this work was admitted under --
+            # the plan, the registration and the planner WorkOrder are all
+            # bound to it -- while every live constraint comes from the
+            # version that governs now.
             **mission,
+            "universe": governing["universe"],
+            "source_plan": governing["source_plan"],
+            "autonomy": governing["autonomy"],
+            "bindings": governing["bindings"],
+            "budget": governing["budget"],
+            "mission_version_provenance": {
+                "admitted_mission_version_ref": mission["id"],
+                "admitted_mission_version_hash": mission["content_hash"],
+                "governing_mission_version_ref": governing["id"],
+                "governing_mission_version_hash": governing["content_hash"],
+            },
             "outer_budget": {
                 "mandate_ref": mandate["mandate_ref"],
                 "mandate_version_ref": mandate["id"],
@@ -611,9 +683,21 @@ class MissionDocumentResearchAuthority:
             key: wire[key] for key in wire
             if key not in {"id", "status", "created_at", "identity_hash", "content_hash"}
         }
+        # The governance envelope -- which mandate version and which daily
+        # ceiling this run is bound by -- is re-resolved on every call against
+        # the mission version that governs *now* (see ``_governing_mission``),
+        # so it is allowed to differ from the one the admission was written
+        # with.  It is not unchecked: ``_mission`` has just revalidated the
+        # whole chain.  Everything that says *what work this is* -- the plan,
+        # the inquiry, the question, the document, the company, the source,
+        # the request -- must still be byte-identical, or this admission is
+        # genuinely no longer the work that was admitted.
+        merged = {**identity, **{
+            key: wire[key] for key in GOVERNANCE_ENVELOPE_FIELDS if key in wire
+        }}
         if (
-            canonical_json(identity) != canonical_json(stored_identity)
-            or content_hash(_execution_identity(identity)) != wire["identity_hash"]
+            canonical_json(merged) != canonical_json(stored_identity)
+            or content_hash(_execution_identity(merged)) != wire["identity_hash"]
         ):
             raise MissionDocumentResearchError("mission document admission is no longer executable")
         return wire

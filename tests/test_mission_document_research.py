@@ -466,6 +466,109 @@ class MissionDocumentResearchTests(unittest.TestCase):
         }
         return fixture, authority, args, registration, launcher
 
+    def _roll_mission(self, fixture, *, budget=None, universe=None,
+                      source_plan=None, version=2):
+        """Roll the mission pointer forward, the way a signing does."""
+
+        coverage = CoverageMissionAuthority(fixture.store)
+        current = coverage.active_mission(fixture.mission["mission_ref"])
+        return coverage.create_mission(
+            current["mission_ref"],
+            title=current["title"], objective=current["objective"],
+            industry_ref=current["industry_ref"],
+            universe=current["universe"] if universe is None else universe,
+            research_questions=current["research_questions"],
+            deliverables=current["deliverables"],
+            source_plan=(current["source_plan"] if source_plan is None
+                         else source_plan),
+            bindings=current["bindings"], autonomy=current["autonomy"],
+            budget=current["budget"] if budget is None else budget,
+            actor_ref="human:test-owner",
+            version_id=f"coverage-mission-version:annual-test:{version}",
+            prior_version_ref=current["id"],
+            idempotency_key=f"coverage-mission:mission-annual:roll:{version}",
+        )
+
+    def test_admission_admitted_under_a_prior_mission_version_still_runs(self):
+        """Live: six legacy admissions died on a budget change, unspent.
+
+        Every budget revision and every policy signing rolls the mission
+        version.  An admission is bound to the version its plan was written
+        against, so before this each signing killed everything held -- with
+        ``directed document research requires the active mission``, before a
+        single call -- and the lane spent its one automatic retry proving it.
+        """
+
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        admission = authority.admit_from_plan(**args)
+        rolled = self._roll_mission(fixture, budget={
+            **fixture.mission["budget"], "max_daily_cost_usd": 9.0})
+        self.assertNotEqual(rolled["id"], fixture.mission["id"])
+        resolved = authority.resolve_for_execution(admission["id"])
+        # The admission still names the version it was admitted under.
+        self.assertEqual(resolved["mission_version_ref"], fixture.mission["id"])
+        self.assertEqual(resolved["content_hash"], admission["content_hash"])
+        mission = authority.active_budget_mission(admission["id"])
+        self.assertEqual(mission["mission_version_provenance"], {
+            "admitted_mission_version_ref": fixture.mission["id"],
+            "admitted_mission_version_hash": fixture.mission["content_hash"],
+            "governing_mission_version_ref": rolled["id"],
+            "governing_mission_version_hash": rolled["content_hash"],
+        })
+        # The *new* ceiling is the one that binds the work.
+        self.assertEqual(mission["budget"]["max_daily_cost_usd"], 9.0)
+        executor, draft, verifier = self._executor(fixture, authority)
+        outcomes = [executor.run_once(admission["id"]) for _ in range(9)]
+        self.assertEqual([item["status"] for item in outcomes], [
+            "admitted", "succeeded", "admitted", "succeeded", "admitted",
+            "succeeded", "admitted", "complete", "complete",
+        ])
+        self.assertEqual((draft.calls, verifier.calls), (1, 1))
+        self.assertEqual(outcomes[-1]["research_status"], "candidate_staged")
+
+    def test_mission_roll_that_drops_the_company_or_source_still_refuses(self):
+        """Lineage tolerance is not tolerance of a changed mission."""
+
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        admission = authority.admit_from_plan(**args)
+        self._roll_mission(fixture, universe=[{
+            "company_ref": "company:other", "ticker": "OTHR",
+            "coverage_tier": "A", "bootstrap_priority": "P0",
+        }])
+        with self.assertRaisesRegex(
+            MissionDocumentResearchError,
+            "company is outside the active mission universe",
+        ):
+            authority.resolve_for_execution(admission["id"])
+        dropped = [
+            {**item, "status": "not_connected"}
+            if item["source_ref"] == COMPANY_WIKI_SOURCE_REF else item
+            for item in fixture.mission["source_plan"]
+        ]
+        self._roll_mission(fixture, source_plan=dropped, version=3,
+                           universe=fixture.mission["universe"])
+        with self.assertRaisesRegex(
+            MissionDocumentResearchError,
+            "selected document source is not connected",
+        ):
+            authority.resolve_for_execution(admission["id"])
+
+    def test_a_version_of_another_mission_is_still_refused(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        admission = authority.admit_from_plan(**args)
+        coverage = CoverageMissionAuthority(fixture.store)
+        current = coverage.active_mission(fixture.mission["mission_ref"])
+        with patch.object(
+            CoverageMissionAuthority, "active_mission",
+            return_value={**current, "id": "coverage-mission-version:other:1",
+                          "prior_version_ref": None},
+        ):
+            with self.assertRaisesRegex(
+                MissionDocumentResearchError,
+                "requires the active mission",
+            ):
+                authority.resolve_for_execution(admission["id"])
+
     def test_exact_archived_plan_question_and_registration_admit_and_replay(self):
         fixture, authority, args, registration, _launcher = self._fixture()
         admitted = authority.admit_from_plan(**args)
@@ -1470,6 +1573,97 @@ class MissionDocumentResearchTests(unittest.TestCase):
         with self.assertRaises(MissionDocumentResearchExecutorError):
             executor.authorize_unproved_send_recovery(admission["id"], changed)
 
+    def _owner_door(self, adapter, *, door, reason):
+        """Drive one admission to an escalated state and open its owner door."""
+
+        from dalton_core.mission_document_research_lane import (
+            authorize_owner_recovery,
+        )
+
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        self._enable_recovery(fixture, maximum=2)
+        admission = authority.admit_from_plan(**args)
+        executor, _draft, _verifier = self._executor(
+            fixture, authority, draft_adapter=adapter)
+        self._run_until(executor, admission,
+                        lambda item: item.get("reason") == reason)
+        work, _links = executor_module._effective_stage(
+            authority, executor.scheduler, admission, 1,
+            worker=executor.draft_worker)
+        ceiling = float(work["budget"]["max_cost_usd"])
+        self.assertGreater(ceiling, 0)
+        # A cap below what this stage costs is a refusal, not a smaller buy:
+        # the authorization must carry the failed Work's own ceiling.
+        calls = adapter.calls
+        refused = authorize_owner_recovery(
+            executor, admission["id"], door=door, actor_ref="human:lumos",
+            max_cost_usd=ceiling / 2)
+        self.assertEqual(refused["status"], "refused")
+        self.assertEqual(refused["reason"], "stage_budget_exceeds_authorized_cap")
+        self.assertEqual(refused["max_cost_usd"], work["budget"]["max_cost_usd"])
+        self.assertEqual(adapter.calls, calls)
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM "
+            "mission_document_research_controlled_recovery_authorizations"
+        ).fetchone()[0], 1)
+        granted = authorize_owner_recovery(
+            executor, admission["id"], door=door, actor_ref="human:lumos",
+            max_cost_usd=ceiling)
+        self.assertEqual(granted["status"], "admitted")
+        self.assertEqual(granted["model_calls"], 0)
+        self.assertEqual(granted["stage_ordinal"], 2)
+        self.assertEqual(granted["authorized_by"], "human:lumos")
+        self.assertEqual(adapter.calls, calls)
+        # Replayed -- a retried writer call, a re-run CLI -- it is the same
+        # authorization row and the same answer, not a second purchase.
+        self.assertEqual(
+            authorize_owner_recovery(
+                executor, admission["id"], door=door, actor_ref="human:lumos"),
+            granted)
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM "
+            "mission_document_research_controlled_recovery_authorizations"
+        ).fetchone()[0], 2)
+        self.assertEqual(adapter.calls, calls)
+        # And the other door refuses to touch a state that is not its own.
+        other = "unproved" if door == "paid" else "paid"
+        self.assertEqual(
+            authorize_owner_recovery(
+                executor, admission["id"], door=other,
+                actor_ref="human:lumos")["status"],
+            "not_escalated")
+        return fixture, authority, executor, admission, granted
+
+    def test_owner_paid_door_builds_the_exact_authorization_and_replays(self):
+        """The escalation's own door, opened the way the owner can reach it."""
+
+        _fixture, authority, executor, admission, granted = self._owner_door(
+            CountingFakeAdapter({"schema_version": "0.1", "status": "answered"}),
+            door="paid", reason="contract_failed_after_automatic_retry")
+        self.assertTrue(granted["authorization_ref"].startswith(
+            "mission-document-paid-recovery-authorization:"))
+        _work, links = executor_module._effective_stage(
+            authority, executor.scheduler,
+            authority.resolve_for_execution(admission["id"]), 1,
+            worker=executor.draft_worker)
+        self.assertEqual([item["failure_proof"]["classification"] for item in links],
+                         ["automation_bounded_contract_retry",
+                          "owner_authorized_paid_contract_retry"])
+
+    def test_owner_unproved_door_builds_the_exact_authorization_and_replays(self):
+        _fixture, authority, executor, admission, granted = self._owner_door(
+            AlwaysUnprovedSendAdapter({"unused": True}),
+            door="unproved", reason="unproved_send_failed_after_automatic_retry")
+        self.assertTrue(granted["authorization_ref"].startswith(
+            "mission-document-unproved-send-recovery-authorization:"))
+        _work, links = executor_module._effective_stage(
+            authority, executor.scheduler,
+            authority.resolve_for_execution(admission["id"]), 1,
+            worker=executor.draft_worker)
+        self.assertEqual([item["failure_proof"]["classification"] for item in links],
+                         ["automation_bounded_unproved_send_retry",
+                          "owner_authorized_unproved_send_retry"])
+
     def test_changed_ticket_identity_rebinds_when_the_admission_did_not_change(self):
         """The ten live holds: a moved ticket name, not a moved admission."""
 
@@ -1630,6 +1824,155 @@ class MissionDocumentResearchTests(unittest.TestCase):
                     prior_ticket_ref=prior_ref,
                     authorization="test:other-authorization")
         self.assertEqual(len(spawned), 3)
+
+    def test_systemic_child_failure_is_completed_once_then_reaches_a_person(self):
+        """The live 2026-09-18 escalations, at the real instants they happened.
+
+        Six legacy admissions escalated to the owner saying the lane had
+        already tried.  It had: the re-entered child really ran -- six
+        milliseconds after the claim -- and died on ``requires the active
+        mission``, because a source-plan change had rolled the mission version
+        under them.  Nothing was sent and nothing was charged, so that attempt
+        bought nothing; once the executor accepts the lineage the lane must
+        complete it by itself rather than ask a person about a defect.  Once,
+        though: a second death on the same condition is a real fault.
+        """
+
+        from dalton_core.lane_child_launcher import LaneChildRejected, write_owner_only
+        from dalton_core.lane_reentry_claim import claim_path, systemic_path
+        from dalton_core.mission_document_research_launcher import (
+            MissionDocumentResearchLauncher,
+        )
+
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        admission = authority.admit_from_plan(**args)
+        for name, body in (("systemic-staging.sqlite", b"staging"),
+                           ("systemic-core.sqlite", b"core")):
+            (fixture.state / name).write_bytes(body)
+        for name in ("systemic-planner-config.json", "systemic-document-config.json",
+                     "systemic-draft-model-config.json",
+                     "systemic-verifier-model-config.json"):
+            (fixture.state / name).write_text("{}\n", encoding="utf-8")
+        launcher = MissionDocumentResearchLauncher(
+            state_dir=fixture.state,
+            staging_path=fixture.state / "systemic-staging.sqlite",
+            planner_scheduler_db=fixture.state / "systemic-core.sqlite",
+            planner_model_config_path=fixture.state / "systemic-planner-config.json",
+            draft_model_config_path=fixture.state / "systemic-draft-model-config.json",
+            verifier_model_config_path=(
+                fixture.state / "systemic-verifier-model-config.json"),
+            document_config_path=fixture.state / "systemic-document-config.json",
+        )
+        self.addCleanup(launcher.close)
+        configuration = launcher.configuration()
+        signature = {
+            "admission_ref": admission["id"],
+            "admission_hash": admission["content_hash"],
+            "configuration": configuration,
+        }
+        prior_ref = "mission-document-research:" + content_hash(signature)[:24]
+        ticket_path = launcher._ticket_path(prior_ref)
+        ticket_path.parent.mkdir(parents=True, exist_ok=True)
+        # The exact instants from legacy ticket 897e433770c53844a036f208.
+        claimed_at = "2026-09-18T09:57:37.393651+00:00"
+        started_at = "2026-09-18T09:57:37.399947+00:00"
+        write_owner_only(ticket_path, {
+            "schema_version": "0.1", "id": prior_ref, **signature,
+            "configuration_hash": content_hash(configuration),
+            "started_at": started_at, "pid": 1, "command": ["true"],
+            "status": "failed", "exit_code": 1,
+            "completed_at": "2026-09-18T09:57:51.919136+00:00",
+        })
+        summary = {
+            "schema_version": "0.1",
+            "created_at": "2026-09-18T09:57:51.919136+00:00",
+            "admission_ref": admission["id"],
+            "admission_hash": admission["content_hash"],
+            "status": "failed", "outcomes": [],
+            "error": ("MissionDocumentResearchError: directed document research "
+                      "requires the active mission"),
+        }
+        write_owner_only(ticket_path.with_name("summary.json"),
+                         {**summary, "content_hash": content_hash(summary)})
+        authorization = "test:exact-scheduler-replay"
+        write_owner_only(claim_path(launcher, prior_ref, authorization), {
+            "schema_version": "0.3", "ticket_ref": prior_ref,
+            "authorization": authorization, "claimed_at": claimed_at,
+            "lane_input": None, "prior_log_base64": "",
+            "prior_log_sha256": "0" * 64,
+            "prior_summary_base64": "", "prior_summary_sha256": "0" * 64,
+        })
+        # Before the fix this was the end of the road: the claim was spent, so
+        # the lane escalated and there was nothing automatic left.
+        self.assertFalse(launcher.controlled_reentry_consumed(
+            prior_ref, authorization))
+        spawned = []
+
+        def fake_spawn(*, digest, record, _controlled_reentry=None, **kwargs):
+            spawned.append({"digest": digest, "reentry": _controlled_reentry})
+            return {"id": f"mission-document-research:{digest}",
+                    "status": "running", **dict(record)}
+
+        with patch.object(launcher, "spawn", side_effect=fake_spawn):
+            resumed = launcher.resume(
+                admission_ref=admission["id"],
+                admission_hash=admission["content_hash"],
+                prior_ticket_ref=prior_ref, authorization=authorization)
+        self.assertEqual(resumed["id"], prior_ref)
+        self.assertEqual(len(spawned), 1)
+        # Completed, not re-claimed: the marker's name is already taken.
+        self.assertIsNone(spawned[0]["reentry"])
+        recorded = systemic_path(launcher, prior_ref, authorization)
+        self.assertTrue(recorded.is_file())
+        self.assertIn("requires the active mission",
+                      json.loads(recorded.read_text(encoding="utf-8"))["reason"])
+        # And exactly once.  A second death on the same condition is a fault
+        # the owner has to look at, which is what the owner door is for.
+        self.assertTrue(launcher.controlled_reentry_consumed(
+            prior_ref, authorization))
+        with patch.object(launcher, "spawn", side_effect=fake_spawn):
+            with self.assertRaisesRegex(LaneChildRejected, "already attempted"):
+                launcher.resume(
+                    admission_ref=admission["id"],
+                    admission_hash=admission["content_hash"],
+                    prior_ticket_ref=prior_ref, authorization=authorization)
+        self.assertEqual(len(spawned), 1)
+
+    def test_a_child_that_failed_on_its_own_work_is_not_completed_again(self):
+        """Only a systemic condition buys the extra completion."""
+
+        from dalton_core.lane_child_launcher import write_owner_only
+        from dalton_core.lane_reentry_claim import claim_consumed, claim_path
+
+        class _Launcher:
+            def __init__(self, root):
+                self.tickets_dir = root
+
+            def _ticket_path(self, ticket_ref):
+                return self.tickets_dir / ticket_ref.split(":")[-1] / "ticket.json"
+
+        import tempfile
+
+        root = Path(tempfile.mkdtemp(prefix="systemic-claim"))
+        self.addCleanup(lambda: __import__("shutil").rmtree(root, ignore_errors=True))
+        launcher = _Launcher(root)
+        ticket_ref = "mission-document-research:abc"
+        path = launcher._ticket_path(ticket_ref)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_owner_only(path, {"id": ticket_ref, "started_at": "2026-09-18T09:57:38+00:00"})
+        write_owner_only(claim_path(launcher, ticket_ref, "auth"),
+                         {"claimed_at": "2026-09-18T09:57:37+00:00"})
+        for error, consumed in (
+            ("ResearchAutoCommitRejected: document qualitative rule admits "
+             "no numeric statement", True),
+            ("MissionDocumentResearchError: directed document research requires "
+             "the active mission", False),
+        ):
+            write_owner_only(path.with_name("summary.json"),
+                             {"status": "failed", "error": error})
+            with self.subTest(error=error):
+                self.assertEqual(
+                    claim_consumed(launcher, ticket_ref, "auth"), consumed)
 
     def test_automatic_contract_retry_replays_its_own_authorization_after_a_crash(self):
         """One failed Work carries one authorization, even across a crash.

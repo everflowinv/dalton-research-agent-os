@@ -441,19 +441,45 @@ def _escalated_reason(reason: str) -> bool:
     return any(name in reason for name in ESCALATED_HOLD_REASONS)
 
 
-def _retry_words(reason: str) -> tuple[str, str]:
+def recovery_command(
+    subcommand: str, *, state_dir: Any = "<state>", admission_ref: str = "<ref>",
+    cap: str | None = None,
+) -> str:
+    """The exact line the owner types, with nothing left to fill in but who."""
+
+    return (
+        f"python -m dalton_core.document_recovery_cli {subcommand} "
+        f"--state-dir {state_dir} --admission-ref {admission_ref}"
+        + (f" --max-cost-usd {cap}" if cap else "")
+        + " --apply --actor human:<owner>"
+    )
+
+
+def _retry_words(
+    reason: str, *, state_dir: Any = "<state>", admission_ref: str = "<ref>",
+) -> tuple[str, str]:
     """What the lane already tried for this reason, and what to do next.
 
     The ask has to say what has already been bought, or the owner authorises
-    the same purchase a second time without knowing the first one happened.
+    the same purchase a second time without knowing the first one happened --
+    and it has to name the one command that does it.  Naming an executor
+    method, as this did until 2026-09-18, is not an action: that method lives
+    in a process the owner must not start.
     """
+
+    def _line(subcommand: str, *, cap: str | None = None) -> str:
+        return recovery_command(subcommand, state_dir=state_dir,
+                                admission_ref=admission_ref, cap=cap)
 
     if CONTRACT_RETRIED_REASON in reason:
         return (
             "模型回复不符合输出契约，系统已经按上限自动重试过一次（同样的预算上限、"
             "只放一条新 WorkOrder），重试回来的回复仍然不合契约，所以才轮到人。",
-            "先看模型或提示词为什么连续两次给不出合契约的回复；确认值得再买一次，"
-            "再按车道原文里写的那条 authorize_paid_contract_recovery 授权最后一次。",
+            "先看模型或提示词为什么连续两次给不出合契约的回复——连续两次同样失败通常是"
+            "契约或提示词的问题，再买一次大概率还是同一个结果。确认值得再买一次，就执行："
+            + _line("authorize-paid", cap="<上限美元>")
+            + "（先不加 --apply 是只读预览；--max-cost-usd 是你愿意花的上限，"
+            "那一阶段自己的预算超过它就直接拒绝，不会偷偷少买。）",
         )
     if UNPROVED_SEND_RETRIED_REASON in reason:
         return (
@@ -461,18 +487,21 @@ def _retry_words(reason: str) -> tuple[str, str]:
             "（同样的预算上限、只放一条新 WorkOrder）；重试也失败了。"
             "最坏情况是先前那次其实已经计费，也就是这个阶段最多已经花了两次调用，"
             "所以系统不再自动买第三次。",
-            "先看模型或线路为什么连续两次都拿不回可用结果；确认值得再买一次，"
-            "再按车道原文里写的那条 authorize_unproved_send_recovery 授权最后一次。",
+            "先看模型或线路为什么连续两次都拿不回可用结果；确认值得再买一次，就执行："
+            + _line("authorize-unproved", cap="<上限美元>")
+            + "（先不加 --apply 是只读预览；--max-cost-usd 是你愿意花的上限。）",
         )
     if REENTRY_REBOUND_REASON in reason:
         return (
             "子进程票据身份变过（通常是发布或配置换了），系统已经自动改绑到新票据"
             "并重新进入过一次，重新进入又失败了，所以才轮到人。",
             "先看原因里那条 LaneChildRejected 原文说的是什么（配置文件、工作区绑定、"
-            "票据占用）；修好之后用 `python -m dalton_core.document_recovery_cli "
-            "authorize-reentry --state-dir <state> --admission-ref <ref> "
-            "--apply --actor human:<owner>` 放行一次重新进入。"
-            "（先不加 --apply 是只读预览；`holds` 子命令列出账本里所有停着的 admission。）",
+            "票据占用）；修好之后执行："
+            + _line("authorize-reentry")
+            + "放行一次重新进入。"
+            "（先不加 --apply 是只读预览；`holds` 子命令列出账本里所有停着的 admission；"
+            "`authorize-all-escalated --max-total-cost-usd N` 按最早停的先来，"
+            "在一个总预算里一次清完。）",
         )
     return (
         "它不会自己重新开始。",
@@ -487,8 +516,12 @@ def _escalated_hold_item(
     """One admission the lane has already tried and handed to a person."""
 
     reason = str(hold.get("reason") or "")
-    why, action = _retry_words(reason)
     admission_ref = str(hold.get("admission_ref") or "")
+    # ``path`` is <state>/<lane runs dir>/holds.json, so the state directory
+    # the owner has to name is two levels up -- which means the command in
+    # front of them is the real one, not a template.
+    why, action = _retry_words(
+        reason, state_dir=Path(path).parent.parent, admission_ref=admission_ref)
     return _item(
         "controlled_recovery", ref=f"lane:{lane}:{admission_ref}", at=at,
         title=f"研究 admission 自动重试过一次仍然失败，等人决定：{_short(admission_ref)}",
@@ -978,6 +1011,7 @@ __all__ = [
     "REENTRY_REBOUND_REASON",
     "UNPROVED_SEND_RETRIED_REASON",
     "lane_hold_ledgers",
+    "recovery_command",
     "GOVERNANCE_DIR_NAME",
     "HELD_LANE_STATUSES",
     "KINDS",
