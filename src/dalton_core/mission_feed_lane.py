@@ -2011,10 +2011,24 @@ COMPANY_WIKI_GOVERNANCE = (
 
 
 def _mission_universe(server: Any) -> list[dict[str, Any]]:
-    """The covered companies, from the mission the writer is running."""
+    """The covered companies, from the mission the writer is running.
 
-    missions = server.coverage_mission
-    version = missions.active_mission("coverage-mission:us-it-services")
+    Read off the mission pointer rather than by name: this lane used to ask
+    for ``coverage-mission:us-it-services`` literally, which the legacy
+    environment has and every workspace does not, so in a new environment all
+    three feed lanes answered "requested object was not found" every tick
+    (Hyperscaler, live 2026-09-18) even after their inputs were installed.
+    """
+
+    from .coverage_mission import CoverageMissionNotFound
+
+    pointer = server.store.connection.execute(
+        "SELECT mission_version_id FROM coverage_mission_pointer "
+        "ORDER BY mission_ref LIMIT 1"
+    ).fetchone()
+    if pointer is None:
+        raise CoverageMissionNotFound("this Core has no active coverage mission")
+    version = server.coverage_mission.mission(pointer["mission_version_id"])
     return [dict(item) for item in version["universe"]]
 
 
