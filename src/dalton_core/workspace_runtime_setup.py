@@ -371,15 +371,56 @@ def _host_lane_inputs(workspace: Any, actor_ref: str,
     }
 
 
+def _shared_daily_budget(workspace: Any, manager_config_path: str | Path | None,
+                         policy_path: str | Path | None) -> dict[str, Any]:
+    """Put this workspace inside the host's daily cap before it can spend.
+
+    The cap is shared across the machine, and an environment with no binding
+    file is an environment the shared cap does not reach -- it was still true
+    of every workspace created between the policy's installation and somebody
+    remembering to run ``scripts/bind_shared_daily_budget.py``.  Doing it here
+    closes that window to zero: the binding is written before the writer that
+    could spend anything is started.
+
+    ``manager_config_path`` is a parameter and not a discovery for the reason
+    ``host_sources`` is: the binding names the host manifest its peer ledgers
+    are enumerated from, and a setup that guessed it would make a test in a
+    temporary directory bind itself to the real installation on this Mac.
+    """
+
+    from .shared_daily_budget import SharedDailyBudgetError, install_binding
+
+    if manager_config_path is None:
+        return {"status": "skipped",
+                "note": "创建时没有指定本机研究环境清单，这个环境没有绑定共享每日预算；"
+                        "运行 scripts/bind_shared_daily_budget.py --apply 可以补上。"}
+    try:
+        return install_binding(
+            workspace.state_dir, environment_id=workspace.workspace_id,
+            manager_config_path=manager_config_path, policy_path=policy_path)
+    except (SharedDailyBudgetError, OSError) as exc:
+        # A workspace that came up outside the shared cap is repairable by one
+        # script; a creation that failed because a cap file was mid-write is
+        # not repairable by anything the owner can see.
+        return {"status": "failed", "note": f"没有绑定共享每日预算：{exc}"}
+
+
 def install(workspace_manifest: str | Path, *, actor_ref: str,
             stage_host_lanes: bool = True,
-            host_sources: Mapping[str, Path] | None = None) -> dict[str, Any]:
+            host_sources: Mapping[str, Path] | None = None,
+            manager_config_path: str | Path | None = None,
+            shared_daily_budget_policy_path: str | Path | None = None) -> dict[str, Any]:
     """Install idempotent, mission-neutral research foundations.
 
     ``host_sources`` names where this machine keeps the host-level lane inputs.
     It is a parameter rather than always a discovery so that what a setup did
     is reproducible: a test pins it, and a caller installing on behalf of
     another host can say so.  ``None`` means "look at this machine".
+
+    ``manager_config_path`` names the host's research-environment manifest.
+    Given it, the workspace is bound to this machine's shared daily budget as
+    part of its installation; without it, or on a host that has no shared
+    policy file, the foundation records that it was not and why.
 
     ``stage_host_lanes=False`` installs the foundation and nothing else.  A
     hermetic rehearsal wants that: it runs real writers against made-up
@@ -407,6 +448,8 @@ def install(workspace_manifest: str | Path, *, actor_ref: str,
     connectors, unsupported = _connector_records(workspace, actor_ref)
     host_lanes = _host_lane_inputs(workspace, actor_ref, host_sources,
                                    stage_host_lanes)
+    shared_budget = _shared_daily_budget(workspace, manager_config_path,
+                                         shared_daily_budget_policy_path)
     routing_policies = _service_pinned_policy_lineages(workspace)
     debate_hash = content_hash(DEBATE_POLICY)
     conviction_hash = content_hash(CONVICTION_POLICY)
@@ -520,6 +563,11 @@ def install(workspace_manifest: str | Path, *, actor_ref: str,
         "host_lane_inputs": host_lanes,
         "service_pinned_policy_lineages": sorted(
             [*routing_policies["created"], *routing_policies["present"]]),
+        # What this environment shares with the rest of the machine, recorded
+        # where the owner already looks for "what was this environment set up
+        # with".  A host with no shared policy file is recorded as skipped and
+        # is not an error: it is a machine that has not adopted the cap.
+        "shared_daily_budget": shared_budget,
     }
     foundation = {**foundation_body, "content_hash": content_hash(foundation_body)}
     files["research-foundation.json"] = _atomic_seed(
@@ -530,6 +578,7 @@ def install(workspace_manifest: str | Path, *, actor_ref: str,
             "unsupported_shared_capabilities": unsupported,
             "host_lane_inputs": host_lanes,
             "routing_policy_lineages": routing_policies,
+            "shared_daily_budget": shared_budget,
             "research_state_copied": False, "legacy_approvals_copied": False}
 
 
@@ -537,8 +586,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--actor-ref", required=True)
+    parser.add_argument("--manager-config", type=Path, default=None,
+                        help="本机研究环境清单；给了它才会绑定共享每日预算")
     args = parser.parse_args(argv)
-    print(json.dumps(install(args.manifest, actor_ref=args.actor_ref), sort_keys=True))
+    print(json.dumps(install(args.manifest, actor_ref=args.actor_ref,
+                             manager_config_path=args.manager_config),
+                     sort_keys=True))
     return 0
 
 

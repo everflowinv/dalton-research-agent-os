@@ -209,6 +209,12 @@ class MissionDocumentResearchRuntime:
             self.registry = authority.registry
             from .document_research_inventory import (
                 CONFIG_FILENAME, automatic_contract_retry_cap,
+                automatic_unproved_send_retry_cap,
+            )
+
+            document_config = (
+                Path(document_config_path) if document_config_path is not None
+                else self.state_dir / CONFIG_FILENAME
             )
 
             self.executor = MissionDocumentResearchExecutor(
@@ -221,9 +227,9 @@ class MissionDocumentResearchRuntime:
                 actor_ref=ACTOR_REF,
                 clock=self.clock,
                 max_automatic_contract_retries_per_day=automatic_contract_retry_cap(
-                    Path(document_config_path) if document_config_path is not None
-                    else self.state_dir / CONFIG_FILENAME,
-                ),
+                    document_config),
+                max_automatic_unproved_send_retries_per_day=(
+                    automatic_unproved_send_retry_cap(document_config)),
             )
         except Exception:
             self.close()

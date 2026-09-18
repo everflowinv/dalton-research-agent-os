@@ -61,6 +61,8 @@ from .company_dossier import (
     _unit_was_drafted,
 )
 from .company_dossier_draft import (
+    DRAFT_CONTRACT_VERSION,
+    FINDINGS_REMINDER_LINES,
     MAX_CLAIM_ROWS,
     independence_precheck,
     MAX_COST_USD,
@@ -83,6 +85,8 @@ from .company_dossier_draft import (
     independence,
     material_rows,
     parse_unit_output,
+    repair_unit_with_findings,
+    unit_reply_wire,
     unit_contract,
     unit_contract_reminder,
     citable_context,
@@ -117,6 +121,59 @@ def _verifier_contract_pairs(draft_digest, blocks, company, *, current):
 # this layer, so they are a gate rather than a score.
 HARD_CHECKS: tuple[str, ...] = ("numbers_without_refs", "new_version_cites_new_refs")
 MAX_REPAIR_TARGETS = 20
+# One.  A run whose draft was rejected by the independent verifier, or by the
+# Constitution's ``output_rubric``, gets exactly one round of repair calls --
+# one per rejected unit, at most this many units -- and is then refused.  The
+# number is a constant rather than a loop bound because it is the whole
+# economics of the thing: the Accenture lane relaunched every five minutes
+# from 2026-09-17, paid four calls each time, and published nothing, because a
+# verifier's finding had nowhere to go.  A second round would have been a
+# second way to spend the same money.
+MAX_FINDINGS_REPAIR_ROUNDS = 1
+MAX_FINDINGS_REPAIR_UNITS = 3
+# The two things a unit can be repaired against after it has been drafted.
+VERIFICATION_REPAIR = "verification"
+OUTPUT_RUBRIC_REPAIR = "output_rubric"
+# The six fields that name one model call in the formal record.
+_CALL_KEYS = ("work_order_ref", "result_envelope_ref", "invocation_ref",
+              "route_decision_ref", "request_id", "prompt_hash")
+
+
+def findings_repair_contract_name(kind: str, unit: str) -> str:
+    """The name a findings repair of one unit is identified under.
+
+    Part of the repair call's content-addressed request id, so it is derived
+    rather than chosen: the formal replay in
+    :func:`validate_formal_unit_provenance` rebuilds it from the ``kind`` the
+    record carries and refuses a repair whose identity does not follow.
+    """
+
+    return f"{DRAFT_CONTRACT_VERSION}:{kind}:{unit}"
+
+
+def findings_repair_targets(
+    findings: Sequence[Mapping[str, Any]], blocks: Mapping[str, Any], *, key: str,
+) -> dict[str, list[dict[str, Any]]]:
+    """Group findings by the unit this run drafted, dropping the rest.
+
+    A finding about a section carried forward from an earlier version has no
+    drafting call behind it on this run, so there is nothing to hand back to a
+    model and nothing a repair could change.  Those are refusals, exactly as
+    before; only what this run wrote can be rewritten.
+    """
+
+    targets: dict[str, list[dict[str, Any]]] = {}
+    for item in findings or ():
+        if not isinstance(item, Mapping):
+            continue
+        unit = item.get(key)
+        if not isinstance(unit, str) or unit not in blocks:
+            continue
+        rows = targets.setdefault(unit, [])
+        if len(rows) < MAX_REPAIR_TARGETS:
+            rows.append({name: value for name, value in sorted(item.items())
+                         if isinstance(value, (str, int, float, bool))})
+    return {unit: rows for unit, rows in targets.items() if rows}
 MAX_STATEMENT_PERIODS = 8
 # The sections a filed figure belongs beside. The rest of the file is about
 # judgement, and a number offered to a section that cannot use it is prompt
@@ -1288,34 +1345,107 @@ def validate_formal_unit_provenance(
                             # trusted, and its request id -- which is content
                             # addressed on those violations -- has to agree.
                             from .draft_contract_repair import (
-                                build_repair_prompt, repair_request_id, violations_of)
+                                build_findings_repair_prompt, build_repair_prompt,
+                                contract_reminder_lines, repair_request_id,
+                                violations_from_findings, violations_of)
 
                             parent = resolved["producer_repair"]
                             contract = unit_contract(
                                 unit, structure=prompt_args["structure"],
                                 material=prompt_args["material"])
-                            violations = violations_of(parent["text"], contract)
-                            if not violations:
-                                raise UnitProvenanceDrift(
-                                    f"unit_provenance.{unit}.producer_repair repaired a "
-                                    "reply that broke no rule",
-                                    unit=unit, carry_forward=not is_current)
-                            if claimed["request_id"] != repair_request_id(
-                                    parent["request_id"], contract_name=contract.name,
-                                    violations=violations):
-                                raise UnitProvenanceDrift(
-                                    f"unit_provenance.{unit}.producer repair identity drifted",
-                                    unit=unit, carry_forward=not is_current)
-                            if is_current and work.get("question") != build_repair_prompt(
-                                    original_prompt=parent["question"],
-                                    reply_text=parent["text"], violations=violations,
-                                    contract_reminder=unit_contract_reminder(
-                                        unit, structure=prompt_args["structure"]),
-                                    context=citable_context(prompt_args["material"])):
-                                raise UnitProvenanceDrift(
-                                    f"unit_provenance.{unit}.producer repair input "
-                                    "binding drifted",
-                                    unit=unit, carry_forward=False)
+                            against = item.get("producer_repair_findings")
+                            if against is not None:
+                                # A *findings* repair.  The parent reply is well
+                                # formed -- the verifier or the output rubric read
+                                # it and said what was wrong with what it said --
+                                # so there is no violation list to re-derive, and
+                                # the finder's own words are carried in the record
+                                # instead.  Everything else is still rebuilt: the
+                                # reply the model was shown is re-rendered from the
+                                # parent's recorded output, the prompt is rebuilt
+                                # byte for byte around it, and the repair's request
+                                # id is content addressed on those same findings.
+                                #
+                                # Trusting the recorded findings is bounded rather
+                                # than unbounded trust: the body this repair
+                                # produced was verified by an independent call and
+                                # re-run through both rubrics before publication,
+                                # so a fabricated finding cannot admit anything the
+                                # gates would otherwise refuse -- it can only name
+                                # a repair nobody asked for.
+                                findings = list(against["findings"])
+                                repair_violations = violations_from_findings(findings)
+                                try:
+                                    parent_block = parse_unit_output(
+                                        parent["text"], unit=unit,
+                                        structure=prompt_args["structure"],
+                                        material=prompt_args["material"],
+                                        market_view_available=prompt_args[
+                                            "market_view_available"],
+                                        profile=producer_input["parse_input"]["profile"],
+                                        classification=prompt_args["classification"])
+                                except Exception as exc:
+                                    # A findings repair is only ever made of a
+                                    # reply that *was* accepted; one that no
+                                    # longer parses did not produce this unit.
+                                    raise UnitProvenanceDrift(
+                                        f"unit_provenance.{unit}.producer_repair output "
+                                        "is invalid",
+                                        unit=unit, carry_forward=not is_current) from exc
+                                if claimed["request_id"] != repair_request_id(
+                                        parent["request_id"],
+                                        contract_name=findings_repair_contract_name(
+                                            against["kind"], unit),
+                                        violations=repair_violations):
+                                    raise UnitProvenanceDrift(
+                                        f"unit_provenance.{unit}.producer findings "
+                                        "repair identity drifted",
+                                        unit=unit, carry_forward=not is_current)
+                                if is_current and work.get("question") != \
+                                        build_findings_repair_prompt(
+                                            original_prompt=parent["question"],
+                                            reply_text=json.dumps(
+                                                unit_reply_wire(
+                                                    parent_block, unit=unit,
+                                                    material=prompt_args["material"]),
+                                                ensure_ascii=False, sort_keys=True),
+                                            findings=repair_violations,
+                                            contract_reminder=(
+                                                contract_reminder_lines(
+                                                    FINDINGS_REMINDER_LINES) + "\n"
+                                                + unit_contract_reminder(
+                                                    unit,
+                                                    structure=prompt_args["structure"])),
+                                            context=citable_context(
+                                                prompt_args["material"])):
+                                    raise UnitProvenanceDrift(
+                                        f"unit_provenance.{unit}.producer findings "
+                                        "repair input binding drifted",
+                                        unit=unit, carry_forward=False)
+                            else:
+                                violations = violations_of(parent["text"], contract)
+                                if not violations:
+                                    raise UnitProvenanceDrift(
+                                        f"unit_provenance.{unit}.producer_repair repaired a "
+                                        "reply that broke no rule",
+                                        unit=unit, carry_forward=not is_current)
+                                if claimed["request_id"] != repair_request_id(
+                                        parent["request_id"], contract_name=contract.name,
+                                        violations=violations):
+                                    raise UnitProvenanceDrift(
+                                        f"unit_provenance.{unit}.producer repair identity "
+                                        "drifted",
+                                        unit=unit, carry_forward=not is_current)
+                                if is_current and work.get("question") != build_repair_prompt(
+                                        original_prompt=parent["question"],
+                                        reply_text=parent["text"], violations=violations,
+                                        contract_reminder=unit_contract_reminder(
+                                            unit, structure=prompt_args["structure"]),
+                                        context=citable_context(prompt_args["material"])):
+                                    raise UnitProvenanceDrift(
+                                        f"unit_provenance.{unit}.producer repair input "
+                                        "binding drifted",
+                                        unit=unit, carry_forward=False)
                         elif is_current:
                             # A unit drafted *on this run* has to re-render byte for
                             # byte from the input we recorded for it. That is the
@@ -1546,6 +1676,13 @@ def run_dossier(
         "budget": None,
         "carry_forward_drift": [],
         "contract_repair": [],
+        # One row per repair call bought *after* a unit was drafted and then
+        # rejected -- by the verifier or by the output rubric -- so that "one
+        # repair call" is a number in the summary rather than a claim in a
+        # docstring.  ``findings_repair_rounds`` is how many rounds were run at
+        # all; it is 0 on the overwhelming majority of runs.
+        "findings_repair": [],
+        "findings_repair_rounds": 0,
     }
     store = DaltonStore(str(state_dir / "core.sqlite"))
     try:
@@ -1723,6 +1860,14 @@ def run_dossier(
         }
         drafted_producers: dict[str, dict[str, Any]] = {}
         drafted_classifications: dict[str, str | None] = {}
+        # Units whose formal provenance this run cannot state, because the
+        # chain would have to name two repairs of the same unit.
+        unprovable_units: set[str] = set()
+        # Exactly what each unit's drafting call was shown, kept so that a
+        # repair of that unit is a second look at the same question rather than
+        # a differently-assembled one.  A repair whose inputs were rebuilt
+        # would not be the call the formal provenance replay can check.
+        unit_inputs: dict[str, dict[str, Any]] = {}
         spent = 0
         run_bound_blocked = False
         attempted_outcomes: list[str] = []
@@ -1758,6 +1903,15 @@ def run_dossier(
                 market_view_available=market_view_available,
                 classification=actual_classification,
             )
+            unit_inputs[unit] = {
+                "structure": entry["structure"], "material": material,
+                "company": company, "mission": mission,
+                "prior_body": prior_body,
+                "profile": profile if unit == "guidance_style" else None,
+                "profile_table": unit_profile_table,
+                "market_view_available": market_view_available,
+                "classification": actual_classification,
+            }
             outcome = draft_unit(
                 model, unit=unit, structure=entry["structure"], material=material,
                 company=company, mission=mission,
@@ -1879,188 +2033,300 @@ def run_dossier(
             summary.update({"status": "succeeded", "dossier_status": "unverified"})
             return summary
         verifier = verifier_factory()
-        verdict = verify(
-            verifier, blocks, company=company, mission=mission,
-            producer_route_decision_refs=draft_routes,
-        )
-        if verdict.get("failure_trace") is not None:
-            summary["failed_model_traces"].append(verdict["failure_trace"])
-        spent += int((verdict.get("model") or {}).get("cost_micros") or 0)
-        summary["cost_micros"] = spent
-        check = independence(
-            draft_routes=draft_routes,
-            verifier_route=(verdict.get("model") or {}).get("route_decision_ref"),
-            resolve=resolve,
-        )
-        summary["verification"] = {
-            "status": verdict.get("status"), "verdict": verdict.get("verdict"),
-            "findings": verdict.get("findings") or [],
-            "reason": verdict.get("reason"),
-            "independent": check["independent"],
-            "independence_reason": check["reason"],
-            "verifier_family": check["verifier_family"],
-        }
-        if verdict.get("status") != "verified" or verdict.get("verdict") != "pass":
-            reason = verdict.get("reason")
-            if not reason and verdict.get("findings"):
-                reason = json.dumps(verdict["findings"][:3], ensure_ascii=False)
-            summary.update({
-                "status": "failed", "dossier_status": "verification_failed",
-                "failure_reason": ("dossier verification did not pass: "
-                                   + str(reason or verdict.get("verdict") or "refused"))[:500],
-            })
-            return summary
-        if not check["independent"]:
-            summary.update({"status": "succeeded", "dossier_status": "not_independent"})
-            return summary
+        # One repair round, at most, and it is bought here rather than on the
+        # next tick.  Everything below -- the verdict, the record, the two
+        # rubrics -- is re-derived from ``blocks``, so a repaired unit is
+        # re-verified by a second independent call and re-gated by the same
+        # deterministic checks before it can be published.  Editing prose after
+        # a verdict and publishing it under that verdict is the one thing this
+        # must not do.
+        findings_rounds = 0
 
-        verifier_call = {
-            key: (verdict.get("model") or {}).get(key)
-            for key in ("work_order_ref", "result_envelope_ref", "invocation_ref",
-                        "route_decision_ref", "request_id", "prompt_hash")
-        }
-        producer_prior = None if prior is None else prior["id"]
-        for unit, producer_call in drafted_producers.items():
-            producer_input = producer_call.pop("producer_input")
-            repair_call = producer_call.pop("producer_repair", None)
-            if (all(isinstance(value, str) and value for value in producer_call.values())
-                    and all(isinstance(value, str) and value
-                            for value in verifier_call.values())
-                    and (repair_call is None
-                         or all(isinstance(value, str) and value
-                                for value in repair_call.values()))):
-                unit_provenance[unit] = {
-                    "input_fingerprint": input_fingerprints[unit],
-                    "producer_input": producer_input,
-                    "producer_prior_version_ref": producer_prior,
-                    "resolved_classification": drafted_classifications[unit],
-                    "verified_draft_hash": verdict["verified_draft_hash"],
-                    "producer": producer_call,
-                    "verifier": verifier_call,
-                    **({} if repair_call is None
-                       else {"producer_repair": repair_call}),
+        def repair_round(targets: Mapping[str, Sequence[Mapping[str, Any]]],
+                         *, kind: str) -> bool:
+            """One call per rejected unit, out of what is left of the bound.
+
+            Returns whether anything changed.  A unit whose repair is refused,
+            unaffordable or unavailable keeps the reply it had: the run is
+            about to be refused anyway, and a half-repaired draft published
+            under a stale verdict would be worse than no repair at all.
+            """
+
+            nonlocal spent
+            changed = False
+            for unit in sorted(targets)[:MAX_FINDINGS_REPAIR_UNITS]:
+                inputs = unit_inputs.get(unit)
+                findings = [dict(item) for item in targets[unit]]
+                if inputs is None or unit not in blocks or not findings:
+                    continue
+                outcome = repair_unit_with_findings(
+                    model, unit=unit, block=blocks[unit], findings=findings,
+                    contract_name=findings_repair_contract_name(kind, unit),
+                    parent_request_id=drafted_producers[unit]["request_id"],
+                    # What is left of the *run's* bound, and the repair has to
+                    # leave the second verifying call its own or it is refused
+                    # unmade, with the numbers.
+                    budget_remaining_micros=run_cost_micros - spent,
+                    repair_reserve_micros=producer_reserve + verifier_reserve,
+                    **inputs)
+                spent += int(outcome.get("cost_micros") or 0)
+                summary["cost_micros"] = spent
+                summary["findings_repair"].append({
+                    "kind": kind, **outcome["findings_repair"],
+                    "findings": findings[:MAX_REPAIR_TARGETS],
+                })
+                if outcome.get("failure_trace") is not None:
+                    summary["failed_model_traces"].append(outcome["failure_trace"])
+                if outcome["status"] != "repaired":
+                    continue
+                blocks[unit] = outcome["block"]
+                call = outcome["model"]
+                if "producer_repair" in drafted_producers[unit]:
+                    # This unit's shape was already repaired once, so its
+                    # accepted call is a contract repair and its recorded
+                    # drafting prompt is that call's *parent*.  The formal
+                    # chain holds exactly one prior call per unit, and a second
+                    # link would have to be a reviewed shape change rather than
+                    # something inferred here.  So this unit publishes without
+                    # a formal provenance record instead of with a wrong one.
+                    unprovable_units.add(unit)
+                parent = {key: drafted_producers[unit].get(key)
+                          for key in _CALL_KEYS}
+                drafted_producers[unit] = {
+                    **{key: call.get(key) for key in _CALL_KEYS},
+                    "producer_input": drafted_producers[unit]["producer_input"],
+                    "producer_repair": parent,
+                    "producer_repair_findings": {"kind": kind, "findings": findings},
                 }
+                draft_routes.append(call.get("route_decision_ref"))
+                changed = True
+            return changed
 
-        # ADR-0008, asked before a record exists. A draft that cites nothing
-        # the current version does not is not a version, and saying so here
-        # costs nothing; assembling one and having the authority refuse it
-        # would leave the summary describing a record nobody can read.
-        fresh = fresh_evidence(blocks, prior)
-        if not fresh:
-            summary.update({"status": "succeeded", "dossier_status": "no_new_evidence",
-                            "failure_reason": ("this draft cites nothing the current "
-                                               "version does not")})
-            return summary
-        stamped = _now()
-        record = assemble(
-            company_ref=chosen, blocks=blocks, plan=plan, prior=prior,
-            profile=profile, constitution=constitution, policy=policy,
-            mission=mission, actor_ref=actor_ref, change_reason=change_reason,
-            drafted_at=stamped, evidence_refs=fresh,
-        )
-        forecast_cells = {row["ref"] for row in number_material(store, chosen)
-                          if row["kind"] == "forecast_cell"}
-        missing = unresolved_refs(store.connection, record, forecast_cells=forecast_cells)
-        if missing:
-            # A ref that stopped resolving is a defect in whichever part cites
-            # it. In a part drafted just now that is a bad draft and the run is
-            # refused. In a part carried forward from an earlier version -- a
-            # Claim retired since it was written -- refusing would freeze the
-            # whole chain on one stale section for ever, so that section drops
-            # to unavailable and the lane redrafts it. The old version keeps
-            # what it said; nothing is edited.
-            drafted_refs = {row["ref"] for block in blocks.values()
-                            for row in block.get("sources") or []}
-            broken = {item["ref"] for item in missing}
-            if broken & drafted_refs:
+        while True:
+            verdict = verify(
+                verifier, blocks, company=company, mission=mission,
+                producer_route_decision_refs=draft_routes,
+            )
+            if verdict.get("failure_trace") is not None:
+                summary["failed_model_traces"].append(verdict["failure_trace"])
+            spent += int((verdict.get("model") or {}).get("cost_micros") or 0)
+            summary["cost_micros"] = spent
+            check = independence(
+                draft_routes=draft_routes,
+                verifier_route=(verdict.get("model") or {}).get("route_decision_ref"),
+                resolve=resolve,
+            )
+            summary["verification"] = {
+                "status": verdict.get("status"), "verdict": verdict.get("verdict"),
+                "findings": verdict.get("findings") or [],
+                "reason": verdict.get("reason"),
+                "independent": check["independent"],
+                "independence_reason": check["reason"],
+                "verifier_family": check["verifier_family"],
+            }
+            if verdict.get("status") != "verified" or verdict.get("verdict") != "pass":
+                # The verifier said which sentence of which unit it could not
+                # find behind the rows it cites.  That is repairable by the
+                # model that wrote it, without reading anything again, and
+                # until 2026-09-18 it went nowhere: the run was declared failed
+                # and the lane redrafted the same unit from the same material
+                # five minutes later, for ever.
+                targets = (findings_repair_targets(
+                    verdict.get("findings") or [], blocks, key="unit")
+                    if verdict.get("status") == "verified" else {})
+                if (targets and findings_rounds < MAX_FINDINGS_REPAIR_ROUNDS
+                        and repair_round(targets, kind=VERIFICATION_REPAIR)):
+                    findings_rounds += 1
+                    summary["findings_repair_rounds"] = findings_rounds
+                    continue
+                reason = verdict.get("reason")
+                if not reason and verdict.get("findings"):
+                    reason = json.dumps(verdict["findings"][:3], ensure_ascii=False)
+                if findings_rounds:
+                    reason = ("after one repair call per rejected unit: "
+                              + str(reason or ""))
                 summary.update({
-                    "status": "succeeded", "dossier_status": "unresolvable_refs",
-                    "failure_reason": json.dumps(
-                        [item for item in missing if item["ref"] in drafted_refs][:5],
-                        ensure_ascii=False)})
+                    "status": "failed", "dossier_status": "verification_failed",
+                    "failure_reason": ("dossier verification did not pass: "
+                                       + str(reason or verdict.get("verdict") or "refused"))[:500],
+                })
                 return summary
-            dropped = units_citing(record, broken) - set(blocks)
-            summary["dropped_units"] = sorted(dropped)
-            for unit in dropped:
-                input_fingerprints[unit] = None
-                unit_provenance[unit] = None
+            if not check["independent"]:
+                summary.update({"status": "succeeded", "dossier_status": "not_independent"})
+                return summary
+
+            verifier_call = {
+                key: (verdict.get("model") or {}).get(key)
+                for key in ("work_order_ref", "result_envelope_ref", "invocation_ref",
+                            "route_decision_ref", "request_id", "prompt_hash")
+            }
+            producer_prior = None if prior is None else prior["id"]
+            # Read, never pop: this runs once per round of the loop above, and
+            # a repaired unit goes through it twice.
+            for unit, recorded in drafted_producers.items():
+                producer_input = recorded["producer_input"]
+                repair_call = recorded.get("producer_repair")
+                repair_findings = recorded.get("producer_repair_findings")
+                producer_call = {key: recorded.get(key) for key in _CALL_KEYS}
+                if (unit not in unprovable_units
+                        and all(isinstance(value, str) and value
+                                for value in producer_call.values())
+                        and all(isinstance(value, str) and value
+                                for value in verifier_call.values())
+                        and (repair_call is None
+                             or all(isinstance(value, str) and value
+                                    for value in repair_call.values()))):
+                    unit_provenance[unit] = {
+                        "input_fingerprint": input_fingerprints[unit],
+                        "producer_input": producer_input,
+                        "producer_prior_version_ref": producer_prior,
+                        "resolved_classification": drafted_classifications[unit],
+                        "verified_draft_hash": verdict["verified_draft_hash"],
+                        "producer": producer_call,
+                        "verifier": verifier_call,
+                        **({} if repair_call is None
+                           else {"producer_repair": repair_call}),
+                        **({} if repair_findings is None
+                           else {"producer_repair_findings": repair_findings}),
+                    }
+                else:
+                    unit_provenance[unit] = None
+
+            # ADR-0008, asked before a record exists. A draft that cites nothing
+            # the current version does not is not a version, and saying so here
+            # costs nothing; assembling one and having the authority refuse it
+            # would leave the summary describing a record nobody can read.
+            fresh = fresh_evidence(blocks, prior)
+            if not fresh:
+                summary.update({"status": "succeeded", "dossier_status": "no_new_evidence",
+                                "failure_reason": ("this draft cites nothing the current "
+                                                   "version does not")})
+                return summary
+            stamped = _now()
             record = assemble(
                 company_ref=chosen, blocks=blocks, plan=plan, prior=prior,
                 profile=profile, constitution=constitution, policy=policy,
                 mission=mission, actor_ref=actor_ref, change_reason=change_reason,
-                drafted_at=stamped, evidence_refs=fresh, drop_units=dropped,
+                drafted_at=stamped, evidence_refs=fresh,
             )
-            still = unresolved_refs(store.connection, record,
-                                    forecast_cells=forecast_cells)
-            if still:
-                summary.update({
-                    "status": "succeeded", "dossier_status": "unresolvable_refs",
-                    "failure_reason": json.dumps(still[:5], ensure_ascii=False)})
+            forecast_cells = {row["ref"] for row in number_material(store, chosen)
+                              if row["kind"] == "forecast_cell"}
+            missing = unresolved_refs(store.connection, record, forecast_cells=forecast_cells)
+            if missing:
+                # A ref that stopped resolving is a defect in whichever part cites
+                # it. In a part drafted just now that is a bad draft and the run is
+                # refused. In a part carried forward from an earlier version -- a
+                # Claim retired since it was written -- refusing would freeze the
+                # whole chain on one stale section for ever, so that section drops
+                # to unavailable and the lane redrafts it. The old version keeps
+                # what it said; nothing is edited.
+                drafted_refs = {row["ref"] for block in blocks.values()
+                                for row in block.get("sources") or []}
+                broken = {item["ref"] for item in missing}
+                if broken & drafted_refs:
+                    summary.update({
+                        "status": "succeeded", "dossier_status": "unresolvable_refs",
+                        "failure_reason": json.dumps(
+                            [item for item in missing if item["ref"] in drafted_refs][:5],
+                            ensure_ascii=False)})
+                    return summary
+                dropped = units_citing(record, broken) - set(blocks)
+                summary["dropped_units"] = sorted(dropped)
+                for unit in dropped:
+                    input_fingerprints[unit] = None
+                    unit_provenance[unit] = None
+                record = assemble(
+                    company_ref=chosen, blocks=blocks, plan=plan, prior=prior,
+                    profile=profile, constitution=constitution, policy=policy,
+                    mission=mission, actor_ref=actor_ref, change_reason=change_reason,
+                    drafted_at=stamped, evidence_refs=fresh, drop_units=dropped,
+                )
+                still = unresolved_refs(store.connection, record,
+                                        forecast_cells=forecast_cells)
+                if still:
+                    summary.update({
+                        "status": "succeeded", "dossier_status": "unresolvable_refs",
+                        "failure_reason": json.dumps(still[:5], ensure_ascii=False)})
+                    return summary
+            record["input_fingerprints"] = input_fingerprints
+            if all(unit_provenance[unit] is not None for unit in drafted_producers):
+                record["unit_provenance"] = unit_provenance
+            gate = rubric_gate(store.connection, record, prior=prior)
+            summary["rubric"] = gate["summary"]
+            summary["repair_targets"].extend(
+                gate["repair_targets"][:MAX_REPAIR_TARGETS - len(summary["repair_targets"])])
+            if gate["failed"]:
+                target = gate["repair_targets"][0] if gate["repair_targets"] else None
+                detail = "" if target is None else "; first target: " + json.dumps(
+                    target, ensure_ascii=False, sort_keys=True)
+                summary.update({"status": "succeeded", "dossier_status": "rubric_refused",
+                                "failure_reason": "hard checks failed: "
+                                                  + ", ".join(gate["failed"]) + detail})
                 return summary
-        record["input_fingerprints"] = input_fingerprints
-        if all(unit_provenance[unit] is not None for unit in drafted_producers):
-            record["unit_provenance"] = unit_provenance
-        gate = rubric_gate(store.connection, record, prior=prior)
-        summary["rubric"] = gate["summary"]
-        summary["repair_targets"].extend(
-            gate["repair_targets"][:MAX_REPAIR_TARGETS - len(summary["repair_targets"])])
-        if gate["failed"]:
-            target = gate["repair_targets"][0] if gate["repair_targets"] else None
-            detail = "" if target is None else "; first target: " + json.dumps(
-                target, ensure_ascii=False, sort_keys=True)
-            summary.update({"status": "succeeded", "dossier_status": "rubric_refused",
-                            "failure_reason": "hard checks failed: "
-                                              + ", ".join(gate["failed"]) + detail})
-            return summary
-        findings = output_rubric_findings(record, constitution=constitution,
-                                          policy=policy, prior=prior)
-        summary["output_rubric_findings"] = findings
-        if findings:
-            summary.update({"status": "succeeded", "dossier_status": "constitution_refused",
-                            "failure_reason": "the Constitution's output_rubric was not "
-                                              "satisfied"})
-            return summary
-        summary["new_refs"] = len(new_refs(record, prior))
-        if record.get("unit_provenance") is not None:
-            router_db = config.get("model_router_db")
-            if not isinstance(router_db, str) or not router_db:
-                raise ValueError("dossier unit provenance requires the bound model router DB")
-            # A carried-forward unit whose historical binding no longer
-            # resolves is recorded and stepped over rather than allowed to
-            # throw away this run's drafting.  The drift stays visible: it is
-            # in ``refused`` beside the model refusals, with the unit named.
-            drift: list[dict[str, str]] = []
-            try:
-                published = authority.publish_verified(
-                    record, scheduler_db=(scheduler_db or (state_dir / "scheduler.sqlite")),
-                    router_db=router_db, carry_forward_drift=drift)
-            except UnitProvenanceDrift as exc:
-                summary["refused"].append(
-                    {"unit": exc.unit, "reason": f"binding_drift: {exc}"})
-                summary.update({
-                    "status": "failed", "dossier_status": "provenance_refused",
-                    "failure_reason": (
-                        "a unit drafted on this run does not resolve against its "
-                        f"formal model authority: {exc}")[:500],
-                })
+            findings = output_rubric_findings(record, constitution=constitution,
+                                              policy=policy, prior=prior)
+            summary["output_rubric_findings"] = findings
+            if findings:
+                # Live 2026-09-17 (CTSH), 27 runs: three ``investment_conclusion``
+                # findings against one freshly drafted section, and the run was
+                # refused whole every time without the section ever being told
+                # which words were the problem.  A criterion nobody can act on
+                # is a standard nobody applies.
+                targets = findings_repair_targets(findings, blocks, key="section")
+                if (targets and findings_rounds < MAX_FINDINGS_REPAIR_ROUNDS
+                        and repair_round(targets, kind=OUTPUT_RUBRIC_REPAIR)):
+                    findings_rounds += 1
+                    summary["findings_repair_rounds"] = findings_rounds
+                    # Back to the verifier: what it signs off has to be the
+                    # body that is published, and the body just moved.
+                    continue
+                summary.update({"status": "succeeded", "dossier_status": "constitution_refused",
+                                "failure_reason": (
+                                    "the Constitution's output_rubric was not satisfied"
+                                    + (" after one repair call per named section"
+                                       if findings_rounds else ""))})
                 return summary
-            summary["refused"].extend(drift)
-            summary["carry_forward_drift"] = drift
-        else:
-            published = authority.publish(record)
-        summary.update({
-            "status": "succeeded",
-            "dossier_status": (("partial_published" if not gate["summary"]["passed"]
-                                else "published") if published["status"] == "fresh"
-                               else "duplicate"),
-            "version_ref": published["id"],
-            "version_status": published["status"],
-            "duplicate_reason": published.get("duplicate_reason"),
-            "input_freshness": dossier_freshness(
-                store.connection, published, mission, policy),
-            **summarise_blocks(blocks),
-        })
-        return summary
+            summary["new_refs"] = len(new_refs(record, prior))
+            if record.get("unit_provenance") is not None:
+                router_db = config.get("model_router_db")
+                if not isinstance(router_db, str) or not router_db:
+                    raise ValueError("dossier unit provenance requires the bound model router DB")
+                # A carried-forward unit whose historical binding no longer
+                # resolves is recorded and stepped over rather than allowed to
+                # throw away this run's drafting.  The drift stays visible: it is
+                # in ``refused`` beside the model refusals, with the unit named.
+                drift: list[dict[str, str]] = []
+                try:
+                    published = authority.publish_verified(
+                        record, scheduler_db=(scheduler_db or (state_dir / "scheduler.sqlite")),
+                        router_db=router_db, carry_forward_drift=drift)
+                except UnitProvenanceDrift as exc:
+                    summary["refused"].append(
+                        {"unit": exc.unit, "reason": f"binding_drift: {exc}"})
+                    summary.update({
+                        "status": "failed", "dossier_status": "provenance_refused",
+                        "failure_reason": (
+                            "a unit drafted on this run does not resolve against its "
+                            f"formal model authority: {exc}")[:500],
+                    })
+                    return summary
+                summary["refused"].extend(drift)
+                summary["carry_forward_drift"] = drift
+            else:
+                published = authority.publish(record)
+            summary.update({
+                "status": "succeeded",
+                "dossier_status": (("partial_published" if not gate["summary"]["passed"]
+                                    else "published") if published["status"] == "fresh"
+                                   else "duplicate"),
+                "version_ref": published["id"],
+                "version_status": published["status"],
+                "duplicate_reason": published.get("duplicate_reason"),
+                "input_freshness": dossier_freshness(
+                    store.connection, published, mission, policy),
+                **summarise_blocks(blocks),
+            })
+            return summary
     except CompanyDossierError as exc:
         summary["failure_reason"] = f"{type(exc).__name__}: {exc}"
         summary["status"] = "failed"
@@ -2262,6 +2528,10 @@ if __name__ == "__main__":  # pragma: no cover - exercised as a subprocess
 
 __all__ = [
     "HARD_CHECKS",
+    "MAX_FINDINGS_REPAIR_ROUNDS",
+    "MAX_FINDINGS_REPAIR_UNITS",
+    "OUTPUT_RUBRIC_REPAIR",
+    "VERIFICATION_REPAIR",
     "assemble",
     "build_dossier_input",
     "build_parser",
@@ -2269,6 +2539,8 @@ __all__ = [
     "dossier_company_source_fingerprint",
     "dossier_input_fingerprint",
     "dossier_freshness",
+    "findings_repair_contract_name",
+    "findings_repair_targets",
     "granted_scope",
     "guidance_material",
     "main",

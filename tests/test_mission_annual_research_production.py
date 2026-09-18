@@ -216,6 +216,93 @@ class MissionAnnualResearchProductionTests(unittest.TestCase):
         with self.assertRaisesRegex(LaneChildRejected, "summary authority drifted"):
             launcher.status(wrong["id"])
 
+    def test_changed_ticket_identity_rebinds_when_the_admission_did_not_change(self):
+        """A release renamed the ticket; the admission is byte-identical."""
+
+        from dalton_core.lane_child_launcher import write_owner_only
+
+        fixture = MissionAnnualFixture(self)
+        fixture.harness.clock.value = datetime.now(timezone.utc)
+        governance = self._install_manifest_pointer(fixture)
+        admission = fixture.authority.admit(**fixture.args())
+        staging_path = fixture.state / "mission-annual-rebind-staging.sqlite"
+        CandidateStagingStore(staging_path).close()
+        launcher = MissionAnnualResearchLauncher(
+            state_dir=fixture.state,
+            staging_path=staging_path,
+            web_fetch_governance_path=governance,
+            spool_dir=fixture.source.root / "spool",
+            python_executable=sys.executable,
+        )
+        self.addCleanup(launcher.close)
+        configuration = launcher.configuration()
+        signature = {
+            "admission_ref": admission["id"],
+            "admission_hash": admission["content_hash"],
+            "configuration": configuration,
+        }
+        prior_ref = "mission-annual-research:" + content_hash(signature)[:24]
+        ticket_path = launcher._ticket_path(prior_ref)
+        ticket_path.parent.mkdir(parents=True, exist_ok=True)
+        now = fixture.harness.clock.value.isoformat()
+        write_owner_only(ticket_path, {
+            "schema_version": "0.1", "id": prior_ref, **signature,
+            "configuration_hash": content_hash(configuration),
+            "started_at": now, "pid": 1, "command": ["true"],
+            "status": "failed", "exit_code": 1, "completed_at": now,
+        })
+        summary = {
+            "schema_version": "0.1", "created_at": now,
+            "admission_ref": admission["id"],
+            "admission_hash": admission["content_hash"],
+            "status": "incomplete", "outcomes": [], "error": None,
+        }
+        write_owner_only(ticket_path.with_name("summary.json"),
+                         {**summary, "content_hash": content_hash(summary)})
+        # A release rewrites a runtime config file.  Nothing about the
+        # admission moved, but the ticket identity is a digest of both.
+        governance.write_text('{"release": "two"}\n', encoding="utf-8")
+        spawned = []
+
+        def fake_spawn(*, digest, record, _controlled_reentry=None, **kwargs):
+            spawned.append({"digest": digest, "record": dict(record),
+                            "reentry": _controlled_reentry})
+            return {"id": f"mission-annual-research:{digest}",
+                    "status": "running", **dict(record)}
+
+        with mock.patch.object(launcher, "spawn", side_effect=fake_spawn):
+            rebound = launcher.resume(
+                admission_ref=admission["id"],
+                admission_hash=admission["content_hash"],
+                prior_ticket_ref=prior_ref,
+                authorization="test:exact-scheduler-replay")
+        self.assertEqual(rebound["rebound_from_ticket_ref"], prior_ref)
+        self.assertNotEqual(rebound["id"], prior_ref)
+        self.assertEqual(len(spawned), 1)
+        self.assertEqual(spawned[0]["record"]["rebound_from_ticket_ref"], prior_ref)
+        # The one-shot re-entry claim is archived against the prior run, so
+        # the rebinding is automatic exactly once for this authorization.
+        markers = sorted(ticket_path.parent.glob("controlled-reentry-*.json"))
+        self.assertEqual(len(markers), 1)
+        with mock.patch.object(launcher, "spawn", side_effect=fake_spawn):
+            with self.assertRaises(LaneChildRejected):
+                launcher.resume(
+                    admission_ref=admission["id"],
+                    admission_hash=admission["content_hash"],
+                    prior_ticket_ref=prior_ref,
+                    authorization="test:exact-scheduler-replay")
+        self.assertEqual(len(spawned), 1)
+        # A moved admission is a different thing entirely and is still refused.
+        with mock.patch.object(launcher, "spawn", side_effect=fake_spawn):
+            with self.assertRaisesRegex(
+                LaneChildRejected, "changed ticket identity",
+            ):
+                launcher.resume(
+                    admission_ref=admission["id"], admission_hash="0" * 64,
+                    prior_ticket_ref=prior_ref,
+                    authorization="test:other-authorization")
+        self.assertEqual(len(spawned), 1)
+
     def test_production_budget_refusal_is_visible_to_writer_without_broker_io(self):
         fixture = MissionAnnualFixture(self)
         fixture.harness.clock.value = datetime.now(timezone.utc)

@@ -44,7 +44,7 @@ from types import MappingProxyType
 from typing import Any, Callable, Mapping, Sequence
 
 from .company_wiki_core import SOURCE_REF as COMPANY_WIKI_SOURCE_REF
-from .coverage_mission import DISCOVERED_DOCUMENT_STATUSES
+from .coverage_mission import DISCOVERED_DOCUMENT_STATUSES, CoverageMissionConflict
 from .document_subject import subject_names
 from .sales_notes_core import (
     DOCUMENT_REF_PREFIX as SALES_NOTE_REF_PREFIX,
@@ -716,11 +716,12 @@ def _merge_reads(source_ref: str, reads: Sequence[Mapping[str, Any]]) -> dict[st
 
     merged: dict[str, Any] = {
         "source_ref": source_ref, "read": 0, "already_held": 0, "outcomes": [],
-        "company": 0, "industry": 0, "dropped": 0, "failed": 0,
+        "company": 0, "industry": 0, "dropped": 0, "failed": 0, "already_bound": 0,
     }
     for item in reads:
-        for key in ("read", "already_held", "company", "industry", "dropped", "failed"):
-            merged[key] += item[key]
+        for key in ("read", "already_held", "company", "industry", "dropped",
+                    "failed", "already_bound"):
+            merged[key] += item.get(key, 0)
         merged["outcomes"].extend(item["outcomes"])
     return merged
 
@@ -1289,6 +1290,21 @@ class FeedDiscoveryCoordinator:
 
     # -- recording ------------------------------------------------------
 
+    def bound_discovery(
+        self, mission_version_ref: str, source_envelope_ref: str
+    ) -> dict[str, Any] | None:
+        """The discovery Core has already bound to this envelope, if any.
+
+        The authority's own index, not a guess the lane keeps: the table
+        carries ``UNIQUE(mission_version_ref, source_envelope_ref)``, so this
+        answers the exact question the unique constraint asks, before the
+        write rather than after it.
+        """
+
+        return self.missions.source_discovery_for_envelope(
+            mission_version_ref, source_envelope_ref
+        )
+
     def record_document(
         self,
         *,
@@ -1306,26 +1322,72 @@ class FeedDiscoveryCoordinator:
         mission's queue is partitioned out as in-authority rather than queued
         again, so a second pass over a feed that grew by one note discovers
         one note.
+
+        **One envelope binds one discovery.**  Core enforces that with a
+        unique key, and a second submission of an envelope that is already
+        bound is a conflict -- which, raised, refused the whole tick.  Live
+        that was every multi-company note: ``sales-note:1a06dcd3bc7969d5``
+        names IBM, Cognizant, EPAM and Accenture, one read produced one
+        envelope, the first company's discovery committed and the second
+        company's submission of the same envelope killed the dispatch.  So
+        this asks Core first and reports ``already_bound`` for that company
+        instead: the read happened, the document is in the queue under the
+        discovery that owns the envelope, and the tick carries on.  A second
+        discovery for the second company would need its own read and its own
+        envelope; it is not something this lane can invent from bytes that are
+        already bound.
         """
 
         authorization = self.authorize(company_ref=company_ref, requested_by=requested_by)
-        known = self._documents_for(
-            authorization["mission_version_ref"], company_ref=company_ref
-        )
-        return self.missions.record_source_discovery(
-            authorization=authorization,
-            discovery_plan_ref=self.plan["id"],
-            discovery_plan_hash=self.plan["content_hash"],
-            spec_ref=spec_ref,
-            query_hash=feed_query_hash(self.source_ref, parameters),
-            parameters=dict(parameters),
-            connector_invocation_ref=receipt["connector_invocation_ref"],
-            connector_invocation_hash=receipt["connector_invocation_hash"],
-            source_envelope_ref=receipt["source_envelope_ref"],
-            source_envelope_hash=receipt["source_envelope_hash"],
-            document_refs=[document_ref],
-            in_authority_document_refs=[document_ref] if document_ref in known else [],
-        )
+        version_ref = authorization["mission_version_ref"]
+        envelope_ref = receipt["source_envelope_ref"]
+        bound = self.bound_discovery(version_ref, envelope_ref)
+        if bound is not None and bound["company_ref"] != company_ref:
+            return self._already_bound(company_ref, document_ref, envelope_ref, bound)
+        known = self._documents_for(version_ref, company_ref=company_ref)
+        try:
+            return self.missions.record_source_discovery(
+                authorization=authorization,
+                discovery_plan_ref=self.plan["id"],
+                discovery_plan_hash=self.plan["content_hash"],
+                spec_ref=spec_ref,
+                query_hash=feed_query_hash(self.source_ref, parameters),
+                parameters=dict(parameters),
+                connector_invocation_ref=receipt["connector_invocation_ref"],
+                connector_invocation_hash=receipt["connector_invocation_hash"],
+                source_envelope_ref=envelope_ref,
+                source_envelope_hash=receipt["source_envelope_hash"],
+                document_refs=[document_ref],
+                in_authority_document_refs=[document_ref] if document_ref in known else [],
+            )
+        except CoverageMissionConflict:
+            # The same answer for the same reason, for the bindings the
+            # pre-check cannot see: an identity that drifted since the first
+            # submission -- a retried tick whose window moved, a document that
+            # entered authority between the two -- reaches the unique key with
+            # the same envelope and a different record id.  Anything else is
+            # a real conflict and is re-raised.
+            bound = self.bound_discovery(version_ref, envelope_ref)
+            if bound is None:
+                raise
+            return self._already_bound(company_ref, document_ref, envelope_ref, bound)
+
+    @staticmethod
+    def _already_bound(
+        company_ref: str, document_ref: str, envelope_ref: str,
+        bound: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """One skipped submission, named well enough to be acted on."""
+
+        return {
+            "status": "already_bound",
+            "company_ref": company_ref,
+            "document_ref": document_ref,
+            "source_envelope_ref": envelope_ref,
+            "mission_version_ref": bound["mission_version_ref"],
+            "discovery_ref": bound["id"],
+            "bound_company_ref": bound["company_ref"],
+        }
 
     def resolve_documents(
         self,
@@ -1427,6 +1489,13 @@ class FeedDiscoveryCoordinator:
             "industry": sum(1 for item in outcomes if item["outcome"] == "industry"),
             "dropped": sum(1 for item in outcomes if item["outcome"] == "dropped"),
             "failed": sum(1 for item in outcomes if item["outcome"] == "failed"),
+            # Per-company submissions Core already held under another
+            # discovery. This used to be a CoverageMissionConflict that
+            # refused the tick; it is a number now, and an owner watching the
+            # lane can see it grow.
+            "already_bound": sum(
+                len(item.get("already_bound") or ()) for item in outcomes
+            ),
         }
 
     def _resolve_one(
@@ -1482,6 +1551,11 @@ class FeedDiscoveryCoordinator:
             "industry_terms": decision["industry_terms"],
             "reason": decision["reason"],
             "records": [],
+            # Companies this read could not record because the envelope it
+            # produced is already bound to another discovery. Reported per
+            # document rather than raised, so one note that names two covered
+            # companies costs one skipped row, not the whole tick.
+            "already_bound": [],
         }
         if decision["outcome"] != "company":
             # Kept visible in the tick rather than queued: the mission ledger
@@ -1502,6 +1576,12 @@ class FeedDiscoveryCoordinator:
                 parameters=self.company_window(company_ref, since=since),
                 requested_by=requested_by,
             )
+            if recorded["status"] == "already_bound":
+                # The document is in the mission's queue already, under the
+                # discovery that owns this envelope; there is no row to launch
+                # and no review to open for this company. Counted, not hidden.
+                result["already_bound"].append(recorded)
+                continue
             # The row the queue keyed by this document, which is not the
             # discovery record's own id: one discovery names one document,
             # but the queue row is keyed by (mission version, document) so
@@ -1890,6 +1970,11 @@ class FeedDiscoveryCoordinator:
                 for read in reads for outcome in read["outcomes"]
                 if outcome.get("ticket_ref")
             )
+            # Top level, next to the other tick numbers, because the ledger's
+            # ``bounded_counts`` keeps scalars and drops nested results: a
+            # count buried in ``read`` is a count no owner ever sees.  This is
+            # the one that used to be a refused dispatch.
+            results["already_bound"] = results["read"]["already_bound"]
             results["enumerated"] = enumerated
             results["windows"] = windows
             results["partial_windows"] = partial_windows

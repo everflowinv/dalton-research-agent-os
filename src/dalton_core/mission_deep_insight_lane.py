@@ -36,6 +36,7 @@ same breath it was spawned is always still running.
 from __future__ import annotations
 
 import hashlib
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -68,6 +69,33 @@ CONTENT_TERMINAL_STATUSES = frozenset({
     # tells the owner the gate is not stuck on a bug.
     "auto_returned",
 })
+# What starts the company back-off below.  Every content refusal, including the
+# two this lane's terminal list happens not to name -- they take the quiet path
+# instead, which is correct for an unchanged signature and useless for a
+# changing one.  ``constitution_refused`` is exactly the live case: DXC's return
+# path held on it 23 times.
+COOLDOWN_STATUSES = CONTENT_TERMINAL_STATUSES | frozenset({
+    "constitution_refused", "unresolvable_refs",
+})
+# Six hours, the same number and for the same reason as the dossier lane's.
+# ``content_refused`` is recorded against the run's *signature*, and this
+# lane's signature digests the company's dossier head, its debate map, the
+# numbers and the valuation rows -- all of which move while an owner is
+# thinking.  In the live tick ledger (2,147 dossier-gate ticks, 09-10 to
+# 09-18) Accenture was launched 103 times under 49 distinct signatures and DXC
+# 51 times under 21; the hold binds for a few ticks and then a new key lets the
+# same four calls be paid for again.  Under a six-hour company-keyed cooldown
+# those would have been 15 launches each.
+#
+# It is keyed on the company and measured in time, and new evidence neither
+# restarts nor lifts it: new evidence arriving is the thing that broke the old
+# hold.  A submission, an idle tick or a moved control fingerprint ends it --
+# a cooldown a deploy cannot clear is a suspension.
+#
+# A module constant because the gate shares P12a's policy file, whose shape is
+# closed and carries no cadence field; when one is added, the coordinator
+# already takes the number as a constructor argument.
+CONTENT_REFUSAL_COOLDOWN_SECONDS = 6 * 60 * 60
 
 
 def permission_key(connection: Any, launcher: Any, signature: str) -> str:
@@ -157,10 +185,19 @@ class MissionDeepInsightLaneCoordinator:
     def __init__(self, *, connection: Any, launcher: Any,
                  companies: Callable[[], list[str]] | None = None,
                  failure_ledger_dir: Any | None = None,
-                 failure_clock: Any | None = None) -> None:
+                 failure_clock: Any | None = None,
+                 cooldown_seconds: int = CONTENT_REFUSAL_COOLDOWN_SECONDS) -> None:
         self.connection = connection
         self.launcher = launcher
         self.companies = companies
+        self.cooldown_seconds = int(cooldown_seconds)
+        # company_ref -> (when the cooldown ends, what refused, why, the
+        # control fingerprint it was decided under).  Keyed on the company
+        # because that is the thing that keeps being relaunched; the signature
+        # the failure budget holds is a different string on every tick.
+        self._cooldowns: dict[str, tuple[Any, str, str, str]] = {}
+        self._cooldown_clock = failure_clock or (
+            lambda: datetime.now(timezone.utc))
         self._open: str | None = None
         # The signature under which the last run found nothing, and the
         # signatures whose runs failed.  Held for this process only: a restart
@@ -169,6 +206,71 @@ class MissionDeepInsightLaneCoordinator:
         self._quiet_signatures: set[str] = set()
         self.budget = lane_budget("deep_insight_gate", state_dir=failure_ledger_dir,
                                   clock=failure_clock)
+
+    # -- the company-scoped back-off -----------------------------------------
+
+    def control_fingerprint(self) -> str:
+        """The half of the launch signature no evidence can move.
+
+        The drafting contract, the verifier's provider contract, the mission
+        and governance pointers, and the model/policy configuration files.  A
+        content refusal is a statement made under these; when one of them
+        moves, the statement is about a system that no longer exists and the
+        back-off goes with it.  That is what makes a reviewed fix take effect
+        on the next tick rather than in six hours.
+        """
+
+        from .cockpit_model import verifier_provider_contract_fingerprint
+        from .deep_insight_gate_cli import GATE_DRAFTING_CONTRACT
+
+        return permission_key(self.connection, self.launcher, "|".join([
+            verifier_provider_contract_fingerprint("deep_insight_gate_verifier"),
+            GATE_DRAFTING_CONTRACT,
+        ]))
+
+    def company_cooldown(self, company_ref: Any,
+                         control: str | None = None) -> dict[str, Any] | None:
+        """Why this company must not be relaunched yet, or ``None``.
+
+        Expiry is read rather than swept: a cooldown nobody asks about costs
+        nothing, and a sweep would need its own tick.
+        """
+
+        key = str(company_ref or "-")
+        entry = self._cooldowns.get(key)
+        if entry is None:
+            return None
+        until, status, reason, held_control = entry
+        if control is None:
+            control = self.control_fingerprint()
+        if self._cooldown_clock() >= until or control != held_control:
+            self._cooldowns.pop(key, None)
+            return None
+        return {
+            "until": until.isoformat(timespec="seconds"),
+            "seconds": self.cooldown_seconds,
+            "gate_status": status,
+            "reason": (f"content refused ({status}); this company is held until "
+                       f"{until.isoformat(timespec='seconds')} regardless of new "
+                       f"evidence: {reason}")[:MAX_FAILURE_DETAIL_CHARS],
+        }
+
+    def _start_cooldown(self, company_ref: Any, *, status: str, reason: str) -> None:
+        """Begin the back-off, or leave a running one exactly where it is.
+
+        Not restarted by a second refusal either: a company that refused twice
+        inside one cooldown has not earned a longer one, and an interval every
+        failure extends is a suspension.
+        """
+
+        key = str(company_ref or "-")
+        control = self.control_fingerprint()
+        if self.company_cooldown(key, control) is not None:
+            return
+        self._cooldowns[key] = (
+            self._cooldown_clock() + timedelta(seconds=self.cooldown_seconds),
+            str(status), str(reason)[:MAX_FAILURE_DETAIL_CHARS], control,
+        )
 
     def _settle(self, ticket_ref: str) -> dict[str, Any] | None:
         try:
@@ -205,6 +307,20 @@ class MissionDeepInsightLaneCoordinator:
         self._open = None
         signature = settled.get("signature")
         status = str(settled.get("gate_status") or "")
+        company = settled.get("company_ref")
+        # The content back-off, decided before the signature-keyed bookkeeping
+        # below and independently of it.  A verdict about what a draft *says*
+        # is about the company, and the next tick's evidence signature has no
+        # bearing on whether it is still true.
+        if status in COOLDOWN_STATUSES:
+            self._start_cooldown(
+                company, status=status,
+                reason=str(settled.get("failure_reason") or status))
+            settled["cooldown"] = self.company_cooldown(company)
+        elif status:
+            # A submission, a duplicate, an idle tick or a gating status ends
+            # it.  A submitted draft is the thing the cooldown was waiting for.
+            self._cooldowns.pop(str(company or "-"), None)
         if status in {"not_authorized", "no_checkpoint", "no_policy"} and signature:
             self.budget.record(
                 str(signature),
@@ -239,6 +355,7 @@ class MissionDeepInsightLaneCoordinator:
         held_companies = {}
         held_decisions = {}
         quiet_companies = []
+        cooling_down: dict[str, Any] = {}
         for company_ref in companies:
             evidence = (ledger_signature(self.connection) if company_ref is None else
                         f"{company_ref}|{company_ledger_signature(self.connection, company_ref, self.launcher)}")
@@ -252,6 +369,21 @@ class MissionDeepInsightLaneCoordinator:
                 label = str(company_ref or "-")
                 held_companies[label] = held.classification.reason
                 held_decisions[label] = held
+                continue
+            # The company-scoped back-off, asked after the signature-keyed
+            # budget and before the launch.  The budget answers first because
+            # it is the more specific statement -- "this exact input is
+            # terminal" -- and the cooldown catches the case the budget
+            # structurally cannot: a refusal about the *content* whose key has
+            # changed because the dossier, the debate map or a number moved
+            # underneath it.
+            cooldown = self.company_cooldown(company_ref)
+            if cooldown is not None:
+                label = str(company_ref or "-")
+                cooling_down[label] = cooldown
+                # Also in ``held``, which is where every reader of this lane
+                # already looks for "why did nothing happen for this company".
+                held_companies[label] = cooldown["reason"]
                 continue
             try:
                 ticket = self.launcher.start(
@@ -267,16 +399,20 @@ class MissionDeepInsightLaneCoordinator:
             self._open = ticket["id"]
             return {"status": "launched", "ticket_ref": ticket["id"],
                     "company_ref": company_ref, "signature": signature,
-                    "settled": settled, "held": held_companies}
+                    "settled": settled, "held": held_companies,
+                    **({} if not cooling_down else {"cooling_down": cooling_down})}
         if held_companies:
             if len(companies) == 1 and len(held_decisions) == 1:
                 decision = next(iter(held_decisions.values()))
                 return {"status": decision.action, "settled": settled,
                         "reason": decision.classification.reason,
                         "held": held_companies,
+                        **({} if not cooling_down else
+                           {"cooling_down": cooling_down}),
                         "failure_budget": self.budget.summary()}
             return {"status": "held", "settled": settled, "held": held_companies,
                     "reason": "; ".join(f"{key}: {value}" for key, value in held_companies.items()),
+                    **({} if not cooling_down else {"cooling_down": cooling_down}),
                     "failure_budget": self.budget.summary()}
         return {"status": "idle", "settled": settled, "companies": quiet_companies,
                 "reason": "nothing has moved since each company's last quiet run"}
@@ -401,6 +537,9 @@ LANE = register_lane(LaneSpec(
 
 
 __all__ = [
+    "CONTENT_REFUSAL_COOLDOWN_SECONDS",
+    "CONTENT_TERMINAL_STATUSES",
+    "COOLDOWN_STATUSES",
     "GATE_MODEL_CONFIG",
     "LEGACY_GATE_MODEL_CONFIG",
     "LEGACY_GATE_VERIFIER_MODEL_CONFIG",

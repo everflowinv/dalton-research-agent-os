@@ -40,8 +40,11 @@ from dalton_core.claim_index_tagging import (
     build_prompt,
     dedupe_group_key,
     fold,
+    normalise_aspect,
+    parse_tagging_reply,
     period_as_of,
     quantitative_aspect,
+    repair_tagging_reply,
     rule_tags,
 )
 
@@ -558,6 +561,179 @@ class ModelTaggingTests(unittest.TestCase):
         batch = build_batch(self.rows(1))
         with self.assertRaises(ClaimIndexTaggingRefused):
             aspects_from_response(batch, "   ")
+
+
+# The exact row that took CTSH out of the index on 2026-09-18: one aspect word
+# copied correctly with a stray "m " in front of it. Written out here as the
+# literal bytes rather than described, because every assertion in this file
+# about leniency is an assertion about *this* string.
+LIVE_ROW = "1\tm management_and_capital_allocation"
+
+
+class LenientTaggingTests(unittest.TestCase):
+    """One unreadable row costs one row, and only a bad reply costs the batch."""
+
+    def rows(self, count=3):
+        return [
+            {"claim_version_ref": f"claim-version:{index}",
+             "subject_ref": ACN, "metric_or_aspect": "demand environment",
+             "period": "current",
+             "normalized_statement": f"Statement number {index}."}
+            for index in range(1, count + 1)
+        ]
+
+    # -- the token ---------------------------------------------------------
+
+    def test_the_live_stray_letter_names_exactly_one_section(self):
+        self.assertEqual(
+            normalise_aspect("m management_and_capital_allocation"),
+            ("management_and_capital_allocation", "m management_and_capital_allocation"),
+        )
+
+    def test_an_exact_word_is_not_reported_as_a_normalisation(self):
+        self.assertEqual(normalise_aspect("demand_drivers"), ("demand_drivers", None))
+
+    def test_case_spacing_and_decoration_are_read_through(self):
+        for token in ("Demand_Drivers", " demand drivers ", "`demand-drivers`",
+                      "demand_drivers.", "**demand_drivers**", "a. demand drivers"):
+            with self.subTest(token=token):
+                aspect, raw = normalise_aspect(token)
+                self.assertEqual(aspect, "demand_drivers")
+                self.assertIsNotNone(raw)
+
+    def test_a_word_that_is_not_in_the_vocabulary_is_not_guessed_at(self):
+        for token in ("moat_and_pricing", "", "unsure", "management", None,
+                      "demand_drivers competitive_position"):
+            with self.subTest(token=token):
+                self.assertEqual(normalise_aspect(token), (None, None))
+
+    # -- the reply ---------------------------------------------------------
+
+    def test_the_live_row_is_read_and_the_normalisation_is_recorded(self):
+        batch = build_batch(self.rows(1))
+        reply = parse_tagging_reply(batch, LIVE_ROW)
+        self.assertEqual(reply.by_claim(batch),
+                         {"claim-version:1": "management_and_capital_allocation"})
+        self.assertFalse(reply.needs_repair())
+        self.assertEqual(list(reply.normalisations), [{
+            "row_id": "1", "raw": "m management_and_capital_allocation",
+            "aspect": "management_and_capital_allocation",
+        }])
+        # The summary says what it accepted, so a model that keeps doing this
+        # is visible rather than quietly accommodated.
+        self.assertEqual(reply.report()["normalised"], 1)
+        self.assertEqual(reply.report()["skipped"], 0)
+
+    def test_the_live_row_no_longer_refuses_the_strict_door_either(self):
+        batch = build_batch(self.rows(1))
+        self.assertEqual(
+            aspects_from_response(batch, LIVE_ROW),
+            {"claim-version:1": "management_and_capital_allocation"})
+
+    def test_one_unreadable_row_in_ten_is_skipped_and_reported(self):
+        batch = build_batch(self.rows(10))
+        lines = [f"{index}\tdemand_drivers" for index in range(1, 11)]
+        lines[1] = "2\tmoat_and_pricing"
+        reply = parse_tagging_reply(batch, "\n".join(lines))
+        self.assertFalse(reply.needs_repair())
+        self.assertEqual(len(reply.by_claim(batch)), 9)
+        self.assertNotIn("claim-version:2", reply.by_claim(batch))
+        self.assertEqual(reply.unresolved_rows, ["2"])
+        # The raw text, not "a row did not parse": the words are the report.
+        self.assertEqual([dict(row) for row in reply.unparsed_rows],
+                         [{"row_id": "2", "text": "2\tmoat_and_pricing"}])
+
+    def test_more_than_a_fifth_unreadable_is_worth_a_repair_call(self):
+        batch = build_batch(self.rows(10))
+        lines = [f"{index}\tdemand_drivers" for index in range(1, 11)]
+        for index in (1, 2, 3):
+            lines[index] = f"{index + 1}\tsection {index}"
+        reply = parse_tagging_reply(batch, "\n".join(lines))
+        self.assertEqual(len(reply.unresolved_rows), 3)
+        self.assertTrue(reply.needs_repair())
+
+    def test_a_row_that_was_never_shown_is_worth_a_repair_however_few(self):
+        batch = build_batch(self.rows(10))
+        lines = [f"{index}\tdemand_drivers" for index in range(1, 11)]
+        reply = parse_tagging_reply(batch, "\n".join(lines + ["11\tother"]))
+        self.assertEqual(len(reply.by_claim(batch)), 10)
+        self.assertTrue(reply.needs_repair())
+        self.assertEqual([row["row_id"] for row in reply.unknown_rows], ["11"])
+
+    def test_the_same_row_twice_is_worth_a_repair_and_keeps_the_first_answer(self):
+        batch = build_batch(self.rows(2))
+        reply = parse_tagging_reply(
+            batch, "1\tdemand_drivers\n1\tother\n2\tother\n")
+        self.assertTrue(reply.needs_repair())
+        self.assertEqual(reply.assigned["1"], "demand_drivers")
+        self.assertEqual([row["row_id"] for row in reply.duplicate_rows], ["1"])
+
+    def test_an_empty_reply_leaves_every_row_unanswered(self):
+        batch = build_batch(self.rows(3))
+        reply = parse_tagging_reply(batch, "  ")
+        self.assertTrue(reply.empty)
+        self.assertTrue(reply.needs_repair())
+        self.assertEqual(reply.unresolved_rows, ["1", "2", "3"])
+
+    # -- the repair --------------------------------------------------------
+
+    def test_one_repair_call_carries_the_violations_and_asks_for_a_table(self):
+        batch = build_batch(self.rows(3))
+        reply = parse_tagging_reply(batch, "1\tsection one\n2\tother\n")
+        self.assertTrue(reply.needs_repair())
+        seen = []
+
+        def call(*, prompt, request_id):
+            seen.append((prompt, request_id))
+            return {"text": "1\tdemand_drivers\n2\tother\n3\tother\n",
+                    "cost_micros": 7, "work_order_ref": "work:repair"}
+
+        outcome = repair_tagging_reply(
+            batch=batch, prompt="ORIGINAL", text="1\tsection one\n2\tother\n",
+            reply=reply, call=call, request_id="req")
+        self.assertEqual(outcome["status"], "repaired")
+        self.assertEqual(outcome["attempts"], 1)
+        self.assertEqual(outcome["cost_micros"], 7)
+        self.assertEqual(len(outcome["reply"].by_claim(batch)), 3)
+        [(prompt, request_id)] = seen
+        self.assertTrue(request_id.startswith("contract-repair:"))
+        # Its own reply, the violations, the rule block, the row ids -- and an
+        # envelope that asks for the table it actually wants back.
+        self.assertIn("1\tsection one", prompt)
+        self.assertIn("row 1", prompt)
+        self.assertIn("management_and_capital_allocation", prompt)
+        self.assertIn("<row id><TAB><aspect>", prompt)
+        self.assertNotIn("one raw JSON object", prompt)
+        # Not the original prompt: it was paid for once and the model is not
+        # being asked to decide again.
+        self.assertNotIn("ORIGINAL", prompt)
+
+    def test_a_repair_that_is_still_unreadable_refuses_the_batch(self):
+        batch = build_batch(self.rows(3))
+        text = "1\tsection one\n2\tsection two\n3\tsection three\n"
+        reply = parse_tagging_reply(batch, text)
+        outcome = repair_tagging_reply(
+            batch=batch, prompt="ORIGINAL", text=text, reply=reply,
+            call=lambda **_: {"text": text, "cost_micros": 3},
+            request_id="req")
+        self.assertEqual(outcome["status"], "refused")
+        self.assertIn("after one repair", outcome["reason"])
+        self.assertIn("section one", outcome["reason"])
+
+    def test_a_repair_that_fixes_most_of_it_keeps_what_it_fixed(self):
+        # Below the ratio after the repair is a *repaired* reply with one row
+        # skipped, not a second refusal: the batch is thirty-nine answers.
+        batch = build_batch(self.rows(10))
+        text = "\n".join(f"{index}\tsection {index}" for index in range(1, 11))
+        reply = parse_tagging_reply(batch, text)
+        lines = [f"{index}\tdemand_drivers" for index in range(1, 11)]
+        lines[4] = "5\tsection five"
+        outcome = repair_tagging_reply(
+            batch=batch, prompt="ORIGINAL", text=text, reply=reply,
+            call=lambda **_: {"text": "\n".join(lines), "cost_micros": 0},
+            request_id="req")
+        self.assertEqual(outcome["status"], "repaired")
+        self.assertEqual(outcome["reply"].unresolved_rows, ["5"])
 
 
 if __name__ == "__main__":  # pragma: no cover

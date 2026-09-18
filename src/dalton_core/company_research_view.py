@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from .store import DaltonStore, canonical_json, content_hash
@@ -53,6 +53,36 @@ class CompanyClaimQueryContext:
     connection: Any
     company_ref: str
     rows: tuple[Mapping[str, Any], ...]
+    # The index entries for exactly ``rows``, read once and reused by every
+    # query bound to this context.  Not part of the value: two contexts over
+    # the same rows are the same projection whether or not either has been
+    # asked for its index yet, so the memo is excluded from equality and from
+    # the constructor.
+    _index_memo: dict[str, Any] = field(
+        default_factory=dict, compare=False, repr=False, init=False)
+
+    def index_entries(self) -> dict[str, dict[str, Any]]:
+        """The current index entry per claim version of this company.
+
+        Read once per context rather than once per aspect.  The dossier
+        fingerprint asks for ten aspects of one company and the aspect filter
+        is applied *after* the join, so the ten calls read, decoded and
+        re-hashed the same few thousand entries ten times over -- 4.3 s of the
+        5.0 s one company's signature cost on the live Core.  The rows a
+        context holds do not change, so neither can their entries.
+        """
+
+        if "entries" not in self._index_memo:
+            from .claim_index_authority import current_entries, table_exists
+
+            self._index_memo["entries"] = (
+                current_entries(
+                    self.connection,
+                    claim_version_refs=[row["claim_version_ref"] for row in self.rows],
+                )
+                if table_exists(self.connection) else {}
+            )
+        return self._index_memo["entries"]
 
 
 def prepare_company_claim_query(
@@ -461,8 +491,15 @@ def annotate_with_index(
     as_of_to: str | None = None,
     importance: str | None = None,
     canonical_only: bool = True,
+    entries: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Join P12b index entries onto claim rows and filter by them.
+
+    ``entries`` is an already-read ``claim_version_ref -> entry`` mapping
+    covering at least ``rows``; a caller that annotates the same rows several
+    times in one operation reads the index once and passes it here.  It never
+    changes the answer: with it absent the same mapping is read from the same
+    connection.
 
     Separate from ``query_company_research`` because more than one reader wants
     it: the cockpit's answer context reads ``claim_versions`` directly and
@@ -503,10 +540,14 @@ def annotate_with_index(
             "this Core holds no Claim index; aspect, as_of and importance "
             "filters cannot be answered here"
         )
-    entries = (
-        current_entries(connection, claim_version_refs=[row[ref_key] for row in rows])
-        if indexed else {}
-    )
+    if entries is None:
+        entries = (
+            current_entries(connection,
+                            claim_version_refs=[row[ref_key] for row in rows])
+            if indexed else {}
+        )
+    elif not indexed:
+        entries = {}
     result: list[dict[str, Any]] = []
     for row in rows:
         entry = entries.get(row[ref_key])
@@ -631,6 +672,10 @@ def query_company_research(
         store.connection, filtered, index_aspect=index_aspect,
         as_of_from=as_of_from, as_of_to=as_of_to, importance=importance,
         canonical_only=canonical_only,
+        # The context's rows are exactly what ``filtered`` was drawn from, so
+        # its index read covers them and is shared by every aspect asked of
+        # the same context.
+        entries=None if claim_context is None else claim_context.index_entries(),
     )
     retirement_table = None
     if exclude_retired:

@@ -345,7 +345,7 @@ class CompanyModelSpecError(ValueError):
 # agree, which is the one thing it must never be asked to do.  So the list is
 # an allow-list keyed on the rule's own message, anything unrecognised stays
 # ``semantic``, and adding to it is a reviewed decision with a version.
-REPAIRABLE_STRUCTURE_RULES_REF = "rule:company-model-spec-repairable-structure:0.1"
+REPAIRABLE_STRUCTURE_RULES_REF = "rule:company-model-spec-repairable-structure:0.2"
 REPAIRABLE_STRUCTURE_RULES: tuple[str, ...] = (
     "a derived line cannot claim a filed concept",
     "a filed subtotal may only be actual/tie authority or unavailable",
@@ -354,6 +354,13 @@ REPAIRABLE_STRUCTURE_RULES: tuple[str, ...] = (
     "Only diluted weighted-average shares may select",
     "sum formula roles do not match its company statement output",
     "EPS denominator must be diluted weighted-average shares",
+    # 0.2, live 2026-09: the *numerator* half of the same divide-formula rule
+    # was missing, so a specification that named the right denominator and the
+    # wrong numerator role was a whole refusal while its mirror image was a
+    # repair.  Both are the same kind of choice among roles the model was shown
+    # -- ``diluted_eps_numerator`` is one of them -- and neither is arithmetic
+    # about the filings.
+    "EPS numerator must use the company-specific diluted EPS numerator role",
 )
 
 

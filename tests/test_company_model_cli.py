@@ -25,6 +25,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from dalton_core.company_model_cli import (
+    DEFAULT_REPAIR_ATTEMPTS,
     _scheduler_failure_codes, _validated_spec_with_repair,
     choose_company, filed_classifications,
     model_spec_request_id, run_model_spec, structured_output_repair_config,
@@ -400,7 +401,8 @@ class ChooseCompanyTests(unittest.TestCase):
                 scheduler_db=None, company_ref=ACN,
                 expected_state_hash=state["state_hash"],
                 expected_task_hash=TASK_HASH,
-                expected_repair_policy_hash=content_hash({"max_attempts": 0}),
+                expected_repair_policy_hash=content_hash(
+                    {"max_attempts": DEFAULT_REPAIR_ATTEMPTS}),
                 expected_financial_validation_contract_hash="f" * 64,
             )
         self.assertEqual(summary["spec_status"], "stale_input")
@@ -440,7 +442,8 @@ class ChooseCompanyTests(unittest.TestCase):
                 scheduler_db=self.state_dir / "scheduler.sqlite",
                 company_ref=ACN, expected_state_hash=state["state_hash"],
                 expected_task_hash=TASK_HASH,
-                expected_repair_policy_hash=content_hash({"max_attempts": 0}),
+                expected_repair_policy_hash=content_hash(
+                    {"max_attempts": DEFAULT_REPAIR_ATTEMPTS}),
                 expected_financial_validation_contract_hash=(
                     CASH_FLOW_COMPANION_VALIDATION_CONTRACT_HASH),
             )
@@ -830,8 +833,21 @@ class StructuredOutputRepairTests(unittest.TestCase):
         self.assertEqual(one.calls, 1)
         self.assertEqual(len(attempts), 1)
 
-    def test_absent_and_zero_disable_while_large_nonnegative_limits_are_retained(self):
-        self.assertEqual(structured_output_repair_config({}), {"max_attempts": 0})
+    def test_absent_means_one_repair_and_zero_is_the_way_to_disable_it(self):
+        # It used to be the other way round, and that is why the lane held
+        # durably on a wiring rule it could have been asked to fix: no
+        # installation's model configuration sets the key, so the repair was
+        # off everywhere.
+        self.assertEqual(structured_output_repair_config({}),
+                         {"max_attempts": DEFAULT_REPAIR_ATTEMPTS})
+        self.assertEqual(structured_output_repair_config(None),
+                         {"max_attempts": DEFAULT_REPAIR_ATTEMPTS})
+        self.assertEqual(
+            structured_output_repair_config({
+                "structured_output_repair": {"max_attempts": 0}
+            }),
+            {"max_attempts": 0},
+        )
         self.assertEqual(
             structured_output_repair_config({
                 "structured_output_repair": {"max_attempts": 1000}

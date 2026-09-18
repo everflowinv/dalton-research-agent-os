@@ -7,7 +7,9 @@ from pathlib import Path
 from typing import Any
 
 from .document_research_inventory import CONFIG_FILENAME as DOCUMENT_CONFIG_NAME
-from .lane_child_launcher import LaneChildLauncher, LaneChildRejected
+from .lane_child_launcher import (
+    LaneChildConflict, LaneChildLauncher, LaneChildRejected,
+)
 from .mission_document_model_authority import (
     DRAFT_MODEL_CONFIG_NAME,
     VERIFIER_MODEL_CONFIG_NAME,
@@ -164,10 +166,53 @@ class MissionDocumentResearchLauncher(LaneChildLauncher):
         }
         digest = content_hash(signature)[:24]
         expected = f"{self.TICKET_PREFIX}:{digest}"
+        record = {**signature, "configuration_hash": content_hash(configuration)}
+        rebound_from = None
         if prior_ticket_ref != expected:
-            raise LaneChildRejected(
-                "controlled document research re-entry changed ticket identity"
+            # The ticket identity is a digest of the admission *and* this
+            # launcher's configuration, so a release that moves a config file
+            # or changes its bytes renames every held admission's ticket.  Ten
+            # live admissions were stuck on exactly that: nothing about the
+            # work had changed, only the name of the run that had done it.
+            # The admission is the thing that must not move; the ticket is
+            # bookkeeping.  So rebind when the admission is identical, and
+            # refuse only when it is not.
+            try:
+                prior = self.status(prior_ticket_ref)
+            except LookupError as exc:
+                raise LaneChildRejected(
+                    "controlled document research re-entry changed ticket identity"
+                ) from exc
+            if (
+                prior.get("admission_ref") != admission_ref
+                or prior.get("admission_hash") != admission_hash
+            ):
+                raise LaneChildRejected(
+                    "controlled document research re-entry changed ticket identity"
+                )
+            if prior.get("status") == "running":
+                raise LaneChildConflict(
+                    f"{self.TICKET_PREFIX} child is already running"
+                )
+            rebound_from = prior_ticket_ref
+            prior_ticket_ref = expected
+        if rebound_from is not None and not self._ticket_path(
+            prior_ticket_ref
+        ).is_file():
+            # Rebinding onto a ticket identity that has never run.  The prior
+            # ticket still owns the one-shot re-entry claim for this exact
+            # authorization, so claim it there -- the archive of the prior
+            # summary and log stays where the prior run is -- and then start
+            # the new identity as a fresh run.
+            self.claim_controlled_reentry(rebound_from, authorization)
+            ticket = self.spawn(
+                digest=digest,
+                record={**record, "rebound_from_ticket_ref": rebound_from},
+                admission_ref=admission_ref,
+                admission_hash=admission_hash,
+                configuration=configuration,
             )
+            return {**ticket, "rebound_from_ticket_ref": rebound_from}
         prior = self.status(prior_ticket_ref)
         if (
             prior.get("status") == "running"
@@ -179,14 +224,18 @@ class MissionDocumentResearchLauncher(LaneChildLauncher):
             raise LaneChildRejected(
                 "controlled document research re-entry lost its exact prior ticket"
             )
-        return self.spawn(
+        ticket = self.spawn(
             digest=digest,
-            record={**signature, "configuration_hash": content_hash(configuration)},
+            record=record if rebound_from is None else {
+                **record, "rebound_from_ticket_ref": rebound_from},
             _controlled_reentry=(prior_ticket_ref, authorization),
             admission_ref=admission_ref,
             admission_hash=admission_hash,
             configuration=configuration,
         )
+        if rebound_from is None:
+            return ticket
+        return {**ticket, "rebound_from_ticket_ref": rebound_from}
 
     def status(self, ticket_ref: str) -> dict[str, Any]:
         ticket = super().status(ticket_ref)

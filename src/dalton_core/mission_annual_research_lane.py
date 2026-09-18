@@ -4,6 +4,9 @@ The planner/research-task producer writes the immutable admission.  This lane
 only selects an unstarted admission and launches its admission-ref-only child.
 An orphaned or failed child is held and skipped so the lane never guesses that
 another paid call is safe, while later independent admissions can still run.
+A child ticket whose *name* moved because a release changed this launcher's
+configuration is rebound once onto the new name; that costs nothing and
+guesses nothing, because the admission it re-enters is byte-identical.
 """
 
 from __future__ import annotations
@@ -29,6 +32,10 @@ LAUNCHER_KWARG = "mission_annual_research_launcher"
 DRIVER_KEY = "mission_annual_research"
 LATEST_FILE = "latest.json"
 HOLDS_FILE = "holds.json"
+# The hold reason for a controlled re-entry that failed again *after* the lane
+# had already rebound this admission onto a new ticket identity by itself.
+# Automatic once, then a person.
+REENTRY_ESCALATED_REASON = "reentry_failed_after_automatic_rebind"
 
 
 def _sha256(value: Any) -> bool:
@@ -446,6 +453,52 @@ class MissionAnnualResearchCoordinator:
         finally:
             connection.close()
 
+    @staticmethod
+    def _reentry_authorization(
+        admission: Mapping[str, Any], ticket_ref: str,
+        recovery: Mapping[str, Any],
+    ) -> str:
+        return canonical_json({
+            "schema_version": "0.1",
+            "kind": "exact_scheduler_replay",
+            "admission_ref": admission["id"],
+            "admission_hash": admission["content_hash"],
+            "prior_ticket_ref": ticket_ref,
+            "work_order_ref": recovery["work_order_ref"],
+            "reason": recovery["reason"],
+        })
+
+    def _reentry_hold_reason(
+        self, admission: Mapping[str, Any], ticket_ref: str | None,
+        recovery: Mapping[str, Any], exc: Exception,
+    ) -> str:
+        """Automatic once, then a person.
+
+        A first refused re-entry is the lane's own business: the next tick may
+        well succeed, and a ticket identity that moved is repaired without
+        anyone being told.  A refusal after the lane has already spent that one
+        attempt is a different fact and has to be held under its own name.
+        """
+
+        if ticket_ref is None:
+            return "controlled_reentry_unavailable:" + str(exc)
+        try:
+            if self.launcher.status(ticket_ref).get(
+                    "rebound_from_ticket_ref") is not None:
+                return REENTRY_ESCALATED_REASON + ":" + str(exc)
+        except Exception:  # noqa: BLE001 - an unreadable ticket asks a person
+            return REENTRY_ESCALATED_REASON + ":" + str(exc)
+        try:
+            claimed = self.launcher.controlled_reentry_claimed(
+                ticket_ref,
+                self._reentry_authorization(admission, ticket_ref, recovery),
+            )
+        except Exception:  # noqa: BLE001 - no claim ledger, no escalation
+            claimed = False
+        if claimed:
+            return REENTRY_ESCALATED_REASON + ":" + str(exc)
+        return "controlled_reentry_unavailable:" + str(exc)
+
     def dispatch_once(self) -> dict[str, Any]:
         if self.launcher is None:
             return {"status": "unconfigured", "reason": "annual research lane is absent"}
@@ -521,15 +574,8 @@ class MissionAnnualResearchCoordinator:
                         "retry_at": recovery["retry_at"], "last": settled,
                     }
                 if recovery["action"] == "resume":
-                    authorization = canonical_json({
-                        "schema_version": "0.1",
-                        "kind": "exact_scheduler_replay",
-                        "admission_ref": admission["id"],
-                        "admission_hash": admission["content_hash"],
-                        "prior_ticket_ref": ticket["id"],
-                        "work_order_ref": recovery["work_order_ref"],
-                        "reason": recovery["reason"],
-                    })
+                    authorization = self._reentry_authorization(
+                        admission, ticket["id"], recovery)
                     try:
                         resumed = self.launcher.resume(
                             admission_ref=admission["id"],
@@ -540,22 +586,44 @@ class MissionAnnualResearchCoordinator:
                     except LaneChildConflict as exc:
                         return {"status": "busy", "reason": str(exc), "last": settled}
                     except LaneChildRejected as exc:
+                        reason = self._reentry_hold_reason(
+                            admission, ticket["id"], recovery, exc)
                         self._hold(
-                            holds, admission,
-                            reason="controlled_reentry_unavailable:" + str(exc),
+                            holds, admission, reason=reason,
                             ticket_ref=ticket["id"],
                             disposition="recovery_required",
                         )
                         settled["recovery"] = {
-                            "action": "recovery_required",
-                            "reason": "controlled_reentry_unavailable",
+                            "action": "recovery_required", "reason": reason,
                         }
                         recovery = settled["recovery"]
                     else:
-                        return {
+                        result = {
                             "status": "resumed", "ticket_ref": resumed["id"],
                             "admission_ref": admission["id"], "last": settled,
                         }
+                        rebound_from = resumed.get("rebound_from_ticket_ref")
+                        if rebound_from is not None:
+                            # This lane finds its running child through the
+                            # latest pointer and nothing else, so a rebinding
+                            # that did not move the pointer would send the next
+                            # tick back to the ticket that was just replaced.
+                            pointer = {
+                                "ticket_ref": resumed["id"],
+                                "admission_ref": admission["id"],
+                                "admission_hash": admission["content_hash"],
+                            }
+                            write_owner_only(
+                                self.latest_path,
+                                {**pointer, "content_hash": content_hash(pointer)},
+                            )
+                            result["rebound_from_ticket_ref"] = rebound_from
+                            result["reason"] = (
+                                f"子进程票据身份已变（{rebound_from} → "
+                                f"{resumed['id']}），admission 本身没变，"
+                                "已自动改绑并重新进入。"
+                            )
+                        return result
                 disposition = (
                     "recovery_required"
                     if recovery["action"] == "recovery_required"
@@ -768,6 +836,7 @@ LANE = register_lane(LaneSpec(
 
 
 __all__ = [
+    "REENTRY_ESCALATED_REASON",
     "DRIVER_KEY", "LANE", "LANE_CONFIG", "LAUNCHER_KWARG",
     "MissionAnnualResearchCoordinator", "MissionAnnualResearchLaneError",
     "add_arguments", "argv_fragment", "build_launcher", "lane_configuration",

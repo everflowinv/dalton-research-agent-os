@@ -395,6 +395,28 @@ class LaneCacheTests(unittest.TestCase):
         self.assertEqual(second.enumeration_cursor_ref, "2026-09-02")
 
 
+    def test_a_replayed_listing_never_re_submits_a_recorded_document(self) -> None:
+        # The listing outlives its tick, so the same document refs come back
+        # every tick for an hour.  What must not come back is the *recording*:
+        # a document the mission already holds is not read again, so no second
+        # envelope is produced for it and nothing is re-submitted to an
+        # envelope binding that already exists.
+        first = self.lane(notes=3, budget=60.0)
+        self.tick(first)
+        self.assertEqual(len(first.documents_read), 3)
+        held = [f"sales-note:2026-09-16:{index}" for index in range(3)]
+        second = self.lane(notes=3, budget=60.0, held=held)
+        result = self.tick(second)
+        self.assertEqual(result["cache_hits"], 1)
+        self.assertEqual(second.enumerator_calls, 0)
+        # Listed again, read nothing, recorded nothing.
+        self.assertEqual(result["enumerated"], 3)
+        self.assertEqual(second.documents_read, [])
+        self.assertEqual(result["read"]["read"], 0)
+        self.assertEqual(result["read"]["already_held"], 3)
+        self.assertEqual(result["already_bound"], 0)
+
+
 class LedgerShapeTests(unittest.TestCase):
     """What the owner reads in ``tick_ledger_lanes`` after this ships."""
 
@@ -406,13 +428,17 @@ class LedgerShapeTests(unittest.TestCase):
             "settled": [], "launched": [{"ticket_ref": "t"}], "read": {"read": 1},
             "enumerated": 211, "windows": 1, "partial_windows": 0,
             "enumerations": 0, "cache_hits": 1, "enumeration_seconds": 0.0,
-            "read_seconds": 4.1, "read_deferred": False,
+            "read_seconds": 4.1, "read_deferred": False, "already_bound": 2,
         }
         counts = bounded_counts(result)
         # The three numbers this work package is judged on.
         self.assertEqual(counts["launched"], 1)
         self.assertEqual(counts["enumerations"], 0)
         self.assertEqual(counts["cache_hits"], 1)
+        # ...and the one the envelope-binding fix added. It has to be a scalar
+        # at the top level: ``read`` is a nested result and is dropped here.
+        self.assertEqual(counts["already_bound"], 2)
+        self.assertNotIn("read", counts)
         for key in ("enumerated", "windows", "enumeration_seconds", "read_seconds"):
             self.assertIn(key, counts)
 

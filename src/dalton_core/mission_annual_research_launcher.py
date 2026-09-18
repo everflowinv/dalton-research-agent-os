@@ -6,7 +6,9 @@ import hashlib
 from pathlib import Path
 from typing import Any, Mapping
 
-from .lane_child_launcher import LaneChildLauncher, LaneChildRejected
+from .lane_child_launcher import (
+    LaneChildConflict, LaneChildLauncher, LaneChildRejected,
+)
 from .store import content_hash
 
 
@@ -131,11 +133,19 @@ class MissionAnnualResearchLauncher(LaneChildLauncher):
         self, *, admission_ref: str, admission_hash: str,
         prior_ticket_ref: str, authorization: str,
     ) -> dict[str, Any]:
-        """Re-enter the same ticket only under a caller's exact authority.
+        """Re-enter this admission's run only under a caller's exact authority.
 
         ``LaneChildLauncher`` archives the prior summary and admits only one
-        controlled re-entry marker for this authorization.  A changed runtime
-        configuration produces a different ticket and is therefore refused.
+        controlled re-entry marker for this authorization.
+
+        The ticket identity is a digest of the admission *and* this launcher's
+        configuration, so a release that moves a runtime config file or
+        changes its bytes renames every held admission's ticket.  That used to
+        be a permanent refusal, which is how the document lane accumulated ten
+        admissions held on nothing but a moved name.  The admission is the
+        thing that must not move; the ticket is bookkeeping.  So rebind onto
+        the new identity when the admission is byte-identical, and refuse only
+        when it is not.
         """
 
         configuration = self.configuration()
@@ -146,10 +156,46 @@ class MissionAnnualResearchLauncher(LaneChildLauncher):
         }
         digest = content_hash(signature)[:24]
         expected = f"{self.TICKET_PREFIX}:{digest}"
+        record = {**signature, "configuration_hash": content_hash(configuration)}
+        rebound_from = None
         if prior_ticket_ref != expected:
-            raise LaneChildRejected(
-                "controlled annual re-entry changed ticket identity"
+            try:
+                prior = self.status(prior_ticket_ref)
+            except LookupError as exc:
+                raise LaneChildRejected(
+                    "controlled annual re-entry changed ticket identity"
+                ) from exc
+            if (
+                prior.get("admission_ref") != admission_ref
+                or prior.get("admission_hash") != admission_hash
+            ):
+                raise LaneChildRejected(
+                    "controlled annual re-entry changed ticket identity"
+                )
+            if prior.get("status") == "running":
+                raise LaneChildConflict(
+                    f"{self.TICKET_PREFIX} child is already running"
+                )
+            rebound_from = prior_ticket_ref
+            prior_ticket_ref = expected
+        if rebound_from is not None and not self._ticket_path(
+            prior_ticket_ref
+        ).is_file():
+            # Rebinding onto a ticket identity that has never run.  The prior
+            # ticket still owns the one-shot re-entry claim for this exact
+            # authorization, so claim it there -- the archive of the prior
+            # summary and log stays where the prior run is -- and then start
+            # the new identity as a fresh run.  Claiming it there is also what
+            # makes the rebinding automatic exactly once.
+            self.claim_controlled_reentry(rebound_from, authorization)
+            ticket = self.spawn(
+                digest=digest,
+                record={**record, "rebound_from_ticket_ref": rebound_from},
+                admission_ref=admission_ref,
+                admission_hash=admission_hash,
+                configuration=configuration,
             )
+            return {**ticket, "rebound_from_ticket_ref": rebound_from}
         prior = self.status(prior_ticket_ref)
         if (
             prior.get("status") == "running"
@@ -161,14 +207,18 @@ class MissionAnnualResearchLauncher(LaneChildLauncher):
             raise LaneChildRejected(
                 "controlled annual re-entry lost its exact prior ticket"
             )
-        return self.spawn(
+        ticket = self.spawn(
             digest=digest,
-            record={**signature, "configuration_hash": content_hash(configuration)},
+            record=record if rebound_from is None else {
+                **record, "rebound_from_ticket_ref": rebound_from},
             _controlled_reentry=(prior_ticket_ref, authorization),
             admission_ref=admission_ref,
             admission_hash=admission_hash,
             configuration=configuration,
         )
+        if rebound_from is None:
+            return ticket
+        return {**ticket, "rebound_from_ticket_ref": rebound_from}
 
     def status(self, ticket_ref: str) -> dict[str, Any]:
         ticket = super().status(ticket_ref)

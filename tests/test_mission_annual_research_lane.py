@@ -81,6 +81,9 @@ class _Launcher:
         self.tickets: dict[str, dict] = {}
         self.started: list[tuple[str, str]] = []
         self.resumed: list[dict] = []
+        self.resume_error: Exception | None = None
+        self.rebind_to: str | None = None
+        self.claims: set[tuple[str, str]] = set()
 
     def start(self, *, admission_ref: str, admission_hash: str) -> dict:
         self.started.append((admission_ref, admission_hash))
@@ -97,7 +100,21 @@ class _Launcher:
 
     def resume(self, **kwargs) -> dict:
         self.resumed.append(dict(kwargs))
-        return {"id": kwargs["prior_ticket_ref"], "status": "running"}
+        if self.resume_error is not None:
+            raise self.resume_error
+        if self.rebind_to is None:
+            return {"id": kwargs["prior_ticket_ref"], "status": "running"}
+        prior = kwargs["prior_ticket_ref"]
+        self.tickets[self.rebind_to] = {
+            "id": self.rebind_to, "status": "running", "summary": None,
+            "admission_ref": kwargs["admission_ref"],
+            "admission_hash": kwargs["admission_hash"],
+            "rebound_from_ticket_ref": prior,
+        }
+        return dict(self.tickets[self.rebind_to])
+
+    def controlled_reentry_claimed(self, ticket_ref: str, authorization: str) -> bool:
+        return (ticket_ref, authorization) in self.claims
 
 
 def _write_latest(path: Path, admission: dict, ticket_ref: str) -> None:
@@ -342,6 +359,94 @@ class MissionAnnualResearchLaneTests(unittest.TestCase):
         authorization = json.loads(self.launcher.resumed[0]["authorization"])
         self.assertEqual(authorization["kind"], "exact_scheduler_replay")
         self.assertEqual(authorization["work_order_ref"], result["last"]["recovery"]["work_order_ref"])
+
+    def test_rebound_ticket_identity_moves_the_latest_pointer_and_says_so(self) -> None:
+        """A release that renames the ticket must not hold the admission."""
+
+        admission = self.store.add(1)
+        self.store.started(admission["id"])
+        self._scheduler_work(admission)
+        ticket_ref = "mission-annual-research:" + "6" * 24
+        rebound_ref = "mission-annual-research:" + "7" * 24
+        self.launcher.tickets[ticket_ref] = {
+            "id": ticket_ref, "status": "failed",
+            "summary": {"status": "incomplete"},
+            "admission_ref": admission["id"],
+            "admission_hash": admission["content_hash"],
+        }
+        _write_latest(self.lane.latest_path, admission, ticket_ref)
+        self.launcher.rebind_to = rebound_ref
+
+        result = self.lane.dispatch_once()
+
+        self.assertEqual(result["status"], "resumed")
+        self.assertEqual(result["ticket_ref"], rebound_ref)
+        self.assertEqual(result["rebound_from_ticket_ref"], ticket_ref)
+        self.assertIn("已自动改绑", result["reason"])
+        # This lane finds its child only through the pointer, so a rebinding
+        # that left the pointer behind would send the next tick back to the
+        # ticket that was just replaced.
+        pointer = json.loads(self.lane.latest_path.read_text(encoding="utf-8"))
+        self.assertEqual(pointer["ticket_ref"], rebound_ref)
+        self.assertEqual(pointer["admission_ref"], admission["id"])
+        asserted = dict(pointer).pop("content_hash")
+        self.assertEqual(
+            asserted,
+            content_hash({key: value for key, value in pointer.items()
+                          if key != "content_hash"}),
+        )
+
+    def test_reentry_that_fails_after_a_rebinding_is_held_under_its_own_name(self) -> None:
+        from dalton_core.lane_child_launcher import LaneChildRejected
+        from dalton_core.mission_annual_research_lane import (
+            REENTRY_ESCALATED_REASON,
+        )
+
+        admission = self.store.add(1)
+        self.store.started(admission["id"])
+        self._scheduler_work(admission)
+        ticket_ref = "mission-annual-research:" + "5" * 24
+        self.launcher.tickets[ticket_ref] = {
+            "id": ticket_ref, "status": "failed",
+            "summary": {"status": "incomplete"},
+            "admission_ref": admission["id"],
+            "admission_hash": admission["content_hash"],
+            # Itself the product of an automatic rebinding: the lane has
+            # already spent its one free attempt here.
+            "rebound_from_ticket_ref": "mission-annual-research:" + "4" * 24,
+        }
+        _write_latest(self.lane.latest_path, admission, ticket_ref)
+        self.launcher.resume_error = LaneChildRejected("ticket is unavailable")
+
+        result = self.lane.dispatch_once()
+
+        self.assertEqual(result["status"], "recovery_required")
+        holds = json.loads(self.lane.holds_path.read_text(encoding="utf-8"))
+        self.assertTrue(holds["holds"][admission["id"]]["reason"].startswith(
+            REENTRY_ESCALATED_REASON))
+
+    def test_first_refused_reentry_stays_the_lanes_own_business(self) -> None:
+        from dalton_core.lane_child_launcher import LaneChildRejected
+
+        admission = self.store.add(1)
+        self.store.started(admission["id"])
+        self._scheduler_work(admission)
+        ticket_ref = "mission-annual-research:" + "3" * 24
+        self.launcher.tickets[ticket_ref] = {
+            "id": ticket_ref, "status": "failed",
+            "summary": {"status": "incomplete"},
+            "admission_ref": admission["id"],
+            "admission_hash": admission["content_hash"],
+        }
+        _write_latest(self.lane.latest_path, admission, ticket_ref)
+        self.launcher.resume_error = LaneChildRejected("ticket is unavailable")
+
+        result = self.lane.dispatch_once()
+
+        self.assertEqual(result["status"], "recovery_required")
+        holds = json.loads(self.lane.holds_path.read_text(encoding="utf-8"))
+        self.assertTrue(holds["holds"][admission["id"]]["reason"].startswith(
+            "controlled_reentry_unavailable:"))
 
     def test_proved_capacity_terminal_is_visible_as_recovery_required(self) -> None:
         admission = self.store.add(1)

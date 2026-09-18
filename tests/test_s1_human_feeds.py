@@ -106,6 +106,7 @@ AUTOMATION = "automation:coverage-mission"
 OWNER = "human:coverage-owner"
 SALES_NOTES = "source:sales-notes"
 COMPANY_WIKI = "source:company-wiki"
+PRIOR_RESEARCH = "source:prior-research"
 
 UNIVERSE = [
     {"company_ref": ACN, "ticker": "ACN"},
@@ -1021,8 +1022,16 @@ class FeedTriageTests(unittest.TestCase):
         )
 
 
-class FeedEndToEndTests(unittest.TestCase):
-    """The whole lane against the real mission authority and a real runner."""
+class FeedEndToEndHarness(unittest.TestCase):
+    """The whole lane against the real mission authority and a real runner.
+
+    Carries no tests of its own: the sales-notes corpus is a parameter
+    (``digest_dir``) so a case that needs a note the committed fixtures do not
+    have can build one without moving the counts every other case asserts.
+    """
+
+    def digest_dir(self) -> Path:
+        return FIXTURES
 
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -1053,7 +1062,7 @@ class FeedEndToEndTests(unittest.TestCase):
             "get_note": write_governance(self.root, SALES_NOTES_GET_KIND),
         }
         self.launcher = SalesNotesFeedLauncher(
-            digest_dir=FIXTURES, state_dir=self.state,
+            digest_dir=self.digest_dir(), state_dir=self.state,
             governance_paths=self.governance, spool_dir=self.root / "spool",
         )
         self.addCleanup(self.launcher.close)
@@ -1092,6 +1101,10 @@ class FeedEndToEndTests(unittest.TestCase):
             missions=self.missions, launcher=self.launcher, source_ref=SALES_NOTES,
             plan=load_feed_discovery_plan(PLAN_PATH), **runners, **overrides,
         )
+
+
+class FeedEndToEndTests(FeedEndToEndHarness):
+    """One tick over the committed fixtures, end to end."""
 
     def test_a_tick_reads_records_and_opens_reviews_end_to_end(self) -> None:
         coordinator = self.coordinator()
@@ -1263,6 +1276,309 @@ class FeedEndToEndTests(unittest.TestCase):
         )
         self.assertEqual([r["document_ref"] for r in one["outcomes"]], queue[:2])
         self.assertEqual([r["document_ref"] for r in two["outcomes"]], queue[2:4])
+
+
+TWO_COMPANY_NOTE = "sales-note:cccc000000000001"
+SECOND_NOTE = "sales-note:cccc000000000002"
+
+
+def two_company_digest(root: Path) -> Path:
+    """A digest whose newest note is about two covered companies at once.
+
+    Live this is ordinary: ``sales-note:1a06dcd3bc7969d5`` (2026-09-17) names
+    IBM, Cognizant, EPAM and Accenture in one morning wrap, and 27 of the
+    1,727 notes the lane has read name at least two. Not one of them was ever
+    recorded for its second company -- the second submission of the one
+    envelope the read produced raised ``CoverageMissionConflict: source
+    envelope is already bound to another discovery`` and the writer refused
+    the whole ``dispatch_sales_notes_feed`` operation, 45 times in the log.
+    """
+
+    root.mkdir(parents=True, exist_ok=True)
+    emails = [
+        {
+            "id": "cccc000000000001",
+            "from": '"Morning Wrap" <wrap@example-bank.test>',
+            "subject": "Accenture (ACN) and Cognizant (CTSH): pricing check",
+            "date": format_datetime(datetime(2026, 9, 8, 9, 30, tzinfo=timezone.utc)),
+            "is_priority": True,
+            "body": "SYNTHETIC FIXTURE BODY -- Accenture and Cognizant in one note.\r\n",
+        },
+        {
+            "id": "cccc000000000002",
+            "from": '"Jane Analyst" <jane.analyst@example-bank.test>',
+            "subject": "EPAM Systems: quarter preview",
+            "date": format_datetime(datetime(2026, 9, 8, 8, 5, tzinfo=timezone.utc)),
+            "is_priority": False,
+            "body": "SYNTHETIC FIXTURE BODY -- EPAM note.\r\n",
+        },
+    ]
+    for email in emails:
+        email["body_length"] = len(email["body"])
+    (root / "digest_2026-09-08_AM.json").write_text(
+        json.dumps({
+            "ok": True, "status": "emails_fetched", "date": "2026-09-08",
+            "period": "AM", "count": len(emails), "priority_count": 1,
+            "raw_chunks_indexed": 0, "emails": emails,
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return root
+
+
+class AlreadyBoundEnvelopeTests(FeedEndToEndHarness):
+    """One read, one envelope, one discovery -- and a tick that survives it.
+
+    Core keys ``coverage_mission_source_discoveries`` by
+    ``UNIQUE(mission_version_ref, source_envelope_ref)``: an envelope binds
+    exactly one discovery. The lane reads a note once and then records it for
+    every company the body names, so the second company re-submitted the one
+    envelope the read produced, under a different identity and therefore a
+    different record id. That is the live failure. It has to be a per-document
+    skip with a number on it, not a refusal of the tick.
+    """
+
+    def digest_dir(self) -> Path:
+        return two_company_digest(self.root / "digests")
+
+    def setUp(self) -> None:
+        self.temp_root = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_root.cleanup)
+        # ``digest_dir`` is called from the parent's setUp, which builds the
+        # launcher; the corpus has to exist before that.
+        self.root = Path(self.temp_root.name)
+        super().setUp()
+
+    def test_a_note_naming_two_companies_skips_the_bound_envelope_and_the_tick_lives(
+        self
+    ) -> None:
+        coordinator = self.coordinator()
+        result = coordinator.dispatch_once(universe=UNIVERSE, since="2026-08-01")
+
+        # The tick completed. Before the fix this raised out of dispatch_once
+        # and the writer reported the whole operation failed.
+        self.assertEqual(result["status"], "dispatched")
+        read = result["read"]
+        self.assertEqual(read["read"], 2)
+        self.assertEqual(read["company"], 2)
+        # One submission skipped, counted where an owner reads the lane: the
+        # tick summary itself, because the ledger keeps scalars and drops the
+        # nested read result.
+        self.assertEqual(read["already_bound"], 1)
+        self.assertEqual(result["already_bound"], 1)
+
+        outcomes = {item["document_ref"]: item for item in read["outcomes"]}
+        shared = outcomes[TWO_COMPANY_NOTE]
+        self.assertEqual(shared["company_refs"], sorted([ACN, CTSH]))
+        self.assertEqual(len(shared["records"]), 1)
+        skipped = shared["already_bound"]
+        self.assertEqual(len(skipped), 1)
+        self.assertEqual(skipped[0]["status"], "already_bound")
+        # The skip names the company that was not recorded, the envelope, and
+        # the discovery that owns it -- enough to act on without the log.
+        # Sorted by ref, so Cognizant's discovery is the one that commits
+        # and Accenture's is the submission that finds the envelope taken.
+        self.assertEqual(skipped[0]["company_ref"], ACN)
+        self.assertEqual(skipped[0]["bound_company_ref"], CTSH)
+
+        version_ref = self.mission["id"]
+        discoveries = self.missions.source_discoveries(version_ref, limit=100)
+        self.assertEqual(len(discoveries), 2)
+        by_envelope = {item["source_envelope_ref"]: item for item in discoveries}
+        self.assertEqual(len(by_envelope), 2)
+        self.assertEqual(
+            by_envelope[skipped[0]["source_envelope_ref"]]["id"],
+            skipped[0]["discovery_ref"],
+        )
+        # The second note -- read *after* the conflicting one -- is recorded.
+        # That is the whole point: a genuinely new document is not lost to a
+        # skip earlier in the same tick.
+        queued = self.missions.discovered_documents(version_ref, limit=100)
+        self.assertEqual({row["document_ref"] for row in queued},
+                         {TWO_COMPANY_NOTE, SECOND_NOTE})
+        self.assertEqual({row["status"] for row in queued}, {"acquired"})
+        self.assertEqual(
+            {row["document_ref"] for row in
+             self.missions.document_reviews(version_ref, limit=100)},
+            {TWO_COMPANY_NOTE, SECOND_NOTE},
+        )
+
+    def test_the_authority_still_refuses_the_second_binding(self) -> None:
+        # The skip is not the invariant going soft: Core still refuses, and
+        # this is the exact call the lane no longer makes.
+        coordinator = self.coordinator()
+        coordinator.dispatch_once(universe=UNIVERSE, since="2026-08-01")
+        bound = next(
+            item for item in self.missions.source_discoveries(self.mission["id"], limit=10)
+            if item["document_refs"] == [TWO_COMPANY_NOTE]
+        )
+        self.assertEqual(bound["company_ref"], CTSH)
+        authorization = coordinator.authorize(company_ref=ACN)
+        with self.assertRaises(CoverageMissionConflict) as caught:
+            self.missions.record_source_discovery(
+                authorization=authorization,
+                discovery_plan_ref=bound["discovery_plan_ref"],
+                discovery_plan_hash=bound["discovery_plan_hash"],
+                spec_ref=bound["spec_ref"], query_hash=bound["query_hash"],
+                parameters=bound["parameters"],
+                connector_invocation_ref=bound["connector_invocation_ref"],
+                connector_invocation_hash=bound["connector_invocation_hash"],
+                source_envelope_ref=bound["source_envelope_ref"],
+                source_envelope_hash=bound["source_envelope_hash"],
+                document_refs=[TWO_COMPANY_NOTE], in_authority_document_refs=[],
+            )
+        self.assertIn("already bound", str(caught.exception))
+        # And the lane, asked the same thing, answers with a skip.
+        self.assertEqual(
+            coordinator.bound_discovery(
+                self.mission["id"], bound["source_envelope_ref"]
+            )["id"],
+            bound["id"],
+        )
+
+    def test_the_next_tick_neither_re_reads_nor_re_submits(self) -> None:
+        coordinator = self.coordinator()
+        coordinator.dispatch_once(universe=UNIVERSE, since="2026-08-01")
+        before = self.missions.source_discoveries(self.mission["id"], limit=100)
+        again = coordinator.dispatch_once(universe=UNIVERSE, since="2026-08-01")
+        # Both notes are held, so the envelope that is already bound is never
+        # produced a second time and nothing is re-submitted.
+        self.assertEqual(again["read"]["read"], 0)
+        self.assertEqual(again["read"]["already_held"], 2)
+        self.assertEqual(again["read"]["already_bound"], 0)
+        self.assertEqual(
+            len(self.missions.source_discoveries(self.mission["id"], limit=100)),
+            len(before),
+        )
+
+
+class BoundEnvelopeSkipTests(unittest.TestCase):
+    """The skip belongs to every feed whose attribution can name two companies.
+
+    The sales-notes body is one way to reach two companies from one read; the
+    wiki's ``related`` column is the other -- a document filed under ACN and
+    tagged CTSH carries both tickers, and ``decide`` returns both. Prior
+    research cannot: a file lives in exactly one company's folder.
+    """
+
+    class Missions:
+        """Just the four calls ``record_document`` makes."""
+
+        def __init__(self, bound: dict[str, Any] | None = None) -> None:
+            self.bound = bound
+            self.submitted: list[str] = []
+
+        def authorize_source_discovery(self, *, company_ref, source_ref, requested_by):
+            return {"mission_version_ref": "coverage-mission-version:us-it-services:1",
+                    "company_ref": company_ref, "source_ref": source_ref,
+                    "requested_by": requested_by}
+
+        def source_discovery_for_envelope(self, mission_version_ref, source_envelope_ref):
+            return self.bound
+
+        def discovered_documents(self, mission_version_ref, *, company_ref=None,
+                                 status=None, limit=100):
+            return []
+
+        def record_source_discovery(self, **kwargs):
+            self.submitted.append(kwargs["source_envelope_ref"])
+            return {"status": "fresh", "id": "mission-source-discovery:new",
+                    "mission_version_ref": kwargs["authorization"]["mission_version_ref"]}
+
+    RECEIPT = {
+        "connector_invocation_ref": "connector-invocation:host-tool:company-wiki:1",
+        "connector_invocation_hash": "0" * 64,
+        "source_envelope_ref": "source-envelope:host-tool:company-wiki:1",
+        "source_envelope_hash": "1" * 64,
+    }
+
+    def coordinator(self, missions, source_ref=COMPANY_WIKI):
+        return FeedDiscoveryCoordinator(
+            missions=missions, launcher=None, source_ref=source_ref,
+            plan=load_feed_discovery_plan(PLAN_PATH),
+        )
+
+    def record(self, missions, *, company_ref=CTSH):
+        return self.coordinator(missions).record_document(
+            company_ref=company_ref, document_ref="wiki-doc:abcdef0123456789",
+            spec_ref="wiki-expert-call", receipt=self.RECEIPT,
+            parameters=feed_discovery_parameters(
+                terms="Cognizant CTSH", since="2026-08-01", as_of=date(2026, 9, 8)
+            ),
+        )
+
+    def test_an_envelope_another_company_holds_is_never_submitted_again(self) -> None:
+        missions = self.Missions({
+            "id": "mission-source-discovery:first",
+            "mission_version_ref": "coverage-mission-version:us-it-services:1",
+            "company_ref": ACN,
+        })
+        recorded = self.record(missions)
+        self.assertEqual(recorded["status"], "already_bound")
+        self.assertEqual(recorded["discovery_ref"], "mission-source-discovery:first")
+        self.assertEqual(recorded["bound_company_ref"], ACN)
+        # Not submitted at all: the conflict is avoided, not caught.
+        self.assertEqual(missions.submitted, [])
+
+    def test_an_unbound_envelope_is_recorded_as_before(self) -> None:
+        missions = self.Missions(None)
+        recorded = self.record(missions)
+        self.assertEqual(recorded["status"], "fresh")
+        self.assertEqual(missions.submitted, [self.RECEIPT["source_envelope_ref"]])
+
+    def test_a_conflict_the_pre_check_missed_is_still_a_skip(self) -> None:
+        # A binding that appeared between the check and the write -- or an
+        # identity that drifted since the first submission -- reaches the
+        # unique key. It is the same answer, from the authority's own index.
+        missions = self.Missions(None)
+
+        def refuse(**kwargs):
+            missions.bound = {
+                "id": "mission-source-discovery:first",
+                "mission_version_ref": kwargs["authorization"]["mission_version_ref"],
+                "company_ref": ACN,
+            }
+            raise CoverageMissionConflict(
+                "source envelope is already bound to another discovery"
+            )
+
+        missions.record_source_discovery = refuse
+        self.assertEqual(self.record(missions)["status"], "already_bound")
+
+    def test_a_conflict_with_no_binding_behind_it_is_still_raised(self) -> None:
+        missions = self.Missions(None)
+
+        def refuse(**kwargs):
+            raise CoverageMissionConflict("discovery authorization drifted")
+
+        missions.record_source_discovery = refuse
+        with self.assertRaises(CoverageMissionConflict):
+            self.record(missions)
+
+    def test_the_wiki_tags_and_the_note_body_both_reach_two_companies(self) -> None:
+        wiki = self.coordinator(self.Missions())
+        decision = wiki.decide(
+            {"document": {"company_tags": ["ACN", "CTSH"]}, "text": "..."},
+            UNIVERSE,
+        )
+        self.assertEqual(decision["outcome"], "company")
+        self.assertEqual(decision["company_refs"], sorted([ACN, CTSH]))
+        notes = self.coordinator(self.Missions(), source_ref=SALES_NOTES)
+        body = notes.decide(
+            {"body": "Accenture and Cognizant both cut pricing."}, UNIVERSE
+        )
+        self.assertEqual(body["company_refs"], sorted([ACN, CTSH]))
+
+    def test_prior_research_cannot_reach_two_companies_at_all(self) -> None:
+        # The folder is the attribution, so this feed never produced the
+        # conflict and never will; the skip costs it nothing.
+        prior = self.coordinator(self.Missions(), source_ref=PRIOR_RESEARCH)
+        decision = prior.decide(
+            {"document": {"company": "ACN", "relative_path": "ACN/2026/note.md"},
+             "text": "Accenture and Cognizant both cut pricing."},
+            UNIVERSE,
+        )
+        self.assertEqual(decision["company_refs"], [ACN])
 
 
 def synthetic_digests(root: Path, *, days: int, per_day: int) -> Path:
@@ -1614,6 +1930,11 @@ class AuthoritySeamTests(unittest.TestCase):
             "authorize_source_discovery": ((), {"company_ref": ACN,
                                                 "source_ref": SALES_NOTES,
                                                 "requested_by": AUTOMATION}),
+            # The envelope-binding pre-check: the lane asks this before every
+            # submission, so the authority has to keep taking it positionally.
+            "source_discovery_for_envelope": (
+                ("mission-version", "source-envelope:host-tool:sales-notes:1"), {}
+            ),
         }
         for name, (args, kwargs) in calls.items():
             with self.subTest(method=name):

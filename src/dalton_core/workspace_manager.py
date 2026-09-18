@@ -54,7 +54,7 @@ def _config(path: Path) -> dict[str, Any]:
                 "tailscale_executable", "launch_agents_dir", "ports"}
     optional = {"shared_readonly_paths", "shared_model_capacity_bindings", "shared_connector_capacity",
                 "legacy_workspace", "connections_path", "runtime_templates",
-                "shared_call_budget_policy_path"}
+                "shared_call_budget_policy_path", "shared_daily_budget_policy_path"}
     if not isinstance(raw, dict) or not required <= raw.keys() or raw.keys() - required - optional:
         raise WorkspaceError("研究环境管理配置格式无效")
     for key in ("host_root", "release_path", "tailscale_executable", "launch_agents_dir"):
@@ -77,6 +77,10 @@ def _config(path: Path) -> dict[str, Any]:
         value = raw["shared_call_budget_policy_path"]
         if not isinstance(value, str) or not Path(value).is_absolute():
             raise WorkspaceError("共享模型费用策略路径无效")
+    if raw.get("shared_daily_budget_policy_path") is not None:
+        value = raw["shared_daily_budget_policy_path"]
+        if not isinstance(value, str) or not Path(value).is_absolute():
+            raise WorkspaceError("共享每日预算策略路径无效")
     templates = raw.get("runtime_templates")
     if templates is not None:
         if not isinstance(templates, dict) or set(templates) != {"model", "service"}:
@@ -104,8 +108,17 @@ def _runtime_templates(config: Mapping[str, Any]) -> dict[str, Path]:
     return result
 
 
-def provision_runtime(config: Mapping[str, Any], manifest: Path, *, login: str) -> dict[str, Any] | None:
-    """Reuse the installed OS before starting this workspace's processes."""
+def provision_runtime(config: Mapping[str, Any], manifest: Path, *, login: str,
+                      manager_config_path: Path | None = None) -> dict[str, Any] | None:
+    """Reuse the installed OS before starting this workspace's processes.
+
+    ``manager_config_path`` is what makes the new environment adopt this
+    machine's scheme rather than only the packaged templates: the host's shared
+    daily budget, the model selections the owner has actually made, and the
+    credential slots this machine has.  It is the path and not the parsed
+    configuration because the binding file written into the workspace names it,
+    so that the workspace can enumerate its peer ledgers later.
+    """
     templates = _runtime_templates(config)
     if not templates:
         return None  # Backward compatible low-level blank-state installation.
@@ -113,18 +126,34 @@ def provision_runtime(config: Mapping[str, Any], manifest: Path, *, login: str) 
     from .workspace_service_setup import install_service_template
     from .workspace_runtime_setup import install
     from .workspace_control_setup import configure_workspace_control
+    from .workspace_host_scheme import adopt_host_scheme
     # Establish the base control shape before installing reusable authorities.
     # Its bootstrap may create the empty router and base principals; installing
     # model/runtime state afterwards makes those writes final and observable.
     configure_workspace_control(manifest, owner_login=login,
         tailscale_host=config["tailscale_host"], tailscale_executable=config["tailscale_executable"])
+    actor_ref = "human:tailscale-" + hashlib.sha256(login.encode()).hexdigest()[:32]
     model = install_runtime_template(manifest, templates["model"])
-    runtime = install(manifest, actor_ref="human:tailscale-" + hashlib.sha256(login.encode()).hexdigest()[:32])
+    runtime = install(manifest, actor_ref=actor_ref,
+                      manager_config_path=manager_config_path,
+                      shared_daily_budget_policy_path=config.get(
+                          "shared_daily_budget_policy_path"))
     service = install_service_template(manifest, templates["service"])
     workspace = load_workspace_manifest(manifest)
+    # After the service template and before any writer: the routing alignment
+    # repoints both the lane configurations and the pins service.json carries,
+    # so it has to run once everything that writes those files has written
+    # them -- and while nothing is holding them open.
+    host_scheme = adopt_host_scheme(
+        workspace.state_dir, manager_config_path=manager_config_path,
+        actor_ref=actor_ref,
+        legacy_service_path=(config.get("legacy_workspace") or {}).get("config_path"))
     receipt = {"schema_version": "dalton-workspace-runtime-ready-0.1",
                "workspace_id": workspace.workspace_id,
                "model": model, "runtime": runtime, "service": service,
+               "host_scheme": {
+                   "shared_daily_budget": runtime.get("shared_daily_budget"),
+                   **host_scheme},
                "template_sha256": {key: value["sha256"] for key, value in config["runtime_templates"].items()}}
     _write(workspace.state_dir / "runtime-ready.json", receipt)
     return receipt
@@ -535,6 +564,15 @@ def create_managed_workspace(config_path: Path, login: str, name: str, request_i
             shared_paths = list(config.get("shared_readonly_paths", ()))
             if config.get("shared_call_budget_policy_path"):
                 shared_paths.append(str(Path(config["shared_call_budget_policy_path"]).resolve()))
+            # The host's daily cap file, declared read-only for the same reason
+            # the per-call cost policy is: this workspace's admission authority
+            # reads it on every paid call, and a path a workspace reads without
+            # declaring is a boundary nobody can audit.
+            from .shared_daily_budget import DEFAULT_POLICY_PATH
+            daily_policy = Path(config.get("shared_daily_budget_policy_path")
+                                or DEFAULT_POLICY_PATH).expanduser()
+            if daily_policy.is_file():
+                shared_paths.append(str(daily_policy.resolve()))
             shared_paths.extend([
                 str(config_path.resolve()), str(Path(config["tailscale_executable"]).resolve()),
                 *catalog_paths,
@@ -556,7 +594,8 @@ def create_managed_workspace(config_path: Path, login: str, name: str, request_i
             record["status"] = "creating"
             record.pop("retryable", None)
             _write(target, record)
-            if provision_runtime(config, manifest, login=login) is None:
+            if provision_runtime(config, manifest, login=login,
+                                 manager_config_path=config_path.resolve()) is None:
                 configure_workspace_control(
                     manifest, owner_login=login, tailscale_host=config["tailscale_host"],
                     tailscale_executable=config["tailscale_executable"])

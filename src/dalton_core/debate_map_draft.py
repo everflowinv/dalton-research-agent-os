@@ -1101,7 +1101,9 @@ def subject_claim_rows(store: Any, subject_ref: str) -> list[dict[str, Any]]:
     return enriched
 
 
-def subject_claim_refs(store: Any, subject_ref: str) -> list[str]:
+def subject_claim_refs(
+    store: Any, subject_ref: str, *, snapshot: Mapping[str, Any] | None = None,
+) -> list[str]:
     """Just the canonical claim version refs for one subject.
 
     The lane asks every subject every tick whether its evidence moved, and the
@@ -1109,13 +1111,22 @@ def subject_claim_refs(store: Any, subject_ref: str) -> list[str]:
     -- a provenance resolver, a title map and a per-claim evidence walk for
     five companies, five times a minute -- was work done to learn nothing on
     the overwhelmingly common tick where nothing changed.
+
+    ``snapshot`` is one Ledger snapshot shared by every subject of one tick.
+    Without it each of the six subjects read and parsed all 13,816 Claims for
+    itself -- 5 s of the lane's 8 s, spent six times on the same bytes.  The
+    result is unchanged: one consistent read answers for every subject exactly
+    as six consecutive ones did.
     """
 
-    from .company_research_view import query_company_research
+    from .company_research_view import (prepare_company_claim_query,
+                                        query_company_research)
 
+    context = prepare_company_claim_query(store, subject_ref, snapshot=snapshot)
     return [
         row["claim_version_ref"]
-        for row in query_company_research(store, company_ref=subject_ref, limit=1000)
+        for row in query_company_research(
+            store, company_ref=subject_ref, limit=1000, claim_context=context)
     ]
 
 

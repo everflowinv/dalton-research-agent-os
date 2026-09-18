@@ -139,6 +139,12 @@ from .deep_insight_gate_draft import (
 from .store import DaltonStore, canonical_json, content_hash
 
 SUMMARY_SCHEMA_VERSION = "0.1"
+# One.  A draft the output rubric refused gets one repair call per group the
+# findings name, and is then refused exactly as before.  Live on 2026-09-17
+# (DXC): a reviewer's return held with ``constitution_refused`` and the
+# criterion never reached the model that wrote the answer.
+MAX_FINDINGS_REPAIR_ROUNDS = 1
+OUTPUT_RUBRIC_REPAIR = "output_rubric"
 # The groups whose questions are about numbers.  The other two are about how a
 # business works and who runs it; a filed cash-flow line offered there is prompt
 # budget spent on distraction.
@@ -858,6 +864,151 @@ def repair_group_numbers(
     return result
 
 
+# The extra rules a rubric repair is reminded of.  Deliberately short and
+# deliberately only about what the Constitution's criteria actually refuse.
+_RUBRIC_REMINDER_LINES = (
+    "A gate answer is a file, not a call: no buy, sell, hold, overweight, "
+    "underweight, target price or valuation verdict, in any language. Say what "
+    "the evidence shows and what would falsify it, and stop there.",
+    "Every digit in a sentence must appear, verbatim, in one of the rows that "
+    "sentence cites. A figure you cannot cite is a figure you must remove.",
+    "Do not add, drop or re-decide an answer. Change only the sentences the "
+    "findings name, and leave every other question exactly as it is.",
+)
+
+
+def rubric_repair_targets(
+    findings: Sequence[Mapping[str, Any]], answers: Mapping[str, Any],
+) -> dict[str, list[dict[str, Any]]]:
+    """Group the output rubric's findings by the group that has to fix them.
+
+    A finding names a *question*; a drafting call answers a *group*, because
+    four groups read the same tables.  A finding about a question this run did
+    not draft, or a finding about the document as a whole
+    (``no_new_evidence``), has no call behind it to hand back and is dropped:
+    those are refusals, exactly as before.
+    """
+
+    from .deep_insight_gate import GROUP_OF
+
+    targets: dict[str, list[dict[str, Any]]] = {}
+    for item in findings or ():
+        if not isinstance(item, Mapping):
+            continue
+        ref = item.get("section")
+        group = GROUP_OF.get(str(ref))
+        if (not isinstance(ref, str) or group is None
+                or any(name not in answers for name in GROUP_QUESTIONS[group])):
+            continue
+        rows = targets.setdefault(group, [])
+        if len(rows) < 12:
+            rows.append({key: value for key, value in sorted(item.items())
+                         if isinstance(value, (str, int, float, bool))})
+    return {group: rows for group, rows in targets.items() if rows}
+
+
+def repair_group_findings(
+    model: Any,
+    *,
+    group: str,
+    questions: Mapping[str, str],
+    material: Sequence[Mapping[str, Any]],
+    company: Mapping[str, Any],
+    mission: Mapping[str, Any],
+    answers: Mapping[str, Any],
+    findings: Sequence[Mapping[str, Any]],
+    classification: str | None = None,
+    prior_answers: Mapping[str, str] | None = None,
+    notes: Sequence[str] = (),
+    review: Mapping[str, Any] | None = None,
+    budget_remaining_micros: int | None = None,
+    repair_reserve_micros: int = 0,
+) -> dict[str, Any]:
+    """One repair call for a group the Constitution's output_rubric refused.
+
+    The same bargain as :func:`repair_group_numbers` and as the dossier lane's
+    unit repair, and through the same shared helper: the finder's own words go
+    back to the model that wrote the sentence, once, with the group's own
+    reply, out of what is left of the run's bound.  A repair that changes
+    question one's classification is refused: it was asked to remove a call, not
+    to re-decide the company.
+    """
+
+    from .cockpit_model import CockpitModelError
+    from .deep_insight_gate_draft import (
+        DRAFT_PURPOSE,
+        GateDraftRefused,
+        build_group_prompt,
+        group_contract,
+        group_contract_reminder,
+        group_repair_context,
+        parse_group_output,
+    )
+    from .draft_contract_repair import contract_reminder_lines, repair_with_findings
+
+    result: dict[str, Any] = {
+        "status": "ok", "group": group, "answers": dict(answers),
+        "cost_micros": 0, "repair_attempts": 0, "reason": None,
+    }
+    if not findings or any(ref not in answers for ref in GROUP_QUESTIONS[group]):
+        return result
+    prompt = build_group_prompt(
+        group=group, questions=questions, material=material, company=company,
+        prior_answers=prior_answers, notes=notes, review=review)
+    request_id = content_hash({
+        "group": group, "company": company.get("company_ref"),
+        "prompt_sha": content_hash(prompt),
+    })[:32]
+    route: list[str | None] = []
+
+    def call_model(*, prompt: str, request_id: str) -> Mapping[str, Any]:
+        call = model.call(purpose=DRAFT_PURPOSE, mission=mission, prompt=prompt,
+                          request_id=request_id)
+        route.append(call.get("route_decision_ref"))
+        return call
+
+    def parse(text: Any) -> dict[str, Any]:
+        return parse_group_output(text, group=group, questions=questions,
+                                  material=material)
+
+    outcome = repair_with_findings(
+        call=call_model, parse=parse, original_prompt=prompt,
+        reply_text=json.dumps(
+            group_reply_wire(answers, group=group, material=material,
+                             classification=classification),
+            ensure_ascii=False, sort_keys=True),
+        request_id=request_id,
+        contract_name=f"deep-insight-gate-output-rubric:{group}",
+        findings=findings,
+        contract=group_contract(group, material=material),
+        refusal_errors=(GateDraftRefused,),
+        unavailable_errors=(CockpitModelError,),
+        contract_reminder=(contract_reminder_lines(_RUBRIC_REMINDER_LINES) + "\n"
+                           + group_contract_reminder(group)),
+        repair_context=group_repair_context(material),
+        budget_remaining_micros=budget_remaining_micros,
+        repair_reserve_micros=repair_reserve_micros,
+    )
+    result.update({
+        "status": outcome.status, "reason": outcome.reason,
+        "cost_micros": outcome.cost_micros,
+        "repair_attempts": outcome.summary()["repair_attempts"],
+        "route_decision_ref": route[-1] if route else None,
+    })
+    if outcome.status != "repaired":
+        return result
+    parsed = outcome.value
+    if "q1" in GROUP_QUESTIONS[group] and parsed.get("classification") != classification:
+        result["status"] = "refused"
+        result["reason"] = (
+            "the output_rubric repair changed question one's classification from "
+            f"{classification!r} to {parsed.get('classification')!r}; a repair "
+            "removes what the standard forbids, it does not re-decide the question")
+        return result
+    result["answers"] = {**dict(answers), **parsed["answers"]}
+    return result
+
+
 def rubric_gate(
     connection: Any, record: Mapping[str, Any], *, prior: Mapping[str, Any] | None
 ) -> dict[str, Any]:
@@ -1074,6 +1225,11 @@ def run_gate(
         # group refused whole over a stray key on an unknown answer is the
         # commonest thing this lane does, and it was invisible here.
         "contract_repair": [],
+        # One row per repair call bought *after* a group was drafted and then
+        # rejected by the Constitution's output_rubric, so that "one repair
+        # call" is a number here rather than a claim in a docstring.
+        "findings_repair": [],
+        "findings_repair_rounds": 0,
         "verification": None,
         "classification": None,
         "rubric": None,
@@ -1558,155 +1714,215 @@ def run_gate(
             summary.update({"status": "succeeded", "gate_status": "unverified"})
             return summary
         verifier = verifier_factory()
-        verdict = verify(
-            verifier, answers, company=company, mission=mission,
-            producer_route_decision_refs=draft_routes,
-        )
-        spent += int((verdict.get("model") or {}).get("cost_micros") or 0)
-        summary["cost_micros"] = spent
-        check = independence(
-            draft_routes=draft_routes,
-            verifier_route=(verdict.get("model") or {}).get("route_decision_ref"),
-            resolve=resolve,
-        )
-        summary["verification"] = {
-            "status": verdict.get("status"), "verdict": verdict.get("verdict"),
-            "findings": verdict.get("findings") or [],
-            "reason": verdict.get("reason"),
-            "independent": check["independent"],
-            "independence_reason": check["reason"],
-            "verifier_family": check["verifier_family"],
-        }
-        if verdict.get("status") != "verified" or verdict.get("verdict") != "pass":
-            summary.update({"status": "succeeded", "gate_status": "verification_failed"})
-            return summary
-        if not check["independent"]:
-            summary.update({"status": "succeeded", "gate_status": "not_independent"})
-            return summary
+        # One repair round, at most.  Everything below -- the verdict, the
+        # record, both rubrics -- is re-derived from ``answers``, so a repaired
+        # group is re-verified by a second independent call and re-gated before
+        # it can be submitted.  Editing an answer after a verdict and
+        # submitting it under that verdict is the one thing this must not do.
+        findings_rounds = 0
 
-        # ADR-0008, asked before a record exists.  A draft that cites nothing the
-        # current version does not is not a version, and saying so here costs
-        # nothing; assembling one and having the authority refuse it would leave
-        # the summary describing a record nobody can read.
-        fresh = fresh_evidence(answers, prior)
-        if not fresh and review is not None:
-            # D2: a reviewer's return is the new information.  The rows are the
-            # same rows -- that is usually the point, "you misread what is
-            # already here" -- so the version names what the rewritten answers
-            # rest on rather than claiming a novelty it does not have, and the
-            # authority lets a ``reviewer_returned`` version through on an
-            # unchanged evidence set provided the body actually moved.
-            fresh = [dict(row) for row in {
-                row["ref"]: row
-                for answer in answers.values()
-                for row in answer.get("sources") or []
-            }.values()]
-        if not fresh:
-            summary.update({
-                "status": "succeeded", "gate_status": "no_new_evidence",
-                "failure_reason": ("this draft cites nothing the current version "
-                                   "does not")})
-            return summary
-        stamped = _now()
-        record = assemble(
-            company_ref=chosen, answers=answers, questions=questions, prior=prior,
-            classification=classification, dossier=dossier, map_version=map_version,
-            constitution=constitution, policy=policy, mission=mission,
-            actor_ref=actor_ref, change_reason=change_reason, drafted_at=stamped,
-            evidence_refs=fresh, group_outcomes=group_outcomes,
-        )
-        missing = unresolved_refs(store.connection, record)
-        if missing:
-            # A ref that stopped resolving is a defect in whichever answer cites
-            # it. In an answer drafted just now that is a bad draft and the run
-            # is refused whole. In an answer carried forward it is the world
-            # having moved, so that answer becomes an honest unknown and the
-            # lane redrafts its group next time -- refusing here would freeze
-            # the chain on one stale answer for ever, and would do it *after*
-            # paying for four calls.
-            broken = {item["ref"] for item in missing}
-            drafted_refs = {row["ref"] for answer in answers.values()
-                            for row in answer.get("sources") or []}
-            if broken & drafted_refs:
-                summary.update({
-                    "status": "succeeded", "gate_status": "unresolvable_refs",
-                    "failure_reason": json.dumps(
-                        [item for item in missing if item["ref"] in drafted_refs][:5],
-                        ensure_ascii=False)})
-                return summary
-            record, demoted = demote_unresolved(
-                record, broken, drafted=set(answers))
-            summary["demoted_questions"] = demoted
-            summary["demoted_refs"] = [dict(item) for item in missing][:5]
-            still = unresolved_refs(store.connection, record)
-            if still:
-                summary.update({
-                    "status": "succeeded", "gate_status": "unresolvable_refs",
-                    "failure_reason": json.dumps(still[:5], ensure_ascii=False)})
-                return summary
-        gate_result = rubric_gate(store.connection, record, prior=prior)
-        summary["rubric"] = gate_result["summary"]
-        if gate_result["failed"]:
-            summary.update({"status": "succeeded", "gate_status": "rubric_refused",
-                            "failure_reason": "hard checks failed: "
-                                              + ", ".join(gate_result["failed"])})
-            return summary
-        findings = output_rubric_findings(record, constitution=constitution,
-                                          policy=policy, prior=prior,
-                                          reviewer_returned=review is not None)
-        summary["output_rubric_findings"] = findings
-        if findings:
-            summary.update({"status": "succeeded", "gate_status": "constitution_refused",
-                            "failure_reason": "the Constitution's output_rubric was "
-                                              "not satisfied"})
-            return summary
-        # D1: the last gate before a person's attention is spent.  Everything
-        # above asked "is this a well-formed, well-cited document"; this asks
-        # "is there anything here to decide".  A draft that answers three of
-        # twelve questions from twenty-six rows is both of the first and none
-        # of the second, and publishing it would put a research plan in the
-        # approvals queue and call it a finding.
-        quality = assess(record, dossier=dossier, verifier_passed=True,
-                         standard=standard)
-        summary["quality"] = quality
-        summary["carried_forward_questions"] = carried_forward_questions(record, prior)
-        if not quality["submittable"]:
-            note = write_note(
-                state_dir, company_ref=chosen,
-                evidence_fingerprint=attempt_fingerprint,
-                body_hash=content_hash(record.get("answers") or []),
-                assessment=quality,
-                reviewer_questions=summary.get("redrafted_questions") or [],
+        def rubric_repair_round(targets: Mapping[str, Sequence[Mapping[str, Any]]]
+                                ) -> bool:
+            """One call per group the output rubric named, out of the bound."""
+
+            nonlocal spent, answers
+            changed = False
+            for group in sorted(targets)[:len(GROUPS)]:
+                rows, notes = plan[group]
+                outcome = repair_group_findings(
+                    model, group=group,
+                    questions={ref: question_by_ref[ref]
+                               for ref in GROUP_QUESTIONS[group]},
+                    material=rows, company=company, mission=mission,
+                    answers=answers, findings=targets[group],
+                    classification=classification,
+                    prior_answers=prior_bodies, notes=notes, review=draft_review,
+                    budget_remaining_micros=run_cost_micros - spent,
+                    repair_reserve_micros=producer_reserve + verifier_reserve,
+                )
+                spent += int(outcome.get("cost_micros") or 0)
+                summary["cost_micros"] = spent
+                summary["findings_repair"].append({
+                    "group": group, "kind": OUTPUT_RUBRIC_REPAIR,
+                    "status": outcome["status"],
+                    "repair_attempts": outcome["repair_attempts"],
+                    "cost_micros": outcome["cost_micros"],
+                    "reason": outcome["reason"],
+                    "findings": [dict(item) for item in targets[group]][:12],
+                })
+                if outcome["status"] != "repaired":
+                    continue
+                answers = outcome["answers"]
+                if outcome.get("route_decision_ref"):
+                    draft_routes.append(outcome["route_decision_ref"])
+                changed = True
+            return changed
+
+        while True:
+            verdict = verify(
+                verifier, answers, company=company, mission=mission,
+                producer_route_decision_refs=draft_routes,
             )
+            spent += int((verdict.get("model") or {}).get("cost_micros") or 0)
+            summary["cost_micros"] = spent
+            check = independence(
+                draft_routes=draft_routes,
+                verifier_route=(verdict.get("model") or {}).get("route_decision_ref"),
+                resolve=resolve,
+            )
+            summary["verification"] = {
+                "status": verdict.get("status"), "verdict": verdict.get("verdict"),
+                "findings": verdict.get("findings") or [],
+                "reason": verdict.get("reason"),
+                "independent": check["independent"],
+                "independence_reason": check["reason"],
+                "verifier_family": check["verifier_family"],
+            }
+            if verdict.get("status") != "verified" or verdict.get("verdict") != "pass":
+                summary.update({"status": "succeeded", "gate_status": "verification_failed"})
+                return summary
+            if not check["independent"]:
+                summary.update({"status": "succeeded", "gate_status": "not_independent"})
+                return summary
+
+            # ADR-0008, asked before a record exists.  A draft that cites nothing the
+            # current version does not is not a version, and saying so here costs
+            # nothing; assembling one and having the authority refuse it would leave
+            # the summary describing a record nobody can read.
+            fresh = fresh_evidence(answers, prior)
+            if not fresh and review is not None:
+                # D2: a reviewer's return is the new information.  The rows are the
+                # same rows -- that is usually the point, "you misread what is
+                # already here" -- so the version names what the rewritten answers
+                # rest on rather than claiming a novelty it does not have, and the
+                # authority lets a ``reviewer_returned`` version through on an
+                # unchanged evidence set provided the body actually moved.
+                fresh = [dict(row) for row in {
+                    row["ref"]: row
+                    for answer in answers.values()
+                    for row in answer.get("sources") or []
+                }.values()]
+            if not fresh:
+                summary.update({
+                    "status": "succeeded", "gate_status": "no_new_evidence",
+                    "failure_reason": ("this draft cites nothing the current version "
+                                       "does not")})
+                return summary
+            stamped = _now()
+            record = assemble(
+                company_ref=chosen, answers=answers, questions=questions, prior=prior,
+                classification=classification, dossier=dossier, map_version=map_version,
+                constitution=constitution, policy=policy, mission=mission,
+                actor_ref=actor_ref, change_reason=change_reason, drafted_at=stamped,
+                evidence_refs=fresh, group_outcomes=group_outcomes,
+            )
+            missing = unresolved_refs(store.connection, record)
+            if missing:
+                # A ref that stopped resolving is a defect in whichever answer cites
+                # it. In an answer drafted just now that is a bad draft and the run
+                # is refused whole. In an answer carried forward it is the world
+                # having moved, so that answer becomes an honest unknown and the
+                # lane redrafts its group next time -- refusing here would freeze
+                # the chain on one stale answer for ever, and would do it *after*
+                # paying for four calls.
+                broken = {item["ref"] for item in missing}
+                drafted_refs = {row["ref"] for answer in answers.values()
+                                for row in answer.get("sources") or []}
+                if broken & drafted_refs:
+                    summary.update({
+                        "status": "succeeded", "gate_status": "unresolvable_refs",
+                        "failure_reason": json.dumps(
+                            [item for item in missing if item["ref"] in drafted_refs][:5],
+                            ensure_ascii=False)})
+                    return summary
+                record, demoted = demote_unresolved(
+                    record, broken, drafted=set(answers))
+                summary["demoted_questions"] = demoted
+                summary["demoted_refs"] = [dict(item) for item in missing][:5]
+                still = unresolved_refs(store.connection, record)
+                if still:
+                    summary.update({
+                        "status": "succeeded", "gate_status": "unresolvable_refs",
+                        "failure_reason": json.dumps(still[:5], ensure_ascii=False)})
+                    return summary
+            gate_result = rubric_gate(store.connection, record, prior=prior)
+            summary["rubric"] = gate_result["summary"]
+            if gate_result["failed"]:
+                summary.update({"status": "succeeded", "gate_status": "rubric_refused",
+                                "failure_reason": "hard checks failed: "
+                                                  + ", ".join(gate_result["failed"])})
+                return summary
+            findings = output_rubric_findings(record, constitution=constitution,
+                                              policy=policy, prior=prior,
+                                              reviewer_returned=review is not None)
+            summary["output_rubric_findings"] = findings
+            if findings:
+                # D2, live 2026-09-17 (DXC): a return held with
+                # ``constitution_refused`` and the owner's attention spent for
+                # nothing, because the criterion that refused it never reached
+                # the model that wrote the answer.  One repair call per group
+                # the findings name, then the same refusal as before.
+                targets = rubric_repair_targets(findings, answers)
+                if (targets and findings_rounds < MAX_FINDINGS_REPAIR_ROUNDS
+                        and rubric_repair_round(targets)):
+                    findings_rounds += 1
+                    summary["findings_repair_rounds"] = findings_rounds
+                    # Back to the verifier: what it signs off has to be the
+                    # body that is submitted, and the body just moved.
+                    continue
+                summary.update({"status": "succeeded", "gate_status": "constitution_refused",
+                                "failure_reason": (
+                                    "the Constitution's output_rubric was not satisfied"
+                                    + (" after one repair call per named group"
+                                       if findings_rounds else ""))})
+                return summary
+            # D1: the last gate before a person's attention is spent.  Everything
+            # above asked "is this a well-formed, well-cited document"; this asks
+            # "is there anything here to decide".  A draft that answers three of
+            # twelve questions from twenty-six rows is both of the first and none
+            # of the second, and publishing it would put a research plan in the
+            # approvals queue and call it a finding.
+            quality = assess(record, dossier=dossier, verifier_passed=True,
+                             standard=standard)
+            summary["quality"] = quality
+            summary["carried_forward_questions"] = carried_forward_questions(record, prior)
+            if not quality["submittable"]:
+                note = write_note(
+                    state_dir, company_ref=chosen,
+                    evidence_fingerprint=attempt_fingerprint,
+                    body_hash=content_hash(record.get("answers") or []),
+                    assessment=quality,
+                    reviewer_questions=summary.get("redrafted_questions") or [],
+                )
+                summary.update({
+                    "status": "succeeded",
+                    "gate_status": "auto_returned",
+                    "auto_return_note_at": note["created_at"],
+                    "failure_reason": quality["summary"],
+                })
+                return summary
+            summary["new_refs"] = len(new_refs(record, prior))
+            published = gates.publish(record)
             summary.update({
                 "status": "succeeded",
-                "gate_status": "auto_returned",
-                "auto_return_note_at": note["created_at"],
-                "failure_reason": quality["summary"],
+                "gate_status": ("submitted" if published["status"] == "fresh"
+                                else "duplicate"),
+                "version_ref": published["id"],
+                "version_status": published["status"],
+                "duplicate_reason": published.get("duplicate_reason"),
+                **summarise_answers(answers),
             })
+            summary["change_note"] = change_note(record, prior)
+            summary["changed_questions"] = changed_questions(record, prior)
+            if published["status"] == "fresh":
+                # The company is in front of a person now, so the note that said it
+                # was being held back is no longer true.  A note that outlives its
+                # condition is worse than no note.
+                clear_note(state_dir, chosen)
+                summary["deliverable_status"] = _publish_deliverable(
+                    store, published, mission=mission, playbook=playbook,
+                    actor_ref=actor_ref)
             return summary
-        summary["new_refs"] = len(new_refs(record, prior))
-        published = gates.publish(record)
-        summary.update({
-            "status": "succeeded",
-            "gate_status": ("submitted" if published["status"] == "fresh"
-                            else "duplicate"),
-            "version_ref": published["id"],
-            "version_status": published["status"],
-            "duplicate_reason": published.get("duplicate_reason"),
-            **summarise_answers(answers),
-        })
-        summary["change_note"] = change_note(record, prior)
-        summary["changed_questions"] = changed_questions(record, prior)
-        if published["status"] == "fresh":
-            # The company is in front of a person now, so the note that said it
-            # was being held back is no longer true.  A note that outlives its
-            # condition is worse than no note.
-            clear_note(state_dir, chosen)
-            summary["deliverable_status"] = _publish_deliverable(
-                store, published, mission=mission, playbook=playbook,
-                actor_ref=actor_ref)
-        return summary
     except DeepInsightGateError as exc:
         summary["failure_reason"] = f"{type(exc).__name__}: {exc}"
         summary["status"] = "failed"
@@ -1959,7 +2175,9 @@ if __name__ == "__main__":  # pragma: no cover - exercised as a subprocess
 
 
 __all__ = [
+    "MAX_FINDINGS_REPAIR_ROUNDS",
     "NUMBER_GROUPS",
+    "OUTPUT_RUBRIC_REPAIR",
     "assemble",
     "build_parser",
     "debate_map_version",
@@ -1970,7 +2188,9 @@ __all__ = [
     "group_material",
     "main",
     "publishable_as_deliverable",
+    "repair_group_findings",
     "rubric_gate",
+    "rubric_repair_targets",
     "run_gate",
     "screened_companies",
     "unanswered",

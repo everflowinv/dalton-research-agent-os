@@ -82,6 +82,77 @@ CONTRACT_FAILED_AFTER_OWNER_RETRY = "contract_failed_after_owner_authorized_retr
 # hold has not spent its automatic retry, so the lane re-enters it once.
 LEGACY_PAID_CONTRACT_REASON = "paid_send_output_contract_failed"
 
+# The third door, and the last one automation opens by itself.
+# ``send_state_unproved`` is the state in the middle: the escape ledger already
+# reopens an admission that *provably* never sent, the contract retry already
+# replays a send that *provably* happened and was charged, and this is the gap
+# between them -- a model stage that failed with nothing to prove either way.
+# The owner's instruction is that a transport failure is retried automatically
+# within a bound and only escalates when the bounded retry fails too, so this
+# buys exactly one fresh WorkOrder at the failed Work's own ceiling.  Unlike
+# the contract door the retry may pay twice, because the earlier unproved send
+# may itself have been charged.  That worst case is written into the recovery
+# observation in words, and it is why the exposure is bounded at one extra
+# call per (admission, stage) and at a separate, smaller lane-wide day cap.
+AUTOMATIC_UNPROVED_SEND_RETRY_CLASSIFICATION = "automation_bounded_unproved_send_retry"
+OWNER_UNPROVED_SEND_RETRY_CLASSIFICATION = "owner_authorized_unproved_send_retry"
+AUTOMATIC_UNPROVED_SEND_RETRY_ACTOR = "automation:document-research-unproved-send-retry"
+UNPROVED_SEND_RETRY_ACTORS: Mapping[str, str] = {
+    OWNER_UNPROVED_SEND_RETRY_CLASSIFICATION:
+        "operator:owner-authorized-document-recovery",
+    AUTOMATIC_UNPROVED_SEND_RETRY_CLASSIFICATION: AUTOMATIC_UNPROVED_SEND_RETRY_ACTOR,
+}
+# The owner's own row for the same state, in the same shape the owner already
+# signs for a paid contract reject.  It exists because the escalation has to
+# lead somewhere: before this, an admission whose send state could not be
+# proved had *no* working door at all -- the paid-contract door refuses it for
+# want of a charge proof -- which is precisely how seventeen of them came to
+# sit in front of a person forever.
+OWNER_UNPROVED_SEND_RETRY_FIELDS = frozenset({
+    "schema_version", "id", "actor_ref", "admission_ref", "admission_hash",
+    "stage_ordinal", "failed_work_order_ref", "failed_work_order_hash",
+    "formal_result_ref", "formal_result_hash", "max_fresh_work_orders",
+    "max_cost_usd", "authorized_at", "content_hash",
+})
+# The closed schema of that authorization row.  Same bound as the other two
+# doors grant, plus the day and the cap it was issued under, plus the hash of
+# the exact unproved state it was issued against -- so the row can never be
+# replayed onto a different failure.
+AUTOMATIC_UNPROVED_SEND_RETRY_FIELDS = frozenset({
+    "schema_version", "id", "kind", "actor_ref", "admission_ref", "admission_hash",
+    "stage_ordinal", "failed_work_order_ref", "failed_work_order_hash",
+    "formal_result_ref", "formal_result_hash", "max_fresh_work_orders",
+    "max_cost_usd", "authorized_at", "day",
+    "max_automatic_unproved_send_retries_per_day",
+    "unproved_send_record_hash", "content_hash",
+})
+# A deliberately *separate*, smaller sibling of the contract cap rather than a
+# share of it.  Two reasons.  (1) The risk differs: a contract retry buys one
+# call whose predecessor is proved paid, so the day's worst case is known
+# exactly; an unproved-send retry may duplicate a charge nobody can see, so the
+# same number of retries can cost up to twice as much.  (2) The trigger is
+# broader: every model failure that cannot be classified lands here, including
+# a purely local observability or budget-ledger fault, so one systemic bug can
+# push the whole lane into this state at once -- and it must not then be able
+# to consume the contract door's budget as well.  Five a day drains the live
+# backlog in days while keeping one bad release's blast radius small.
+DEFAULT_MAX_AUTOMATIC_UNPROVED_SEND_RETRIES_PER_DAY = 5
+AUTOMATIC_UNPROVED_SEND_RETRY_REASON = "automatic_bounded_unproved_send_retry"
+UNPROVED_SEND_RETRY_DAY_CAP_REASON = "automatic_unproved_send_retry_day_cap_reached"
+UNPROVED_SEND_FAILED_AFTER_AUTOMATIC_RETRY = "unproved_send_failed_after_automatic_retry"
+# Written by every release before this one for exactly this state.  Such a hold
+# has not spent its automatic retry either, so the lane re-enters it once.
+LEGACY_UNPROVED_SEND_REASON = "send_state_unproved"
+# Every controlled classification that already spent a stage's one automatic
+# replacement.  Automation adds nothing after any of these.
+CONTROLLED_RETRY_CLASSIFICATIONS = frozenset({
+    OWNER_CONTRACT_RETRY_CLASSIFICATION,
+    AUTOMATIC_CONTRACT_RETRY_CLASSIFICATION,
+    AUTOMATIC_UNPROVED_SEND_RETRY_CLASSIFICATION,
+    OWNER_UNPROVED_SEND_RETRY_CLASSIFICATION,
+    "reconstructed_historical_provider_controls_no_send",
+})
+
 
 class MissionDocumentResearchExecutorError(RuntimeError):
     pass
@@ -966,6 +1037,63 @@ def _verify_recovery_failure_proof(authority: Any, scheduler: Scheduler,
     }
     if any(proof.get(key) != value for key, value in common.items()):
         raise MissionDocumentResearchExecutorError("recovery formal proof drifted")
+    if proof.get("classification") in UNPROVED_SEND_RETRY_ACTORS:
+        classification = proof["classification"]
+        row = authority.store.connection.execute(
+            "SELECT record_json,content_hash FROM "
+            "mission_document_research_controlled_recovery_authorizations "
+            "WHERE authorization_id=?", (proof.get("authorization_ref"),),
+        ).fetchone()
+        if row is None:
+            raise MissionDocumentResearchExecutorError(
+                "unproved send retry authorization is unavailable")
+        try:
+            authorization = json.loads(row["record_json"])
+        except (TypeError, ValueError, RecursionError) as exc:
+            raise MissionDocumentResearchExecutorError(
+                "unproved send retry authorization is invalid") from exc
+        body = dict(authorization)
+        asserted = body.pop("content_hash", None)
+        actual = _unproved_send_state_record(
+            authority, admission, failed, formal, index, worker)
+        if classification == AUTOMATIC_UNPROVED_SEND_RETRY_CLASSIFICATION:
+            if (set(authorization) != AUTOMATIC_UNPROVED_SEND_RETRY_FIELDS
+                    or authorization.get("kind") != classification
+                    or authorization.get("day")
+                    != str(authorization.get("authorized_at"))[:10]
+                    or actual is None
+                    or authorization.get("unproved_send_record_hash")
+                    != content_hash(actual)):
+                raise MissionDocumentResearchExecutorError(
+                    "automatic unproved send retry authorization drifted")
+        elif (set(authorization) != OWNER_UNPROVED_SEND_RETRY_FIELDS
+                or authorization.get("id") != _ref(
+                    "mission-document-unproved-send-recovery-authorization",
+                    {key: value for key, value in body.items() if key != "id"})):
+            raise MissionDocumentResearchExecutorError(
+                "owner unproved send recovery authorization drifted")
+        if (authorization.get("schema_version") != SCHEMA_VERSION
+                or actual is None
+                or actual != proof.get("unproved_send_record")
+                or canonical_json(authorization) != row["record_json"]
+                or asserted != row["content_hash"] or asserted != content_hash(body)
+                or asserted != proof.get("authorization_hash")
+                or authorization.get("id") != proof.get("authorization_ref")
+                or authorization.get("actor_ref")
+                != UNPROVED_SEND_RETRY_ACTORS[classification]
+                or authorization.get("admission_ref") != admission["id"]
+                or authorization.get("admission_hash") != admission["content_hash"]
+                or authorization.get("stage_ordinal") != index + 1
+                or authorization.get("failed_work_order_ref") != failed["id"]
+                or authorization.get("failed_work_order_hash") != content_hash(failed)
+                or authorization.get("formal_result_ref") != _formal_ref(formal)
+                or authorization.get("formal_result_hash") != _formal_hash(formal)
+                or authorization.get("max_fresh_work_orders") != 1
+                or authorization.get("max_cost_usd")
+                != failed["budget"]["max_cost_usd"]):
+            raise MissionDocumentResearchExecutorError(
+                "unproved send recovery authorization drifted")
+        return
     if proof.get("classification") in CONTRACT_RETRY_ACTORS:
         classification = proof["classification"]
         row = authority.store.connection.execute(
@@ -1186,13 +1314,11 @@ def _read_recovery_link(
     created = _parse_time(expected["created_at"], "recovery eligibility time")
     proof = wire.get("failure_proof") if isinstance(wire, Mapping) else None
     # A link opened by a recorded authorization row -- the owner's, the sealed
-    # historical receipt's, or the lane's own bounded contract retry -- carries
+    # historical receipt's, or one of the lane's own bounded retries -- carries
     # its bound in that row instead of in the generic unknown-recovery policy.
-    owner_authorized = (isinstance(proof, Mapping) and proof.get("classification") in {
-        OWNER_CONTRACT_RETRY_CLASSIFICATION,
-        AUTOMATIC_CONTRACT_RETRY_CLASSIFICATION,
-        "reconstructed_historical_provider_controls_no_send",
-    })
+    owner_authorized = (isinstance(proof, Mapping)
+                        and proof.get("classification")
+                        in CONTROLLED_RETRY_CLASSIFICATIONS)
     failed_formal_time = (
         _parse_time(wire["failure_proof"].get("failed_at"), "failed formal time")
         if isinstance(proof, Mapping) and proof.get("failed_at") is not None else None
@@ -1327,6 +1453,15 @@ def _paid_contract_failure_proof(authority, work, formal, index, worker):
         proxy, work, formal, index)
 
 
+def _unproved_send_state_record(authority, admission, work, formal, index, worker):
+    proxy = object.__new__(MissionDocumentResearchExecutor)
+    proxy.authority = authority
+    proxy.draft_worker = worker if index == 1 else None
+    proxy.verifier_worker = worker if index == 2 else None
+    return MissionDocumentResearchExecutor._unproved_send_state_record(
+        proxy, admission, work, formal, index)
+
+
 class MissionDocumentResearchExecutor:
     _authorized = authorized_flag()
 
@@ -1336,7 +1471,9 @@ class MissionDocumentResearchExecutor:
                  actor_ref: str, clock: Callable[[], datetime] = _now,
                  fault_injector: Callable[[str], None] | None = None,
                  max_automatic_contract_retries_per_day: int =
-                 DEFAULT_MAX_AUTOMATIC_CONTRACT_RETRIES_PER_DAY):
+                 DEFAULT_MAX_AUTOMATIC_CONTRACT_RETRIES_PER_DAY,
+                 max_automatic_unproved_send_retries_per_day: int =
+                 DEFAULT_MAX_AUTOMATIC_UNPROVED_SEND_RETRIES_PER_DAY):
         if not isinstance(authority, MissionDocumentResearchAuthority):
             raise TypeError("authority has the wrong type")
         if not isinstance(scheduler, Scheduler) or not isinstance(registry, DocumentResearchRegistry):
@@ -1361,6 +1498,14 @@ class MissionDocumentResearchExecutor:
             raise TypeError(
                 "max_automatic_contract_retries_per_day must be a non-negative integer")
         self.max_automatic_contract_retries_per_day = max_automatic_contract_retries_per_day
+        if (isinstance(max_automatic_unproved_send_retries_per_day, bool)
+                or not isinstance(max_automatic_unproved_send_retries_per_day, int)
+                or max_automatic_unproved_send_retries_per_day < 0):
+            raise TypeError(
+                "max_automatic_unproved_send_retries_per_day must be a "
+                "non-negative integer")
+        self.max_automatic_unproved_send_retries_per_day = (
+            max_automatic_unproved_send_retries_per_day)
         self._authorization_flag = authorization_flag(
             self.connection, "dalton_mission_document_research_executor_authorized")
         self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
@@ -1929,6 +2074,74 @@ class MissionDocumentResearchExecutor:
             # barrier; it must never disrupt recovery control flow.
             return None
 
+    def _unproved_send_state_record(self, admission, work, formal, index):
+        """Record, exactly, a failure whose send and charge cannot be proved.
+
+        This is deliberately *not* called a proof: the other two doors have
+        one, and this door exists precisely because there is none.  What it is
+        is a deterministic description of what is known -- which formal
+        failure, which envelope, which error, which model invocations exist,
+        what the budget ledger settled -- so the authorization that buys one
+        more call is bound to that exact state and can never be replayed onto
+        a different failure.  It is rederived and compared on every later read
+        of the recovery link.
+
+        Returns ``None`` when the state cannot be described deterministically;
+        the caller then keeps the old conservative ``send_state_unproved``
+        hold, which is still the right answer when even this is unavailable.
+        """
+
+        try:
+            if formal["terminal_state"] != "failed":
+                return None
+            envelope = ResultEnvelope.from_dict(formal["result_envelope"]).to_dict()
+            if (envelope.get("id") != formal.get("result_envelope_id")
+                    or envelope.get("work_order_ref") != work["id"]
+                    or content_hash(envelope) != formal.get("result_envelope_hash")):
+                return None
+            invocations = [
+                row["invocation_id"] for row in
+                self.authority.store.connection.execute(
+                    "SELECT invocation_id FROM model_invocations "
+                    "WHERE work_order_ref=? ORDER BY invocation_id", (work["id"],),
+                ).fetchall()
+            ]
+            worker = self.draft_worker if index == 1 else self.verifier_worker
+            budget_store = getattr(worker, "budget_store", None)
+            settlement_ref = settlement_hash = settled_micros = None
+            if budget_store is not None:
+                exact = budget_store.admission(
+                    work_order_ref=work["id"],
+                    attempt_number=formal["attempt_number"],
+                    phase=self._phase(index))
+                settlement = (exact.get("settlement")
+                              if isinstance(exact, Mapping) else None)
+                if isinstance(settlement, Mapping):
+                    settlement_ref = settlement.get("settlement_id")
+                    settlement_hash = settlement.get("content_hash")
+                    settled_micros = settlement.get("actual_micros")
+            return {
+                "classification": "unproved_send_state",
+                "failed_at": formal["created_at"],
+                "formal_result_ref": _formal_ref(formal),
+                "formal_result_hash": _formal_hash(formal),
+                "result_envelope_ref": envelope["id"],
+                "result_envelope_hash": formal["result_envelope_hash"],
+                "route_decision_ref": envelope.get("metadata", {}).get(
+                    "route_decision_ref"),
+                "error_code": (envelope.get("error") or {}).get("code"),
+                "model_invocation_refs": invocations,
+                "budget_settlement_ref": settlement_ref,
+                "budget_settlement_hash": settlement_hash,
+                "settled_micros": settled_micros,
+                "mission_binding_hash": content_hash(
+                    _expected_budget_binding(self.authority, admission, index)),
+                # Said in the record itself so no reader has to infer it.
+                "worst_case": "earlier_send_may_have_been_sent_and_charged",
+            }
+        except Exception:
+            return None
+
     def authorize_paid_contract_recovery(self, admission_ref, authorization):
         """Append one owner-reviewed fresh Work for a proved paid contract reject."""
 
@@ -2001,39 +2214,159 @@ class MissionDocumentResearchExecutor:
             admission, work, formal, index, links, authorization,
             classification=OWNER_CONTRACT_RETRY_CLASSIFICATION, paid=paid)
 
+    def authorize_unproved_send_recovery(self, admission_ref, authorization):
+        """Append one owner-reviewed fresh Work after an unproved send escalated.
+
+        The door the escalation leads to.  It grants the same thing the lane
+        granted itself -- one fresh WorkOrder at the failed WorkOrder's own
+        ceiling -- and it is the only way past that point, because automation
+        has already spent its one call and the earlier send may have been
+        charged as well.
+        """
+
+        admission = self.authority.resolve_for_execution(admission_ref)
+        if not isinstance(authorization, Mapping):
+            raise MissionDocumentResearchExecutorError(
+                "unproved send recovery authorization is invalid")
+        if set(authorization) != OWNER_UNPROVED_SEND_RETRY_FIELDS:
+            raise MissionDocumentResearchExecutorError(
+                "unproved send recovery authorization schema is invalid")
+        body = dict(authorization)
+        asserted = body.pop("content_hash", None)
+        if (authorization.get("schema_version") != SCHEMA_VERSION
+                or authorization.get("actor_ref")
+                != UNPROVED_SEND_RETRY_ACTORS[OWNER_UNPROVED_SEND_RETRY_CLASSIFICATION]
+                or authorization.get("admission_ref") != admission["id"]
+                or authorization.get("admission_hash") != admission["content_hash"]
+                or authorization.get("stage_ordinal") not in {2, 3}
+                or authorization.get("max_fresh_work_orders") != 1
+                or authorization.get("id") != _ref(
+                    "mission-document-unproved-send-recovery-authorization",
+                    {key: value for key, value in body.items() if key != "id"})
+                or asserted != content_hash(body)):
+            raise MissionDocumentResearchExecutorError(
+                "unproved send recovery authorization authority drifted")
+        _parse_time(authorization["authorized_at"],
+                    "unproved send recovery authorization time")
+        index = authorization["stage_ordinal"] - 1
+        worker = self.draft_worker if index == 1 else self.verifier_worker
+        work, links = _effective_stage(
+            self.authority, self.scheduler, admission, index, worker=worker)
+        if links:
+            last = links[-1]
+            if (last.get("failure_proof", {}).get("authorization_ref")
+                    == authorization["id"]):
+                failed_row = self.scheduler.work_order_authority(
+                    last["failed_work_order_ref"])
+                failed_formal = self.scheduler.formal_result(
+                    last["failed_work_order_ref"])
+                if failed_row is None or failed_formal is None:
+                    raise MissionDocumentResearchExecutorError(
+                        "unproved send recovery predecessor is unavailable")
+                _verify_recovery_failure_proof(
+                    self.authority, self.scheduler, admission, index,
+                    failed_row["work_order"], last, worker)
+                return {"status": "admitted", "work_order_ref": work["id"],
+                        "authorization_ref": authorization["id"], "model_calls": 0}
+            if any(link.get("failure_proof", {}).get("classification")
+                   == OWNER_UNPROVED_SEND_RETRY_CLASSIFICATION for link in links):
+                raise MissionDocumentResearchExecutorError(
+                    "unproved send recovery target was already owner-recovered")
+        formal = self.scheduler.formal_result(work["id"])
+        if (formal is None
+                or authorization.get("failed_work_order_ref") != work["id"]
+                or authorization.get("failed_work_order_hash") != content_hash(work)
+                or authorization.get("formal_result_ref") != _formal_ref(formal)
+                or authorization.get("formal_result_hash") != _formal_hash(formal)
+                or authorization.get("max_cost_usd") != work["budget"]["max_cost_usd"]):
+            raise MissionDocumentResearchExecutorError(
+                "unproved send recovery target drifted or was already recovered")
+        record = self._unproved_send_state_record(admission, work, formal, index)
+        if record is None:
+            raise MissionDocumentResearchExecutorError(
+                "unproved send state record is unavailable")
+        return self._append_unproved_send_retry(
+            admission, work, formal, index, links, authorization, record=record,
+            classification=OWNER_UNPROVED_SEND_RETRY_CLASSIFICATION)
+
     def _append_contract_retry(self, admission, work, formal, index, links,
                                authorization, *, classification, paid):
         """Append exactly one replacement Work for a proved paid contract reject.
 
-        Both doors land here -- the owner's hand and the lane's own bounded
-        automatic retry -- so the authorization row, the recovery link, the
-        Scheduler enqueue and the reconvergence check are the same records
+        Both contract doors land here -- the owner's hand and the lane's own
+        bounded automatic retry -- so the authorization row, the recovery link,
+        the Scheduler enqueue and the reconvergence check are the same records
         whoever opened the door, and an audit does not have to learn two
         shapes.  The caller has already proved the charge and built the closed
         authorization body; this appends it and the one Work it grants.
         """
 
-        worker = self.draft_worker if index == 1 else self.verifier_worker
         envelope = ResultEnvelope.from_dict(formal["result_envelope"]).to_dict()
-        proof = {
-            "classification": classification,
-            "failed_at": formal["created_at"],
-            "formal_result_ref": _formal_ref(formal),
-            "formal_result_hash": _formal_hash(formal),
-            "result_envelope_ref": envelope["id"],
-            "result_envelope_hash": formal["result_envelope_hash"],
-            "route_decision_ref": envelope.get("metadata", {}).get("route_decision_ref"),
-            "authorization_ref": authorization["id"],
-            "authorization_hash": authorization["content_hash"],
-            "paid_contract_proof": paid,
-            "mission_binding_hash": content_hash(
-                _expected_budget_binding(self.authority, admission, index)),
-            "budget_authority_ref": paid["budget_settlement_ref"],
-            "budget_authority_hash": paid["budget_settlement_hash"],
-            "budget_settlement_ref": paid["budget_settlement_ref"],
-            "budget_settlement_hash": paid["budget_settlement_hash"],
-            "refusal_day": None,
-        }
+        return self._append_controlled_retry(
+            admission, work, formal, index, links, authorization, proof={
+                "classification": classification,
+                "failed_at": formal["created_at"],
+                "formal_result_ref": _formal_ref(formal),
+                "formal_result_hash": _formal_hash(formal),
+                "result_envelope_ref": envelope["id"],
+                "result_envelope_hash": formal["result_envelope_hash"],
+                "route_decision_ref": envelope.get("metadata", {}).get(
+                    "route_decision_ref"),
+                "authorization_ref": authorization["id"],
+                "authorization_hash": authorization["content_hash"],
+                "paid_contract_proof": paid,
+                "mission_binding_hash": content_hash(
+                    _expected_budget_binding(self.authority, admission, index)),
+                "budget_authority_ref": paid["budget_settlement_ref"],
+                "budget_authority_hash": paid["budget_settlement_hash"],
+                "budget_settlement_ref": paid["budget_settlement_ref"],
+                "budget_settlement_hash": paid["budget_settlement_hash"],
+                "refusal_day": None,
+            })
+
+    def _append_unproved_send_retry(self, admission, work, formal, index, links,
+                                    authorization, *, record, classification):
+        """Append the one replacement Work an unproved send state may buy.
+
+        Both unproved doors land here -- the lane's own bounded retry and the
+        owner's hand afterwards -- so one audit reads both.
+        """
+
+        envelope = ResultEnvelope.from_dict(formal["result_envelope"]).to_dict()
+        return self._append_controlled_retry(
+            admission, work, formal, index, links, authorization, proof={
+                "classification": classification,
+                "failed_at": formal["created_at"],
+                "formal_result_ref": _formal_ref(formal),
+                "formal_result_hash": _formal_hash(formal),
+                "result_envelope_ref": envelope["id"],
+                "result_envelope_hash": formal["result_envelope_hash"],
+                "route_decision_ref": envelope.get("metadata", {}).get(
+                    "route_decision_ref"),
+                "authorization_ref": authorization["id"],
+                "authorization_hash": authorization["content_hash"],
+                "unproved_send_record": record,
+                "mission_binding_hash": record["mission_binding_hash"],
+                # Nothing here is a budget *authority* -- that is the whole
+                # point of the state.  The settlement reference, when the
+                # ledger has one, is carried so the audit can see exactly how
+                # much of the earlier call was accounted for.
+                "budget_authority_ref": None, "budget_authority_hash": None,
+                "budget_settlement_ref": record["budget_settlement_ref"],
+                "budget_settlement_hash": record["budget_settlement_hash"],
+                "refusal_day": None,
+            })
+
+    def _append_controlled_retry(self, admission, work, formal, index, links,
+                                 authorization, *, proof):
+        """Write one authorization row, one recovery link and one fresh Work.
+
+        Every controlled door -- owner contract retry, automatic contract
+        retry, automatic unproved-send retry -- lands here, so all of them
+        append the same records and reconverge through the same check.
+        """
+
+        worker = self.draft_worker if index == 1 else self.verifier_worker
         identity = {
             "admission_ref": admission["id"], "admission_hash": admission["content_hash"],
             "stage_ordinal": index + 1, "recovery_number": len(links) + 1,
@@ -2070,10 +2403,10 @@ class MissionDocumentResearchExecutor:
         elif (existing_authorization["record_json"] != canonical_json(authorization)
               or existing_authorization["content_hash"] != authorization["content_hash"]):
             raise MissionDocumentResearchExecutorError(
-                "paid recovery authorization conflicted")
+                "controlled recovery authorization conflicted")
         enqueued = self.scheduler.enqueue(recovered)
         if enqueued["status"] not in {"fresh", "duplicate"}:
-            raise MissionDocumentResearchExecutorError("paid recovery enqueue conflicted")
+            raise MissionDocumentResearchExecutorError("controlled recovery enqueue conflicted")
         existing_link = self.connection.execute(
             "SELECT record_json,content_hash FROM mission_document_research_recovery_links "
             "WHERE recovery_link_id=?", (link["id"],),
@@ -2089,21 +2422,22 @@ class MissionDocumentResearchExecutor:
                 )
         elif (existing_link["record_json"] != canonical_json(link)
               or existing_link["content_hash"] != link["content_hash"]):
-            raise MissionDocumentResearchExecutorError("paid recovery link conflicted")
+            raise MissionDocumentResearchExecutorError("controlled recovery link conflicted")
         checked, checked_links = _effective_stage(
             self.authority, self.scheduler, admission, index, worker=worker)
         if (canonical_json(checked) != canonical_json(recovered)
                 or checked_links != [*links, link]):
-            raise MissionDocumentResearchExecutorError("paid recovery did not converge")
+            raise MissionDocumentResearchExecutorError("controlled recovery did not converge")
         return {"status": "admitted", "work_order_ref": recovered["id"],
                 "authorization_ref": authorization["id"], "model_calls": 0}
 
-    def _automatic_contract_retries_today(self, day: str) -> int:
-        """Count this install's automatic contract retries issued on one UTC day.
+    def _automatic_retries_today(self, day: str, kind: str) -> int:
+        """Count this install's automatic retries of one kind on one UTC day.
 
         Counted from the authorization ledger rather than a side file: the row
         that grants the retry is the row that is counted, so the cap cannot
-        drift away from what was actually spent.
+        drift away from what was actually spent.  The two automatic doors are
+        counted separately because their caps bound different exposures.
         """
 
         rows = self.connection.execute(
@@ -2117,12 +2451,11 @@ class MissionDocumentResearchExecutor:
                 record = json.loads(row["record_json"])
             except (TypeError, ValueError, RecursionError):
                 continue
-            if (isinstance(record, Mapping)
-                    and record.get("kind") == AUTOMATIC_CONTRACT_RETRY_CLASSIFICATION):
+            if isinstance(record, Mapping) and record.get("kind") == kind:
                 total += 1
         return total
 
-    def _existing_automatic_contract_authorization(self, work_ref):
+    def _existing_automatic_authorization(self, work_ref, kind):
         """Replay the authorization already written for this exact failed Work.
 
         The ledger holds one authorization per failed Work.  Minting a second
@@ -2143,13 +2476,12 @@ class MissionDocumentResearchExecutor:
         except (TypeError, ValueError, RecursionError) as exc:
             raise MissionDocumentResearchExecutorError(
                 "controlled recovery authorization is invalid") from exc
-        if (not isinstance(record, Mapping)
-                or record.get("kind") != AUTOMATIC_CONTRACT_RETRY_CLASSIFICATION):
+        if not isinstance(record, Mapping) or record.get("kind") != kind:
             return None
         if (canonical_json(record) != row["record_json"]
                 or record.get("content_hash") != row["content_hash"]):
             raise MissionDocumentResearchExecutorError(
-                "automatic contract retry authorization drifted")
+                "automatic retry authorization drifted")
         return dict(record)
 
     def _automatic_contract_retry_authorization(self, admission, work, formal, index,
@@ -2194,6 +2526,68 @@ class MissionDocumentResearchExecutor:
             # the contract.  This is the only state the owner is asked about.
             return CONTRACT_FAILED_AFTER_AUTOMATIC_RETRY
         return None
+
+    def _automatic_unproved_send_retry_authorization(
+        self, admission, work, formal, index, record, *, day, authorized_at,
+    ):
+        """Write down what automation allowed itself for an unproved send."""
+
+        body = {
+            "schema_version": SCHEMA_VERSION,
+            "kind": AUTOMATIC_UNPROVED_SEND_RETRY_CLASSIFICATION,
+            "actor_ref": AUTOMATIC_UNPROVED_SEND_RETRY_ACTOR,
+            "admission_ref": admission["id"], "admission_hash": admission["content_hash"],
+            "stage_ordinal": index + 1, "failed_work_order_ref": work["id"],
+            "failed_work_order_hash": content_hash(work),
+            "formal_result_ref": _formal_ref(formal),
+            "formal_result_hash": _formal_hash(formal),
+            # Exactly the bound the owner door grants by hand.
+            "max_fresh_work_orders": 1,
+            "max_cost_usd": work["budget"]["max_cost_usd"],
+            "authorized_at": authorized_at, "day": day,
+            "max_automatic_unproved_send_retries_per_day":
+                self.max_automatic_unproved_send_retries_per_day,
+            "unproved_send_record_hash": content_hash(record),
+        }
+        body["id"] = _ref(
+            "mission-document-automatic-unproved-send-retry-authorization", body)
+        body["content_hash"] = content_hash(body)
+        if set(body) != AUTOMATIC_UNPROVED_SEND_RETRY_FIELDS:
+            raise MissionDocumentResearchExecutorError(
+                "automatic unproved send retry authorization schema is invalid")
+        return body
+
+    @staticmethod
+    def _unproved_retry_disposition(links):
+        """Say whether this stage has already spent a controlled replacement.
+
+        Any controlled door -- either automatic one, the owner's, the sealed
+        historical receipt -- closes this one.  An unproved send is the state
+        with the least evidence behind it, so it is never the reason a stage
+        buys a *second* automatic call.
+        """
+
+        classifications = {
+            link.get("failure_proof", {}).get("classification") for link in links
+        }
+        if classifications & CONTROLLED_RETRY_CLASSIFICATIONS:
+            return UNPROVED_SEND_FAILED_AFTER_AUTOMATIC_RETRY
+        return None
+
+    @staticmethod
+    def _unproved_retry_already_issued(links):
+        """Has *this* door already been opened for this stage?
+
+        Narrower than the disposition above on purpose.  A stage that spent a
+        contract retry still escalates through the contract door's own words,
+        which say what was bought; only a stage that already bought an
+        unproved-send retry must skip the contract check entirely, because
+        after this door nothing may buy anything.
+        """
+
+        return any(
+            link.get("failure_proof", {}).get("classification")
+            == AUTOMATIC_UNPROVED_SEND_RETRY_CLASSIFICATION for link in links)
 
     def _start(self, admission, root):
         start_id = _ref("mission-document-research-start", self._run_id(admission))
@@ -2332,9 +2726,25 @@ class MissionDocumentResearchExecutor:
                 "The terminal provider request and actual charge are proved, but its "
                 "output failed the contract. No fresh automatic recovery is allowed."
                 if reason == LEGACY_PAID_CONTRACT_REASON else
+                "Nothing proves whether this stage's request was sent or charged, so "
+                "the lane issued its one bounded automatic retry: one fresh WorkOrder "
+                "at the failed WorkOrder's own cost ceiling. Worst case the earlier "
+                "unproved send was in fact sent and charged, which makes the total "
+                "exposure of this stage exactly one extra paid call and no more."
+                if reason == AUTOMATIC_UNPROVED_SEND_RETRY_REASON else
+                "Nothing proves whether this stage's request was sent or charged, but "
+                "this install has already issued its daily maximum of automatic "
+                "unproved-send retries. The retry is taken automatically after the UTC "
+                "day resets; no person is needed."
+                if reason == UNPROVED_SEND_RETRY_DAY_CAP_REASON else
+                "The one bounded automatic retry for an unproved send was already "
+                "issued for this stage and it failed as well. Worst case both calls "
+                "were charged. Automation stops here; only an owner authorization may "
+                "buy a further reply."
+                if reason == UNPROVED_SEND_FAILED_AFTER_AUTOMATIC_RETRY else
                 "The model stage failed without authority for a safe replay; its send and "
                 "charging state remains frozen for review."
-                if reason == "send_state_unproved" else
+                if reason == LEGACY_UNPROVED_SEND_REASON else
                 "The model stage did not send a chargeable request and may use a fresh "
                 "bounded WorkOrder when its recorded retry conditions permit."
             ),
@@ -2357,7 +2767,8 @@ class MissionDocumentResearchExecutor:
         """
 
         stage = work["metadata"]["stage"]
-        authorization = self._existing_automatic_contract_authorization(work["id"])
+        authorization = self._existing_automatic_authorization(
+            work["id"], AUTOMATIC_CONTRACT_RETRY_CLASSIFICATION)
         spent = self._contract_retry_disposition(links)
         if spent is None and authorization is None and self.connection.execute(
             "SELECT 1 FROM mission_document_research_controlled_recovery_authorizations "
@@ -2378,8 +2789,9 @@ class MissionDocumentResearchExecutor:
             return {"status": "stopped", "reason": spent,
                     "work_order_ref": work["id"], "stage": stage}
         day = _time(now)[:10]
-        if authorization is None and self._automatic_contract_retries_today(day) >= (
-                self.max_automatic_contract_retries_per_day):
+        if authorization is None and self._automatic_retries_today(
+                day, AUTOMATIC_CONTRACT_RETRY_CLASSIFICATION
+        ) >= self.max_automatic_contract_retries_per_day:
             # The cap is a spending bound, not a doubt about the failure, so the
             # answer is "tomorrow" rather than "a person".  The retry instant is
             # the next UTC reset, which is exactly when the count starts again.
@@ -2413,6 +2825,95 @@ class MissionDocumentResearchExecutor:
                 "work_order_ref": issued["work_order_ref"],
                 "authorization_ref": issued["authorization_ref"], "stage": stage}
 
+    def _recover_unproved_send_failure(self, admission, work, formal, index, links,
+                                       record, *, now, deadline):
+        """Retry an unproved send once, then ask a person.
+
+        The owner's instruction again, for the class that was left behind:
+        a transport failure is retried automatically within a bound, and a
+        person is asked only when the bounded retry fails too.  Seventeen
+        admissions waiting forever on a signature that always says the same
+        thing is what that instruction was written against.
+
+        What is *not* claimed here is that the earlier request never happened.
+        Nobody can say.  So the bound is the honest part: one fresh WorkOrder
+        at the failed WorkOrder's own ceiling, at most one per (admission,
+        stage), under its own recorded authorization row, counted against this
+        install's own daily cap for this door -- and the worst case, that the
+        earlier unproved send was charged too, is written into the observation
+        in words rather than left for a reader to work out.
+        """
+
+        stage = work["metadata"]["stage"]
+        authorization = self._existing_automatic_authorization(
+            work["id"], AUTOMATIC_UNPROVED_SEND_RETRY_CLASSIFICATION)
+        spent = self._unproved_retry_disposition(links)
+        if spent is None and authorization is None and self.connection.execute(
+            "SELECT 1 FROM mission_document_research_controlled_recovery_authorizations "
+            "WHERE failed_work_order_ref=? LIMIT 1", (work["id"],),
+        ).fetchone() is not None:
+            # Another controlled authorization already names this exact Work.
+            # One Work carries one authorization; automation never adds a
+            # second and never overwrites a person's.
+            spent = UNPROVED_SEND_FAILED_AFTER_AUTOMATIC_RETRY
+        if spent is not None:
+            recovery = {
+                "status": "stopped", "reason": spent, "eligible": False,
+                "used_fresh_work_orders": len(links), "max_fresh_work_orders": 1,
+                "retry_at": None, "deadline": _time(deadline), "proof": record,
+            }
+            self._recovery_observation(admission, work, formal, index, recovery)
+            return {"status": "stopped", "reason": spent,
+                    "work_order_ref": work["id"], "stage": stage}
+        if record is None:
+            # Nothing describable to bind an authorization to.  Keep the old
+            # conservative verdict rather than buy a call against a blank.
+            recovery = {
+                "status": "stopped", "reason": LEGACY_UNPROVED_SEND_REASON,
+                "eligible": False, "used_fresh_work_orders": len(links),
+                "max_fresh_work_orders": _recovery_policy(
+                    admission, index)["max_fresh_work_orders"],
+                "retry_at": None, "deadline": _time(deadline), "proof": None,
+            }
+            self._recovery_observation(admission, work, formal, index, recovery)
+            return {"status": "stopped", "reason": LEGACY_UNPROVED_SEND_REASON,
+                    "work_order_ref": work["id"], "stage": stage}
+        day = _time(now)[:10]
+        if authorization is None and self._automatic_retries_today(
+                day, AUTOMATIC_UNPROVED_SEND_RETRY_CLASSIFICATION
+        ) >= self.max_automatic_unproved_send_retries_per_day:
+            # A spending bound, not a doubt about the failure, so the answer is
+            # "tomorrow" rather than "a person".
+            resets_at = datetime(
+                now.year, now.month, now.day, tzinfo=timezone.utc) + timedelta(days=1)
+            recovery = {
+                "status": "waiting", "reason": UNPROVED_SEND_RETRY_DAY_CAP_REASON,
+                "eligible": False, "used_fresh_work_orders": len(links),
+                "max_fresh_work_orders": 1, "retry_at": _time(resets_at),
+                "deadline": _time(deadline), "day": day, "proof": record,
+            }
+            self._recovery_observation(admission, work, formal, index, recovery)
+            return {"status": "waiting", "reason": UNPROVED_SEND_RETRY_DAY_CAP_REASON,
+                    "retry_at": _time(resets_at), "work_order_ref": work["id"],
+                    "stage": stage}
+        if authorization is None:
+            authorization = self._automatic_unproved_send_retry_authorization(
+                admission, work, formal, index, record, day=day,
+                authorized_at=_time(now))
+        recovery = {
+            "status": "admitted", "reason": AUTOMATIC_UNPROVED_SEND_RETRY_REASON,
+            "eligible": False, "used_fresh_work_orders": len(links),
+            "max_fresh_work_orders": 1, "retry_at": None,
+            "deadline": _time(deadline), "proof": record,
+        }
+        self._recovery_observation(admission, work, formal, index, recovery)
+        issued = self._append_unproved_send_retry(
+            admission, work, formal, index, links, authorization, record=record,
+            classification=AUTOMATIC_UNPROVED_SEND_RETRY_CLASSIFICATION)
+        return {"status": "admitted", "reason": AUTOMATIC_UNPROVED_SEND_RETRY_REASON,
+                "work_order_ref": issued["work_order_ref"],
+                "authorization_ref": issued["authorization_ref"], "stage": stage}
+
     def _recover_failed_model(self, admission, work, formal, index):
         policy = _recovery_policy(admission, index)
         worker = self.draft_worker if index == 1 else self.verifier_worker
@@ -2431,15 +2932,27 @@ class MissionDocumentResearchExecutor:
                    else _parse_time(links[0]["window_started_at"], "recovery window start"))
         deadline = started + timedelta(seconds=policy["max_elapsed_seconds"])
         if proof is None:
-            paid_contract_proof = self._paid_contract_failure_proof(
-                work, formal, index,
-            )
+            # A stage that already spent *this* door asks a person whatever the
+            # new failure looks like: the retry has happened, and the
+            # escalation has to say so rather than open another door.
+            already_spent = self._unproved_retry_already_issued(links)
+            paid_contract_proof = (
+                None if already_spent
+                else self._paid_contract_failure_proof(work, formal, index))
             if paid_contract_proof is not None:
                 return self._recover_paid_contract_failure(
                     admission, work, formal, index, links,
                     paid_contract_proof, now=now, deadline=deadline)
+            record = self._unproved_send_state_record(admission, work, formal, index)
+            if record is not None or already_spent:
+                return self._recover_unproved_send_failure(
+                    admission, work, formal, index, links, record,
+                    now=now, deadline=deadline)
+            # Not even the unproved state can be described deterministically,
+            # so nothing may be bought against it.  This is the old verdict,
+            # and it is still the right one here.
             recovery = {
-                "status": "stopped", "reason": "send_state_unproved",
+                "status": "stopped", "reason": LEGACY_UNPROVED_SEND_REASON,
                 "eligible": False,
                 "used_fresh_work_orders": len(links),
                 "max_fresh_work_orders": policy["max_fresh_work_orders"],
@@ -2854,11 +3367,19 @@ __all__ = ["AUTHORITY_KIND",
            "AUTOMATIC_CONTRACT_RETRY_ACTOR",
            "AUTOMATIC_CONTRACT_RETRY_CLASSIFICATION",
            "AUTOMATIC_CONTRACT_RETRY_REASON",
+           "AUTOMATIC_UNPROVED_SEND_RETRY_ACTOR",
+           "AUTOMATIC_UNPROVED_SEND_RETRY_CLASSIFICATION",
+           "AUTOMATIC_UNPROVED_SEND_RETRY_REASON",
            "CONTRACT_FAILED_AFTER_AUTOMATIC_RETRY",
            "CONTRACT_FAILED_AFTER_OWNER_RETRY",
            "CONTRACT_RETRY_DAY_CAP_REASON",
            "DEFAULT_MAX_AUTOMATIC_CONTRACT_RETRIES_PER_DAY",
+           "DEFAULT_MAX_AUTOMATIC_UNPROVED_SEND_RETRIES_PER_DAY",
            "LEGACY_PAID_CONTRACT_REASON",
+           "LEGACY_UNPROVED_SEND_REASON",
+           "OWNER_UNPROVED_SEND_RETRY_CLASSIFICATION",
+           "UNPROVED_SEND_FAILED_AFTER_AUTOMATIC_RETRY",
+           "UNPROVED_SEND_RETRY_DAY_CAP_REASON",
            "MissionDocumentResearchExecutor",
            "MissionDocumentResearchExecutorError",
            "exact_mission_document_model_execution_authority",

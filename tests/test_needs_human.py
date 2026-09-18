@@ -129,6 +129,42 @@ class LaneTests(unittest.TestCase):
         # than the lane's own words.
         self.assertIn("controlled_reentry_unavailable", items[0]["why_blocked"])
 
+    def test_an_escalated_unproved_send_says_the_retry_already_happened(self):
+        heartbeat = {"bounded_planner": {
+            "last_completed_at": "2026-09-18T11:00:00+00:00",
+            "last_result": {
+                "mission_document_research": {
+                    "status": "recovery_required", "held": 7,
+                    "reason": "no unstarted document research admission",
+                    "last": {"recovery": {
+                        "action": "recovery_required",
+                        "reason": "unproved_send_failed_after_automatic_retry"}},
+                },
+            }}}
+        items = held_lanes(heartbeat)
+        self.assertEqual(len(items), 1)
+        self.assertIn("自动重试过一次", items[0]["title"])
+        # The owner must not be asked to buy the same call again without being
+        # told what has already been bought, or what the worst case is.
+        self.assertIn("自动重试过一次", items[0]["why_blocked"])
+        self.assertIn("两次调用", items[0]["why_blocked"])
+
+    def test_an_escalated_rebinding_says_the_rebinding_already_happened(self):
+        heartbeat = {"bounded_planner": {
+            "last_completed_at": "2026-09-18T11:00:00+00:00",
+            "last_result": {
+                "mission_document_research": {
+                    "status": "recovery_required", "held": 10,
+                    "reason": "no unstarted document research admission",
+                    "last": {"recovery": {
+                        "action": "recovery_required",
+                        "reason": "reentry_failed_after_automatic_rebind:boom"}},
+                },
+            }}}
+        items = held_lanes(heartbeat)
+        self.assertIn("自动重试过一次", items[0]["title"])
+        self.assertIn("自动改绑", items[0]["why_blocked"])
+
     def test_an_idle_lane_is_not_a_to_do(self):
         self.assertEqual(held_lanes({"bounded_planner": {"last_result": {
             "deep_insight_gate": {"status": "idle"}}}}), [])

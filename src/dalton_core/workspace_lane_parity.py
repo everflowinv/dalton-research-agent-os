@@ -657,6 +657,7 @@ def plan_parity_actions(
     host_sources: Mapping[str, Path] | None = None,
     mission: Mapping[str, Any] | None = None,
     lanes: Sequence[str] | None = None,
+    source_state_dir: str | Path | None = None,
 ) -> list[ParityAction]:
     """Everything this state directory is missing that this machine can supply.
 
@@ -722,7 +723,64 @@ def plan_parity_actions(
                 actions.append(action)
     if selected is None:
         actions.extend(_routing_policy_actions(state))
+        actions.extend(_credential_slot_actions(state, source_state_dir))
     return actions
+
+
+def _credential_slot_actions(
+    state: Path, source_state_dir: str | Path | None,
+) -> list[ParityAction]:
+    """The broker credential slots this environment lists fewer of than the host.
+
+    Not a lane either, and here for the same reason the routing lineages are:
+    it is a list in a configuration file that silently turns a chain into a
+    dead chain.  A workspace created from an older runtime template names five
+    or six slots where this machine now has seven, and every call down a chain
+    whose model is served through a missing one is refused with
+    ``credential_slot_unavailable`` -- the lane reports an exhausted chain at a
+    cost of zero, which reads like the models failing.
+
+    New environments get this at creation (``workspace_host_scheme``); this is
+    the same repair for the ones that already exist, and it is why the script
+    that performs it ends by telling the owner to restart: a writer reads its
+    configurations once, at launch.
+    """
+
+    if source_state_dir is None:
+        return []
+    from .workspace_host_scheme import source_credential_slots
+
+    source = Path(source_state_dir).expanduser().resolve()
+    if source == state:
+        return []
+    wanted = source_credential_slots(source)
+    if not wanted:
+        return []
+    missing: set[str] = set()
+    for path in sorted(state.glob("*model-config.json")):
+        try:
+            config = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(config, Mapping):
+            missing |= {slot for slot in wanted
+                        if slot not in (config.get("credential_slot_refs") or [])}
+    from .workspace_host_scheme import _slot_lists, service_config_path
+
+    try:
+        service = json.loads(service_config_path(state).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        service = None
+    for held in _slot_lists(service):
+        missing |= {slot for slot in wanted if slot not in held}
+    if not missing:
+        return []
+    return [ParityAction(
+        kind="credential_slots", target=str(state), detail=str(source),
+        reason="模型凭证：这个环境的配置里少了 " + "、".join(sorted(missing))
+               + "，凡是走这些渠道的模型每次调用都会被拒（credential_slot_unavailable），"
+                 "看起来像模型不可用。按本机现有环境补齐，改完要重启服务才生效。",
+    )]
 
 
 def _routing_policy_actions(state: Path) -> list[ParityAction]:
@@ -818,6 +876,13 @@ def apply_parity_actions(
                 target, checked_at=datetime.now(timezone.utc))
             performed.append({**action.as_wire(), "result": "registered",
                               "detail": "、".join(outcome["created"]) or "（已齐全）"})
+            continue
+        if action.kind == "credential_slots":
+            from .workspace_host_scheme import align_credential_slots
+
+            outcome = align_credential_slots(target, source_state_dir=action.detail)
+            performed.append({**action.as_wire(), "result": outcome["status"],
+                              "detail": "、".join(outcome["updated"]) or "（本来就齐了）"})
             continue
         if action.kind == "seed":
             _write_json(target, SEED_FILES[action.detail])
@@ -915,12 +980,21 @@ def audit_lanes(
     *,
     host_sources: Mapping[str, Path] | None = None,
     plist_path: str | Path | None = None,
+    manager_config_path: str | Path | None = None,
+    source_state_dir: str | Path | None = None,
 ) -> dict[str, Any]:
     """Per lane: is it on this writer, and if not, what exactly is missing.
 
     Read-only by construction.  Nothing here opens a socket, writes a file or
     loads a LaunchAgent; the mission is read through a read-only connection and
     the plist is parsed, not re-rendered.
+
+    The host-wide scheme is reported here too, as its own rows: whether this
+    environment is inside the machine's shared daily budget, whether its model
+    routing is the machine's, and whether it lists the machine's credential
+    slots.  They are not lanes, and they belong on the same page for the same
+    reason the routing lineages do -- an owner asking "why is this environment
+    quieter/poorer/more expensive than the other one" is asking one question.
     """
 
     state = Path(state_dir).expanduser().resolve()
@@ -980,9 +1054,14 @@ def audit_lanes(
     stale = None
     if installed is not None:
         stale = sorted(would_render - installed)
+    from .workspace_host_scheme import audit_host_scheme
+
     return {
         "schema_version": SCHEMA_VERSION,
         "state_dir": str(state),
+        "host_scheme": audit_host_scheme(
+            state, manager_config_path=manager_config_path,
+            source_state_dir=source_state_dir),
         "mission_ref": (mission or {}).get("mission_ref"),
         "granted_source_refs": sorted(granted),
         "host_sources": {name: str(path) for name, path in sorted(sources.items())},
@@ -1045,6 +1124,15 @@ def render_audit(report: Mapping[str, Any]) -> str:
             lines.append(f"    需你决定：{item}")
         if row["configured"] and not row["blockers"]:
             lines.append("    这条通道的输入齐了。")
+        lines.append("")
+    for row in report.get("host_scheme") or ():
+        mark = {"ok": "一致", "missing": "未绑定", "differs": "不一致",
+                "stale": "已过期", "invalid": "读不出"}.get(row["status"], "未知")
+        lines.append(f"[{mark}] {row['label']}（{row['key']}）")
+        if row.get("detail"):
+            lines.append(f"    现在：{row['detail']}")
+        for blocker in row.get("blockers") or ():
+            lines.append(f"    缺：{blocker}")
         lines.append("")
     if report.get("plist_missing_flags"):
         lines.append("已安装的 writer 启动项落后于状态目录，重新渲染后会多出这些参数：")

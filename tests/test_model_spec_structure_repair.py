@@ -24,7 +24,12 @@ from __future__ import annotations
 
 import unittest
 
-from dalton_core.company_model_cli import REPAIR_CONTRACT, _repair_prompt
+from dalton_core.company_model_cli import (
+    DEFAULT_REPAIR_ATTEMPTS,
+    REPAIR_CONTRACT,
+    _repair_prompt,
+    structured_output_repair_config,
+)
 from dalton_core.company_model_spec import (
     REPAIRABLE_STRUCTURE_RULES,
     REPAIRABLE_STRUCTURE_RULES_REF,
@@ -34,7 +39,61 @@ from dalton_core.company_model_spec import (
 )
 
 
+class DefaultAttemptTests(unittest.TestCase):
+    """Why the mechanism above never ran.
+
+    Live 2026-09-18: the model-specification lane held durably with
+    ``CompanyModelSpecError: financial_statement_structure is invalid: sum
+    formula roles do not match its company statement output`` -- a rule that
+    has been on the repairable allow-list since 0.1.  The repair is gated on
+    ``structured_output_repair.max_attempts``, that key is in no deploy
+    artefact in this repository, and its default was zero.  A capability that
+    is off in every installation is not a capability.
+    """
+
+    def test_a_configuration_that_says_nothing_gets_one_repair(self):
+        self.assertEqual(DEFAULT_REPAIR_ATTEMPTS, 1)
+        for config in ({}, None, {"model_router_db": "x"}):
+            self.assertEqual(structured_output_repair_config(config),
+                             {"max_attempts": 1}, config)
+
+    def test_zero_is_still_how_an_operator_turns_it_off(self):
+        self.assertEqual(
+            structured_output_repair_config(
+                {"structured_output_repair": {"max_attempts": 0}}),
+            {"max_attempts": 0})
+
+
 class StructureCodeTests(unittest.TestCase):
+    def test_the_eps_numerator_half_of_the_divide_rule_is_eligible(self):
+        # 2026-09-18: the denominator half was repairable and the numerator
+        # half was a whole refusal, which is the same choice among the same
+        # roles.  Both are wiring; neither is arithmetic about the filings.
+        for message in (
+            "EPS numerator must use the company-specific diluted EPS numerator role",
+            "EPS denominator must be diluted weighted-average shares",
+        ):
+            self.assertEqual(
+                structure_error_code(
+                    f"financial_statement_structure is invalid: {message}"),
+                "structure", message)
+
+    def test_the_repair_prompt_lists_the_rule_the_way_every_lane_does(self):
+        # One renderer for all three lanes: the dossier's verifier findings,
+        # the gate's output-rubric findings and this validation error are put
+        # in front of a model under the same label, in the same numbered form.
+        from dalton_core.draft_contract_repair import FINDINGS_LIST_LABEL
+
+        prompt = _repair_prompt("{}", CompanyModelSpecError(
+            "financial_statement_structure is invalid: sum formula roles do "
+            "not match its company statement output", code="structure"))
+        self.assertIn(FINDINGS_LIST_LABEL, prompt)
+        self.assertIn("1. financial_statement_structure:", prompt)
+        self.assertIn("sum formula roles do not match", prompt)
+        # The machine-readable object an auditor replays is still there.
+        self.assertIn("VALIDATION_ERROR:", prompt)
+
+
     def test_every_live_wiring_refusal_is_eligible(self):
         for message in (
             "diluted weighted-average shares require duration direct_annual shares",

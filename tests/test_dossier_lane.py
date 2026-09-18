@@ -91,7 +91,8 @@ class FakeModel:
         if prompt.startswith("You are an independent verifier"):
             text = json.dumps({"verdict": self.verdict, "findings": self.findings})
             return self._envelope(text)
-        if prompt.startswith("Your previous reply broke"):
+        if prompt.startswith("Your previous reply broke") or prompt.startswith(
+                "An independent check read your previous reply"):
             # A model that cannot be repaired.  Subclasses that want to
             # exercise a successful repair override this.
             return self._envelope("still not json")

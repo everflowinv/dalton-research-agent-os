@@ -498,6 +498,39 @@ def _call_provenance(value: Any, name: str) -> dict[str, str]:
     return out
 
 
+# What a unit may be repaired against once, after it has been drafted and
+# accepted, and how much of the finder's own words the record keeps.  Bounded
+# because the record is read back and re-hashed on every publication, and a
+# verifier that answered with an essay must not be able to make a company's
+# chain unpublishable.
+REPAIR_FINDING_KINDS: tuple[str, ...] = ("verification", "output_rubric")
+MAX_REPAIR_FINDINGS = 20
+MAX_REPAIR_FINDING_CHARS = 500
+
+
+def _repair_findings(value: Any, name: str) -> dict[str, Any]:
+    """The closed shape of what one findings repair was shown."""
+
+    if (not isinstance(value, Mapping) or set(value) != {"kind", "findings"}
+            or value["kind"] not in REPAIR_FINDING_KINDS
+            or not isinstance(value["findings"], list)
+            or not value["findings"]
+            or len(value["findings"]) > MAX_REPAIR_FINDINGS):
+        raise CompanyDossierValidationError(f"{name} has an invalid closed shape")
+    findings = []
+    for index, item in enumerate(value["findings"]):
+        if (not isinstance(item, Mapping) or not item
+                or any(not isinstance(key, str) or not key for key in item)
+                or any(not isinstance(field, (str, int, float, bool))
+                       for field in item.values())
+                or any(isinstance(field, str) and len(field) > MAX_REPAIR_FINDING_CHARS
+                       for field in item.values())):
+            raise CompanyDossierValidationError(
+                f"{name}.findings[{index}] has an invalid closed shape")
+        findings.append({key: item[key] for key in sorted(item)})
+    return {"kind": str(value["kind"]), "findings": findings}
+
+
 def _unit_provenance(value: Any) -> dict[str, Any]:
     if not isinstance(value, Mapping) or set(value) != set(UNITS):
         raise CompanyDossierValidationError("unit_provenance must cover every dossier unit")
@@ -517,8 +550,17 @@ def _unit_provenance(value: Any) -> dict[str, Any]:
         # formal replay in ``company_dossier_cli`` rebuilds the repair prompt
         # from this parent's own recorded reply, so the chain is verifiable
         # end to end rather than asserted.
+        # ``producer_repair_findings`` says the repair was against *findings*
+        # rather than against the closed output contract: a verifier's rejected
+        # sentence, or a section the Constitution's output_rubric refused.  The
+        # parent reply in that case is well formed -- it is wrong, which is a
+        # different thing -- so the replay cannot re-derive the repair from a
+        # violation list and is handed what the finder said instead.  Present
+        # only beside ``producer_repair``, never alone.
         if (not isinstance(item, Mapping)
-                or set(item) not in (expected, expected | {"producer_repair"})):
+                or set(item) not in (
+                    expected, expected | {"producer_repair"},
+                    expected | {"producer_repair", "producer_repair_findings"})):
             raise CompanyDossierValidationError(
                 f"unit_provenance.{unit} has an invalid closed shape")
         producer_input = item["producer_input"]
@@ -608,6 +650,10 @@ def _unit_provenance(value: Any) -> dict[str, Any]:
                 raise CompanyDossierValidationError(
                     f"unit_provenance.{unit}.producer_repair must be a different "
                     "call from the producer it repaired")
+        if "producer_repair_findings" in item:
+            out[unit]["producer_repair_findings"] = _repair_findings(
+                item["producer_repair_findings"],
+                f"unit_provenance.{unit}.producer_repair_findings")
         if content_hash(out[unit]["producer_input"]) != out[unit]["input_fingerprint"]:
             raise CompanyDossierValidationError(
                 f"unit_provenance.{unit}.producer_input fingerprint differs")
@@ -1627,8 +1673,10 @@ __all__ = [
     "CLASSIFICATION_UNIT",
     "GENERATOR_REF",
     "INDUSTRY_CLASSIFICATIONS",
+    "MAX_REPAIR_FINDINGS",
     "MAX_SIGNALS",
     "OUTPUT_RUBRIC_CHECKS",
+    "REPAIR_FINDING_KINDS",
     "REF_KINDS",
     "SCHEMA_VERSION",
     "SECTIONS",

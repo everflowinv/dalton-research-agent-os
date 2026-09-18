@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -46,6 +47,10 @@ ACN = "company:sec-cik:0001467373"
 EPAM = "company:sec-cik:0001352010"
 
 
+# The exact row that took CTSH out of the index on 2026-09-18.
+LIVE_ROW = "1\tm management_and_capital_allocation"
+
+
 class FakeModel:
     """One canned reply, and a record of what it was asked."""
 
@@ -60,6 +65,28 @@ class FakeModel:
         self.prompts.append(prompt)
         return {
             "text": self.text, "replayed": False, "cost_micros": 1234,
+            "work_order_ref": "work:cockpit-claim_index-" + "a" * 32,
+        }
+
+
+class ScriptedModel(FakeModel):
+    """One reply per call: the draft, then the repair.
+
+    The last reply stands for every call after it, so a model that cannot
+    satisfy the contract is written as one text rather than as a list of
+    identical ones.
+    """
+
+    def __init__(self, *texts, cost_micros=100, **kwargs):
+        super().__init__(texts[0])
+        self.texts = list(texts)
+        self.cost_micros = cost_micros
+
+    def call(self, *, purpose, request_id, prompt, mission):
+        self.prompts.append(prompt)
+        text = self.texts[min(len(self.prompts), len(self.texts)) - 1]
+        return {
+            "text": text, "replayed": False, "cost_micros": self.cost_micros,
             "work_order_ref": "work:cockpit-claim_index-" + "a" * 32,
         }
 
@@ -97,6 +124,15 @@ class ChildHarness:
             metric="competitive positioning", period="current",
             statement="Wins against heritage vendors are up.",
             source_type="public_web")
+
+    def add_prose(self, count):
+        """A batch big enough for one bad row to be a fifth of nothing."""
+
+        for index in range(1, count + 1):
+            self.fixture.add_claim(
+                f"prose-{index:02d}", kind="qualitative", value=None, unit=None,
+                metric="demand environment", period="current",
+                statement=f"Statement number {index}.", source_type="public_web")
 
     def run(self, **overrides):
         params = {
@@ -235,6 +271,109 @@ class ChildRunTests(unittest.TestCase):
         # the vocabulary contributed nothing at all.
         self.assertEqual(len(entries), 1)
 
+    def _configured(self):
+        config = self.harness.state_dir / "model.json"
+        config.write_text("{}", encoding="utf-8")
+        return config
+
+    def test_the_live_stray_letter_is_filed_rather_than_refusing_the_company(self):
+        # 2026-09-18: CTSH's batch came back with one row reading
+        # "1\tm management_and_capital_allocation" and the whole company stopped
+        # being indexed. The word names one section of the dossier and only one.
+        self.harness.add_claims()
+        model = ScriptedModel(LIVE_ROW + "\n2\tcompetitive_position\n")
+        with patch("dalton_core.claim_index_cli.CockpitModel", model):
+            summary = self.harness.run(
+                dry_run=False, model_config_path=self._configured())
+        self.assertEqual(summary["index_status"], "tagged")
+        self.assertEqual(summary["model_tagged"], 2)
+        # Read, not repaired: leniency costs no second call.
+        self.assertEqual(len(model.prompts), 1)
+        self.assertIsNone(summary["repair"])
+        self.assertEqual(summary["normalised_aspects"], [{
+            "row_id": "1", "raw": "m management_and_capital_allocation",
+            "aspect": "management_and_capital_allocation"}])
+        entries = current_entries(self.harness.store.connection)
+        self.assertEqual(
+            sorted(entry["aspect"] for entry in entries.values()
+                   if entry["aspect_source"] == "model"),
+            ["competitive_position", "management_and_capital_allocation"])
+        self.assertEqual(pending_claims(self.harness.store), [])
+
+    def test_one_unreadable_row_is_skipped_and_reported_not_a_refusal(self):
+        self.harness.add_prose(10)
+        lines = [f"{index}\tdemand_drivers" for index in range(1, 11)]
+        lines[1] = "2\tmoat_and_pricing"
+        model = ScriptedModel("\n".join(lines))
+        with patch("dalton_core.claim_index_cli.CockpitModel", model):
+            summary = self.harness.run(
+                dry_run=False, model_config_path=self._configured())
+        self.assertEqual(summary["index_status"], "tagged_partial")
+        self.assertEqual(summary["model_tagged"], 9)
+        self.assertEqual(summary["skipped_rows"], 1)
+        # The raw text, so somebody can see what the model actually wrote.
+        self.assertEqual(summary["unparsed_rows"],
+                         [{"row_id": "2", "text": "2\tmoat_and_pricing"}])
+        self.assertEqual(len(model.prompts), 1)
+        # The skipped row was not tagged, so it is still pending and the next
+        # batch asks about it again.
+        self.assertEqual(len(pending_claims(self.harness.store)), 1)
+
+    def test_a_mostly_unreadable_reply_buys_one_repair_and_then_files_it(self):
+        self.harness.add_claims()
+        model = ScriptedModel(
+            "1\tsection one\n2\tsection two\n",
+            "1\tdemand_drivers\n2\tcompetitive_position\n")
+        with patch("dalton_core.claim_index_cli.CockpitModel", model):
+            summary = self.harness.run(
+                dry_run=False, model_config_path=self._configured())
+        self.assertEqual(summary["index_status"], "tagged")
+        self.assertEqual(summary["model_tagged"], 2)
+        self.assertEqual(len(model.prompts), 2)
+        self.assertEqual(summary["repair"]["status"], "repaired")
+        self.assertEqual(summary["repair"]["attempts"], 1)
+        # Both calls are paid for out of the same run.
+        self.assertEqual(summary["cost_micros"], 200)
+        # The repair is shown its own reply and the violations, not the
+        # original prompt: that was paid for once already.
+        self.assertIn("1\tsection one", model.prompts[1])
+        self.assertIn("<row id><TAB><aspect>", model.prompts[1])
+        self.assertNotIn("Statement number", model.prompts[1])
+
+    def test_a_batch_is_refused_only_after_the_repair_failed_too(self):
+        self.harness.add_claims()
+        model = ScriptedModel("1\tmoat_and_pricing\n2\tcompetitive_position\n")
+        with patch("dalton_core.claim_index_cli.CockpitModel", model):
+            summary = self.harness.run(
+                dry_run=False, model_config_path=self._configured())
+        self.assertEqual(summary["index_status"], "refused")
+        self.assertEqual(len(model.prompts), 2)
+        self.assertEqual(summary["repair"]["status"], "refused")
+        self.assertIn("after one repair", summary["failure_reason"])
+        self.assertIn("moat_and_pricing", summary["failure_reason"])
+        self.assertEqual(summary["model_tagged"], 0)
+        # The rule-settled number still stands; the batch contributed nothing.
+        self.assertEqual(len(current_entries(self.harness.store.connection)), 1)
+
+    def test_a_repair_that_cannot_be_made_now_is_not_held_against_the_batch(self):
+        from dalton_core.scheduler import SchedulerError
+
+        self.harness.add_claims()
+
+        class BusyOnRepair(ScriptedModel):
+            def call(self, **kwargs):
+                if self.prompts:
+                    raise SchedulerError("request already in flight")
+                return super().call(**kwargs)
+
+        model = BusyOnRepair("1\tsection one\n2\tsection two\n")
+        with patch("dalton_core.claim_index_cli.CockpitModel", model):
+            summary = self.harness.run(
+                dry_run=False, model_config_path=self._configured())
+        # "busy" is true of a moment, not of this batch: the next tick asks
+        # again rather than the batch being refused for the scheduler.
+        self.assertEqual(summary["index_status"], "busy")
+
     def test_a_re_run_of_an_unchanged_claim_is_a_duplicate_not_a_new_version(self):
         self.harness.add_claims()
         first = self.harness.run(dry_run=False)
@@ -294,12 +433,14 @@ class FakeLauncher:
     def status(self, ticket_ref):
         return self.tickets[ticket_ref]
 
-    def settle(self, ticket_ref, *, index_status="tagged", status="succeeded"):
+    def settle(self, ticket_ref, *, index_status="tagged", status="succeeded",
+               failure_reason=None):
         self.tickets[ticket_ref] = {
             **self.tickets[ticket_ref], "status": status,
             "summary": {"index_status": index_status, "rule_tagged": 1,
                         "model_tagged": 2, "cost_micros": 5,
-                        "failure_reason": None if status == "succeeded" else "boom"},
+                        "failure_reason": failure_reason or (
+                            None if status == "succeeded" else "boom")},
         }
 
 
@@ -386,6 +527,90 @@ class LaneCoordinatorTests(unittest.TestCase):
         self.assertIsNone(self.coordinator.budget.blocked(old_control))
         self.launcher.settle(retry["ticket_ref"], index_status="not_authorized")
         self.assertEqual(self.coordinator.dispatch_once()["status"], "held")
+
+    # The refusal exactly as the child wrote it live on 2026-09-18.
+    LIVE_REFUSAL = (
+        "ClaimIndexTaggingRefused: tagging row is not '<row id><TAB><aspect>': "
+        f"{LIVE_ROW!r}")
+
+    def _refuse_once(self, coordinator=None):
+        """Launch one batch, refuse its content, and settle the refusal."""
+
+        coordinator = coordinator or self.coordinator
+        self.harness.fixture.add_claim("acn-refused", subject_ref=ACN)
+        first = coordinator.dispatch_once()
+        self.launcher.settle(first["ticket_ref"], index_status="refused",
+                             failure_reason=self.LIVE_REFUSAL)
+        held = coordinator.dispatch_once()  # settles the refusal, then holds
+        self.assertEqual(held["status"], "held")
+        # This is the classification that made the hold durable: a refusal of a
+        # model's reply read as "content nobody can use", which for a document
+        # is terminal and for a reply is one sample.
+        self.assertEqual(held["failure"]["failure_class"], "content_refused")
+        self.assertIn("management_and_capital_allocation", held["reason"])
+        return first
+
+    def test_a_content_refusal_is_asked_again_a_day_later_not_never(self):
+        # The shared classifier calls a content refusal terminal, and for bytes
+        # that did not parse it is right. A refused tagging batch is a model's
+        # reply, and the next reply is a new one -- live, one stray character
+        # took CTSH out of the index with nothing that would ever clear it.
+        moment = [datetime(2026, 9, 18, 9, 0, tzinfo=timezone.utc)]
+        coordinator = MissionClaimIndexLaneCoordinator(
+            store=self.harness.store, launcher=self.launcher,
+            mission=lambda: self.harness.mission, clock=lambda: moment[0])
+        first = self._refuse_once(coordinator)
+        moment[0] += timedelta(hours=23)
+        self.assertEqual(coordinator.dispatch_once()["status"], "held")
+        moment[0] += timedelta(hours=2)
+        again = coordinator.dispatch_once()
+        self.assertEqual(again["status"], "launched")
+        # The same batch, asked again -- and it says that it is a retry rather
+        # than the lane having forgotten that it refused.
+        self.assertEqual(again["batch_digest"], first["batch_digest"])
+        self.assertEqual(again["retried_refusal"]["failure_class"],
+                         "content_refused")
+
+    def test_a_refusal_that_is_asked_again_and_refused_stands_another_day(self):
+        moment = [datetime(2026, 9, 18, 9, 0, tzinfo=timezone.utc)]
+        coordinator = MissionClaimIndexLaneCoordinator(
+            store=self.harness.store, launcher=self.launcher,
+            mission=lambda: self.harness.mission, clock=lambda: moment[0])
+        self._refuse_once(coordinator)
+        moment[0] += timedelta(days=1)
+        retry = coordinator.dispatch_once()
+        self.launcher.settle(retry["ticket_ref"], index_status="refused")
+        self.assertEqual(coordinator.dispatch_once()["status"], "held")
+        moment[0] += timedelta(hours=23)
+        self.assertEqual(coordinator.dispatch_once()["status"], "held")
+
+    def test_a_restart_reads_when_the_refusal_was_recorded_not_when_it_booted(self):
+        # The terminal verdict survives a restart by replay, so its age has to
+        # as well: a clock that restarted with the process would make the expiry
+        # mean "a day since this writer started" and a writer that is deployed
+        # every morning would re-ask every morning.
+        first = MissionClaimIndexLaneCoordinator(
+            store=self.harness.store, launcher=self.launcher,
+            mission=lambda: self.harness.mission,
+            failure_ledger_dir=self.harness.state_dir)
+        self._refuse_once(first)
+        later = datetime.now(timezone.utc) + timedelta(hours=25)
+        restarted = MissionClaimIndexLaneCoordinator(
+            store=self.harness.store, launcher=self.launcher,
+            mission=lambda: self.harness.mission,
+            failure_ledger_dir=self.harness.state_dir, clock=lambda: later)
+        self.assertTrue(restarted._refused_at)
+        self.assertEqual(restarted.dispatch_once()["status"], "launched")
+
+    def test_new_claims_are_a_new_batch_and_retire_the_old_refusal(self):
+        first = self._refuse_once()
+        self.harness.fixture.add_claim("acn-new", subject_ref=ACN)
+        again = self.coordinator.dispatch_once()
+        self.assertEqual(again["status"], "launched")
+        self.assertNotEqual(again["batch_digest"], first["batch_digest"])
+        # The old verdict was about a set of claims that no longer exists, and
+        # saying so retires it rather than leaving a row nobody will clear.
+        self.assertEqual(self.coordinator.budget.terminal_items(), [])
 
     def test_a_mission_that_is_not_there_yet_is_unconfigured_not_a_crash(self):
         coordinator = MissionClaimIndexLaneCoordinator(

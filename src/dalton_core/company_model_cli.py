@@ -83,7 +83,10 @@ MAX_OUTPUT_TOKENS = int(DEFAULT_MODEL_SPEC_CALL_BUDGET["max_output_tokens"])
 # structure rather than to look frugal.
 MAX_COST_USD = float(DEFAULT_MODEL_SPEC_CALL_BUDGET["max_cost_usd"])
 TIMEOUT_SECONDS = int(DEFAULT_MODEL_SPEC_CALL_BUDGET["timeout_seconds"])
-REPAIR_CONTRACT_REF = "contract:company-model-spec-structured-output-repair:0.2"
+REPAIR_CONTRACT_REF = "contract:company-model-spec-structured-output-repair:0.3"
+# One repair call, which is the number every other lane in this repository
+# uses for the same bargain (``draft_contract_repair.MAX_REPAIR_ATTEMPTS``).
+DEFAULT_REPAIR_ATTEMPTS = 1
 REPAIR_CONTRACT = {
     "ref": REPAIR_CONTRACT_REF,
     # ``structure`` joins the two envelope codes in 0.2.  The deterministic
@@ -219,10 +222,28 @@ def validate_model_spec_request_identity(value: Mapping[str, Any]) -> dict[str, 
 def structured_output_repair_config(
     model_config: Mapping[str, Any] | None,
 ) -> dict[str, int]:
+    """How many repair calls this installation allows, and by default one.
+
+    It used to be zero, and zero is why the repair never ran.  The mechanism
+    below has been able to hand a structural refusal back to the model since
+    2026-09, and every installation's model configuration simply omits the key
+    -- there is no deploy artefact in this repository that sets it -- so the
+    model-specification lane held durably on
+    ``financial_statement_structure is invalid: sum formula roles do not match
+    its company statement output`` without ever asking the model to fix the
+    wiring rule it had just been told about.  A capability that is off
+    everywhere is not a capability.
+
+    So the default is the house number for a repair: one.  ``{"max_attempts":
+    0}`` written out in a configuration still disables it, which is the knob an
+    operator who wants the old behaviour turns.
+    """
+
     if model_config is None:
-        return {"max_attempts": 0}
+        return {"max_attempts": DEFAULT_REPAIR_ATTEMPTS}
     value = model_config.get("structured_output_repair")
-    return {"max_attempts": 0} if value is None else dict(value)
+    return ({"max_attempts": DEFAULT_REPAIR_ATTEMPTS} if value is None
+            else dict(value))
 
 
 def validate_structured_output_repair_binding(
@@ -310,9 +331,23 @@ def _repair_prompt(original_text: str, error: CompanyModelSpecError) -> str:
             "else. If that cannot be done without a semantic change, return the original "
             "content unchanged.\n\n"
         )
+    # The findings block is the shared one: the dossier lane, the gate and this
+    # lane hand a model the same numbered list under the same label, so a
+    # reader comparing three repair prompts is comparing three prompts rather
+    # than three renderers.  The machine-readable ``VALIDATION_ERROR`` object
+    # stays beside it -- it is what the repair *binding* is content-addressed
+    # on, and what an auditor replays.
+    from .draft_contract_repair import (
+        FINDINGS_LIST_LABEL, Violation, findings_block)
+
+    listed = findings_block(
+        [Violation("financial_statement_structure" if error.code == "structure"
+                   else "(reply)", error.code, str(error))],
+        label=FINDINGS_LIST_LABEL)
     return (
         head +
         f"REPAIR_CONTRACT:\n{canonical_json(REPAIR_CONTRACT)}\n\n"
+        f"{listed}\n\n"
         f"VALIDATION_ERROR:\n{canonical_json({'code': error.code, 'message': str(error)})}\n\n"
         f"OUTPUT_SCHEMA:\n{json.dumps(OUTPUT_SCHEMA, ensure_ascii=False, sort_keys=True)}\n\n"
         f"ORIGINAL_MODEL_OUTPUT:\n{original_text}\n"

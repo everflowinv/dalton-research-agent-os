@@ -4,7 +4,8 @@ The planner/research-task producer writes the immutable admission.  This lane
 only selects an unstarted admission and launches its admission-ref-only child.
 An orphaned or failed child is re-entered only from persisted Scheduler and
 typed recovery authority.  Timed safe recovery does not block later independent
-admissions; unproved send state remains held.
+admissions; an unproved send state buys the executor's one bounded automatic
+retry and only escalates to a person when that retry fails as well.
 """
 
 from __future__ import annotations
@@ -33,6 +34,10 @@ HOLDS_FILE = "holds.json"
 # in ``holds.json``: the hold ledger's shape is closed and content-sealed, and
 # an installed writer must be able to read the file it already has.
 ESCAPES_FILE = "recovery-escapes.json"
+# The hold reason for a controlled re-entry that failed again *after* the lane
+# had already rebound this admission onto a new ticket identity by itself.
+# Automatic once, then a person -- the same rule the two retry doors follow.
+REENTRY_ESCALATED_REASON = "reentry_failed_after_automatic_rebind"
 
 # How long every admission may be held, with none startable, before the lane
 # reopens the oldest one that provably never sent anything.  Live on
@@ -43,16 +48,51 @@ DEADLOCK_ESCAPE_AFTER = timedelta(hours=6)
 # attempt is worth making; a third is a loop.
 MAX_ESCAPES_PER_ADMISSION = 2
 # The exact words the owner needs, for the admissions no automation may touch.
+# Since the bounded unproved-send retry exists, this is no longer the sentence
+# for "送达状态不明" -- that class is now retried once by the lane itself, and
+# only reaches a person through the escalation note below.  What is left here
+# is everything neither automatic door covers: a started admission whose hold
+# reason is not a model-recovery reason at all.
 OWNER_AUTHORIZATION_NOTE = (
-    "这条已经发起过模型调用、但调用是否真的送达/计费无法证明，因此系统不会自动重开。"
-    "（只有「已经证明送达并结算、仅仅是回复不符合输出契约」那一种失败，系统才会自动"
-    "重试一次；这一条不是那一种。）"
+    "这条 admission 已经启动过，但它停住的原因不属于系统可以自动重试的那两类，"
+    "因此不会自动重开。"
+    "（系统会自动重试一次的只有两种：一是「已经证明送达并结算、仅仅是回复不符合输出"
+    "契约」，二是「送达/计费状态无法证明」；这一条都不是。）"
     "需要 owner 授权一次受控恢复："
     "MissionDocumentResearchExecutor.authorize_paid_contract_recovery("
     "admission_ref, authorization)，其中 authorization 的 actor_ref 必须是 "
     "\"operator:owner-authorized-document-recovery\"、stage_ordinal 为 2 或 3、"
     "max_fresh_work_orders 为 1、max_cost_usd 等于该 WorkOrder 自己的 budget.max_cost_usd。"
     "目前没有任何 CLI 或 writer 操作可以下发这条授权，只能由 owner 运行脚本。"
+)
+# The words for the unproved send that the lane has already retried once by
+# itself.  The ask must say the retry happened, and must say the worst case:
+# the earlier call may also have been charged.
+UNPROVED_SEND_ESCALATION_NOTE = (
+    "这条的模型调用是否真的送达/计费无法证明；系统已经按上限自动重试过一次"
+    "（同一个 WorkOrder 的 budget.max_cost_usd 上限、只放一条新 WorkOrder、"
+    "授权记录的 actor_ref 是 \"automation:document-research-unproved-send-retry\"），"
+    "重试出来的这一次仍然失败，所以才升级给人。"
+    "最坏情况：先前那次无法证明的调用其实已经送达并计费，加上这次自动重试，"
+    "这个阶段最多已经花掉两次调用——所以系统不会再自动买第三次。"
+    "先看模型/线路为什么连续两次都拿不回可用结果；确认值得再买一次时，"
+    "由 owner 授权最后一次受控恢复："
+    "MissionDocumentResearchExecutor.authorize_unproved_send_recovery("
+    "admission_ref, authorization)，其中 authorization 的 actor_ref 必须是 "
+    "\"operator:owner-authorized-document-recovery\"、stage_ordinal 为 2 或 3、"
+    "max_fresh_work_orders 为 1、max_cost_usd 等于那条失败 WorkOrder 自己的 "
+    "budget.max_cost_usd（注意此时失败的是自动重试放出来的那条 WorkOrder）。"
+    "（如果那条重试失败的原因是「已证明送达并结算、只是回复不合契约」，"
+    "则改用 authorize_paid_contract_recovery，车道给出的原因里会写明是哪一种。）"
+)
+# The words for a controlled re-entry that failed again after the lane already
+# rebound the admission onto a new ticket identity by itself.
+REENTRY_ESCALATION_NOTE = (
+    "这条 admission 的子进程票据身份变过（通常是发布或配置换了），系统已经自动把它"
+    "改绑到新票据并重新进入过一次，但重新进入又失败了，所以才升级给人。"
+    "先看车道原因里那条 LaneChildRejected 原文说的是什么（配置文件缺失、"
+    "工作区绑定不对、票据被占用等），修好之后这条会自己继续。"
+    "确实需要人重开时，才用 owner 的受控恢复授权。"
 )
 # The words for the one contract failure that has already been retried once by
 # the lane itself.  This is the only contract state a person is asked about,
@@ -240,12 +280,19 @@ class MissionDocumentResearchCoordinator:
         ``fresh_work_recovery_disabled``, ``send_state_unproved``,
         ``started_without_owned_live_ticket`` -- were written to a file nothing
         else in the system reads.  A lane that only a person can unblock has to
-        say what the person is being asked to do.
+        say what the person is being asked to do -- and, when the lane has
+        already tried something itself, what that was.
         """
 
         from .mission_document_research_executor import (
             CONTRACT_FAILED_AFTER_AUTOMATIC_RETRY,
+            UNPROVED_SEND_FAILED_AFTER_AUTOMATIC_RETRY,
         )
+
+        escalation_notes = {
+            CONTRACT_FAILED_AFTER_AUTOMATIC_RETRY: CONTRACT_ESCALATION_NOTE,
+            UNPROVED_SEND_FAILED_AFTER_AUTOMATIC_RETRY: UNPROVED_SEND_ESCALATION_NOTE,
+        }
 
         order = {admission["id"]: index for index, admission in enumerate(admissions)}
         detail = []
@@ -267,9 +314,10 @@ class MissionDocumentResearchCoordinator:
                 "started": started,
                 "needs_owner_authorization": needs_owner,
                 "owner_action": (
-                    (CONTRACT_ESCALATION_NOTE
-                     if held["reason"] == CONTRACT_FAILED_AFTER_AUTOMATIC_RETRY
-                     else OWNER_AUTHORIZATION_NOTE)
+                    (REENTRY_ESCALATION_NOTE
+                     if held["reason"].startswith(REENTRY_ESCALATED_REASON)
+                     else escalation_notes.get(
+                         held["reason"], OWNER_AUTHORIZATION_NOTE))
                     if needs_owner else None
                 ),
                 "order": order.get(admission_ref, len(order)),
@@ -750,23 +798,36 @@ class MissionDocumentResearchCoordinator:
                 "document research recovery observation has an invalid state"
             )
         recovery = selected["recovery"]
-        from .mission_document_research_executor import LEGACY_PAID_CONTRACT_REASON
+        from .mission_document_research_executor import (
+            AUTOMATIC_UNPROVED_SEND_RETRY_REASON,
+            LEGACY_PAID_CONTRACT_REASON,
+            LEGACY_UNPROVED_SEND_REASON,
+        )
 
-        if (recovery["status"] == "stopped"
-                and recovery.get("reason") == LEGACY_PAID_CONTRACT_REASON):
+        legacy_retry_available = {
             # Releases before the bounded automatic contract retry existed
             # recorded a proved paid contract rejection as permanently stopped
-            # and waited for a signature.  Such an admission has not spent its
-            # one automatic retry, so the child may re-enter: the executor
-            # revalidates the whole paid-send proof before it can enqueue
-            # anything, and then records either the retry or the daily cap.
-            # Any newer row for this same Work supersedes the legacy verdict.
+            # and waited for a signature.
+            LEGACY_PAID_CONTRACT_REASON: "automatic_contract_retry_available",
+            # And every release before the bounded unproved-send retry existed
+            # did the same for a failure whose send state nothing could prove.
+            # Twenty live holds, seventeen of them waiting on a person who was
+            # being asked the same question every tick.
+            LEGACY_UNPROVED_SEND_REASON: "automatic_unproved_send_retry_available",
+        }
+        if (recovery["status"] == "stopped"
+                and recovery.get("reason") in legacy_retry_available):
+            # Such an admission has not spent its one automatic retry, so the
+            # child may re-enter: the executor revalidates the whole failure
+            # state before it can enqueue anything, and then records either the
+            # retry or the daily cap.  Any newer row for this same Work
+            # supersedes the legacy verdict.
             newer = next((by_status[key] for key in ("waiting", "admitted")
                           if key in by_status), None)
             if newer is None:
                 return {
                     "action": "resume",
-                    "reason": "automatic_contract_retry_available",
+                    "reason": legacy_retry_available[recovery["reason"]],
                     "work_order_ref": work_ref,
                 }
             recovery = newer["recovery"]
@@ -775,7 +836,11 @@ class MissionDocumentResearchCoordinator:
             # the executor rebuilds the exact effective Work, so this also
             # repairs an interrupted link write.
             return {
-                "action": "resume", "reason": "controlled_contract_retry_admitted",
+                "action": "resume",
+                "reason": (
+                    "controlled_unproved_send_retry_admitted"
+                    if recovery.get("reason") == AUTOMATIC_UNPROVED_SEND_RETRY_REASON
+                    else "controlled_contract_retry_admitted"),
                 "work_order_ref": work_ref,
             }
         if recovery["status"] == "stopped":
@@ -1114,11 +1179,12 @@ class MissionDocumentResearchCoordinator:
         finally:
             connection.close()
 
-    def _resume(
-        self, admission: Mapping[str, Any], *, ticket_ref: str,
-        recovery: Mapping[str, Any], settled: Mapping[str, Any] | None,
-    ) -> dict[str, Any]:
-        authorization = canonical_json({
+    @staticmethod
+    def _reentry_authorization(
+        admission: Mapping[str, Any], ticket_ref: str,
+        recovery: Mapping[str, Any],
+    ) -> str:
+        return canonical_json({
             "schema_version": "0.1",
             "kind": "exact_scheduler_replay",
             "admission_ref": admission["id"],
@@ -1127,6 +1193,43 @@ class MissionDocumentResearchCoordinator:
             "work_order_ref": recovery.get("work_order_ref"),
             "reason": recovery["reason"],
         })
+
+    def _reentry_hold_reason(
+        self, admission: Mapping[str, Any], ticket_ref: str | None,
+        recovery: Mapping[str, Any], exc: Exception,
+    ) -> str:
+        """Automatic once, then a person -- the rule the retry doors follow.
+
+        A first refused re-entry is the lane's own business: the next tick may
+        well succeed, and a ticket identity that moved is repaired without
+        anyone being told.  A refusal after the lane has already spent that one
+        attempt is a different fact, and it has to reach the owner saying so.
+        """
+
+        if ticket_ref is None:
+            return "controlled_reentry_unavailable:" + str(exc)
+        try:
+            if self.launcher.status(ticket_ref).get(
+                    "rebound_from_ticket_ref") is not None:
+                return REENTRY_ESCALATED_REASON + ":" + str(exc)
+        except Exception:  # noqa: BLE001 - an unreadable ticket asks a person
+            return REENTRY_ESCALATED_REASON + ":" + str(exc)
+        try:
+            claimed = self.launcher.controlled_reentry_claimed(
+                ticket_ref,
+                self._reentry_authorization(admission, ticket_ref, recovery),
+            )
+        except Exception:  # noqa: BLE001 - no claim ledger, no escalation
+            claimed = False
+        if claimed:
+            return REENTRY_ESCALATED_REASON + ":" + str(exc)
+        return "controlled_reentry_unavailable:" + str(exc)
+
+    def _resume(
+        self, admission: Mapping[str, Any], *, ticket_ref: str,
+        recovery: Mapping[str, Any], settled: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        authorization = self._reentry_authorization(admission, ticket_ref, recovery)
         resumed = self.launcher.resume(
             admission_ref=admission["id"],
             admission_hash=admission["content_hash"],
@@ -1142,10 +1245,21 @@ class MissionDocumentResearchCoordinator:
             self.latest_path,
             {**pointer, "content_hash": content_hash(pointer)},
         )
-        return {
+        result = {
             "status": "resumed", "ticket_ref": resumed["id"],
             "admission_ref": admission["id"], "last": settled,
         }
+        rebound_from = resumed.get("rebound_from_ticket_ref")
+        if rebound_from is not None:
+            # Say it out loud in the tick the owner reads, not only in the
+            # ticket file: the run that continues this admission is not the
+            # ticket the hold named.
+            result["rebound_from_ticket_ref"] = rebound_from
+            result["reason"] = (
+                f"子进程票据身份已变（{rebound_from} → {resumed['id']}），"
+                "admission 本身没变，已自动改绑并重新进入。"
+            )
+        return result
 
     def dispatch_once(self) -> dict[str, Any]:
         if self.launcher is None:
@@ -1229,15 +1343,15 @@ class MissionDocumentResearchCoordinator:
                     except LaneChildConflict as exc:
                         return {"status": "busy", "reason": str(exc), "last": settled}
                     except LaneChildRejected as exc:
+                        reason = self._reentry_hold_reason(
+                            admission, ticket["id"], recovery, exc)
                         self._hold(
-                            holds, admission,
-                            reason="controlled_reentry_unavailable:" + str(exc),
+                            holds, admission, reason=reason,
                             ticket_ref=ticket["id"],
                             disposition="recovery_required",
                         )
                         settled["recovery"] = {
-                            "action": "recovery_required",
-                            "reason": "controlled_reentry_unavailable:" + str(exc),
+                            "action": "recovery_required", "reason": reason,
                         }
                         recovery = settled["recovery"]
                     else:
@@ -1318,7 +1432,8 @@ class MissionDocumentResearchCoordinator:
             except LaneChildRejected as exc:
                 self._hold(
                     holds, admission,
-                    reason="controlled_reentry_unavailable:" + str(exc),
+                    reason=self._reentry_hold_reason(
+                        admission, ticket_ref, recovery, exc),
                     ticket_ref=held["ticket_ref"],
                     disposition="recovery_required",
                 )
@@ -1559,6 +1674,9 @@ __all__ = [
     "ESCAPES_FILE",
     "MAX_ESCAPES_PER_ADMISSION",
     "OWNER_AUTHORIZATION_NOTE",
+    "REENTRY_ESCALATED_REASON",
+    "REENTRY_ESCALATION_NOTE",
+    "UNPROVED_SEND_ESCALATION_NOTE",
     "DRIVER_KEY", "LANE", "LANE_CONFIG", "LAUNCHER_KWARG",
     "MissionDocumentResearchCoordinator", "MissionDocumentResearchLaneError",
     "add_arguments", "argv_fragment", "build_launcher", "lane_configuration",

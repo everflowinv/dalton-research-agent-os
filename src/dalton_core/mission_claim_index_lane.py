@@ -16,10 +16,21 @@ pending claims wins the slot.  Deliberately not "the one with the most
 pending": a company that has just been discovered would otherwise sit behind
 whichever one accumulates news fastest, and the universe order is the order the
 owner wrote down.
+
+**A refusal of one batch is not a verdict on the company.**  The shared failure
+budget calls a content refusal terminal, which is right for bytes that did not
+parse and wrong for a model's reply: live on 2026-09-18 one stray character in
+one row of CTSH's tagging table refused the batch, the refusal was recorded as
+terminal, and the company stopped being indexed with nothing in the system that
+would ever clear it.  So a refusal here expires two ways -- immediately when new
+claims arrive, because that is a different batch and a different question, and
+otherwise once a day (:data:`CONTENT_REFUSAL_RETRY_SECONDS`).  Both are said out
+loud in the ledger rather than being a forgotten verdict.
 """
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from .claim_index_tagging import pending_claims
@@ -44,6 +55,36 @@ MAX_PENDING_SCANNED = 200
 TRANSIENT_STATUSES: frozenset[str] = frozenset({"busy", "model_unavailable"})
 DRIVER_KEY = "mission_claim_index"
 
+#: How long a content refusal of one batch stands before the lane asks again.
+#:
+#: The shared classifier calls a content refusal *terminal*, and for a document
+#: that did not parse it is right: the bytes will not change. A refused tagging
+#: batch is not that. The bytes are a model's reply, the next reply is a new
+#: one, and live on 2026-09-18 one stray character in one row of CTSH's batch
+#: took the company out of the index and left it out -- the refusal was recorded
+#: against the batch and nothing was ever going to clear it.
+#:
+#: So a content refusal here expires. A day is the interval because it is the
+#: cadence of the thing that would fix it anyway: a deploy, a model
+#: configuration change, or simply a different sampling of the same model. It is
+#: not five minutes, because re-asking a model that just refused costs real
+#: money for the same answer, and it is not never, which is where we were.
+CONTENT_REFUSAL_RETRY_SECONDS = 86_400
+
+
+def _moment(value: Any) -> datetime | None:
+    """One ledger timestamp as an aware datetime, or ``None`` if it is not one."""
+
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip())
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
 
 class MissionClaimIndexLaneCoordinator:
     """Launch and settle the Claim-index lane."""
@@ -55,6 +96,7 @@ class MissionClaimIndexLaneCoordinator:
         launcher: Any,
         mission: Callable[[], dict[str, Any] | None],
         failure_ledger_dir: Any | None = None,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.store = store
         self.launcher = launcher
@@ -68,6 +110,65 @@ class MissionClaimIndexLaneCoordinator:
         # this process only: a restart is nearly always a deploy, which is the
         # most likely thing to have fixed whatever it was.
         self.budget = lane_budget(DRIVER_KEY, state_dir=failure_ledger_dir)
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        # When each batch was last refused for its content, so the refusal can
+        # expire.  Seeded from the ledger, because a terminal verdict survives a
+        # restart and a clock that restarted with the process would make the
+        # expiry mean "a day since this writer started" instead.
+        self._refused_at: dict[str, datetime] = {}
+        self._seed_refusals()
+
+    # -- content refusals expire ------------------------------------------
+
+    def _seed_refusals(self) -> None:
+        """Read back when each terminal verdict was recorded, if it was."""
+
+        ledger = getattr(self.budget, "ledger", None)
+        if ledger is None:
+            return
+        try:
+            events = ledger.events(lane=self.budget.lane)
+        except Exception:  # noqa: BLE001 - an unreadable ledger is not a failure
+            return
+        for row in events:
+            if row.get("event") != "terminal":
+                continue
+            moment = _moment(row.get("recorded_at"))
+            if moment is not None:
+                self._refused_at[str(row.get("item_key") or "")] = moment
+
+    def _refusal_expired(self, held: Any, item_key: str) -> bool:
+        """Whether this terminal verdict has stood long enough to ask again.
+
+        A verdict whose time nobody recorded is dated *now* rather than assumed
+        old: the conservative direction is one more day of quiet, not one more
+        model call charged for an answer we have already been given.
+        """
+
+        if getattr(held, "action", None) != "terminal":
+            return False
+        moment = self._refused_at.get(item_key)
+        if moment is None:
+            self._refused_at[item_key] = self.clock()
+            return False
+        return self.clock() - moment >= timedelta(
+            seconds=CONTENT_REFUSAL_RETRY_SECONDS)
+
+    def _retire_superseded_refusals(self, company_ref: str, keep: str) -> None:
+        """Drop this company's refusals of batches that no longer exist.
+
+        A refusal was recorded against *that set of claims*.  New claims are a
+        different set, a different digest and a different question, so the old
+        verdict is not evidence about it -- and retiring it says so in the
+        ledger rather than leaving a terminal row nobody will ever clear.
+        """
+
+        prefix = f"{company_ref}|"
+        for row in self.budget.terminal_items():
+            item = str(row.get("item_key") or "")
+            if item.startswith(prefix) and item != keep:
+                self.budget.retire(item, reason="batch_digest_changed")
+                self._refused_at.pop(item, None)
 
     # -- settling ---------------------------------------------------------
 
@@ -126,13 +227,17 @@ class MissionClaimIndexLaneCoordinator:
         if failed and company_ref and digest:
             key = f"{company_ref}|{digest}"
             reason = settled.get("failure_reason") or f"last run: {index_status or settled.get('status')}"
-            settled["failure"] = record_controlled_failure(
+            decision = record_controlled_failure(
                 self.budget, key, self.mission() or {}, self.launcher,
                 reason=reason, control_key=settled.get("control_key"),
                 connection=authority_connection(
                     getattr(self, "store", None), getattr(self, "missions", None),
                     getattr(self, "models", None)), status=str(index_status or settled.get("status")),
-            ).as_wire()
+            )
+            if getattr(decision, "action", None) == "terminal":
+                # Dated, so it can expire. See CONTENT_REFUSAL_RETRY_SECONDS.
+                self._refused_at[key] = self.clock()
+            settled["failure"] = decision.as_wire()
         elif company_ref and digest:
             settled["resumed"] = self.budget.clear(f"{company_ref}|{digest}")
         return settled
@@ -183,7 +288,17 @@ class MissionClaimIndexLaneCoordinator:
                     getattr(self, "store", None), getattr(self, "missions", None),
                     getattr(self, "models", None)))
 
+        # New claims are a new batch and a new question: whatever was decided
+        # about this company's previous batch was decided about other claims.
+        self._retire_superseded_refusals(company_ref, business_key)
+
         held = self.budget.blocked(permission) or self.budget.blocked(business_key)
+        retried = None
+        if held is not None and self._refusal_expired(held, business_key):
+            self.budget.retire(business_key, reason="content_refusal_expired")
+            self._refused_at.pop(business_key, None)
+            retried = held.as_wire()
+            held = self.budget.blocked(permission) or self.budget.blocked(business_key)
         if held is not None:
             return {"status": "held", "company_ref": company_ref,
                     "settled": settled, "reason": held.classification.reason,
@@ -199,11 +314,16 @@ class MissionClaimIndexLaneCoordinator:
             return {"status": "rejected", "company_ref": company_ref,
                     "settled": settled, "reason": f"{type(exc).__name__}: {exc}"}
         self._open = ticket["id"]
-        return {
+        result = {
             "status": "launched", "company_ref": company_ref,
             "batch_digest": digest, "pending": len(refs),
             "ticket_ref": ticket["id"], "settled": settled,
         }
+        if retried is not None:
+            # Said out loud: this launch is a day-old refusal being asked again,
+            # not the lane forgetting that it refused.
+            result["retried_refusal"] = retried
+        return result
 
 
 # -- registration ------------------------------------------------------------
@@ -311,6 +431,7 @@ LANE = register_lane(LaneSpec(
 
 __all__ = [
     "CLAIM_INDEX_MODEL_CONFIG",
+    "CONTENT_REFUSAL_RETRY_SECONDS",
     "LANE",
     "LAUNCHER_KWARG",
     "MAX_FAILURE_DETAIL_CHARS",

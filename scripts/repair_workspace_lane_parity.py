@@ -10,7 +10,8 @@
 的工作区用的。它做三件事，缺一不可：
 
   1. 把缺的东西装进工作区状态目录（链接宿主来源、按本工作区所有者署名批准打包契约、
-     按本任务的公司范围生成检索计划）；
+     按本任务的公司范围生成检索计划、把模型凭证槽位补齐到和本机现有环境一样 ——
+     少一个槽位，走那个渠道的模型每次调用都会被拒，看起来像模型不可用）；
   2. 用 `install_workspace` 重新渲染这个工作区的 LaunchAgent —— 参数是渲染时从状态
      目录读出来的，不重渲染就等于什么都没发生；
   3. 告诉你重启 writer 的命令。它**不会**替你重启：重启要排空正在跑的通道，那是你
@@ -150,9 +151,16 @@ def build_plan(
         raise RepairError(
             "这个工作区还没有发布研究任务；按任务生成的检索计划无从谈起，"
             "先在驾驶舱里发布第一个任务再回来跑这个脚本。")
+    from dalton_core.workspace_host_scheme import resolve_source_state_dir
+
+    # The environment this one is brought up to. Named on the command line, or
+    # resolved from the host manifest this workspace is already bound to --
+    # without it the credential slot lists cannot be compared to anything.
+    source = resolve_source_state_dir(
+        workspace.state_dir, source_state_dir=source_state_dir)
     actions = plan_parity_actions(
         workspace.state_dir, actor_ref=actor_ref, host_sources=host_sources,
-        mission=mission, lanes=lanes,
+        mission=mission, lanes=lanes, source_state_dir=source,
     )
     identity = _sec_identity(workspace)
     resolve_name = sec_name_resolver(workspace.state_dir, identity) if resolve_names else None
@@ -163,9 +171,11 @@ def build_plan(
             [item for item in mission.get("universe") or []
              if str(item.get("ticker") or "").strip().upper() in set(unnamed)],
             resolve=resolve_name))
-    before = audit_lanes(workspace.state_dir, host_sources=host_sources)
+    before = audit_lanes(workspace.state_dir, host_sources=host_sources,
+                         source_state_dir=source)
     return {
         "workspace_id": workspace.workspace_id,
+        "source_state_dir": None if source is None else str(source),
         "slug": workspace.slug,
         "state_dir": str(workspace.state_dir),
         "manifest_path": str(workspace.manifest_path),
@@ -199,7 +209,8 @@ def render_plan(plan: dict[str, Any]) -> str:
         for action in plan["actions"]:
             verb = {"link": "链接", "governance": "批准并写入",
                     "mission_plan": "按任务生成", "seed": "写入默认值",
-                    "routing_policy": "补登记策略血统"}[action["kind"]]
+                    "routing_policy": "补登记策略血统",
+                    "credential_slots": "补齐模型凭证槽位"}[action["kind"]]
             lines.append(f"  [{verb}] {action['target']}")
             if action["kind"] == "link":
                 lines.append(f"      来源：{action['detail']}")
@@ -207,6 +218,11 @@ def render_plan(plan: dict[str, Any]) -> str:
                 lines.append(f"      内容：{action['detail']}")
             lines.append(f"      原因：{action['reason']}")
     lines += ["", "然后会重新渲染这个工作区的 LaunchAgent（writer/controller/control）。"]
+    if plan["source_state_dir"]:
+        lines.append(f"比对的现有环境：{plan['source_state_dir']}")
+    else:
+        lines.append("没有找到可以比对的现有环境，凭证槽位这一项本次不会检查"
+                     "（可用 --source-state-dir 指定）。")
     if plan["company_names"]:
         lines.append("已查到的公司名称（会写进资料通道检索计划）：" + "、".join(
             f"{ticker}={'/'.join(names)}" for ticker, names in plan["company_names"].items()))
@@ -228,7 +244,7 @@ def apply_plan(plan: dict[str, Any]) -> dict[str, Any]:
         plan["_actions"], actor_ref=plan["actor_ref"], mission=plan["_mission"],
         company_names=plan["company_names"])
     installed = install_workspace(plan["manifest_path"], plan["launch_agents_dir"])
-    after = audit_lanes(plan["state_dir"])
+    after = audit_lanes(plan["state_dir"], source_state_dir=plan["source_state_dir"])
     return {
         "status": "applied",
         "performed": performed,

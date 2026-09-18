@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -50,6 +49,7 @@ from dalton_core.shared_daily_budget import (  # noqa: E402
     load_shared_daily_budget_binding,
     load_shared_daily_budget_policy,
     policy_wire,
+    write_owner_only,
 )
 
 DEFAULT_MANAGER_CONFIG = "~/.dalton/manager.json"
@@ -61,20 +61,6 @@ DEFAULT_ACTOR = "human:lumos"
 DEFAULT_MAX_DAILY_COST_USD = 500.0
 DEFAULT_MAX_DAILY_PAID_CALLS = 100000
 DEFAULT_MAX_ALPHAENGINE_CALLS_24H = 130
-
-
-def _write_owner_only(path: Path, value: Mapping[str, Any]) -> None:
-    """Atomic, owner-only, and never a symlink follow."""
-
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    temporary = path.with_name(f".{path.name}.partial")
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-        handle.write(json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2) + "\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(temporary, path)
-    os.chmod(path, 0o600)
 
 
 def plan_policy(
@@ -166,12 +152,12 @@ def apply_plan(policy_path: Path, policy_plan: Mapping[str, Any],
 
     written: list[str] = []
     if policy_plan["status"] != "unchanged":
-        _write_owner_only(policy_path, policy_plan["policy"])
+        write_owner_only(policy_path, policy_plan["policy"])
         written.append(str(policy_path))
     for row in bindings:
         if row["status"] == "unchanged":
             continue
-        _write_owner_only(Path(row["binding_path"]), row["binding"])
+        write_owner_only(Path(row["binding_path"]), row["binding"])
         written.append(row["binding_path"])
     return {"written": written, "count": len(written)}
 

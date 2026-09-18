@@ -11,8 +11,10 @@ One run does four things and stops:
    as_of from its period, dedupe key from subject/measure/period/unit, and the
    aspect too where the aspect follows from the subject or the measure;
 3. ask the model for the aspect of the qualitative claims that are left, in one
-   batched call, and verify the reply against the rows it was shown -- a reply
-   that goes outside them refuses the whole batch;
+   batched call, and read the reply against the rows it was shown: a row whose
+   aspect can be read is filed, a row that cannot be read is skipped and
+   reported, and a reply that is mostly unreadable buys one repair call before
+   the batch is refused;
 4. record the entries.
 
 Exit 0 when the run completed, including when it decided nothing needed doing.
@@ -51,11 +53,12 @@ from .claim_index_tagging import (
     TIMEOUT_SECONDS,
     ClaimIndexTaggingError,
     ProvenanceResolver,
-    aspects_from_response,
     build_batch,
     build_prompt,
+    parse_tagging_reply,
     pending_claims,
     prompt_tagger,
+    repair_tagging_reply,
     rule_tags,
 )
 from .cockpit_model import CockpitModel, CockpitModelError, lane_status_for
@@ -172,6 +175,14 @@ def run_claim_index(
         "recanonicalised": 0,
         "replayed": False,
         "cost_micros": 0,
+        # What the reply had to be read *through*, and what was skipped for
+        # being unreadable. Both carry the raw text: "one row normalised" is a
+        # statistic, and "the model wrote 'm management_and_capital_allocation'"
+        # is something somebody can act on.
+        "normalised_aspects": [],
+        "unparsed_rows": [],
+        "skipped_rows": 0,
+        "repair": None,
         "failure_reason": None,
         "formal_authority_writes": 0,
     }
@@ -275,14 +286,57 @@ def run_claim_index(
         summary["replayed"] = bool(call.get("replayed"))
         summary["cost_micros"] = int(call.get("cost_micros") or 0)
         try:
-            assigned = aspects_from_response(batch, call["text"])
-        except ClaimIndexTaggingError as exc:
-            # Refused whole.  A batch with the invented rows removed is not the
-            # answer the model gave, and the rows it happened to get right came
-            # out of the same reply.
+            reply = parse_tagging_reply(batch, call["text"])
+        except ClaimIndexTaggingError as exc:  # pragma: no cover - empty batch
             summary.update({"status": "succeeded", "index_status": "refused",
                             "failure_reason": f"{type(exc).__name__}: {exc}"})
             return summary
+        if reply.needs_repair():
+            # Too much of the batch came back unreadable for this to be a typo.
+            # One repair call, on the same model out of the same run, with the
+            # violations enumerated -- and then the answer is read again by the
+            # same code. This is the bargain the dossier and deep-insight lanes
+            # already strike; before it, one stray character refused a company.
+            def repair_call(*, prompt: str, request_id: str) -> Any:
+                return model.call(purpose=PURPOSE, request_id=request_id,
+                                  prompt=prompt, mission=mission)
+
+            try:
+                repair = repair_tagging_reply(
+                    batch=batch, prompt=prompt, text=call["text"], reply=reply,
+                    call=repair_call,
+                    request_id=prompt_tagger("", prompt)[1][:32],
+                )
+            except SchedulerError as exc:
+                # The repair could not be made *now*. That is true of a moment
+                # and not of this batch, so it is reported as one: the next
+                # tick asks again rather than the batch being refused for it.
+                summary.update({"status": "succeeded", "index_status": "busy",
+                                "failure_reason": f"{type(exc).__name__}: {exc}"})
+                return summary
+            except CockpitModelError as exc:
+                summary.update({
+                    "status": "succeeded",
+                    "index_status": lane_status_for(exc, "model_unavailable"),
+                    "failure_reason": f"{type(exc).__name__}: {exc}"})
+                return summary
+            summary["cost_micros"] += int(repair["cost_micros"] or 0)
+            summary["repair"] = {
+                key: value for key, value in repair.items() if key != "reply"
+            }
+            if repair["status"] != "repaired":
+                # Refused whole, and only here.  A batch with the invented rows
+                # removed is not the answer the model gave, and the rows it
+                # happened to get right came out of the same reply.
+                summary.update({"status": "succeeded", "index_status": "refused",
+                                "failure_reason": repair["reason"]})
+                return summary
+            reply = repair["reply"]
+        report = reply.report()
+        summary["normalised_aspects"] = report["normalised_aspects"]
+        summary["unparsed_rows"] = report["unparsed_rows"]
+        summary["skipped_rows"] = report["skipped"]
+        assigned = reply.by_claim(batch)
         tagger_ref, tagger_hash = prompt_tagger(call["work_order_ref"], prompt)
         by_ref = {row["claim_version_ref"]: row for row in open_rows}
         tagged = []
@@ -300,7 +354,15 @@ def run_claim_index(
         summary["fresh"] += counts["fresh"]
         summary["duplicate"] += counts["duplicate"]
         summary["recanonicalised"] += counts["recanonicalised"]
-        summary.update({"status": "succeeded", "index_status": "tagged"})
+        # ``tagged_partial`` is a success and is meant to be: the rows that were
+        # read are filed, and the rows that were not are still pending, so the
+        # next batch asks about them again. A word of its own because "we filed
+        # thirty-nine of forty" is a different fact from "we filed forty", and a
+        # lane that reported both as ``tagged`` is one nobody can audit.
+        summary.update({
+            "status": "succeeded",
+            "index_status": "tagged" if reply.clean else "tagged_partial",
+        })
         return summary
     except Exception as exc:  # unexpected: record for the parent, then surface
         summary["failure_reason"] = f"unexpected {type(exc).__name__}: {exc}"

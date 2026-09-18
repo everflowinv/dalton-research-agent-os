@@ -6,6 +6,13 @@ release, the same approvals -- so where did the other ten lanes go?*  Before
 this the answer lived in a tick summary that said ``held`` and a plist nobody
 reads.
 
+Three more rows come after the lanes, and they answer the money-and-models half
+of the same question: is this environment inside the machine's shared daily
+budget, is its model routing the machine's, and does it list the machine's
+broker credential slots.  A new environment gets all three at creation; these
+rows are how an owner checks an old one, and each names the command that fixes
+it.
+
 It writes nothing and opens nothing: the mission is read through a read-only
 database connection and the writer's own plist is parsed rather than
 re-rendered, so this is safe to run against a live workspace while its writer
@@ -69,7 +76,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                         help="工作区根目录，默认 ~/.dalton/workspaces")
     parser.add_argument("--launch-agents-dir", type=Path, default=None)
     parser.add_argument("--source-state-dir", type=Path, default=None,
-                        help="另一个本机环境的状态目录；用它来定位宿主级来源")
+                        help="另一个本机环境的状态目录；用它来定位宿主级来源，"
+                             "也用它来比对模型路由和凭证槽位")
+    parser.add_argument("--manager-config", type=Path, default=None,
+                        help="本机研究环境清单；默认从这个环境自己的绑定文件或 "
+                             "service.json 里读出来")
     parser.add_argument("--json", action="store_true", help="输出机器可读的结果")
     args = parser.parse_args(argv)
 
@@ -84,6 +95,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         state,
         host_sources=resolve_host_sources(source_state_dir=args.source_state_dir),
         plist_path=plist if plist is not None and plist.is_file() else None,
+        manager_config_path=args.manager_config,
+        source_state_dir=args.source_state_dir,
     )
     if args.json:
         json.dump(report, sys.stdout, ensure_ascii=False, sort_keys=True, indent=2)

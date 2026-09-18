@@ -1,5 +1,89 @@
 # Dalton 项目进度
 
+## 2026-09-18 21:40 UTC：档案与辩论图两条车道每轮不再重算五家公司的指纹；写入进程每轮回收所有僵尸子进程（源码，待部署）
+
+线上每一轮 `dispatch_company_dossier` 与 `dispatch_debate_map` 都是 `busy ... over_budget_seconds 8–12`，writer 日志最近 300 行里有 12 + 7 次 30 秒超时。在只读挂上线上 Core（13,816 条 Claim）实测，两条车道每轮**在写入进程那一根 store 线程上**花的时间是：
+
+| | 改前 | 改后（无变化的一轮） | 改后（一家公司确实动了） | 改后（五个主体同时动，实测最坏） |
+|---|---|---|---|---|
+| 档案车道 | **9.68 s**（快照 0.83 s + 5 家 × 1.34–2.65 s） | **0.05–0.08 s** | **1.64 s** | 3.07 s |
+| 辩论图车道 | **8.00 s**（6 个主体各自读一次全账本） | **0.05–0.07 s** | **1.28 s** | 1.98 s |
+
+三处改动，都不改变两条车道**决定什么**（同一批公司签名逐字节相同，已对线上五家逐一核对）：
+
+1. **便宜的变更键当门闩**（新 `lane_change_key.py`）。一轮一次分组聚合（每家公司的 Claim 条数与最新一条、索引条目、已归档决定、证据关系、报表行、文档数字、预测与档案链头）得出每家公司一个 key，**只有 key 变了才重算完整指纹**。key 只会「多变」不会「少变」，所以不会把哪家公司冻住。键既在协调器内存里，也落盘在车道状态目录（`company-dossier-lane-change-keys.json` / `debate-map-lane-change-keys.json`）——否则每次部署后的第一轮又会一次性重算五家。
+2. **指纹自身的重复读消掉**。`dossier_company_source_fingerprint` 按十个 aspect 各问一次索引，每次都把同一批约 4,172 条索引条目重新解码、重新校验、重新哈希——单家公司 5.0 s 里有 4.3 s 花在这里。索引现在随 `CompanyClaimQueryContext` 读一次、十个 aspect 共用（单家 5.0 s → 1.0 s）。辩论图那边六个主体各自取一次全账本快照，现在一轮共用一次（8.0 s 里的 5 s）。
+3. **`<defunct>` 子进程**。`LaneChildLauncher.reap()` 写好了但**没有任何地方调用**：子进程句柄只在 `spawn` 抢槽位时、以及协调器对自己那一张票据调 `status` 时被 poll 到。于是「车道被 hold 住 / 没配置 / 空闲 / 协调器手上没有票据」的 launcher 永远不回收——线上三个 writer 下挂着 13 个僵尸（legacy writer 4 个），已挂数小时。现在 `writer_server._run_lane` 每跑完一条车道（包括抛异常的）就 `reap_lane_children()`：**遍历所有 launcher**，与这一轮跑的是哪条车道无关；一条 launcher 卡住不影响其它。
+
+另外测了 `launcher.start`（档案车道同步起子进程）：**1.4–1.9 ms**，可以忽略，不动。
+
+**还没做的**：B1-2 读副本（`_read_replica`）异步算指纹。按上面的数字，现在最坏一轮也已在 2 s 附近，真正的下限是那一次全账本快照（13.8k 条 0.83 s，按 50k 条线性外推约 3 s）——所以 Claim 到五万量级、且同一轮有多个主体同时动时，仍需要把指纹挪到副本线程上异步算（代价是慢一轮出手）。这一步没做，留在下一个切片。
+
+**测试**：新增 `tests/test_lane_change_key_gate.py`（key 不变→不调用昂贵指纹；key 变→重算；重启→读盘上的 key；key 读不出来→照旧全算而不是拒绝；一家动不牵连其它；按轮计数的性能用例：一轮一次快照、一家公司一次索引读）与 `tests/test_writer_lane_child_reaping.py`（别的车道跑一轮就回收安静 launcher 的子进程、车道抛异常照样回收、按名字接的 launcher 也回收、坏 launcher 不拖累其它、还在跑的不动它）。全量测试通过。
+
+
+## 2026-09-18 18:30 UTC：复核意见能退回给写它的模型改一次；改完还不过就按公司冷却 6 小时（源码，待部署）
+
+线上 `company-dossier-runs/` 里 Accenture（`company:sec-cik:0001467373`）有 **50 份 `verification_failed`**，最新一份 `d4a6ab2cfacbdde1e11ee2fc`（09-18T05:13Z），每一份的意见都是同一句：`{"unit": "demand_drivers", "code": "unsupported_sentence", "detail": "The statement claiming that consulting work is increasingly incorporated into large managed services projects is not supported by the cited evidence for that point."}`。这 50 份的 `contract_repair` 全是 `{"status": "ok", "repair_attempts": 0}`——车道**唯一一处**「坏了就改一次」只认输出**形状**坏掉，而这里形状从来没坏过，所以复核模型写下的那句话没有任何去处。车道自 09-17 04:17Z 起大约每 5 分钟重启一次，每次 4 次以上付费调用，什么都没发布。挡不住它的原因是：`content_refused` 记在**运行签名**上，而签名是公司证据的摘要，定量 Claim 晋升车道每轮进来约两百条新 Claim，于是每一轮都是一把没见过的新钥匙，锁永远对不上。Cognizant（`0001058290`）27 份 `constitution_refused` 同理：`d86211b5a03b5b83f768e4be` 里三条 `investment_conclusion` 全指向**本轮刚起草**的 `history_of_price_drivers`，而那一节从没被告知是哪几个词。Deep Insight Gate 的 DXC（`001688568`）退回路径 23 份 `constitution_refused`，owner 只看到「涉及：q10」。
+
+三处改法是**同一处**：`draft_contract_repair.repair_with_findings`（原提示 + 它自己的回复 + 发现者的原话 + 契约提要 → 一次调用 → 重新校验），三条车道共用，提示里的编号清单也共用一个渲染器（`findings_block`）。
+
+1. **档案车道**：复核不通过时，按被点名的**每个本轮起草的单元**各买一次修复调用，然后**重新复核一次**——签字的必须就是要发布的那份正文，所以不是改完直接发。输出准则（宪法 `output_rubric`）被拒同理。摘要新增 `findings_repair`（每次调用一行：kind、status、repair_attempts、cost_micros、findings）与 `findings_repair_rounds`；一轮就是一轮（`MAX_FINDINGS_REPAIR_ROUNDS = 1`），修复的开销受本轮成本上限约束，放不下就不发、把数字写在 reason 里。正式出处链（`unit_provenance`）新增可选的 `producer_repair_findings`：父调用的回复本身是合规的，推不出违规清单，所以把发现者的原话记进记录，其余照旧**重建而非采信**（回复按父调用的输出重新渲染、提示逐字节重建、修复调用的 request id 就是按这些发现内容寻址的）。
+2. **按公司的冷却**：内容类拒绝（`verification_failed` / `rubric_refused` / `constitution_refused` / `not_independent` / `no_new_evidence`）之后，这家公司冷却 `CONTENT_REFUSAL_COOLDOWN_SECONDS = 6 小时`（模块常量；档案 policy 是封闭结构、没有这个字段，加了字段就从 policy 传进构造函数）。**冷却期内新证据不会重启也不会解除它**——正是「证据一直在动」让旧的 hold 失效的。发布成功、或者起草/复核契约指纹变了（一次评审过的部署）会立刻解除：冷却不是停职。每轮 tick 的结果里有 `cooling_down`，同时照旧进 `held`。
+3. **Deep Insight Gate 退回路径**：`output_rubric` 被拒时，按 findings 点到的**组**各买一次修复调用再重新复核；改动 q1 分类的修复照旧拒绝。摘要同样新增 `findings_repair` / `findings_repair_rounds`。这条车道**也加同一套按公司冷却**（`mission_deep_insight_lane`，同样 6 小时、同样的解除条件）：tick 账本里它 09-10→09-18 跑了 2,147 轮，Accenture 起了 **103 次子进程、49 个不同签名**，DXC **51 次 / 21 个签名**，Cognizant 51 次 / 26 个签名——冷却之后分别是 15、15、11 次。触发冷却的状态比这条车道原有的 `CONTENT_TERMINAL_STATUSES` 多两个（`constitution_refused`、`unresolvable_refs`）：它们原本走"安静"分支，对**不变的**签名是对的，对一直在变的签名没有用，而 DXC 那 23 次正是 `constitution_refused`。
+4. **公司模型规格车道**：机制本来就有，但 `structured_output_repair.max_attempts` 的默认值是 **0**，而本仓库没有任何部署产物设过这个键——也就是说这项能力在所有环境里都是关的，于是 `financial_statement_structure is invalid: sum formula roles do not match its company statement output` 一直硬 hold。默认值改成 1（`DEFAULT_REPAIR_ATTEMPTS`，写 `{"max_attempts": 0}` 仍可关掉）；另外把 `EPS numerator must use the company-specific diluted EPS numerator role` 补进可修复的接线规则清单（`REPAIRABLE_STRUCTURE_RULES` 0.2）——分母那一半本来就可修复，分子这一半却是整份拒绝，是同一个选择。
+
+**测试**：三条车道各有「首答被拒 → 修一次 → 发布/提交」与「修完还是不过 → 只拒一次、不买第二次」的用例；两条车道的冷却用例都走真实账本，连续三轮换掉证据签名仍然不启动子进程，到点自动恢复，契约指纹变化立刻解除，冷却期内第二次拒绝不会把时间往后推；正式出处链的 findings 修复有端到端 replay 用例（改一个字的 findings 就对不上 request id）。全量测试通过。
+
+## 2026-09-18 15:05 UTC：送达状态不明的研究 admission 也自动重试一次；票据改名不再等人（源码，待部署）
+
+9-17 那条「契约失败自动重试一次」只覆盖了**已证明送达并结算**的那一类。线上 hold 账本今天是 20 条：10 条 `controlled_reentry_unavailable:...changed ticket identity`、7 条 `send_state_unproved`、3 条 `terminal_hold`，其中 17 条挂在 owner 名下——而 `send_state_unproved` 这一类**连一扇能用的门都没有**：文档里让 owner 跑的 `authorize_paid_contract_recovery` 需要一份「已计费」的证明，这类失败恰恰给不出，所以它们只会一直等下去。owner 的要求是：传输类失败自动重试一次，重试再失败才找人。现在按契约重试同一套纪律补上第三扇门：
+
+1. **自动一次**（`automation_bounded_unproved_send_retry`）：每个（admission，阶段）最多一条新 WorkOrder，上限就是那条失败 WorkOrder 自己的 `budget.max_cost_usd`，写自己的封闭授权行（`mission_document_research_controlled_recovery_authorizations`，actor 是 `automation:document-research-unproved-send-retry`），并绑定一份**可重新推导**的「不明状态记录」（失败 formal、envelope、错误码、model invocation 列表、账本结算），这样这条授权永远 replay 不到另一次失败上。
+2. **最坏情况写在明面上**：recovery observation 的 `meaning` 直接写「先前那次无法证明的调用可能其实已经送达并计费，所以这一阶段最多就是多花一次调用」。
+3. **单独的日上限** `max_automatic_unproved_send_retries_per_day`（默认 5，与契约重试的 20 分开计数）：契约重试买的那一次前面有一笔已证明的账、代价是确定的；这一类可能**重复计费**，而且所有分不了类的失败都会落到这里，一个系统性 bug 会一次把整条车道推进来，所以它不该还能吃掉契约那扇门的额度。到上限不是找人，是记 `waiting` 并等 UTC 换天。
+4. **重试再失败才升级**：新原因 `unproved_send_failed_after_automatic_retry`，进 owner 列表的文字会写明「已经自动重试过一次、最坏情况已花两次调用」；并且新增真正能用的 owner 门 `authorize_unproved_send_recovery`（形状与 `authorize_paid_contract_recovery` 一致）——升级之后必须有地方可去。
+5. **旧 hold 照常接上**：`send_state_unproved` 现在是「旧版才会写的原因」，车道下一轮就把它当成「这一次自动重试还没花过」重新进入（executor 会把整套失败状态重新校验一遍才可能入队）。
+
+**票据改名那 10 条**：子进程票据 id 是 admission + launcher 配置的摘要，所以一次发布挪了配置文件就把每条 hold 的票据改了名，`resume` 判为「changed ticket identity」永久拒绝——admission 一点没变，变的只是那次运行的名字。现在 admission 的 id 与 content hash 不变就**自动改绑**到新票据继续（一次性的受控重入凭据仍然记在旧票据目录里，所以自动只发生一次），admission hash 变了才照旧拒绝；改绑写进新票据记录和本轮 tick 结果。改绑之后再失败，报 `reentry_failed_after_automatic_rebind`，进 owner 列表并说明已经自动改绑过。
+
+**年报车道同样处理**：`mission_annual_research_launcher.resume` / `mission_annual_research_lane` 里是同一段「changed ticket identity 就永久拒绝」的代码，改法一模一样（admission 不变就改绑一次、记 `rebound_from_ticket_ref`、改绑后再失败才记 `reentry_failed_after_automatic_rebind`）。这条车道找子进程只靠 `latest.json` 这一个指针、而且恢复成功后本来不重写它，所以改绑时必须把指针一起挪到新票据，否则下一轮又会回到刚被替换掉的那张票据——这一点单独写了测试。
+
+**部署后这 20 条会怎样**：7 条 `send_state_unproved` 下一轮开始自动重试，当天最多 5 条、余下 2 条次日；10 条票据改名的下一轮自动改绑重入；3 条 `terminal_hold` 不在这次改动范围内。测试覆盖：首次失败→按上限重试一次→成功继续、重试失败→升级且不再买第二次、日上限与换天、旧 hold 接上、升级态上的 owner 门、票据改名改绑（admission 变了仍拒绝）。全量测试通过。
+
+## 2026-09-18 11:20 UTC：新建的研究环境自动继承本机的三项统一设定（源码，待部署）
+
+9-17 那两条命令（`bind_shared_daily_budget.py --apply`、`align_model_routing.py --apply`）是给**已经建好**的环境补的；此后每新建一个环境，同样的三件事又要再做一遍，漏一件就是一个看起来正常、实际不对的环境。现在这三件事在**创建时**就做完，全部离线、在新环境的 writer 起来之前，用的还是那两个脚本用的同一份代码：
+
+1. **共享每日预算的绑定**（`workspace_runtime_setup.install` 调 `shared_daily_budget.install_binding`）：主机策略文件在，就把绑定写进新环境的状态目录，它从第一次调用起就受全机器日上限约束；主机上没有这份策略，就在 `research-foundation.json` 里记成 `skipped` 并写清补救命令——不是错误，是这台机器还没启用共用上限。
+2. **模型路由按现有环境起步**（新 `workspace_host_scheme.py`，在服务模板装好之后、启动之前跑）：只读地读 legacy 环境每条策略谱系都认的档位链与逐环节钉定（`model_routing_sync.agreed_selections`，和对齐脚本同一个读法），再用 writer 保存模型时的同一个操作（`set_tier_selection` / `set_model_selection`）在新环境自己的谱系里**发布**出来——所以新环境的第一批路由版本是正常的、可读的、可回滚的版本，而不是有人插进去的行。源环境的链里点到的模型档案，新环境的目录里没有的（模板只带它自己车道链上的那些），连同整条版本谱系一起补登记。读不到源环境就退回打包默认值，并把原因写进创建回执。
+3. **模型凭证槽位**：新环境的 21 份车道配置和 `service.json` 各段里的 `credential_slot_refs` 按源环境补齐（只加不减）。线上证据：Hyperscaler 环境的 `service.json` 只列 5 个槽位、legacy 有 7 个，于是对齐后的交付物链（`claude-opus-5 → gemini-3-8-flash-antigravity-high → deepseek-v4-flash`）每一环都被判 `credential_slot_unavailable`，车道报 `MODEL_CHAIN_EXHAUSTED`、花费为 0，看起来像模型坏了，其实是一张名单短了两行。
+
+**记在哪**：预算绑定记进 `research-foundation.json`（`shared_daily_budget`），路由与槽位记进创建回执 `runtime-ready.json`（`host_scheme`）。**怎么复查**：`python -m dalton_core.workspace_parity_cli` 在原有的车道清单之外多了三行——共享每日预算、模型路由是否与本机其它环境一致、凭证槽位是否齐；每一行都给出差在哪、以及补它的命令。
+
+**已经建好的环境**：`scripts/repair_workspace_lane_parity.py` 现在会把凭证槽位一起补齐（离线、需先停服务，补完照旧提示重启命令；路由仍由 `align_model_routing.py --apply` 走各环境的 writer 处理，不重复造第二条路）。创建流程不会失败在这三件事上：任何一件出问题都只记录原因、留给脚本补，环境照常建成。
+
+## 2026-09-18 09:40 UTC：一封提到两家公司的卖方邮件不再退掉整个 feed tick（源码，待部署）
+
+线上 sales-notes 车道每轮都以 `CoverageMissionConflict: source envelope is already bound to another discovery` 收场（legacy writer 日志里 45 次，新的 Hyperscaler 环境显示为 `unavailable: RemoteError: request conflicts with existing immutable data`）。查 legacy Core（只读）后原因是**一次读只产出一个 envelope，而 Core 里一个 envelope 只能绑一条 discovery**（`coverage_mission_source_discoveries` 上就是 `UNIQUE(mission_version_ref, source_envelope_ref)`）：车道读完一封邮件后，会按正文里点到的**每一家**覆盖公司各记一条 discovery，第二家用的还是同一个 envelope，identity 不同、record id 不同，于是撞上唯一键，异常一路抛出，整轮 dispatch 被拒。
+
+具体的行：`sales-note:1a06dcd3bc7969d5`（2026-09-17 22:44 读入）正文同时点名 IBM、Cognizant、EPAM、Accenture，第一家 IBM 的 `mission-source-discovery:82dcb38673ee2adffcabecd8eb7cf548` 绑住了 `source-envelope:host-tool:sales-notes:1f1001183a9364f1884e` 并提交成功，第二家提交同一个 envelope 时被拒。车道读过的 1,727 封邮件里有 27 封点到两家以上（例如 `sales-note:19d0605879fe9439`、`sales-note:1a0819cab3d6b207`），**没有一封**为第二家留下过 discovery。不是缓存重放、不是一封邮件两个 id、也不是提交一半后的重试：跨轮重读会拿到新的 envelope，而已入库的文档本来就被 `documents_in_authority()` 挡在读取之外。
+
+改法：记录之前先问 Core 自己的索引（`source_discovery_for_envelope`，与 web-search 恢复路径同一个写法），envelope 已经被别家绑走就**按文档跳过**，回 `status: already_bound`，把公司、envelope、已绑的 discovery 一并带出来；预检查漏掉的（两次提交之间 identity 漂移）在 `CoverageMissionConflict` 处再问一次索引，确认确实已绑才转成同样的跳过，其它冲突照旧抛出。跳过的条数进每轮摘要的 `already_bound`，并且放在 tick 结果的**顶层**——`tick_ledger.bounded_counts` 只留标量、会把嵌套的 `read` 整个丢掉，藏在里面的数字 owner 根本看不到。这条路是三个 feed 共用的：company-wiki 的 `related` 列同样能给一个文档挂两个 ticker（`decide` 会返回两家），prior-research 一个文件只在一家公司的目录下，天生不会遇上。
+
+代价写清楚：第二家公司这一次不会有自己的 discovery 记录（它需要自己的一次读、自己的 envelope），文档本身仍然照常入队、照常开审阅，不会丢。测试按线上这封邮件的形状复现了冲突并断言这一轮照常跑完、后一封新邮件照常入库（回滚改动后这些用例确实会以那条异常失败），另加缓存重放不重复提交、账本能看见这个数。全量测试通过。
+
+## 2026-09-18 08:05 UTC：Claim 索引一行打标错字不再拖住整家公司（源码，待部署）
+
+线上 legacy 环境里 CTSH 的 claim-index 车道停在 `ClaimIndexTaggingRefused: tagging row is not '<row id><TAB><aspect>': '1\tm management_and_capital_allocation'`——模型在一个词前面多写了个 `m `，一行错字退掉整批，而这条退批被共用失败账本判为 `content_refused`（终局），于是这家公司**再没有新 claim 进过索引**。现在按其它车道处理契约失败的同一套做法改成四步：
+
+1. **意思无歧义就宽松读**：去掉多余的一字母前后缀、大小写、空白与标点之后，恰好等于封闭词表（`claim_aspect_vocabulary`）里**一个**词，就按那个词收下；能对上两个词的一概不猜。每一次这样的归一化都带原文写进 run summary 的 `normalised_aspects`。
+2. **还是读不出的那一行只丢那一行**：跳过并带原文记进 `unparsed_rows`，批次照常入库（`index_status` 记为 `tagged_partial`）；这条 claim 没打标就仍然 pending，下一批会再问一次。
+3. **坏得太多才买一次修复**：超过 `MAX_UNPARSED_ROW_RATIO`（20%）、或者出现没给过的行号 / 同一行答两次，就用现成的 `draft_contract_repair` 机制（与档案车道、`deep_insight_gate_cli.repair_group_numbers` 同一条路）把违规清单和模型自己的回复原样递回去，**只修一次**，再按第 1、2 步读修复后的回复；只有到这一步还不行才退批。修复调用与原调用同一个 purpose、同一份配置、同一本账（`build_repair_prompt` 新增可选的 `output_envelope`，因为这条车道要回的是表不是 JSON）。
+4. **退批不再等于永久停这家公司**：批次摘要一变（有新 claim 进来）就把旧的终局判定退役重问；否则每天最多重问一次（`CONTENT_REFUSAL_RETRY_SECONDS`），重问这件事本身写进失败账本，重启后按账本里记的时间算年龄而不是按进程启动时间。
+
+按线上那一行原文写了测试（宽松读、跳过并上报、修复一次后成功 / 仍失败、隔天重问、摘要变化立即重问、重启后年龄）。全量测试通过。
+
 ## 2026-09-17 13:10 UTC：模型配置全机器统一、每日预算全机器共用（源码，待 owner 执行命令）
 
 owner 的指示：**模型配置在每个研究环境里必须一样**——在任何一个环境保存，其它环境跟着变；当下全部对齐到 legacy（IT services）环境；**每天的预算是整台机器共用的**，不再是每个环境各有一份。

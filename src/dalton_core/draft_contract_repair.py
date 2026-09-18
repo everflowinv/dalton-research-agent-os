@@ -48,16 +48,25 @@ from .store import content_hash
 __all__ = [
     "Contract",
     "ContractRepairError",
+    "DEFAULT_OUTPUT_ENVELOPE",
     "MAX_ALLOWED_SHOWN",
     "MAX_REPAIR_PROMPT_BYTES",
     "MAX_VIOLATIONS_SHOWN",
     "RepairOutcome",
     "Violation",
+    "CONTRACT_HEADLINE",
+    "CONTRACT_LIST_LABEL",
+    "FINDINGS_HEADLINE",
+    "FINDINGS_LIST_LABEL",
+    "build_findings_repair_prompt",
     "build_repair_prompt",
     "check_contract",
+    "findings_block",
     "repair_request_id",
+    "repair_with_findings",
     "run_with_contract_repair",
     "single_json_object",
+    "violations_from_findings",
     "violations_of",
 ]
 
@@ -74,6 +83,112 @@ MAX_REPAIR_PROMPT_BYTES = 24_000
 # One.  Stated as a constant so the number is readable in a summary rather
 # than implied by the shape of a loop.
 MAX_REPAIR_ATTEMPTS = 1
+
+# What a repair is asked to return.  Every lane that came through here first
+# asks for one JSON object, so that is the default; a lane whose contract is a
+# *table* -- the claim-index tagger answers ``<row id><TAB><aspect>`` -- passes
+# its own, because telling a table to come back as JSON is a new violation in
+# the same breath as fixing the old one.
+DEFAULT_OUTPUT_ENVELOPE = (
+    "Return one raw JSON object and nothing else: no prose, no explanation, "
+    "no code fence, no key the contract does not name."
+)
+
+# The two things a repair prompt opens with.  They are constants rather than
+# literals because the *second* kind of repair -- below -- says something
+# different in the same place, and a reader comparing the two should be able
+# to see the whole difference in one screen.
+CONTRACT_HEADLINE = (
+    "Your previous reply broke the fixed output contract. Repair it.\n\n"
+    "Do not research again, do not add or drop content, do not change any "
+    "judgement, figure, citation or wording that is not named below. Change "
+    "only what the violations name, and return the whole answer."
+)
+CONTRACT_LIST_LABEL = "VIOLATIONS -- every one of these must be gone from your next reply:"
+
+# The second kind.  A reply that satisfied the shape and was then rejected by
+# something that read it -- an independent verifier, the Constitution's
+# ``output_rubric``, a structural validator -- has a defect the model can fix
+# without researching anything again, and the thing that found it already said
+# in words what is wrong.  Handing those words back once, with the reply, is
+# the whole mechanism; the rest of this section is bounding it.
+FINDINGS_HEADLINE = (
+    "An independent check read your previous reply and rejected it. Repair it.\n\n"
+    "Do not research again, do not add or drop content, and do not change any "
+    "judgement, figure, citation or wording the findings do not name. Rewrite "
+    "only what they name -- either so that what the sentence says is carried by "
+    "a row it cites, or by removing the part nothing supports -- and return the "
+    "whole answer."
+)
+FINDINGS_LIST_LABEL = "FINDINGS -- every one of these must be gone from your next reply:"
+_FINDINGS_SUBJECT = "the findings it was shown"
+
+# Which keys of a finding say where it is, what rule it is against, and what it
+# says.  Four producers write findings in this repository and none of them
+# agreed on the words: a dossier verifier says ``unit``/``code``/``detail``, the
+# output rubric says ``section``/``code``/``phrase``, the gate says
+# ``question_ref``, a structure validator says nothing but a message.  The
+# alternative to reading all of them here is four renderers.
+_FINDING_WHERE_KEYS = (
+    "unit", "section", "group", "question_ref", "slot_id", "path", "line_ref",
+)
+_FINDING_RULE_KEYS = ("code", "check", "rule")
+_FINDING_DETAIL_KEYS = ("detail", "message", "reason", "phrase", "figure", "criterion")
+
+
+def findings_block(violations: Sequence["Violation"], *, label: str) -> str:
+    """The numbered list a repair prompt puts the defects in, bounded.
+
+    One renderer for both kinds, so a model that has seen one has seen the
+    other, and so the prompt a formal replay rebuilds cannot drift between
+    them.
+    """
+
+    shown = list(violations)[:MAX_VIOLATIONS_SHOWN]
+    listed = "\n".join(f"  {index + 1}. {item.line()}"
+                       for index, item in enumerate(shown))
+    if len(violations) > len(shown):
+        listed += f"\n  ... and {len(violations) - len(shown)} more of the same kind"
+    return f"{label}\n{listed}"
+
+
+def violations_from_findings(findings: Iterable[Any]) -> list[Violation]:
+    """Read any lane's findings into the one shape a repair prompt lists.
+
+    A finding is not a deterministic violation -- it is a second reader's
+    sentence about a first reader's reply -- but it occupies exactly the same
+    place in a repair prompt, and giving it its own dataclass would mean giving
+    it a second renderer, a second bound and a second identity function.  So it
+    is projected here, losslessly enough: where it is, what rule it is against,
+    and what it says, in the finder's own words.
+    """
+
+    out: list[Violation] = []
+    for finding in findings or ():
+        if isinstance(finding, Violation):
+            out.append(finding)
+            continue
+        if isinstance(finding, str):
+            out.append(Violation("(reply)", "finding", finding.strip()))
+            continue
+        if isinstance(finding, BaseException):
+            out.append(Violation("(reply)", type(finding).__name__,
+                                 str(finding).strip() or type(finding).__name__))
+            continue
+        if not isinstance(finding, Mapping):
+            continue
+        where = next((str(finding[key]) for key in _FINDING_WHERE_KEYS
+                      if isinstance(finding.get(key), (str, int)) and finding[key] != ""),
+                     "(reply)")
+        rule = next((str(finding[key]) for key in _FINDING_RULE_KEYS
+                     if isinstance(finding.get(key), str) and finding[key]), "finding")
+        detail = " ".join(
+            f"{key}={finding[key]}" if key in ("phrase", "figure") else str(finding[key])
+            for key in _FINDING_DETAIL_KEYS
+            if isinstance(finding.get(key), (str, int, float)) and finding[key] != ""
+        ).strip()
+        out.append(Violation(where, rule, detail or rule))
+    return out
 
 
 class ContractRepairError(ValueError):
@@ -365,6 +480,9 @@ def build_repair_prompt(
     contract_reminder: str = "",
     context: str = "",
     max_bytes: int = MAX_REPAIR_PROMPT_BYTES,
+    output_envelope: str = DEFAULT_OUTPUT_ENVELOPE,
+    headline: str = CONTRACT_HEADLINE,
+    list_label: str = CONTRACT_LIST_LABEL,
 ) -> str:
     """What the model is shown to repair its own reply, bounded.
 
@@ -379,28 +497,12 @@ def build_repair_prompt(
 
     if not violations:
         raise ContractRepairError("a repair prompt needs at least one violation")
-    shown = list(violations)[:MAX_VIOLATIONS_SHOWN]
-    listed = "\n".join(f"  {index + 1}. {item.line()}"
-                       for index, item in enumerate(shown))
-    if len(violations) > len(shown):
-        listed += f"\n  ... and {len(violations) - len(shown)} more of the same kind"
-    head = (
-        "Your previous reply broke the fixed output contract. Repair it.\n\n"
-        "Do not research again, do not add or drop content, do not change any "
-        "judgement, figure, citation or wording that is not named below. Change "
-        "only what the violations name, and return the whole answer.\n\n"
-        "VIOLATIONS -- every one of these must be gone from your next reply:\n"
-        f"{listed}\n\n"
-    )
+    head = f"{headline.strip()}\n\n{findings_block(violations, label=list_label)}\n\n"
     if contract_reminder:
         head += f"CONTRACT:\n{contract_reminder.strip()}\n\n"
     if context:
         head += f"{context.strip()}\n\n"
-    tail = (
-        "Return one raw JSON object and nothing else: no prose, no explanation, "
-        "no code fence, no key the contract does not name.\n\n"
-        "YOUR PREVIOUS REPLY:\n"
-    )
+    tail = f"{output_envelope.strip()}\n\nYOUR PREVIOUS REPLY:\n"
     body = reply_text if isinstance(reply_text, str) else json.dumps(
         reply_text, ensure_ascii=False, sort_keys=True)
     room = max_bytes - len((head + tail).encode("utf-8"))
@@ -444,6 +546,12 @@ class RepairOutcome:
     calls: list[dict[str, Any]] = field(default_factory=list)
     cost_micros: int = 0
     error: BaseException | None = None
+    # How many repair calls were made.  ``None`` means "count them": a
+    # draft-and-repair exchange made one call before any repair, so its count
+    # is one less than its calls.  A *findings* repair has no drafting call of
+    # its own -- the reply it repairs was paid for before it was rejected --
+    # so it says so rather than reporting zero attempts for a call it made.
+    attempts: int | None = None
 
     @property
     def repaired(self) -> bool:
@@ -457,17 +565,19 @@ class RepairOutcome:
 
         return {
             "status": self.status,
-            "repair_attempts": max(0, len(self.calls) - 1),
+            "repair_attempts": (max(0, len(self.calls) - 1) if self.attempts is None
+                                else int(self.attempts)),
             "cost_micros": self.cost_micros,
             "violations": self.wire_violations()[:MAX_VIOLATIONS_SHOWN],
             "reason": self.reason,
         }
 
 
-def _reason(violations: Sequence[Violation], *, repaired: bool) -> str:
+def _reason(violations: Sequence[Violation], *, repaired: bool,
+            subject: str = "its output contract") -> str:
     listed = "; ".join(item.line() for item in list(violations)[:3])
-    prefix = ("the draft still broke its output contract after one repair"
-              if repaired else "the draft broke its output contract")
+    prefix = (f"the draft still broke {subject} after one repair"
+              if repaired else f"the draft broke {subject}")
     return f"{prefix}: {listed}"[:500]
 
 
@@ -581,3 +691,139 @@ def contract_reminder_lines(lines: Iterable[str]) -> str:
     """Join a caller's rule reminders into the block the repair prompt shows."""
 
     return "\n".join(f"* {line}" for line in lines if line)
+
+
+# ---------------------------------------------------------------------------
+# the same bargain, one step later: a reply that held its shape and was wrong
+# ---------------------------------------------------------------------------
+
+
+def build_findings_repair_prompt(
+    *,
+    original_prompt: str,
+    reply_text: Any,
+    findings: Iterable[Any],
+    contract_reminder: str = "",
+    context: str = "",
+    max_bytes: int = MAX_REPAIR_PROMPT_BYTES,
+    output_envelope: str = DEFAULT_OUTPUT_ENVELOPE,
+) -> str:
+    """The repair prompt for a reply a second reader rejected.
+
+    Same bytes, same bound, same truncation rule as the contract repair; only
+    the opening sentence and the label on the list differ, because what the
+    model is being asked to do differs.  Deterministic in its inputs, which is
+    what lets a formal replay rebuild it rather than trust it.
+    """
+
+    return build_repair_prompt(
+        original_prompt=original_prompt, reply_text=reply_text,
+        violations=violations_from_findings(findings),
+        contract_reminder=contract_reminder, context=context,
+        max_bytes=max_bytes, output_envelope=output_envelope,
+        headline=FINDINGS_HEADLINE, list_label=FINDINGS_LIST_LABEL,
+    )
+
+
+def repair_with_findings(
+    *,
+    call: Callable[..., Mapping[str, Any]],
+    parse: Callable[[str], Any],
+    original_prompt: str,
+    reply_text: Any,
+    request_id: str,
+    contract_name: str,
+    findings: Iterable[Any],
+    contract: Contract | None = None,
+    recheck: Callable[[Any], Sequence[Violation]] | None = None,
+    refusal_errors: tuple[type[BaseException], ...] = (),
+    passthrough_errors: tuple[type[BaseException], ...] = (),
+    unavailable_errors: tuple[type[BaseException], ...] = (),
+    contract_reminder: str = "",
+    repair_context: str = "",
+    budget_remaining_micros: int | None = None,
+    repair_reserve_micros: int = 0,
+    max_repair_prompt_bytes: int = MAX_REPAIR_PROMPT_BYTES,
+    output_envelope: str = DEFAULT_OUTPUT_ENVELOPE,
+) -> RepairOutcome:
+    """One repair call for a reply that was rejected after it parsed.
+
+    The shared half of what three lanes were each about to write separately: a
+    dossier unit the independent verifier found an unsupported sentence in, a
+    dossier section or gate group the Constitution's ``output_rubric`` refused,
+    and a model specification whose financial structure broke a wiring rule.
+    In all three the first reply was well formed, was paid for, and is wrong in
+    a way something has already stated in words.
+
+    The bargain is deliberately the same one ``run_with_contract_repair``
+    strikes, and it is the same for the same reasons:
+
+    * **One call.**  Not a loop.  A model shown the exact finding and its own
+      reply either fixes it or does not; a second round buys the run's budget
+      an education.
+    * **Out of the run's remaining budget**, with the caller's reserve.  A
+      repair that would not fit is refused unmade, with the numbers.
+    * **No model substitution.**  ``call`` is the caller's own closure.
+
+    What it does *not* do is decide whether the repaired reply is now correct.
+    Only the original judge can say that -- which for a verification finding
+    means a second verifying call, and that call belongs to the lane, not here.
+    ``recheck`` covers the cheap case where the finding was deterministic and
+    the same code can re-run it.
+    """
+
+    violations = violations_from_findings(findings)
+    if not violations:
+        return RepairOutcome(status="no_findings", attempts=0,
+                             reason="a findings repair needs at least one finding")
+    if (budget_remaining_micros is not None
+            and budget_remaining_micros < repair_reserve_micros):
+        return RepairOutcome(
+            status="budget_refused", violations=violations, attempts=0,
+            reason=("run cost bound reached before the findings repair: "
+                    f"{max(0, budget_remaining_micros)} micros left, "
+                    f"{repair_reserve_micros} reserved for one repair call; "
+                    + _reason(violations, repaired=False, subject=_FINDINGS_SUBJECT)))
+    try:
+        prompt = build_findings_repair_prompt(
+            original_prompt=original_prompt, reply_text=reply_text,
+            findings=violations, contract_reminder=contract_reminder,
+            context=repair_context, max_bytes=max_repair_prompt_bytes,
+            output_envelope=output_envelope)
+    except ContractRepairError as exc:
+        return RepairOutcome(
+            status="refused", violations=violations, attempts=0,
+            reason=f"{exc}; " + _reason(violations, repaired=False,
+                                        subject=_FINDINGS_SUBJECT))
+    try:
+        result = call(
+            prompt=prompt,
+            request_id=repair_request_id(
+                request_id, contract_name=contract_name, violations=violations),
+        )
+    except unavailable_errors as exc:
+        return RepairOutcome(
+            status="unavailable", violations=violations, attempts=0, error=exc,
+            reason=(f"the findings repair call was unavailable "
+                    f"({type(exc).__name__}: {exc}); "
+                    + _reason(violations, repaired=False, subject=_FINDINGS_SUBJECT)))
+    calls = [dict(result)]
+    spent = int(result.get("cost_micros") or 0)
+    try:
+        value = parse(result.get("text"))
+    except passthrough_errors:
+        raise
+    except refusal_errors as exc:
+        remaining = violations_of(result.get("text"), contract, parse_error=exc)
+        return RepairOutcome(
+            status="refused", violations=remaining or violations, calls=calls,
+            cost_micros=spent, error=exc, attempts=1,
+            reason=_reason(remaining or violations, repaired=True))
+    still = list(recheck(value)) if recheck is not None else []
+    if still:
+        return RepairOutcome(status="refused", violations=still, calls=calls,
+                             cost_micros=spent, attempts=1,
+                             reason=_reason(still, repaired=True,
+                                            subject=_FINDINGS_SUBJECT))
+    return RepairOutcome(status="repaired", value=value, violations=violations,
+                         calls=calls, cost_micros=spent, attempts=1)

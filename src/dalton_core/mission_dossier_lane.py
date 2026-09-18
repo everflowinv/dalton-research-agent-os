@@ -23,6 +23,7 @@ same breath it was spawned is always still running.
 from __future__ import annotations
 
 import hashlib
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -33,8 +34,16 @@ from .lane_child_launcher import (
 )
 from .lane_registry import LaneSpec, register_lane
 from .lane_failure_ledger import lane_budget
+from .lane_change_key import (
+    ChangeKeyMemo, append_probe, claim_change_keys, claim_index_change_keys,
+    compose, document_figure_change_keys, head_change_keys,
+    statement_change_keys,
+)
 
 MAX_FAILURE_DETAIL_CHARS = 500
+#: Where the change keys of the last tick survive a restart, beside the lane's
+#: own failure ledger.
+CHANGE_KEY_FILE = "company-dossier-lane-change-keys.json"
 MAX_REPAIR_TARGETS = 20
 LAUNCHER_KWARG = "company_dossier_launcher"
 # Statuses that mean "this run looked and found nothing to do". After one of
@@ -45,6 +54,25 @@ CONTENT_TERMINAL_STATUSES = frozenset({
     "verification_failed", "rubric_refused", "constitution_refused",
     "not_independent", "no_new_evidence",
 })
+# Six hours.  A content refusal is recorded in the failure budget against the
+# run's *signature*, and the signature is a digest of the company's evidence:
+# the quantitative-claim promotion lane admits a couple of hundred Claims a
+# tick, so every tick produced a signature the hold had never seen, the hold
+# never bound, and Accenture was relaunched every five minutes from
+# 2026-09-17T04:17Z against the same unsupported sentence -- fifty runs, four
+# paid calls each, nothing published.
+#
+# So the back-off is keyed on the *company* and measured in time.  It does not
+# restart when new evidence lands: new evidence is exactly what was arriving
+# throughout, and a cooldown a Claim can reset is not a cooldown.  Six hours is
+# roughly a quarter of the working day -- long enough that a redraft is a new
+# attempt rather than the same one, short enough that a company whose evidence
+# really did move is not silent for a day.
+#
+# A module constant because the dossier policy has a closed shape with no
+# cadence field in it; when one is added, ``MissionDossierLaneCoordinator``
+# takes the number as a constructor argument and the policy can pass it.
+CONTENT_REFUSAL_COOLDOWN_SECONDS = 6 * 60 * 60
 
 
 def permission_key(connection: Any, launcher: Any, signature: str) -> str:
@@ -150,6 +178,52 @@ def company_ledger_signature(
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:32]
 
 
+def company_change_keys(
+    connection: Any, companies: Any, *, control: Any = (),
+) -> dict[str, str]:
+    """A cheap key per company that moves whenever its signature could.
+
+    Every table ``dossier_company_source_fingerprint`` reads is represented
+    here: the company's Claims and index entries, the filed statements and
+    document figures its numbers come from, and the heads of its forecast and
+    dossier chains.  Retirement decisions and evidence relations carry no
+    company of their own and are aggregated whole -- conservative, and cheap
+    enough that the conservatism is free.
+
+    ``control`` is the half of the signature no row can move: the drafting,
+    verifier, number-source and rubric contracts.  They only change on a
+    deploy, but they are in the signature, so they are in the key.
+
+    One grouped scan per table for every company at once -- 0.1 s on the live
+    Core against the 9.7 s of signatures it gates.
+    """
+
+    claims = claim_change_keys(connection)
+    entries = claim_index_change_keys(connection)
+    figures = document_figure_change_keys(connection)
+    statements = statement_change_keys(connection)
+    forecasts = head_change_keys(connection, "forecast_model_versions", "company_ref")
+    dossiers = head_change_keys(connection, "company_dossier_versions", "company_ref")
+    shared = [
+        append_probe(connection, "claim_retirement_decisions"),
+        append_probe(connection, "evidence_relations"),
+        append_probe(connection, "coverage_mission_statement_lines"),
+        *[str(item) for item in control],
+    ]
+    keys: dict[str, str] = {}
+    for company_ref in companies:
+        if company_ref is None:
+            continue
+        label = str(company_ref)
+        keys[label] = compose([
+            "dossier-change-key:v1", label,
+            claims.get(label), entries.get(label), figures.get(label),
+            statements.get(label), forecasts.get(label), dossiers.get(label),
+            *shared,
+        ])
+    return keys
+
+
 class MissionDossierLaneCoordinator:
     """Launch and settle the dossier lane."""
 
@@ -157,17 +231,34 @@ class MissionDossierLaneCoordinator:
                  companies: Callable[[], list[str]] | None = None,
                  mission: Callable[[], Mapping[str, Any] | None] | None = None,
                  failure_ledger_dir: Any | None = None,
-                 failure_clock: Callable[[], Any] | None = None) -> None:
+                 failure_clock: Callable[[], Any] | None = None,
+                 cooldown_seconds: int = CONTENT_REFUSAL_COOLDOWN_SECONDS) -> None:
         self.connection = connection
         self.launcher = launcher
         self.companies = companies
         self.mission = mission
+        self.cooldown_seconds = int(cooldown_seconds)
+        # company_ref -> (when the cooldown ends, what refused, why).  Keyed on
+        # the company because that is the thing that keeps being relaunched,
+        # and the signature the failure budget holds is a different string on
+        # every tick.
+        self._cooldowns: dict[str, tuple[Any, str, str, str]] = {}
+        self._cooldown_clock = failure_clock or (
+            lambda: datetime.now(timezone.utc))
         self._open: str | None = None
         # The signature under which the last run found nothing, and the
         # signatures whose runs failed. Held for this process only: a restart
         # is nearly always a deploy, which is the likeliest thing to have
         # fixed it.
         self._quiet_signatures: set[str] = set()
+        # B1-5: the last cheap key each company's signature was computed
+        # under, so an unchanged company costs one grouped scan instead of a
+        # full fingerprint.  Persisted beside the failure ledger: the first
+        # tick after a deploy would otherwise recompute all five at once,
+        # which is the 30 s timeout this gate exists to remove.
+        self.change_keys = ChangeKeyMemo(
+            None if failure_ledger_dir is None
+            else Path(failure_ledger_dir) / CHANGE_KEY_FILE)
         probe_interval = (
             launcher.capacity_probe_interval_seconds()
             if hasattr(launcher, "capacity_probe_interval_seconds") else None
@@ -176,6 +267,106 @@ class MissionDossierLaneCoordinator:
             "probe_interval_seconds": probe_interval}
         self.budget = lane_budget("company_dossier", state_dir=failure_ledger_dir,
                                   clock=failure_clock, **kwargs)
+
+    # -- the company-scoped back-off -----------------------------------------
+
+    def control_fingerprint(self) -> str:
+        """The half of the launch signature no Claim can move.
+
+        The drafting contract, the verifier's prompt contract, the provider
+        contract, the number-source contract, the output-rubric contract, the
+        mission, the governance policy and the model configuration files --
+        everything a deploy or a person changes, and nothing the evidence
+        changes.  A content refusal is a statement made under *these*; when one
+        of them moves, the statement is about a system that no longer exists
+        and the back-off goes with it.  That is the difference between a
+        cooldown and a suspension, and it is what makes a reviewed fix take
+        effect on the next tick rather than in six hours.
+        """
+
+        from .cockpit_model import verifier_provider_contract_fingerprint
+        from .company_dossier import output_rubric_contract_fingerprint
+        from .company_dossier_draft import (draft_contract_fingerprint,
+                                            verifier_prompt_contract_fingerprint)
+        from .mission_deliverable import number_source_contract_fingerprint
+
+        return permission_key(self.connection, self.launcher, "|".join([
+            verifier_provider_contract_fingerprint("dossier_verifier"),
+            draft_contract_fingerprint(), verifier_prompt_contract_fingerprint(),
+            number_source_contract_fingerprint(), output_rubric_contract_fingerprint(),
+        ]))
+
+    def _change_keys(self, companies: Any) -> dict[str, str]:
+        """This tick's cheap keys, or nothing -- which recomputes everything.
+
+        A key that cannot be read is not a reason to skip a company: an empty
+        map makes every signature a miss, which is exactly the behaviour this
+        lane had before the gate existed.
+        """
+
+        from .cockpit_model import verifier_provider_contract_fingerprint
+        from .company_dossier import output_rubric_contract_fingerprint
+        from .company_dossier_draft import (draft_contract_fingerprint,
+                                            verifier_prompt_contract_fingerprint)
+        from .mission_deliverable import number_source_contract_fingerprint
+
+        try:
+            control = (
+                verifier_provider_contract_fingerprint("dossier_verifier"),
+                draft_contract_fingerprint(), verifier_prompt_contract_fingerprint(),
+                number_source_contract_fingerprint(),
+                output_rubric_contract_fingerprint(),
+            )
+            keys = company_change_keys(self.connection, companies, control=control)
+        except Exception:  # noqa: BLE001 - an unreadable key recomputes, never refuses
+            return {}
+        if keys:
+            self.change_keys.forget(keys)
+        return keys
+
+    def company_cooldown(self, company_ref: Any,
+                         control: str | None = None) -> dict[str, Any] | None:
+        """Why this company must not be relaunched yet, or ``None``.
+
+        Expiry is read rather than swept: a cooldown nobody asks about costs
+        nothing, and a sweep would need its own tick.
+        """
+
+        key = str(company_ref or "-")
+        entry = self._cooldowns.get(key)
+        if entry is None:
+            return None
+        until, status, reason, held_control = entry
+        if control is None:
+            control = self.control_fingerprint()
+        if self._cooldown_clock() >= until or control != held_control:
+            self._cooldowns.pop(key, None)
+            return None
+        return {
+            "until": until.isoformat(timespec="seconds"),
+            "seconds": self.cooldown_seconds,
+            "dossier_status": status,
+            "reason": (f"content refused ({status}); this company is held until "
+                       f"{until.isoformat(timespec='seconds')} regardless of new "
+                       f"evidence: {reason}")[:MAX_FAILURE_DETAIL_CHARS],
+        }
+
+    def _start_cooldown(self, company_ref: Any, *, status: str, reason: str) -> None:
+        """Begin the back-off, or leave a running one exactly where it is.
+
+        Not restarted by a second refusal either: a company that refused twice
+        inside one cooldown has not earned a longer one, and an interval that
+        every failure extends is a suspension.
+        """
+
+        key = str(company_ref or "-")
+        control = self.control_fingerprint()
+        if self.company_cooldown(key, control) is not None:
+            return
+        self._cooldowns[key] = (
+            self._cooldown_clock() + timedelta(seconds=self.cooldown_seconds),
+            str(status), str(reason)[:MAX_FAILURE_DETAIL_CHARS], control,
+        )
 
     def _settle(self, ticket_ref: str) -> dict[str, Any] | None:
         try:
@@ -228,6 +419,23 @@ class MissionDossierLaneCoordinator:
         self._open = None
         signature = settled.get("signature")
         status = str(settled.get("dossier_status") or "")
+        company = settled.get("company_ref")
+        # The content back-off, decided before the signature-keyed bookkeeping
+        # below and independently of it.  A verdict about what a draft *says*
+        # is about the company, and the next tick's evidence signature has no
+        # bearing on whether it is still true.
+        if status in CONTENT_TERMINAL_STATUSES and (
+                status != "verification_failed"
+                or settled.get("verification_status") in {"refused", "verified"}):
+            self._start_cooldown(
+                company, status=status,
+                reason=str(settled.get("failure_reason") or status))
+            settled["cooldown"] = self.company_cooldown(company)
+        elif status and status not in CONTENT_TERMINAL_STATUSES:
+            # Anything that is not a content refusal -- a publication, an idle
+            # tick, a transport failure -- ends it.  A published version is the
+            # thing the cooldown was waiting for.
+            self._cooldowns.pop(str(company or "-"), None)
         if status == "not_authorized" and signature:
             self.budget.record(str(signature),
                                status="gated:not permitted",
@@ -273,6 +481,7 @@ class MissionDossierLaneCoordinator:
         held_companies = {}
         held_decisions = {}
         quiet_companies = []
+        cooling_down: dict[str, Any] = {}
         try:
             active_mission = self.mission() if self.mission is not None else None
         except Exception as exc:  # noqa: BLE001 - one lane's failure is not the tick's
@@ -284,16 +493,41 @@ class MissionDossierLaneCoordinator:
         # request timeout every tick once the Ledger reached ten thousand
         # Claims.  The snapshot is taken only if a company needs it.
         claim_snapshot: Mapping[str, Any] | None = None
+        # B1-5: one grouped scan answers "could any of these five have moved"
+        # before a single signature is built.  A company whose key is the one
+        # its last signature was computed under reuses that signature: the
+        # answer cannot have changed, and asking again costs a second of the
+        # store thread to be told so.
+        keys = self._change_keys(companies)
+        recomputed: list[str] = []
+
+        def fresh() -> dict[str, Any]:
+            """Which companies paid for a full signature this tick, if any.
+
+            Absent on the ordinary tick, so the answer stays the shape every
+            reader already knows, and present exactly when someone asking why
+            a tick was slow wants to know.
+            """
+
+            return {} if not recomputed else {"recomputed": list(recomputed)}
+
         for company_ref in companies:
             if company_ref is None:
                 evidence = ledger_signature(self.connection)
             else:
-                if claim_snapshot is None:
-                    from .company_dossier_cli import _ReadOnlyStoreView
-                    claim_snapshot = _ReadOnlyStoreView(
-                        self.connection).claim_index_snapshot()
-                evidence = f"{company_ref}|" + company_ledger_signature(
-                    self.connection, company_ref, snapshot=claim_snapshot)
+                label = str(company_ref)
+                key = keys.get(label)
+                signed = self.change_keys.cached(label, key)
+                if signed is None:
+                    if claim_snapshot is None:
+                        from .company_dossier_cli import _ReadOnlyStoreView
+                        claim_snapshot = _ReadOnlyStoreView(
+                            self.connection).claim_index_snapshot()
+                    signed = company_ledger_signature(
+                        self.connection, company_ref, snapshot=claim_snapshot)
+                    self.change_keys.remember(label, key, signed)
+                    recomputed.append(label)
+                evidence = f"{company_ref}|{signed}"
             signature = permission_key(self.connection, self.launcher, evidence)
             clear_obsolete_permissions(self.budget, signature, company_ref)
             if signature in self._quiet_signatures:
@@ -315,6 +549,22 @@ class MissionDossierLaneCoordinator:
                     held_companies[label] = held.classification.reason
                     held_decisions[label] = held
                     continue
+            # The company-scoped back-off, asked after the signature-keyed
+            # budget and before the launch.  The budget answers first because
+            # it is the more specific statement -- "this exact input is
+            # terminal" -- and the cooldown is what catches the case the
+            # budget structurally cannot: a refusal about the *content* whose
+            # key has changed because a Claim landed since.  A controlled
+            # re-entry, which is a reviewed human decision, releases both.
+            cooldown = (None if controlled_reentry is not None
+                        else self.company_cooldown(company_ref))
+            if cooldown is not None:
+                label = str(company_ref or "-")
+                cooling_down[label] = cooldown
+                # Also in ``held``, which is where every reader of this lane
+                # already looks for "why did nothing happen for this company".
+                held_companies[label] = cooldown["reason"]
+                continue
             try:
                 ticket = self.launcher.start(
                     signature=signature, company_ref=company_ref,
@@ -328,24 +578,29 @@ class MissionDossierLaneCoordinator:
             self._open = ticket["id"]
             return {"status": "launched", "ticket_ref": ticket["id"],
                     "company_ref": company_ref, "signature": signature,
-                    "settled": settled, "held": held_companies}
+                    "settled": settled, "held": held_companies, **fresh(),
+                    **({} if not cooling_down else {"cooling_down": cooling_down})}
         if not companies:
-            return {"status": "idle", "settled": settled,
+            return {"status": "idle", "settled": settled, **fresh(),
                     "reason": "no screened company needs a dossier"}
         if held_companies:
             if len(held_decisions) == 1 and len(companies) == 1:
                 decision = next(iter(held_decisions.values()))
                 return {"status": decision.action, "settled": settled,
                         "reason": decision.classification.reason,
-                        "held": held_companies,
+                        "held": held_companies, **fresh(),
+                        **({} if not cooling_down else
+                           {"cooling_down": cooling_down}),
                         "failure_budget": self.budget.summary()}
             return {"status": "held", "settled": settled, "held": held_companies,
                     "reason": "; ".join(
                         f"{company}: {reason}"
                         for company, reason in held_companies.items()),
+                    **fresh(),
+                    **({} if not cooling_down else {"cooling_down": cooling_down}),
                     "failure_budget": self.budget.summary()}
         return {"status": "idle", "settled": settled,
-                "companies": quiet_companies,
+                "companies": quiet_companies, **fresh(),
                 "reason": "nothing has moved since each company's last quiet run"}
 
 
@@ -475,6 +730,8 @@ LANE = register_lane(LaneSpec(
 
 
 __all__ = [
+    "CHANGE_KEY_FILE",
+    "CONTENT_REFUSAL_COOLDOWN_SECONDS",
     "DOSSIER_MODEL_CONFIG",
     "LEGACY_DOSSIER_MODEL_CONFIG",
     "LEGACY_DOSSIER_VERIFIER_MODEL_CONFIG",
@@ -488,6 +745,7 @@ __all__ = [
     "add_arguments",
     "argv_fragment",
     "build_launcher",
+    "company_change_keys",
     "company_ledger_signature",
     "dispatch",
     "ledger_signature",

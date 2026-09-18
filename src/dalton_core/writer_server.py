@@ -3105,6 +3105,7 @@ class WriterServer:
             raise
         finally:
             self._lane_deadline = None
+            self.reap_lane_children()
         kind = _lane_hold_kind(result)
         if kind is not None:
             reason = ""
@@ -3123,6 +3124,65 @@ class WriterServer:
                 "budget_seconds": LANE_SOFT_BUDGET_SECONDS,
             }
         return result
+
+    def lane_launchers(self) -> list[Any]:
+        """Every launcher this writer owns, registered or wired by name."""
+
+        launchers: list[Any] = list(self._lane_launchers.values())
+        for name in (
+            "_acquisition_launcher", "_search_launcher",
+            "_discovery_selection_launcher", "_web_search_launcher",
+            "_web_fetch_launcher", "_sec_filings_launcher",
+            "_document_extraction_launcher", "_sec_lane_launcher",
+        ):
+            launcher = getattr(self, name, None)
+            if launcher is not None:
+                launchers.append(launcher)
+        seen: set[int] = set()
+        unique: list[Any] = []
+        for launcher in launchers:
+            if id(launcher) in seen:
+                continue
+            seen.add(id(launcher))
+            unique.append(launcher)
+        return unique
+
+    def reap_lane_children(self) -> list[str]:
+        """Settle every launcher's finished children, whatever ran this tick.
+
+        A lane child that has exited but whose handle nobody has polled is a
+        ``<defunct>`` entry under the writer, and the writer only polled two
+        handles: the one it was about to replace in ``spawn`` and the one the
+        lane's own coordinator asked ``status`` about.  So a launcher whose
+        lane is *not* running -- held by ``lane_holds``, unconfigured, idle
+        because its coordinator has no open ticket, or simply slower than the
+        lane that finished before it -- never reaped anything at all.  Live
+        that left fourteen to seventeen zombies parked under the writer for
+        hours, one per finished child of a lane that had since gone quiet.
+
+        Reaping belongs to the writer, not to the lane: it is a fact about
+        this process's children, and the lane that happens to be ticking has
+        nothing to do with which of them have exited.  So every lane tick
+        reaps every launcher.  It costs one ``waitpid(WNOHANG)`` per live
+        child and nothing at all per dead one, and a launcher that has no
+        children or no ``reap`` contributes neither.
+
+        Runs on the store thread, inside the lane tick, because that is the
+        thread launchers are spawned from and their handles belong to it.
+        """
+
+        reaped: list[str] = []
+        for launcher in self.lane_launchers():
+            reap = getattr(launcher, "reap", None)
+            if not callable(reap):
+                continue
+            try:
+                settled = reap()
+            except Exception:  # noqa: BLE001 - a stuck launcher never fails a tick
+                continue
+            if settled:
+                reaped.extend(str(ticket) for ticket in settled)
+        return reaped
 
     def _hold_lane(self, operation: str, kind: str, *, reason: str,
                    detail: Mapping[str, Any] | None = None) -> LaneHold:

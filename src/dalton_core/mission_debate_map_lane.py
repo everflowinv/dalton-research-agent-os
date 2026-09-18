@@ -32,12 +32,20 @@ from .lane_child_launcher import (
 )
 from .lane_registry import LaneSpec, register_lane
 from .lane_failure_ledger import lane_budget
+from .lane_change_key import (
+    ChangeKeyMemo, claim_change_keys, claim_index_change_keys, compose,
+)
 from .lane_permission_control import (
     authority_connection, current_permission, record_controlled_failure,
 )
 
 MAX_FAILURE_DETAIL_CHARS = 500
 DRIVER_KEY = "mission_debate_map"
+#: Where the change keys of the last tick survive a restart.
+CHANGE_KEY_FILE = "debate-map-lane-change-keys.json"
+#: What the memo holds for a subject with no Claims: a real state, not a miss.
+#: ``evidence_fingerprint`` is a hex digest, so no fingerprint can collide.
+NO_EVIDENCE = "no-evidence"
 # Outcomes that say something about this moment rather than about this
 # evidence, so the subject is not held back for them: the scheduler had the
 # request in flight, or there was no route just then. The very next tick can
@@ -67,6 +75,31 @@ def _business_key(subject_ref: str, fingerprint: str,
     )
 
 
+def subject_change_keys(connection: Any, subjects: Any) -> dict[str, str]:
+    """A cheap key per subject that moves whenever its fingerprint could.
+
+    Narrower than the dossier's on purpose.  This fingerprint is a hash of one
+    subject's canonical claim version refs and nothing else, so exactly two
+    tables can move it: the Claims themselves and the index entries that say
+    which of them are canonical.  Aggregating anything else here would make
+    another lane's writes re-fingerprint five subjects, and a gate that opens
+    for writes its lane does not read is not a gate.
+    """
+
+    claims = claim_change_keys(connection)
+    entries = claim_index_change_keys(connection)
+    keys: dict[str, str] = {}
+    for subject_ref in subjects:
+        if subject_ref is None:
+            continue
+        label = str(subject_ref)
+        keys[label] = compose([
+            "debate-map-change-key:v1", label,
+            claims.get(label), entries.get(label),
+        ])
+    return keys
+
+
 class MissionDebateMapLaneCoordinator:
     """Launch and settle the debate-map lane."""
 
@@ -88,6 +121,16 @@ class MissionDebateMapLaneCoordinator:
         # process only: a restart is nearly always a deploy, which is the most
         # likely thing to have fixed whatever it was.
         self.budget = lane_budget(DRIVER_KEY, state_dir=failure_ledger_dir)
+        # B1-5: the last cheap key each subject's fingerprint was computed
+        # under.  Persisted, so the first tick after a deploy does not
+        # re-fingerprint six subjects at once on the single store thread.
+        from pathlib import Path as _Path
+
+        self.change_keys = ChangeKeyMemo(
+            None if failure_ledger_dir is None
+            else _Path(failure_ledger_dir) / CHANGE_KEY_FILE)
+        # How many subjects paid for a full fingerprint on the last tick.
+        self.recomputed: list[str] = []
 
     # -- settling ---------------------------------------------------------
 
@@ -177,6 +220,25 @@ class MissionDebateMapLaneCoordinator:
             subjects.append(industry)
         return subjects
 
+    def _change_keys(self, subjects: Any) -> dict[str, str]:
+        """This tick's cheap keys, or nothing -- which re-fingerprints all.
+
+        A key that cannot be read is not a reason to skip a subject: an empty
+        map makes every fingerprint a miss, which is exactly what this lane
+        did before the gate existed.
+        """
+
+        connection = getattr(self.store, "connection", None)
+        if connection is None:
+            return {}
+        try:
+            keys = subject_change_keys(connection, subjects)
+        except Exception:  # noqa: BLE001 - an unreadable key recomputes, never refuses
+            return {}
+        if keys:
+            self.change_keys.forget(keys)
+        return keys
+
     def _choose(self, mission: Any) -> tuple[str | None, str | None, str | None]:
         """The first subject whose evidence has moved and is not held.
 
@@ -196,15 +258,39 @@ class MissionDebateMapLaneCoordinator:
 
         authority = DebateMapAuthority(self.store)
         blocked: tuple[str, str, str] | None = None
-        for subject_ref in self._subjects(mission):
-            # Refs only. The full drafting rows walk evidence per claim and
-            # build a title map; doing that for five subjects on every tick is
-            # work spent learning nothing on the overwhelmingly common tick
-            # where the answer is "nothing moved".
-            refs = subject_claim_refs(self.store, subject_ref)
-            if not refs:
+        subjects = self._subjects(mission)
+        # B1-5: one grouped scan says which subjects could have moved, before
+        # a single fingerprint is built.  Six subjects each read and hashed
+        # the whole Ledger every tick to be told, almost always, that nothing
+        # had changed -- 8 s of the writer's one store thread, five times a
+        # minute.
+        keys = self._change_keys(subjects)
+        self.recomputed = []
+        # One Ledger snapshot for the subjects that do need one, taken at most
+        # once and only if at least one of them does.
+        snapshot: Any = None
+        for subject_ref in subjects:
+            label = str(subject_ref)
+            key = keys.get(label)
+            fingerprint = self.change_keys.cached(label, key)
+            if fingerprint is None:
+                if snapshot is None:
+                    snapshot = self.store.claim_index_snapshot()
+                # Refs only. The full drafting rows walk evidence per claim and
+                # build a title map; doing that for five subjects on every tick is
+                # work spent learning nothing on the overwhelmingly common tick
+                # where the answer is "nothing moved".
+                refs = subject_claim_refs(
+                    self.store, subject_ref, snapshot=snapshot)
+                # "This subject has no Claims at all" is a state with no
+                # fingerprint, and it is remembered as such: a subject nobody
+                # has written about yet would otherwise be the one thing that
+                # forces a Ledger snapshot on every tick forever.
+                fingerprint = NO_EVIDENCE if not refs else evidence_fingerprint(refs)
+                self.change_keys.remember(label, key, fingerprint)
+                self.recomputed.append(label)
+            if fingerprint == NO_EVIDENCE:
                 continue
-            fingerprint = evidence_fingerprint(refs)
             current = authority.current(subject_ref)
             if (current is not None
                     and current["evidence_fingerprint"] == fingerprint
@@ -246,12 +332,14 @@ class MissionDebateMapLaneCoordinator:
         except Exception as exc:  # noqa: BLE001 - one lane's failure is not the tick's
             return {"status": "unavailable", "settled": settled,
                     "reason": f"{type(exc).__name__}: {exc}"}
+        recomputed = ({} if not self.recomputed
+                      else {"recomputed": list(self.recomputed)})
         if subject_ref is None:
-            return {"status": "idle", "settled": settled,
+            return {"status": "idle", "settled": settled, **recomputed,
                     "reason": "every subject's map was drawn from the evidence "
                               "we currently hold"}
         if held is not None:
-            return {"status": "held", "subject_ref": subject_ref,
+            return {"status": "held", "subject_ref": subject_ref, **recomputed,
                     "settled": settled, "reason": held}
         try:
             ticket = self.launcher.start(
@@ -268,7 +356,7 @@ class MissionDebateMapLaneCoordinator:
         return {
             "status": "launched", "subject_ref": subject_ref,
             "evidence_fingerprint": fingerprint, "ticket_ref": ticket["id"],
-            "settled": settled,
+            "settled": settled, **recomputed,
         }
 
 
@@ -354,13 +442,16 @@ LANE = register_lane(LaneSpec(
 
 
 __all__ = [
+    "CHANGE_KEY_FILE",
     "DEBATE_MAP_MODEL_CONFIG",
+    "NO_EVIDENCE",
     "LANE",
     "LAUNCHER_KWARG",
     "MAX_FAILURE_DETAIL_CHARS",
     "PUBLISHED_STATUS",
     "TRANSIENT_STATUSES",
     "MissionDebateMapLaneCoordinator",
+    "subject_change_keys",
     "add_arguments",
     "argv_fragment",
     "build_launcher",

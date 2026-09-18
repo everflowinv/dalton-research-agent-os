@@ -46,6 +46,7 @@ from dalton_core.model_routing_sync import (  # noqa: E402
     LEGACY_ENVIRONMENT_ID,
     Environment,
     ModelRoutingSyncError,
+    agreed_selections,
     current_purpose_overrides,
     current_tier_chains,
     host_environments,
@@ -65,69 +66,17 @@ class AlignmentError(RuntimeError):
 # policy lineages.
 
 
-def _agreed(
-    values: Mapping[str, Any], subject: str,
-) -> tuple[Any | None, list[str]]:
-    """The one value every policy agrees on, or nothing and a complaint.
+def source_selections(environment: Environment) -> dict[str, Any]:
+    """Every tier chain and per-stage override the source environment holds.
 
-    An environment has several policy lineages -- each lane pins its own -- and
-    "the legacy configuration" only means something if they say the same
-    thing.  Where they do not, this refuses to pick a winner: copying one
-    lineage's chain over the others would be this script inventing a decision
-    the owner never made.
+    The reading itself lives in ``model_routing_sync.agreed_selections`` since
+    workspace creation started making the same copy offline: this script and a
+    new workspace must read "the source configuration" out of exactly one
+    implementation, or the environment the owner creates and the environment
+    this script repairs would not be the same environment.
     """
 
-    distinct: list[Any] = []
-    for value in values.values():
-        if value not in distinct:
-            distinct.append(value)
-    if not distinct:
-        return None, [f"{subject}：源环境没有这一项"]
-    if len(distinct) > 1:
-        rendered = " / ".join(json.dumps(item, ensure_ascii=False, sort_keys=True)
-                              for item in distinct)
-        return None, [f"{subject}：源环境内部就不一致（{rendered}），需要你先决定用哪一条"]
-    return distinct[0], []
-
-
-def source_selections(environment: Environment) -> dict[str, Any]:
-    """Every tier chain and per-stage override the source environment holds."""
-
-    tier_chains = current_tier_chains(environment.router_db)
-    overrides = current_purpose_overrides(environment.router_db)
-    tiers: dict[str, list[str]] = {}
-    purposes: dict[str, list[str]] = {}
-    conflicts: list[str] = []
-    for tier in sorted({name for held in tier_chains.values() for name in held}):
-        # A lineage that does not declare this tier is not disagreeing about
-        # it; it simply has no chain there. Only the lineages that hold one
-        # have to agree, or there is nothing to copy.
-        declared = {policy_id: held[tier] for policy_id, held in tier_chains.items()
-                    if held.get(tier)}
-        chain, complaints = _agreed(declared, f"类别「{tier}」")
-        conflicts.extend(complaints)
-        if chain:
-            tiers[tier] = list(chain)
-    for purpose in sorted({name for held in overrides.values() for name in held}):
-        entries = {
-            policy_id: held.get(purpose) for policy_id, held in overrides.items()
-        }
-        if any(entry is None for entry in entries.values()):
-            # A stage pinned in one lineage and not in another is not a
-            # disagreement about the model; it is a lineage that never had that
-            # stage. Only the pinned ones are propagated.
-            entries = {key: value for key, value in entries.items() if value is not None}
-        selection, complaints = _agreed(
-            {key: (value or {}).get("chain") if (value or {}).get("mode") == "explicit"
-             else None for key, value in entries.items()},
-            f"环节「{purpose}」",
-        )
-        if complaints and any((value or {}).get("mode") == "explicit"
-                              for value in entries.values()):
-            conflicts.extend(complaints)
-        if selection:
-            purposes[purpose] = list(selection)
-    return {"tiers": tiers, "purposes": purposes, "conflicts": conflicts}
+    return agreed_selections(environment.router_db)
 
 
 def target_selections(environment: Environment) -> dict[str, Any]:

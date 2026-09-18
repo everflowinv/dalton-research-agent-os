@@ -123,6 +123,36 @@ class ContractRejectOnceAdapter(CountingFakeAdapter):
         return super().execute(work, route, selected)
 
 
+class UnprovedSendOnceAdapter(CountingFakeAdapter):
+    """Fail the first Work of a stage unclassifiably, then answer.
+
+    The live shape this stands for: the broker raised after a boundary nothing
+    can place, so no receipt says the request was never sent and no settled
+    charge says it was.  That is ``send_state_unproved``, and it is the exact
+    state the bounded automatic retry exists for.
+    """
+
+    failed_work_id = None
+
+    def execute(self, work, route, selected):
+        from dalton_core.openclaw_model_adapter import BrokerConnectionError
+        if self.failed_work_id is None:
+            self.failed_work_id = work.id
+        if work.id == self.failed_work_id:
+            self.calls += 1
+            raise BrokerConnectionError("socket failed after an unknown boundary")
+        # Avoid CountingFakeAdapter's second increment on successful recovery.
+        from tests.test_transcript_polish_model_worker import FakeAdapter
+        return FakeAdapter.execute(self, work, route, selected)
+
+
+class AlwaysUnprovedSendAdapter(CountingFakeAdapter):
+    def execute(self, work, route, selected):
+        from dalton_core.openclaw_model_adapter import BrokerConnectionError
+        self.calls += 1
+        raise BrokerConnectionError("socket failed after an unknown boundary")
+
+
 class RouteBoundCountingFakeAdapter(CountingFakeAdapter):
     """Keep the shared fixture adapter's invocation faithful to the selected route."""
 
@@ -185,7 +215,8 @@ class MissionDocumentResearchTests(unittest.TestCase):
 
     def _executor(self, fixture, authority, *, draft_adapter=None,
                   verifier_adapter=None, fault_injector=None,
-                  max_automatic_contract_retries_per_day=None):
+                  max_automatic_contract_retries_per_day=None,
+                  max_automatic_unproved_send_retries_per_day=None):
         statement = "Managed services revenue is recognized over time."
         draft_adapter = draft_adapter or RouteBoundCountingFakeAdapter({
             "schema_version": "0.1", "status": "answered", "answer": statement,
@@ -222,6 +253,9 @@ class MissionDocumentResearchTests(unittest.TestCase):
         cap = ({} if max_automatic_contract_retries_per_day is None else
                {"max_automatic_contract_retries_per_day":
                 max_automatic_contract_retries_per_day})
+        if max_automatic_unproved_send_retries_per_day is not None:
+            cap["max_automatic_unproved_send_retries_per_day"] = (
+                max_automatic_unproved_send_retries_per_day)
         return MissionDocumentResearchExecutor(
             authority=authority, scheduler=scheduler, registry=authority.registry,
             draft_worker=draft, verifier_worker=verifier,
@@ -1050,7 +1084,9 @@ class MissionDocumentResearchTests(unittest.TestCase):
         self.assertEqual(fixture.budget.connection.execute(
             "SELECT count(*) FROM thesis_impact_day_admissions").fetchone()[0], 3)
 
-    def test_zero_policy_and_unknown_send_state_do_not_create_recovery_work(self):
+    def test_zero_policy_and_unknown_send_state_take_their_own_doors(self):
+        """A disabled policy creates nothing; an unproved send buys one retry."""
+
         from dalton_core.openclaw_model_adapter import BrokerConnectionError
 
         class UnknownAdapter(CountingFakeAdapter):
@@ -1058,8 +1094,10 @@ class MissionDocumentResearchTests(unittest.TestCase):
                 self.calls += 1
                 raise BrokerConnectionError("socket failed after an unknown boundary")
 
-        for maximum, expected_reason in ((0, "fresh_work_recovery_disabled"),
-                                         (2, "send_state_unproved")):
+        for maximum, expected_reason, expected_links in (
+            (0, "fresh_work_recovery_disabled", 0),
+            (2, "automatic_bounded_unproved_send_retry", 1),
+        ):
             with self.subTest(maximum=maximum):
                 fixture, authority, args, _registration, _launcher = self._fixture()
                 self._enable_recovery(fixture, maximum=maximum)
@@ -1076,7 +1114,7 @@ class MissionDocumentResearchTests(unittest.TestCase):
                 self.assertEqual(result["reason"], expected_reason)
                 self.assertEqual(fixture.store.connection.execute(
                     "SELECT count(*) FROM mission_document_research_recovery_links"
-                ).fetchone()[0], 0)
+                ).fetchone()[0], expected_links)
                 self.assertEqual(read_mission_document_research_observations(
                     fixture.store.connection)[0]["outcome"], "recovery_required")
 
@@ -1160,6 +1198,377 @@ class MissionDocumentResearchTests(unittest.TestCase):
         self.assertIn("only an owner authorization", escalation["meaning"])
         self.assertEqual(escalation["recovery"]["proof"]["classification"],
                          "proved_paid_output_contract_failure")
+
+    def test_unproved_send_buys_exactly_one_automatic_retry_that_can_succeed(self):
+        """The seventeen live holds: retried once by the lane, not by a person."""
+
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        self._enable_recovery(fixture, maximum=2)
+        admission = authority.admit_from_plan(**args)
+        statement = "Managed services revenue is recognized over time."
+        adapter = UnprovedSendOnceAdapter({
+            "schema_version": "0.1", "status": "answered", "answer": statement,
+            "candidate": {"normalized_statement": statement,
+                          "metric_or_aspect": "managed services revenue recognition",
+                          "period": "current policy", "basis": "reported",
+                          "cited_match_indexes": [0]}, "missing": [],
+        })
+        executor, _draft, _verifier = self._executor(
+            fixture, authority, draft_adapter=adapter)
+        while True:
+            current = executor.run_once(admission["id"])
+            if current["status"] == "failed":
+                break
+        failed = executor._derive_work(admission, executor._blueprints(admission), 1)
+        result = executor.run_once(admission["id"])
+        self.assertEqual(result["status"], "admitted")
+        self.assertEqual(result["reason"], "automatic_bounded_unproved_send_retry")
+        rows = fixture.store.connection.execute(
+            "SELECT record_json FROM "
+            "mission_document_research_controlled_recovery_authorizations"
+        ).fetchall()
+        self.assertEqual(len(rows), 1)
+        authorization = json.loads(rows[0]["record_json"])
+        self.assertEqual(authorization["actor_ref"],
+                         "automation:document-research-unproved-send-retry")
+        self.assertEqual(authorization["kind"],
+                         "automation_bounded_unproved_send_retry")
+        self.assertEqual(authorization["max_fresh_work_orders"], 1)
+        self.assertEqual(authorization["max_cost_usd"],
+                         failed["budget"]["max_cost_usd"])
+        self.assertEqual(authorization["failed_work_order_ref"], failed["id"])
+        self.assertEqual(
+            authorization["max_automatic_unproved_send_retries_per_day"], 5)
+        links = fixture.store.connection.execute(
+            "SELECT record_json FROM mission_document_research_recovery_links"
+        ).fetchall()
+        self.assertEqual(len(links), 1)
+        link = json.loads(links[0]["record_json"])
+        self.assertEqual(link["failure_proof"]["classification"],
+                         "automation_bounded_unproved_send_retry")
+        self.assertEqual(
+            link["failure_proof"]["unproved_send_record"]["classification"],
+            "unproved_send_state")
+        self.assertEqual(
+            link["failure_proof"]["unproved_send_record"]["worst_case"],
+            "earlier_send_may_have_been_sent_and_charged")
+        observation = next(
+            item for item in read_mission_document_research_observations(
+                fixture.store.connection)
+            if item["recovery"]["reason"] == "automatic_bounded_unproved_send_retry")
+        # The worst case is stated in words, not left to be worked out.
+        self.assertIn("one bounded automatic retry", observation["meaning"])
+        self.assertIn("sent and charged", observation["meaning"])
+        self.assertIn("one extra paid call", observation["meaning"])
+        # The retry answers, so the admission finishes with no person involved.
+        final = self._run_until(
+            executor, admission,
+            lambda item: item.get("research_status") == "candidate_staged")
+        self.assertEqual(final["research_status"], "candidate_staged")
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM mission_document_research_recovery_links"
+        ).fetchone()[0], 1)
+
+    def test_unproved_send_retry_that_fails_escalates_and_buys_nothing_more(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        self._enable_recovery(fixture, maximum=2)
+        admission = authority.admit_from_plan(**args)
+        adapter = AlwaysUnprovedSendAdapter({"unused": True})
+        executor, _draft, _verifier = self._executor(
+            fixture, authority, draft_adapter=adapter)
+        admitted = self._run_until(
+            executor, admission,
+            lambda item: item.get("reason")
+            == "automatic_bounded_unproved_send_retry")
+        self.assertEqual(admitted["status"], "admitted")
+        escalated = self._run_until(
+            executor, admission,
+            lambda item: item.get("reason")
+            == "unproved_send_failed_after_automatic_retry")
+        self.assertEqual(escalated["status"], "stopped")
+        for _ in range(3):
+            repeated = executor.run_once(admission["id"])
+            self.assertEqual(repeated["reason"],
+                             "unproved_send_failed_after_automatic_retry")
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM mission_document_research_recovery_links"
+        ).fetchone()[0], 1)
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM "
+            "mission_document_research_controlled_recovery_authorizations"
+        ).fetchone()[0], 1)
+        escalation = next(
+            item for item in read_mission_document_research_observations(
+                fixture.store.connection)
+            if item["recovery"]["reason"]
+            == "unproved_send_failed_after_automatic_retry")
+        self.assertIn("already issued", escalation["meaning"])
+        self.assertIn("only an owner authorization", escalation["meaning"])
+
+    def test_unproved_send_retry_stops_at_its_own_daily_cap_and_waits(self):
+        """The cap is a spending bound, so its answer is tomorrow, not a person."""
+
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        self._enable_recovery(fixture, maximum=2)
+        admission = authority.admit_from_plan(**args)
+        statement = "Managed services revenue is recognized over time."
+        draft = UnprovedSendOnceAdapter({
+            "schema_version": "0.1", "status": "answered", "answer": statement,
+            "candidate": {"normalized_statement": statement,
+                          "metric_or_aspect": "managed services revenue recognition",
+                          "period": "current policy", "basis": "reported",
+                          "cited_match_indexes": [0]}, "missing": [],
+        })
+        verifier = UnprovedSendOnceAdapter({
+            "schema_version": "0.1", "verdict": "pass",
+            "verified_statement": statement, "findings": [],
+        })
+        executor, _draft, _verifier = self._executor(
+            fixture, authority, draft_adapter=draft, verifier_adapter=verifier,
+            max_automatic_unproved_send_retries_per_day=1)
+        # The draft stage spends the day's single retry; the verifier stage's
+        # own unproved failure then has to wait for the UTC reset.
+        capped = self._run_until(
+            executor, admission,
+            lambda item: item.get("reason")
+            == "automatic_unproved_send_retry_day_cap_reached")
+        self.assertEqual(capped["status"], "waiting")
+        self.assertEqual(
+            capped["retry_at"],
+            (NOW.replace(hour=0, minute=0, second=0, microsecond=0)
+             + timedelta(days=1)).isoformat(timespec="microseconds"))
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM "
+            "mission_document_research_controlled_recovery_authorizations"
+        ).fetchone()[0], 1)
+        observation = next(
+            item for item in read_mission_document_research_observations(
+                fixture.store.connection)
+            if item["recovery"]["reason"]
+            == "automatic_unproved_send_retry_day_cap_reached")
+        self.assertEqual(observation["recovery"]["day"], NOW.date().isoformat())
+        self.assertIn("after the UTC day resets", observation["meaning"])
+        # The same tick repeated is the same immutable row, and buys nothing.
+        self.assertEqual(executor.run_once(admission["id"])["reason"],
+                         "automatic_unproved_send_retry_day_cap_reached")
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM mission_document_research_recovery_links"
+        ).fetchone()[0], 1)
+        # A new UTC day releases the cap and the retry is taken automatically.
+        fixture.harness.clock.value = NOW + timedelta(days=1)
+        released = executor.run_once(admission["id"])
+        self.assertEqual(released["reason"], "automatic_bounded_unproved_send_retry")
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM mission_document_research_recovery_links"
+        ).fetchone()[0], 2)
+
+    def test_pre_change_unproved_send_hold_is_picked_up_by_the_automatic_retry(self):
+        """The seventeen live holds: recorded before the retry existed."""
+
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        self._enable_recovery(fixture, maximum=2)
+        admission = authority.admit_from_plan(**args)
+        adapter = AlwaysUnprovedSendAdapter({"unused": True})
+        executor, _draft, _verifier = self._executor(
+            fixture, authority, draft_adapter=adapter)
+        while True:
+            current = executor.run_once(admission["id"])
+            if current["status"] == "failed":
+                break
+        work = executor._derive_work(admission, executor._blueprints(admission), 1)
+        formal = executor.scheduler.formal_result(work["id"])
+        # Exactly what every earlier release wrote and then waited on forever.
+        executor._recovery_observation(admission, work, formal, 1, {
+            "status": "stopped", "reason": "send_state_unproved",
+            "eligible": False, "used_fresh_work_orders": 0,
+            "max_fresh_work_orders": 2, "retry_at": None,
+            "deadline": (NOW + timedelta(hours=1)).isoformat(
+                timespec="microseconds"),
+            "proof": None,
+        })
+        lane = MissionDocumentResearchCoordinator(
+            store=fixture.store, launcher=None, clock=fixture.harness.clock,
+        )
+        self.assertEqual(lane._typed_recovery_state(admission, work["id"]), {
+            "action": "resume",
+            "reason": "automatic_unproved_send_retry_available",
+            "work_order_ref": work["id"],
+        })
+        # Re-entering spends the automatic retry rather than asking a person.
+        self.assertEqual(executor.run_once(admission["id"])["reason"],
+                         "automatic_bounded_unproved_send_retry")
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM mission_document_research_recovery_links"
+        ).fetchone()[0], 1)
+        # The newer row supersedes the legacy verdict for the same Work.
+        self.assertEqual(
+            lane._typed_recovery_state(admission, work["id"])["reason"],
+            "controlled_unproved_send_retry_admitted")
+
+    def test_owner_authorizes_one_exact_unproved_send_recovery_without_a_model_call(self):
+        """The owner door, on the state the automatic retry escalated to."""
+
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        self._enable_recovery(fixture, maximum=2)
+        admission = authority.admit_from_plan(**args)
+        adapter = AlwaysUnprovedSendAdapter({"unused": True})
+        executor, _draft, _verifier = self._executor(
+            fixture, authority, draft_adapter=adapter)
+        self._run_until(
+            executor, admission,
+            lambda item: item.get("reason")
+            == "unproved_send_failed_after_automatic_retry")
+        work, automatic = executor_module._effective_stage(
+            authority, executor.scheduler, admission, 1,
+            worker=executor.draft_worker)
+        self.assertEqual([item["failure_proof"]["classification"]
+                          for item in automatic],
+                         ["automation_bounded_unproved_send_retry"])
+        formal = executor.scheduler.formal_result(work["id"])
+        body = {
+            "schema_version": "0.1",
+            "actor_ref": "operator:owner-authorized-document-recovery",
+            "admission_ref": admission["id"],
+            "admission_hash": admission["content_hash"],
+            "stage_ordinal": 2, "failed_work_order_ref": work["id"],
+            "failed_work_order_hash": content_hash(work),
+            "formal_result_ref": _formal_ref(formal),
+            "formal_result_hash": _formal_hash(formal),
+            "max_fresh_work_orders": 1,
+            "max_cost_usd": work["budget"]["max_cost_usd"],
+            "authorized_at": (NOW + timedelta(minutes=1)).isoformat(),
+        }
+        authorization = {
+            **body,
+            "id": "mission-document-unproved-send-recovery-authorization:"
+            + content_hash(body)[:32],
+        }
+        authorization["content_hash"] = content_hash(authorization)
+        calls = adapter.calls
+        result = executor.authorize_unproved_send_recovery(
+            admission["id"], authorization)
+        self.assertEqual(result["status"], "admitted")
+        self.assertEqual(result["model_calls"], 0)
+        self.assertEqual(adapter.calls, calls)
+        self.assertEqual(executor.authorize_unproved_send_recovery(
+            admission["id"], authorization), result)
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM "
+            "mission_document_research_controlled_recovery_authorizations"
+        ).fetchone()[0], 2)
+        _owned, owner_links = executor_module._effective_stage(
+            authority, executor.scheduler, admission, 1,
+            worker=executor.draft_worker)
+        self.assertEqual([item["failure_proof"]["classification"]
+                          for item in owner_links],
+                         ["automation_bounded_unproved_send_retry",
+                          "owner_authorized_unproved_send_retry"])
+        changed = dict(authorization)
+        changed["max_cost_usd"] = authorization["max_cost_usd"] + 1
+        changed["content_hash"] = content_hash(
+            {key: value for key, value in changed.items() if key != "content_hash"})
+        with self.assertRaises(MissionDocumentResearchExecutorError):
+            executor.authorize_unproved_send_recovery(admission["id"], changed)
+
+    def test_changed_ticket_identity_rebinds_when_the_admission_did_not_change(self):
+        """The ten live holds: a moved ticket name, not a moved admission."""
+
+        from dalton_core.lane_child_launcher import LaneChildRejected, write_owner_only
+        from dalton_core.mission_document_research_launcher import (
+            MissionDocumentResearchLauncher,
+        )
+
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        admission = authority.admit_from_plan(**args)
+        staging = fixture.state / "rebind-staging.sqlite"
+        staging.write_bytes(b"staging")
+        planner_db = fixture.state / "rebind-core.sqlite"
+        planner_db.write_bytes(b"core")
+        planner_config = fixture.state / "rebind-planner-config.json"
+        planner_config.write_text("{}\n", encoding="utf-8")
+        document_config = fixture.state / "rebind-document-config.json"
+        document_config.write_text('{"release": "one"}\n', encoding="utf-8")
+        draft_config = fixture.state / "rebind-draft-model-config.json"
+        draft_config.write_text("{}\n", encoding="utf-8")
+        verifier_config = fixture.state / "rebind-verifier-model-config.json"
+        verifier_config.write_text("{}\n", encoding="utf-8")
+        launcher = MissionDocumentResearchLauncher(
+            state_dir=fixture.state, staging_path=staging,
+            planner_scheduler_db=planner_db,
+            planner_model_config_path=planner_config,
+            draft_model_config_path=draft_config,
+            verifier_model_config_path=verifier_config,
+            document_config_path=document_config,
+        )
+        self.addCleanup(launcher.close)
+        configuration = launcher.configuration()
+        signature = {
+            "admission_ref": admission["id"],
+            "admission_hash": admission["content_hash"],
+            "configuration": configuration,
+        }
+        prior_ref = ("mission-document-research:"
+                     + content_hash(signature)[:24])
+        ticket_path = launcher._ticket_path(prior_ref)
+        ticket_path.parent.mkdir(parents=True, exist_ok=True)
+        write_owner_only(ticket_path, {
+            "schema_version": "0.1", "id": prior_ref, **signature,
+            "configuration_hash": content_hash(configuration),
+            "started_at": NOW.isoformat(), "pid": 1, "command": ["true"],
+            "status": "failed", "exit_code": 1,
+            "completed_at": NOW.isoformat(),
+        })
+        summary = {
+            "schema_version": "0.1", "created_at": NOW.isoformat(),
+            "admission_ref": admission["id"],
+            "admission_hash": admission["content_hash"],
+            "status": "incomplete", "outcomes": [], "error": None,
+        }
+        write_owner_only(ticket_path.with_name("summary.json"),
+                         {**summary, "content_hash": content_hash(summary)})
+        # A release moves the document config bytes.  Nothing about the
+        # admission changed, but the ticket identity is a digest of both.
+        document_config.write_text('{"release": "two"}\n', encoding="utf-8")
+        spawned = []
+
+        def fake_spawn(*, digest, record, _controlled_reentry=None, **kwargs):
+            spawned.append({"digest": digest, "record": dict(record),
+                            "reentry": _controlled_reentry})
+            return {"id": f"mission-document-research:{digest}",
+                    "status": "running", **dict(record)}
+
+        with patch.object(launcher, "spawn", side_effect=fake_spawn):
+            rebound = launcher.resume(
+                admission_ref=admission["id"],
+                admission_hash=admission["content_hash"],
+                prior_ticket_ref=prior_ref,
+                authorization="test:exact-scheduler-replay")
+        self.assertEqual(rebound["rebound_from_ticket_ref"], prior_ref)
+        self.assertNotEqual(rebound["id"], prior_ref)
+        self.assertEqual(len(spawned), 1)
+        self.assertEqual(spawned[0]["record"]["rebound_from_ticket_ref"], prior_ref)
+        # The one-shot re-entry claim is archived against the prior run, so the
+        # rebinding is automatic exactly once for this authorization.
+        markers = sorted(ticket_path.parent.glob("controlled-reentry-*.json"))
+        self.assertEqual(len(markers), 1)
+        with patch.object(launcher, "spawn", side_effect=fake_spawn):
+            with self.assertRaises(LaneChildRejected):
+                launcher.resume(
+                    admission_ref=admission["id"],
+                    admission_hash=admission["content_hash"],
+                    prior_ticket_ref=prior_ref,
+                    authorization="test:exact-scheduler-replay")
+        self.assertEqual(len(spawned), 1)
+        # A moved admission is a different thing entirely and is still refused.
+        with patch.object(launcher, "spawn", side_effect=fake_spawn):
+            with self.assertRaisesRegex(
+                LaneChildRejected, "changed ticket identity",
+            ):
+                launcher.resume(
+                    admission_ref=admission["id"], admission_hash="0" * 64,
+                    prior_ticket_ref=prior_ref,
+                    authorization="test:other-authorization")
+        self.assertEqual(len(spawned), 1)
 
     def test_automatic_contract_retry_replays_its_own_authorization_after_a_crash(self):
         """One failed Work carries one authorization, even across a crash.
@@ -1517,9 +1926,20 @@ class MissionDocumentResearchTests(unittest.TestCase):
 
         with patch.object(observability, "latest_usage", side_effect=mismatched):
             result = executor.run_once(admission["id"])
-        self.assertEqual(result["reason"], "send_state_unproved")
-        self.assertIsNone(read_mission_document_research_observations(
-            fixture.store.connection)[0]["recovery"]["proof"])
+        # The paid-contract proof degrades, so the paid door stays shut.  What
+        # is left is an unproved send, and that has its own bounded door: one
+        # retry, never the proved-paid replay.
+        self.assertEqual(result["reason"], "automatic_bounded_unproved_send_retry")
+        observation = read_mission_document_research_observations(
+            fixture.store.connection)[0]
+        self.assertEqual(observation["recovery"]["proof"]["classification"],
+                         "unproved_send_state")
+        authorization = json.loads(fixture.store.connection.execute(
+            "SELECT record_json FROM "
+            "mission_document_research_controlled_recovery_authorizations"
+        ).fetchone()[0])
+        self.assertEqual(authorization["kind"],
+                         "automation_bounded_unproved_send_retry")
 
     def test_foreign_self_consistent_model_proof_is_not_formal_model_authority(self):
         fixture, authority, args, _registration, _launcher = self._fixture()

@@ -95,10 +95,13 @@ PROVIDER_ERROR_CODES = frozenset({"RATE_LIMITED"})
 # why it is held and writes it down every tick.
 HELD_LANE_STATUSES = frozenset({"recovery_required", "not_permitted", "ungranted"})
 
-# The document research lane's escalated contract state.  Matched as a
+# The document research lane's escalated states -- the ones it reaches only
+# after it has already spent its own bounded automatic retry.  Matched as a
 # substring because the lane sends either the bare reason or the long owner
 # sentence that contains it.
 CONTRACT_RETRIED_REASON = "contract_failed_after_automatic_retry"
+UNPROVED_SEND_RETRIED_REASON = "unproved_send_failed_after_automatic_retry"
+REENTRY_REBOUND_REASON = "reentry_failed_after_automatic_rebind"
 
 MAX_ITEMS = 200
 
@@ -408,11 +411,15 @@ def held_lanes(heartbeat: Mapping[str, Any] | None) -> list[dict[str, Any]]:
             value.get("last"), Mapping) else None
         if isinstance(recovery, Mapping) and recovery.get("reason"):
             reason = str(recovery["reason"])
-        # The document lane retries a proved-paid contract rejection once by
-        # itself.  When it still asks for a person, the ask has to say that,
-        # or the owner authorises the same purchase a second time without
-        # knowing the first one already happened.
-        retried = CONTRACT_RETRIED_REASON in reason
+        # The document lane retries a proved-paid contract rejection, an
+        # unproved send and a moved ticket identity once each by itself.  When
+        # it still asks for a person, the ask has to say that, or the owner
+        # authorises the same purchase a second time without knowing the first
+        # one already happened.
+        contract_retried = CONTRACT_RETRIED_REASON in reason
+        unproved_retried = UNPROVED_SEND_RETRIED_REASON in reason
+        rebound = REENTRY_REBOUND_REASON in reason
+        retried = contract_retried or unproved_retried or rebound
         out.append(_item(
             "controlled_recovery", ref=f"lane:{lane}", at=at,
             title=(f"研究车道自动重试过一次仍然失败，等人决定：{lane}" if retried
@@ -420,10 +427,24 @@ def held_lanes(heartbeat: Mapping[str, Any] | None) -> list[dict[str, Any]]:
             why=(f"这个车道本轮的状态是「{status}」，它给出的原因是：{reason or '未说明'}。"
                  + ("模型回复不符合输出契约，系统已经按上限自动重试过一次（同样的预算上限、"
                     "只放一条新 WorkOrder），重试回来的回复仍然不合契约，所以才轮到人。"
-                    if retried else "它不会自己重新开始。")),
+                    if contract_retried else
+                    "这次调用是否真的送达/计费无法证明，系统已经按上限自动重试过一次"
+                    "（同样的预算上限、只放一条新 WorkOrder）；重试也失败了。"
+                    "最坏情况是先前那次其实已经计费，也就是这个阶段最多已经花了两次调用，"
+                    "所以系统不再自动买第三次。"
+                    if unproved_retried else
+                    "子进程票据身份变过（通常是发布或配置换了），系统已经自动改绑到新票据"
+                    "并重新进入过一次，重新进入又失败了，所以才轮到人。"
+                    if rebound else "它不会自己重新开始。")),
             action=("先看模型或提示词为什么连续两次给不出合契约的回复；确认值得再买一次，"
                     "再按车道原文里写的那条 authorize_paid_contract_recovery 授权最后一次。"
-                    if retried else
+                    if contract_retried else
+                    "先看模型或线路为什么连续两次都拿不回可用结果；确认值得再买一次，"
+                    "再按车道原文里写的那条 authorize_paid_contract_recovery 授权最后一次。"
+                    if unproved_retried else
+                    "先看车道原因里那条 LaneChildRejected 原文说的是什么（配置文件、"
+                    "工作区绑定、票据占用），修好之后这条会自己继续。"
+                    if rebound else
                     "打开「运行」页找到这个车道，按它写的原因给出一次受控恢复授权；"
                     "如果原因看不懂，把这句原文发给维护者。"),
             consequence="不授权，这个车道每一轮都会重复报同样的状态，它负责的研究一直不产出。",
@@ -822,6 +843,8 @@ def _short(company_ref: str) -> str:
 __all__ = [
     "APPROVED_GOVERNANCE_STATUSES",
     "CONTRACT_RETRIED_REASON",
+    "REENTRY_REBOUND_REASON",
+    "UNPROVED_SEND_RETRIED_REASON",
     "GOVERNANCE_DIR_NAME",
     "HELD_LANE_STATUSES",
     "KINDS",

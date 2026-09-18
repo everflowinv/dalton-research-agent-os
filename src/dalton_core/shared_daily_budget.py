@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import sqlite3
 from collections.abc import Mapping, Sequence
@@ -246,6 +247,91 @@ def binding_path_for_ledger(budget_db: str | Path) -> Path:
     """Where an environment's binding sits, given its day ledger."""
 
     return Path(budget_db).expanduser().parent / BINDING_FILENAME
+
+
+def write_owner_only(path: str | Path, value: Mapping[str, Any]) -> None:
+    """Write one policy or binding file atomically, owner-only, never a symlink.
+
+    Here rather than in ``scripts/bind_shared_daily_budget.py`` because the
+    binding is now written in two places -- by hand for an environment that
+    already exists, and by ``workspace_host_scheme`` for one being created --
+    and a second copy of "how a cap file is written" is exactly the kind of
+    duplicate that ends with one of the two forgetting ``0o600``.
+    """
+
+    target = Path(path).expanduser()
+    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temporary = target.with_name(f".{target.name}.partial")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(dict(value), ensure_ascii=False, sort_keys=True,
+                                indent=2) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, target)
+    os.chmod(target, 0o600)
+
+
+def install_binding(
+    state_dir: str | Path,
+    *,
+    environment_id: str,
+    manager_config_path: str | Path,
+    policy_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Bind one environment's day ledger to the host policy, if there is one.
+
+    The 2026-09-18 owner instruction is that a research environment created
+    from now on is inside the host's daily cap from its first call, without
+    anybody remembering to run the binding script afterwards.  A workspace
+    created between the policy's installation and its own binding was a
+    workspace that could spend the host's whole day on its own, truthfully
+    reporting that it was inside its cap -- the failure the shared policy
+    exists to prevent, reintroduced once per new environment.
+
+    A host with no policy file is not an error: it is a host that has not
+    adopted the shared cap, and the result says so in the owner's words so the
+    creation receipt can carry the reason rather than a silence.
+    """
+
+    target = binding_path_for_ledger(
+        Path(state_dir).expanduser() / "thesis-impact-budget.sqlite")
+    policy_file = Path(policy_path or DEFAULT_POLICY_PATH).expanduser()
+    if not policy_file.is_file():
+        return {"status": "skipped", "binding_path": str(target),
+                "policy_path": str(policy_file),
+                "note": f"这台机器上没有共享每日预算策略（{policy_file}），"
+                        "这个环境按自己的任务预算运行；装好策略后运行 "
+                        "scripts/bind_shared_daily_budget.py --apply 即可绑定。"}
+    policy = load_shared_daily_budget_policy(policy_file)
+    wanted = binding_wire(
+        policy_path=str(policy_file),
+        policy_hash=policy["content_hash"],
+        manager_config_path=str(Path(manager_config_path).expanduser().resolve()),
+        environment_id=str(environment_id),
+    )
+    status = "bound"
+    if target.is_file():
+        try:
+            held = load_shared_daily_budget_binding(target)
+        except SharedDailyBudgetError:
+            status = "rebound"
+        else:
+            status = ("unchanged" if held["content_hash"] == wanted["content_hash"]
+                      else "rebound")
+    if status != "unchanged":
+        write_owner_only(target, wanted)
+    return {
+        "status": status,
+        "binding_path": str(target),
+        "policy_path": str(policy_file),
+        "policy_hash": policy["content_hash"],
+        "policy_revision": int(policy["revision"]),
+        "environment_id": str(environment_id),
+        "note": (f"这个环境和本机其它研究环境共用每天 ${policy['max_daily_cost_usd']}、"
+                 f"{policy['max_daily_paid_calls']} 次付费调用的上限"
+                 f"（策略第 {policy['revision']} 版）。"),
+    }
 
 
 def resolve_shared_gate(budget_db: str | Path) -> dict[str, Any] | None:

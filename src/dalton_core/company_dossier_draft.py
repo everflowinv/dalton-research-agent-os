@@ -1042,6 +1042,7 @@ __all__ = [
     "DossierDraftError",
     "DossierDraftInsufficientEvidence",
     "DossierDraftRefused",
+    "FINDINGS_REMINDER_LINES",
     "TEMPLATE_UNITS",
     "build_unit_prompt",
     "build_verifier_prompt",
@@ -1059,6 +1060,8 @@ __all__ = [
     "parse_unit_output",
     "render_material",
     "rendered_bodies",
+    "repair_unit_with_findings",
+    "unit_reply_wire",
     "router_family_resolver",
     "summarise_blocks",
     "validate_verifier_output",
@@ -1155,3 +1158,154 @@ def citable_context(material: Sequence[Mapping[str, Any]]) -> str:
     if not tags:
         return "CITABLE ROW TAGS: (none were shown; no sentence can cite anything)"
     return "CITABLE ROW TAGS -- cite only these:\n  " + ", ".join(tags)
+
+
+# ---------------------------------------------------------------------------
+# the second kind of repair: a unit that held its shape and was rejected
+# ---------------------------------------------------------------------------
+
+# Rules a findings repair is reminded of, beside the shape contract.  Short and
+# only about the defect it is being asked to fix: a repair shown two long rule
+# sets tends to satisfy the last one.
+FINDINGS_REMINDER_LINES: tuple[str, ...] = (
+    "A sentence may say only what the rows it cites actually carry. If a row "
+    "does not carry the claim, either cite a row that does or delete the part "
+    "of the sentence nothing supports.",
+    "Never invent a citation, never widen a row's meaning, and never convert, "
+    "round or recompute a figure to make it fit.",
+    "A dossier is a file, not a call: no buy, sell, hold, overweight, target "
+    "price or valuation verdict, in any language.",
+    "Deleting an unsupported sentence is always allowed. If a slot has nothing "
+    "left that the material supports, answer it with "
+    "{\"slot_id\": ..., \"unknown\": \"...\"} instead.",
+    "Change nothing the findings do not name: no other slot, no other "
+    "sentence, no citation, no gap.",
+)
+
+
+def unit_reply_wire(
+    block: Mapping[str, Any], *, unit: str, material: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """One accepted unit, back in the shape the model sent it.
+
+    A repair prompt shows a model its own previous reply.  The raw reply text
+    is not kept past the drafting call -- the run holds the parsed block -- so
+    it is rebuilt here, and rebuilt in the model's vocabulary rather than ours:
+    the sentences carry the row *tags* that were shown, not the refs they
+    resolved to, because a model asked to fix a citation can only cite a tag.
+    """
+
+    tag_of = {str(row["ref"]): str(row["tag"]) for row in material}
+    slots: list[dict[str, Any]] = []
+    for slot in block.get("slots") or []:
+        if "unknown" in slot:
+            slots.append({"slot_id": slot["slot_id"], "unknown": slot["unknown"]})
+            continue
+        slots.append({
+            "slot_id": slot["slot_id"],
+            "sentences": [
+                {"text": row["text"],
+                 "refs": [tag_of.get(str(ref), str(ref)) for ref in row["refs"]]}
+                for row in slot.get("sentences") or []
+            ],
+        })
+    wire: dict[str, Any] = {"slots": slots, "gaps": list(block.get("gaps") or [])}
+    if unit == CLASSIFICATION_UNIT:
+        wire["classification"] = block.get("classification")
+    return wire
+
+
+def repair_unit_with_findings(
+    model: Any,
+    *,
+    unit: str,
+    block: Mapping[str, Any],
+    findings: Sequence[Mapping[str, Any]],
+    structure: Sequence[Mapping[str, str]],
+    material: Sequence[Mapping[str, Any]],
+    company: Mapping[str, Any],
+    mission: Mapping[str, Any],
+    prior_body: str = "",
+    profile: Mapping[str, Any] | None = None,
+    profile_table: str = "",
+    market_view_available: bool = True,
+    classification: Any = None,
+    contract_name: str,
+    parent_request_id: str,
+    budget_remaining_micros: int | None = None,
+    repair_reserve_micros: int = 0,
+) -> dict[str, Any]:
+    """One repair call for a unit something read and rejected.
+
+    The same bargain ``draft_unit`` strikes for a broken reply *shape*, struck
+    one step later for a reply that held the shape and was wrong: the finder's
+    own words go back to the same model once, with the unit's own reply, out of
+    what is left of the run's bound, and a reply that still fails is refused.
+
+    The prompt is deterministic in its inputs -- the drafting prompt this unit
+    was built from, the unit's reply rebuilt from the published block, and the
+    findings -- which is what lets ``validate_formal_unit_provenance`` rebuild
+    it from the record rather than trust the bytes.
+    """
+
+    from .draft_contract_repair import repair_with_findings
+
+    prompt = build_unit_prompt(
+        unit=unit, structure=structure, material=material, company=company,
+        prior_body=prior_body, profile_table=profile_table,
+        market_view_available=market_view_available, classification=classification,
+    )
+    seen: list[tuple[str, str, Mapping[str, Any]]] = []
+
+    def call_model(*, prompt: str, request_id: str) -> Mapping[str, Any]:
+        result = model.call(purpose=DRAFT_PURPOSE, request_id=request_id,
+                            prompt=prompt, mission=mission)
+        seen.append((prompt, request_id, result))
+        return result
+
+    def parse(text: Any) -> dict[str, Any]:
+        return parse_unit_output(
+            text, unit=unit, structure=structure, material=material,
+            market_view_available=market_view_available, profile=profile,
+            classification=classification,
+        )
+
+    from .draft_contract_repair import contract_reminder_lines
+
+    outcome = repair_with_findings(
+        call=call_model, parse=parse, original_prompt=prompt,
+        reply_text=json.dumps(
+            unit_reply_wire(block, unit=unit, material=material),
+            ensure_ascii=False, sort_keys=True),
+        request_id=parent_request_id, contract_name=contract_name,
+        findings=findings,
+        contract=unit_contract(unit, structure=structure, material=material),
+        refusal_errors=(DossierDraftRefused, DossierDraftInsufficientEvidence),
+        unavailable_errors=(CockpitModelError,),
+        contract_reminder=(contract_reminder_lines(FINDINGS_REMINDER_LINES) + "\n"
+                           + unit_contract_reminder(unit, structure=structure)),
+        repair_context=citable_context(material),
+        budget_remaining_micros=budget_remaining_micros,
+        repair_reserve_micros=repair_reserve_micros,
+    )
+    result: dict[str, Any] = {
+        "status": ("repaired" if outcome.status == "repaired" else outcome.status),
+        "unit": unit, "reason": outcome.reason,
+        "block": outcome.value, "cost_micros": outcome.cost_micros,
+        "findings_repair": {"unit": unit, **outcome.summary()},
+    }
+    if seen:
+        accepted_prompt, accepted_request, accepted_call = seen[-1]
+        result["model"] = {
+            "work_order_ref": accepted_call.get("work_order_ref"),
+            "result_envelope_ref": accepted_call.get("result_envelope_ref"),
+            "invocation_ref": accepted_call.get("invocation_ref"),
+            "route_decision_ref": accepted_call.get("route_decision_ref"),
+            "request_id": accepted_request,
+            "prompt_hash": content_hash(accepted_prompt),
+            "replayed": bool(accepted_call.get("replayed")),
+            "cost_micros": outcome.cost_micros,
+        }
+    if outcome.status == "unavailable":
+        result["failure_trace"] = model_failure_trace(outcome.error)
+    return result

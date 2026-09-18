@@ -32,7 +32,10 @@ CONFIG_SCHEMA = "document-research-config-0.1"
 # Optional, because every installed copy of this file predates the knob and an
 # absent key must keep meaning "the built-in default", never "invalid config".
 # The default itself lives with the policy it bounds, in the executor.
-OPTIONAL_CONFIG_FIELDS = frozenset({"max_automatic_contract_retries_per_day"})
+OPTIONAL_CONFIG_FIELDS = frozenset({
+    "max_automatic_contract_retries_per_day",
+    "max_automatic_unproved_send_retries_per_day",
+})
 DOCUMENT_RESEARCH_SOURCES = frozenset({"source:alphaengine", "source:public-web", "source:web-search",
                       "source:sec-edgar", "source:sales-notes", "source:company-wiki",
                       "source:prior-research"})
@@ -191,11 +194,12 @@ def validate_inventory_config(value: Any) -> dict[str, Any]:
         "source_reading_limits", "inventory_preview_chars",
     } or value.get("schema_version") != CONFIG_SCHEMA:
         raise ValueError("document research configuration has an invalid shape")
-    retries = value.get("max_automatic_contract_retries_per_day")
-    if retries is not None and (
-            isinstance(retries, bool) or not isinstance(retries, int) or retries < 0):
-        raise ValueError(
-            "max_automatic_contract_retries_per_day must be a non-negative integer")
+    for knob in sorted(OPTIONAL_CONFIG_FIELDS):
+        retries = value.get(knob)
+        if retries is not None and (
+                isinstance(retries, bool) or not isinstance(retries, int)
+                or retries < 0):
+            raise ValueError(f"{knob} must be a non-negative integer")
     policy = validate_document_research_policy(value["policy"])
     preview = value["inventory_preview_chars"]
     if (isinstance(preview, bool) or not isinstance(preview, int)
@@ -340,6 +344,35 @@ def automatic_contract_retry_cap(config_path: Path | None) -> int:
         ) from exc
     value = config.get("max_automatic_contract_retries_per_day")
     return (DEFAULT_MAX_AUTOMATIC_CONTRACT_RETRIES_PER_DAY if value is None
+            else int(value))
+
+
+def automatic_unproved_send_retry_cap(config_path: Path | None) -> int:
+    """How many automatic unproved-send retries this install may issue in a day.
+
+    A separate knob from the contract cap on purpose: an unproved send may be
+    charged twice, and everything unclassifiable lands in that state, so the
+    two blast radii are lowered independently.
+    """
+
+    from .mission_document_research_executor import (
+        DEFAULT_MAX_AUTOMATIC_UNPROVED_SEND_RETRIES_PER_DAY,
+    )
+
+    if config_path is None:
+        return DEFAULT_MAX_AUTOMATIC_UNPROVED_SEND_RETRIES_PER_DAY
+    path = Path(config_path)
+    if not path.is_file() or path.is_symlink():
+        return DEFAULT_MAX_AUTOMATIC_UNPROVED_SEND_RETRIES_PER_DAY
+    try:
+        config = validate_inventory_config(
+            json.loads(path.read_text(encoding="utf-8")))
+    except (OSError, ValueError) as exc:
+        raise ValueError(
+            "document research configuration cannot bound automatic retries"
+        ) from exc
+    value = config.get("max_automatic_unproved_send_retries_per_day")
+    return (DEFAULT_MAX_AUTOMATIC_UNPROVED_SEND_RETRIES_PER_DAY if value is None
             else int(value))
 
 
