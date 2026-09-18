@@ -6,11 +6,13 @@
 
 **改动**：`document_extraction` 里新增一条统一的 `verified_original`，窗口读取（`view`/`context`）与整篇读取（`_document_text`）走同一条分发，来源各自落到自己的 `verified_*`——AlphaEngine 分页、网页/SEC 确定性渲染、Guidepoint 从搜索原始字节重新推导摘录、三个本地语料（销售笔记 / 公司 wiki / 历史投研，历史投研还要把原始文件重新渲染一遍比对）。封闭验证模型一条没松：manifest 说什么都不信，字节从 spool 读回来重新哈希；没有采集产物的文档仍然被拒，**拒绝理由点名缺的是什么**（spool 里没有这个对象 / ticket 文件不可用 / 本进程没装这个来源的 ticket 读取器）。SEC 文件（10-K/10-Q/8-K）此前已随 P11t 走通网页取回路径，本次未再改动。
 
+**字节不在读的那个 spool 里（这条不查出来，开了门也读不成）**：AlphaEngine 与取回子进程拿的是 writer 的 `--transcript-spool-dir`，而销售笔记 / wiki / 历史投研 / Guidepoint 的 launcher 建出来时**根本没传 spool 目录**（`mission_feed_lane.build_*_launcher` 读的是 `args.transcript_spool`，writer 上叫 `transcript_spool_dir`），子进程于是落到自己的默认值 `<state>/connector-spool`。线上逐份核对：这两个环境 522 份待读文档的 assembled/excerpt 对象、以及 Guidepoint 校验还要回读的搜索原始响应，**全部**在 `connector-spool`，`transcript-spool` 里一份都没有。所以读取侧现在按「哪条车道写的就去哪儿读」解析 spool——launcher 配了就用它的，没配就用子进程自己的默认（`<state>/connector-spool`），再退到 writer 的 spool；对象是内容寻址的，读到之后照样按 manifest 重新哈希，所以「在哪个根下找到」只影响去哪儿找、不影响信什么。没有去改子进程写到哪，那样只会把同一个来源劈成新旧两处。
+
 **读了不等于能入账**：Guidepoint 与三个本地语料没有自己的引用授权（候选链绑的是 AlphaEngine 文档血统 / 网页更正授权），所以自动入账对它们是一条**带理由的门闩**而不是崩溃。但门闩不再把 review 吊在半空：这些来源照常读完、照常出建议留在 review 上、照常写 `document_read_completion_proofs`（cockpit 的 `read` 因此会动），然后带着理由 `dismissed`——否则就是每 5 分钟重新付费读同一份笔记。
 
 **顺带定位 legacy 那 10 条 `completed fetch files are unavailable`**：不是 EveSSD 迁移丢文件。这 10 条 ticket 自己写着 `status: failed, exit_code 1, body_bytes 0`（morningstar / perplexity / investing.com 这类拒爬的页，车道重试了几十次），台账 `ticket_ref` 指着最新那次**失败**的启动，而失败的子进程根本没写 manifest。取回器现在把「这次启动失败了」与「文件不见了」分开说；抽取侧在前者上改问 ticket 目录要一次**成功**的启动——这 10 条里有 4 条确实存在更早的成功取回，会直接恢复；剩下 6 条两头都没有，理由写明两段并列为终局不可读，由扫描把 review 归档，不再每小时重来。
 
-**测试**：新增 `tests/test_corpus_document_reading.py`（四个来源各一条「可读且就是那份文档」——用各自连接器既有的 fixture 跑真协调器 / 真子进程采集；产物被删后按缺什么报什么；没装读取器按来源名拒绝；以及一条完整扫描：销售笔记进入队列、被读完、写下读完凭证、带理由归档且不产生任何正式写入）。`tests/test_fetched_filing_reading.py` 增加失败 ticket 的三条与「被取代的 ticket」三条。全量测试通过。
+**测试**：新增 `tests/test_corpus_document_reading.py`（四个来源各一条「可读且就是那份文档」——用各自连接器既有的 fixture 跑真协调器 / 真子进程采集；销售笔记这一组刻意复刻线上形状：launcher 不给 spool 目录、子进程写进 `<state>/connector-spool`、读取侧仍然读得到；产物被删后按缺什么报什么；没装读取器按来源名拒绝；以及一条完整扫描：销售笔记进入队列、被读完、写下读完凭证、带理由归档且不产生任何正式写入）。`tests/test_fetched_filing_reading.py` 增加失败 ticket 的三条与「被取代的 ticket」三条。全量测试通过。
 
 ## 2026-09-18 23:10 UTC：自动入账规则的签署脚本不再绑死 legacy 环境；新工作区的第一版 policy 自带定性规则（源码，待部署）
 

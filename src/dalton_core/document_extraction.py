@@ -22,10 +22,17 @@ from .budget_pools import POOL_EXHAUSTED_STATUS, mission_pool_scope
 from .contracts import WorkOrder, ResultEnvelope, ModelInvocation, InvocationGranularity
 from .connector_authority_port import ConnectorCompletionReceiptReader
 from .live_mcp_connector import alphaengine_document_page_from_raw_response
+from .feed_acquisition import (
+    COMPANY_WIKI_SOURCE_REF,
+    PRIOR_RESEARCH_SOURCE_REF,
+    SALES_NOTES_SOURCE_REF,
+    verified_feed_source,
+)
 from .guidepoint_acquisition import (
     GUIDEPOINT_SOURCE_REF,
     verified_guidepoint_source,
 )
+from .lane_child_launcher import TICKET_DID_NOT_COMPLETE
 from .public_web_extraction_source import verified_public_web_source
 from .research_verification import ResearchVerificationConflict, ResearchVerificationError
 from .store import canonical_json, content_hash
@@ -63,7 +70,30 @@ SEC_EDGAR_SOURCE_REF = "source:sec-edgar"
 # existed, every acquired annual report was refused at the door -- the bytes
 # were on disk and the queue would not open them.
 FETCHED_SOURCE_REFS = frozenset({PUBLIC_WEB_SOURCE_REF, SEC_EDGAR_SOURCE_REF})
-SUPPORTED_SOURCE_REFS = frozenset({ALPHAENGINE_SOURCE_REF}) | FETCHED_SOURCE_REFS
+# P13ap: the local corpora.  Each of these acquisitions ends the same way every
+# other one does -- the exact text in the content-addressed spool under a
+# manifest that declares its hash -- so the only thing that ever stopped the
+# queue reading them was this gate.  The launcher each source's manifests live
+# under is named here rather than guessed, because a document whose acquisition
+# ticket nobody can find must be refused by name, not read from somewhere else.
+FEED_SOURCE_LAUNCHER_KWARGS = {
+    SALES_NOTES_SOURCE_REF: "sales_notes_feed_launcher",
+    COMPANY_WIKI_SOURCE_REF: "company_wiki_feed_launcher",
+    PRIOR_RESEARCH_SOURCE_REF: "prior_research_feed_launcher",
+}
+FEED_SOURCE_REFS = frozenset(FEED_SOURCE_LAUNCHER_KWARGS)
+GUIDEPOINT_LAUNCHER_KWARG = "guidepoint_search_launcher"
+SUPPORTED_SOURCE_REFS = (
+    frozenset({ALPHAENGINE_SOURCE_REF, GUIDEPOINT_SOURCE_REF})
+    | FETCHED_SOURCE_REFS | FEED_SOURCE_REFS
+)
+# P13ap: reading is not staging.  Every source above can be read, quoted and
+# drafted from, but the candidate chain binds AlphaEngine document lineage (or,
+# for a fetched page, the public-web correction authority); a Guidepoint
+# excerpt and a local corpus document have neither yet, so a draft from one is
+# a suggestion a human can see and never an automatic Claim.
+SOURCE_STAGING_GATE_REASON = "acquired_source_candidate_staging_not_supported"
+STAGEABLE_SOURCE_REFS = frozenset({ALPHAENGINE_SOURCE_REF}) | FETCHED_SOURCE_REFS
 OUTPUT_SCHEMA = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "title": "DocumentExtractionSuggestionsV0.1",
@@ -279,6 +309,209 @@ def verified_source(core, spool, manifest, receipt_reader, *,
             or _hash_text(text) != manifest["declared_content_sha256"]):
         raise ResearchVerificationConflict("assembled original differs from Core raw pages")
     return manifest, text
+
+
+def _lane_launcher(writer, init_kwarg):
+    """The launcher one lane installed on this writer, or ``None``."""
+
+    getter = getattr(writer, "lane_launcher", None)
+    return getter(init_kwarg) if callable(getter) else None
+
+
+def acquisition_ticket_reader(writer, source_ref):
+    """The ticket directory that holds this source's acquisition manifests.
+
+    Reading is refused by name rather than falling back to another source's
+    launcher: the whole point of the ticket directory is that it is the durable
+    record of which launch produced which bytes, and a reader for the wrong
+    lane would be looking in the wrong directory for them.
+    """
+
+    if source_ref == ALPHAENGINE_SOURCE_REF:
+        launcher = getattr(writer, "acquisition_launcher", None)
+    elif source_ref in FETCHED_SOURCE_REFS:
+        launcher = getattr(writer, "web_fetch_launcher", None)
+    elif source_ref == GUIDEPOINT_SOURCE_REF:
+        lane = _lane_launcher(writer, GUIDEPOINT_LAUNCHER_KWARG)
+        launcher = getattr(lane, "acquisition_launcher", None)
+    elif source_ref in FEED_SOURCE_REFS:
+        launcher = _lane_launcher(writer, FEED_SOURCE_LAUNCHER_KWARGS[source_ref])
+    else:
+        raise ResearchVerificationError(
+            f"{source_ref} is not an acquired document source this queue can read; "
+            "only " + ", ".join(sorted(SUPPORTED_SOURCE_REFS)) + " can be viewed here"
+        )
+    if launcher is None:
+        raise ResearchVerificationError(
+            f"no acquisition ticket reader for {source_ref} is installed here, so its "
+            "documents cannot be proved against the bytes their acquisition recorded"
+        )
+    return launcher
+
+
+def completed_acquisition_manifest(launcher, *, ticket_ref, document_ref):
+    """The manifest of the launch that actually produced this document's bytes.
+
+    A row acquired before ticket refs were recorded, or settled as already
+    held, names no ticket, and the ticket directory is asked instead
+    (ADR-0005 / P9d-17a).  P13ap adds the case live found ten of: the row
+    *does* name a ticket and that ticket settled as failed, because the lane
+    retried a page the site refuses and the ledger kept the newest launch.  The
+    bound launch wrote no manifest and never will, so the directory is asked
+    the same question -- and when it has no completed launch either, the
+    refusal says both halves rather than the file-level "unavailable" that sent
+    the queue back to re-read it every five minutes for a week.
+    """
+
+    if not ticket_ref:
+        return launcher.locate_completed_manifest(document_ref)
+    try:
+        return launcher.read_completed_manifest(ticket_ref, document_ref)
+    except Exception as exc:  # noqa: BLE001 - re-raised below unless superseded
+        if TICKET_DID_NOT_COMPLETE not in str(exc):
+            raise
+        try:
+            return launcher.locate_completed_manifest(document_ref)
+        except Exception as located:  # noqa: BLE001
+            raise ResearchVerificationError(
+                f"the acquisition ticket bound to {document_ref} did not complete "
+                f"({exc}) and no completed acquisition of it remains ({located})"
+            ) from located
+
+
+#: What a connector child calls its spool when nobody tells it where to write.
+#: The feed and Guidepoint children are told nothing (their launchers are built
+#: without a spool directory), so this is where their bytes are.
+CHILD_DEFAULT_SPOOL_NAME = "connector-spool"
+
+
+class _AcquisitionSpool:
+    """The objects of one lane, read from whichever root that lane wrote them to.
+
+    The AlphaEngine and fetch children are handed the writer's spool; the feed
+    and Guidepoint children are not, and fall back to their own default under
+    the state directory.  Live on 2026-09-18 that is where every one of the 522
+    queued corpus documents' bytes were -- ``<state>/connector-spool`` -- while
+    the reading side held only the transcript spool, so opening the door
+    without this would have turned one refusal into another.
+
+    Which root answered is not a question about what is true: an object is
+    named by its own hash, and every caller below re-hashes what it gets
+    against the manifest that named it before a word of it is quoted.
+    """
+
+    def __init__(self, roots):
+        self._roots = list(roots)
+
+    def read_object(self, content_hash):
+        first = None
+        for root in self._roots:
+            try:
+                return root.read_object(content_hash)
+            except Exception as exc:  # noqa: BLE001 - the next root may hold it
+                first = first or exc
+        raise first
+
+    def object_exists(self, content_hash):
+        return any(root.object_exists(content_hash) for root in self._roots)
+
+
+def acquisition_spool(writer, launcher, source_ref):
+    """The spool this source's acquisition child put the document bytes in."""
+
+    writer_spool = writer._transcript_spool
+    if source_ref not in FEED_SOURCE_REFS and source_ref != GUIDEPOINT_SOURCE_REF:
+        return writer_spool
+    from .raw_spool import RawSpoolError, RawSpoolReader
+
+    roots = []
+    candidates = []
+    configured = getattr(launcher, "spool_dir", None)
+    if configured is not None:
+        candidates.append(Path(configured))
+    state_dir = getattr(launcher, "state_dir", None)
+    if state_dir is not None:
+        candidates.append(Path(state_dir) / CHILD_DEFAULT_SPOOL_NAME)
+    seen = set()
+    for candidate in candidates:
+        try:
+            resolved = candidate.expanduser().resolve()
+        except OSError:
+            continue
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        try:
+            roots.append(RawSpoolReader(resolved))
+        except RawSpoolError:
+            continue
+    if writer_spool is not None:
+        roots.append(writer_spool)
+    if not roots:
+        raise ResearchVerificationError(
+            f"no readable raw spool for {source_ref}; the bytes its acquisition "
+            "recorded cannot be read back"
+        )
+    return roots[0] if len(roots) == 1 else _AcquisitionSpool(roots)
+
+
+def verified_original(writer, review, row, limits, receipt_reader):
+    """The exact original this document's acquisition recorded, re-proved here.
+
+    One dispatch for every source, used by the window reader and by the
+    whole-document reader, so the two can never disagree about what a document
+    is.  Each branch ends in that source's own ``verified_*``: nothing the
+    manifest asserts is believed, the bytes are read back out of the
+    content-addressed spool and re-hashed, and a source with no such artifact
+    is refused rather than approximated.
+
+    Returns the manifest, the text, the hash that identifies the exact original
+    a context binds, and any source-specific fields the context carries.
+    """
+
+    source_ref = review["source_ref"]
+    document_ref = review["document_ref"]
+    launcher = acquisition_ticket_reader(writer, source_ref)
+    manifest = completed_acquisition_manifest(
+        launcher, ticket_ref=row["ticket_ref"], document_ref=document_ref)
+    store = writer.store
+    spool = acquisition_spool(writer, launcher, source_ref)
+    if source_ref == ALPHAENGINE_SOURCE_REF:
+        manifest, text = verified_source(
+            store, spool, manifest, receipt_reader,
+            max_document_chars=limits["max_document_chars"])
+        return manifest, text, manifest["declared_content_sha256"], {}
+    if source_ref == GUIDEPOINT_SOURCE_REF:
+        # S2: an excerpt has no pages and no URL; its text is re-derived from
+        # the raw bytes of the search that returned it.
+        manifest, text = verified_guidepoint_source(store, spool, manifest, receipt_reader)
+        return manifest, text, manifest["declared_content_sha256"], {}
+    if source_ref in FEED_SOURCE_REFS:
+        # S1/W3: a note, a wiki page or this fund's own earlier work. The
+        # manifest names one spool object and declares its hash; prior research
+        # additionally re-renders the original file and compares.
+        manifest, text = verified_feed_source(store, spool, manifest, receipt_reader)
+        if manifest["source_ref"] != source_ref:
+            raise ResearchVerificationConflict(
+                "completed acquisition belongs to a different source")
+        return manifest, text, manifest["declared_content_sha256"], {}
+    # A fetched page or filing: the review names the ref the document was
+    # queued under, the manifest names the fetched record (url hash + body
+    # hash), and the launcher above cross-checked both.
+    manifest, rendering = verified_public_web_source(
+        store, spool, manifest, receipt_reader,
+        max_source_chars=limits["max_document_chars"], max_pdf_pages=limits["max_pdf_pages"],
+        max_decompressed_bytes=limits["max_decompressed_bytes"],
+    )
+    text = rendering["text"]
+    # A web page has no declared content hash of its own: the citable original
+    # is the deterministic rendering of its exact bytes, so the renderer
+    # identity is part of what a context binds.
+    return manifest, text, _hash_text(text), {
+        "canonical_url": manifest["canonical_url"], "host": manifest["host"],
+        "raw_media_type": manifest["raw_media_type"], "body_sha256": manifest["body_sha256"],
+        "source_renderer": rendering["renderer"], "source_truncated": rendering["truncated"],
+    }
 
 
 # Period labels are not numeric assertions: a statement may name the year,
@@ -984,7 +1217,9 @@ class DocumentExtractionService:
         )
         if review["source_ref"] not in SUPPORTED_SOURCE_REFS:
             raise ResearchVerificationError(
-                "only acquired AlphaEngine documents and fetched public-web pages can be viewed here"
+                f"{review['source_ref']} is not an acquired document source this queue "
+                "can read; only " + ", ".join(sorted(SUPPORTED_SOURCE_REFS))
+                + " can be viewed here"
             )
         row = writer.store.connection.execute(
             "SELECT * FROM coverage_mission_discovered_documents WHERE record_id=?",
@@ -998,42 +1233,8 @@ class DocumentExtractionService:
         if writer._transcript_spool is None:
             raise ResearchVerificationError("original spool is unavailable")
         reader = ConnectorCompletionReceiptReader(connectors=writer._connectors, observability=writer.observability)
-        web_fields: dict[str, Any] = {}
-        if review["source_ref"] == ALPHAENGINE_SOURCE_REF:
-            # A row acquired before ticket refs were recorded, or settled as
-            # already held, names no ticket; the ticket directory still knows
-            # which launch produced the bytes (ADR-0005 / P9d-17a).
-            manifest = (
-                writer.acquisition_launcher.read_completed_manifest(row["ticket_ref"], review["document_ref"])
-                if row["ticket_ref"] else
-                writer.acquisition_launcher.locate_completed_manifest(review["document_ref"])
-            )
-            manifest, text = verified_source(writer.store, writer._transcript_spool, manifest, reader,
-                                            max_document_chars=limits["max_document_chars"])
-            source_content_hash = manifest["declared_content_sha256"]
-        else:
-            # The review names the URL ref; the manifest names the fetched
-            # record (url hash + body hash).  The launcher cross-checks both.
-            manifest = (
-                writer.web_fetch_launcher.read_completed_manifest(row["ticket_ref"], review["document_ref"])
-                if row["ticket_ref"] else
-                writer.web_fetch_launcher.locate_completed_manifest(review["document_ref"])
-            )
-            manifest, rendering = verified_public_web_source(
-                writer.store, writer._transcript_spool, manifest, reader,
-                max_source_chars=limits["max_document_chars"], max_pdf_pages=limits["max_pdf_pages"],
-                max_decompressed_bytes=limits["max_decompressed_bytes"],
-            )
-            text = rendering["text"]
-            # A web page has no declared content hash of its own: the citable
-            # original is the deterministic rendering of its exact bytes, so
-            # the renderer identity is part of what a context binds.
-            source_content_hash = _hash_text(text)
-            web_fields = {
-                "canonical_url": manifest["canonical_url"], "host": manifest["host"],
-                "raw_media_type": manifest["raw_media_type"], "body_sha256": manifest["body_sha256"],
-                "source_renderer": rendering["renderer"], "source_truncated": rendering["truncated"],
-            }
+        manifest, text, source_content_hash, web_fields = verified_original(
+            writer, review, row, limits, reader)
         if type(offset) is not int or offset < 0 or offset >= len(text) or offset % window_chars:
             raise ResearchVerificationError("source offset must be a valid bounded window")
         end = min(offset + window_chars, len(text))
@@ -1543,37 +1744,10 @@ class DocumentExtractionService:
         ).fetchone()
         reader = ConnectorCompletionReceiptReader(
             connectors=self.writer._connectors, observability=self.writer.observability)
-        if review["source_ref"] == ALPHAENGINE_SOURCE_REF:
-            launcher = self.writer.acquisition_launcher
-            manifest = (launcher.read_completed_manifest(row["ticket_ref"], review["document_ref"])
-                        if row["ticket_ref"] else
-                        launcher.locate_completed_manifest(review["document_ref"]))
-            _, text = verified_source(
-                self.writer.store, self.writer._transcript_spool, manifest, reader,
-                max_document_chars=limits["max_document_chars"])
-            return checked(text)
-        # S2: Guidepoint excerpts. Before the web-fetch fall-through, because
-        # the fall-through is a default and this is a source with its own
-        # manifest shape -- an excerpt has no pages and no URL.
-        if review["source_ref"] == GUIDEPOINT_SOURCE_REF:
-            launcher = self.writer.lane_launcher(
-                "guidepoint_search_launcher"
-            ).acquisition_launcher
-            manifest = (launcher.read_completed_manifest(row["ticket_ref"], review["document_ref"])
-                        if row["ticket_ref"] else
-                        launcher.locate_completed_manifest(review["document_ref"]))
-            _, text = verified_guidepoint_source(
-                self.writer.store, self.writer._transcript_spool, manifest, reader)
-            return checked(text)
-        launcher = self.writer.web_fetch_launcher
-        manifest = (launcher.read_completed_manifest(row["ticket_ref"], review["document_ref"])
-                    if row["ticket_ref"] else
-                    launcher.locate_completed_manifest(review["document_ref"]))
-        _, rendering = verified_public_web_source(
-            self.writer.store, self.writer._transcript_spool, manifest, reader,
-            max_source_chars=limits["max_document_chars"], max_pdf_pages=limits["max_pdf_pages"],
-            max_decompressed_bytes=limits["max_decompressed_bytes"])
-        return checked(rendering["text"])
+        # The same dispatch the window reader used, so "the whole document"
+        # cannot mean a different document from the window it came from.
+        _, text, _, _ = verified_original(self.writer, review, row, limits, reader)
+        return checked(text)
 
     def generate_numeric(self, *, review_id, expected_review_hash, offset,
                          expected_context_hash, actor_ref, source_grade=None):
@@ -1894,6 +2068,15 @@ class DocumentExtractionService:
         drafted = self._suggestions(context)
         if drafted["status"] != "succeeded":
             return {"status": drafted["status"], "admitted": []}
+        if context["source_ref"] not in STAGEABLE_SOURCE_REFS:
+            # P13ap: this source can be read, quoted and drafted from, and its
+            # figures land in their own journal, but it has no citation
+            # authority a Claim could be published through yet.  A gate with a
+            # reason, not a crash into the AlphaEngine manifest validator.
+            return {"status": "gated", "admitted": [],
+                    "reason": f"{SOURCE_STAGING_GATE_REASON}: {context['source_ref']} "
+                              "documents can be read and drafted from, but have no "
+                              "candidate citation authority to be staged through"}
         staging = self.writer.candidate_staging
         reviewer = self.writer.candidate_review
         row = self.writer.store.connection.execute(
@@ -1901,9 +2084,9 @@ class DocumentExtractionService:
             (self.writer.coverage_mission.document_review(review_id)["discovered_document_ref"],),
         ).fetchone()
         web = context["source_ref"] in FETCHED_SOURCE_REFS
-        launcher = self.writer.web_fetch_launcher if web else self.writer.acquisition_launcher
-        manifest = (launcher.read_completed_manifest(row["ticket_ref"], context["document_ref"])
-                    if row["ticket_ref"] else launcher.locate_completed_manifest(context["document_ref"]))
+        launcher = acquisition_ticket_reader(self.writer, context["source_ref"])
+        manifest = completed_acquisition_manifest(
+            launcher, ticket_ref=row["ticket_ref"], document_ref=context["document_ref"])
         if web:
             # ADR-0005 / P9d-17c: the same correction authority over the
             # fetched page; its original is the verified rendering.
@@ -2005,6 +2188,14 @@ class DocumentExtractionService:
             raise ResearchVerificationError(
                 f"{WEB_STAGING_GATE_REASON}: fetched public-web pages can be read, drafted "
                 "and dismissed, but not staged as candidates yet"
+            )
+        if context["source_ref"] != ALPHAENGINE_SOURCE_REF:
+            # Same rule, said once for every other source this queue can now
+            # read: a Guidepoint excerpt and a local corpus document have no
+            # citation authority of their own either.
+            raise ResearchVerificationError(
+                f"{SOURCE_STAGING_GATE_REASON}: {context['source_ref']} documents can be "
+                "read, drafted from and dismissed, but not staged as candidates yet"
             )
         suggestions = self._suggestions(context)["suggestions"]
         suggestion = next((s for s in suggestions if s["id"] == suggestion_ref and s["content_hash"] == suggestion_hash), None)

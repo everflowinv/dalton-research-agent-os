@@ -36,6 +36,7 @@ from .public_web_core_fetch import (
     validate_public_web_fetch_manifest,
 )
 from .child_tickets import adopt_finished_child
+from .lane_child_launcher import TICKET_DID_NOT_COMPLETE
 from .launch_drain import _ticket_process_matches
 from .store import canonical_json
 
@@ -389,9 +390,26 @@ class PublicWebFetchLauncher:
                     raise ValueError("not an object")
                 records.append(value)
             except (OSError, ValueError) as exc:
+                # P13ap: a fetch that settled as failed wrote no manifest, and
+                # never will.  Live, ten open reviews were bound to exactly
+                # that -- a page a site refuses, retried dozens of times, the
+                # ledger holding the newest failed launch -- and this read
+                # reported "files are unavailable", which reads as a transient
+                # I/O problem and sent the queue back to try again every five
+                # minutes.  Say which it is: the ticket is the file that knows.
+                if records and records[0].get("status") not in (None, "succeeded"):
+                    raise FetchLaunchRejected(
+                        f"{TICKET_DID_NOT_COMPLETE}: fetch ticket {ticket_ref} settled as "
+                        f"{records[0].get('status')} and wrote no manifest"
+                    ) from exc
                 raise FetchLaunchRejected("completed fetch files are unavailable") from exc
         ticket, summary, manifest = records
-        if (ticket.get("id") != ticket_ref or ticket.get("status") != "succeeded"
+        if ticket.get("status") != "succeeded":
+            raise FetchLaunchRejected(
+                f"{TICKET_DID_NOT_COMPLETE}: fetch ticket {ticket_ref} settled as "
+                f"{ticket.get('status')}"
+            )
+        if (ticket.get("id") != ticket_ref
                 or ticket.get("document_ref") != document_ref
                 or summary.get("url_ref") != document_ref
                 or manifest.get("url_ref") != self._fetched_url_ref(summary, document_ref)

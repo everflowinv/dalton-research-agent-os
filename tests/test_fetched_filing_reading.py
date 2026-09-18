@@ -24,7 +24,11 @@ from dalton_core.document_extraction import (
     PUBLIC_WEB_SOURCE_REF,
     SEC_EDGAR_SOURCE_REF,
     SUPPORTED_SOURCE_REFS,
+    completed_acquisition_manifest,
 )
+from dalton_core.document_extraction_cli import _permanently_unreadable
+from dalton_core.lane_child_launcher import TICKET_DID_NOT_COMPLETE
+from dalton_core.research_verification import ResearchVerificationError
 from dalton_core.public_web_connector import public_web_url_ref
 from dalton_core.public_web_fetch_launcher import (
     FetchLaunchRejected,
@@ -121,14 +125,126 @@ class ManifestReadTests(unittest.TestCase):
             self.launcher.read_completed_manifest(TICKET, "sec:filing:0000051143-25-000012")
 
 
+class FailedTicketTests(unittest.TestCase):
+    """P13ap: a fetch that failed is not a fetch whose files went missing.
+
+    Live, ten open reviews in the legacy environment were bound to fetch
+    tickets that had settled ``failed`` -- pages a site refuses, retried dozens
+    of times, the ledger keeping the newest launch.  Reading one said
+    "completed fetch files are unavailable", which reads as an I/O hiccup, so
+    the queue came back and paid to try again every five minutes for a week.
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.state = Path(self.temp.name)
+        self.launcher = PublicWebFetchLauncher(
+            state_dir=self.state, governance_path=self.state / "unused.json",
+        )
+
+    def write_failed(self, *, ticket=TICKET, manifest=False):
+        directory = self.state / "fetches" / ticket.split(":", 1)[1]
+        directory.mkdir(parents=True, mode=0o700, exist_ok=True)
+        files = {"ticket.json": {"id": ticket, "status": "failed", "exit_code": 1,
+                                 "document_ref": FILING},
+                 "summary.json": {"url_ref": FILING, "status": "failed", "body_bytes": 0}}
+        if manifest:
+            files["manifest.json"] = {"url_ref": URL_REF, "id": "x", "content_hash": "y"}
+        for name, value in files.items():
+            path = directory / name
+            path.write_text(json.dumps(value), encoding="utf-8")
+            path.chmod(0o600)
+
+    def test_a_failed_ticket_says_so_rather_than_naming_the_files(self):
+        self.write_failed()
+        with self.assertRaises(FetchLaunchRejected) as caught:
+            self.launcher.read_completed_manifest(TICKET, FILING)
+        self.assertIn(TICKET_DID_NOT_COMPLETE, str(caught.exception))
+        self.assertNotIn("files are unavailable", str(caught.exception))
+
+    def test_a_failed_ticket_that_did_leave_a_manifest_is_still_refused(self):
+        self.write_failed(manifest=True)
+        with self.assertRaises(FetchLaunchRejected) as caught:
+            self.launcher.read_completed_manifest(TICKET, FILING)
+        self.assertIn(TICKET_DID_NOT_COMPLETE, str(caught.exception))
+
+    def test_genuinely_missing_files_still_read_as_transient(self):
+        # A succeeded ticket with no manifest beside it is the case the old
+        # message was written for, and it keeps that message and its retry.
+        directory = self.state / "fetches" / TICKET.split(":", 1)[1]
+        directory.mkdir(parents=True, mode=0o700, exist_ok=True)
+        path = directory / "ticket.json"
+        path.write_text(json.dumps(
+            {"id": TICKET, "status": "succeeded", "document_ref": FILING}), encoding="utf-8")
+        path.chmod(0o600)
+        with self.assertRaises(FetchLaunchRejected) as caught:
+            self.launcher.read_completed_manifest(TICKET, FILING)
+        self.assertIn("completed fetch files are unavailable", str(caught.exception))
+        self.assertFalse(_permanently_unreadable(str(caught.exception)))
+
+
+class SupersededTicketTests(unittest.TestCase):
+    """Which launch produced the bytes is a question for the directory."""
+
+    class Launcher:
+        def __init__(self, located=None):
+            self.located = located
+
+        def read_completed_manifest(self, ticket_ref, document_ref):
+            raise RuntimeError(
+                f"{TICKET_DID_NOT_COMPLETE}: fetch ticket {ticket_ref} settled as failed")
+
+        def locate_completed_manifest(self, document_ref):
+            if self.located is None:
+                raise RuntimeError("no completed acquisition ticket for this document")
+            return self.located
+
+    def test_a_failed_bound_ticket_falls_back_to_a_launch_that_completed(self):
+        manifest = {"id": "public-web-fetch-manifest:earlier"}
+        self.assertEqual(
+            completed_acquisition_manifest(
+                self.Launcher(manifest), ticket_ref=TICKET, document_ref=FILING),
+            manifest,
+        )
+
+    def test_with_no_completed_launch_the_refusal_names_both_halves(self):
+        with self.assertRaises(ResearchVerificationError) as caught:
+            completed_acquisition_manifest(
+                self.Launcher(), ticket_ref=TICKET, document_ref=FILING)
+        reason = f"{type(caught.exception).__name__}: {caught.exception}"
+        self.assertIn("did not complete", reason)
+        self.assertIn("no completed acquisition of it remains", reason)
+        # Nothing on disk and nothing a later run can find: the review is
+        # parked with this reason instead of being re-read forever.
+        self.assertTrue(_permanently_unreadable(reason, offset=0))
+
+    def test_another_refusal_is_never_silently_retried_somewhere_else(self):
+        class Tampered(self.Launcher):
+            def read_completed_manifest(self, ticket_ref, document_ref):
+                raise RuntimeError("ticket, summary and manifest disagree")
+
+        with self.assertRaises(RuntimeError) as caught:
+            completed_acquisition_manifest(
+                Tampered({"id": "other"}), ticket_ref=TICKET, document_ref=FILING)
+        self.assertIn("disagree", str(caught.exception))
+
+
 class SourceGateTests(unittest.TestCase):
     def test_a_fetched_filing_is_read_on_the_same_path_as_a_fetched_page(self):
         self.assertEqual(FETCHED_SOURCE_REFS, {PUBLIC_WEB_SOURCE_REF, SEC_EDGAR_SOURCE_REF})
         self.assertIn(SEC_EDGAR_SOURCE_REF, SUPPORTED_SOURCE_REFS)
         self.assertIn("source:alphaengine", SUPPORTED_SOURCE_REFS)
 
+    def test_every_source_whose_acquisition_leaves_readable_text_is_wired(self):
+        # P13ap: each of these ends its acquisition the same way -- the exact
+        # text in the content-addressed spool under a manifest that declares
+        # its hash -- so each is read through its own ``verified_*``.
+        for source_ref in ("source:guidepoint", "source:sales-notes",
+                           "source:company-wiki", "source:prior-research"):
+            self.assertIn(source_ref, SUPPORTED_SOURCE_REFS)
+
     def test_a_source_nobody_has_wired_is_still_refused(self):
-        self.assertNotIn("source:guidepoint", SUPPORTED_SOURCE_REFS)
         self.assertNotIn("source:company-ir", SUPPORTED_SOURCE_REFS)
 
 

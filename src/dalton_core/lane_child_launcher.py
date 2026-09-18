@@ -36,6 +36,12 @@ from .launch_drain import _is_zombie, _ticket_process_matches
 
 TICKET_SCHEMA_VERSION = "0.1"
 
+#: The sentence a launcher uses when a ticket it was asked to read settled
+#: without producing a manifest.  A reader that knows this string apart from a
+#: file-level failure can ask the ticket directory for a launch that *did*
+#: complete, and can tell a durably dead acquisition from a transient one.
+TICKET_DID_NOT_COMPLETE = "acquisition ticket did not complete"
+
 # When this interpreter started. A ``running`` ticket written before this
 # moment belongs to a previous writer process and is this process's to settle;
 # one written after it belongs to a live launcher in this process and is not.
@@ -697,6 +703,7 @@ class LaneChildLauncher:
 
 __all__ = [
     "PROCESS_STARTED_AT",
+    "TICKET_DID_NOT_COMPLETE",
     "LaneChildConflict",
     "LaneChildError",
     "LaneChildLauncher",

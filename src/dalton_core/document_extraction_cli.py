@@ -34,6 +34,10 @@ from .coverage_mission import CoverageMissionAuthority
 from .extraction_priority import review_sort_key as evidence_review_sort_key
 from .mission_stage import company_priority_order, review_sort_key
 from .document_extraction import (
+    FEED_SOURCE_LAUNCHER_KWARGS,
+    GUIDEPOINT_LAUNCHER_KWARG,
+    SOURCE_STAGING_GATE_REASON,
+    STAGEABLE_SOURCE_REFS,
     DocumentExtractionModelWorker,
     DocumentExtractionService,
     HermeticExtractionAdapter,
@@ -115,6 +119,12 @@ class ExtractionHost:
             state_dir=state_dir, governance_path=web_fetch_governance or (state_dir / "unused-governance.json"),
             spool_dir=spool_dir,
         )
+        # P13ap: the corpora read through their own ticket directories.  Each
+        # reader is opened on first use and only then: a workspace with no
+        # Guidepoint lane has no ``guidepoint-acquire-runs`` directory, and
+        # opening one here would be this read-only child creating lane state.
+        self.state_dir = state_dir
+        self._lane_readers: dict[str, Any] = {}
         self._document_extraction_model_config = model_config
         self._document_extraction_worker_factory = None
         # ADR-0005 / P9d-17b: staging and admission need the shared candidate
@@ -138,6 +148,38 @@ class ExtractionHost:
             from .thesis_impact_budget import ThesisImpactBudgetStore
             self._keepalive.append(ThesisImpactBudgetStore(model_config["budget_db"]))
             self._keepalive.append(ModelRouter(model_config["model_router_db"]))
+
+    def lane_launcher(self, init_kwarg: str) -> Any | None:
+        """The read-only manifest reader for one lane, opened on demand.
+
+        Mirrors ``WriterServer.lane_launcher`` so the extraction service needs
+        one resolution path, not one per host.  Nothing is spawned and nothing
+        is written: a feed reader refuses outright when its ticket directory is
+        not there, which is the refusal the queue should see.
+        """
+
+        if init_kwarg in self._lane_readers:
+            return self._lane_readers[init_kwarg]
+        reader: Any = None
+        feeds = {kwarg: source for source, kwarg in FEED_SOURCE_LAUNCHER_KWARGS.items()}
+        if init_kwarg in feeds:
+            from .feed_launcher import ReadOnlyFeedManifestReader
+
+            reader = ReadOnlyFeedManifestReader(
+                state_dir=self.state_dir, source_ref=feeds[init_kwarg])
+        elif init_kwarg == GUIDEPOINT_LAUNCHER_KWARG:
+            from types import SimpleNamespace
+
+            from .guidepoint_launcher import GuidepointAcquisitionLauncher
+
+            # No spool directory: this launcher is opened to read tickets, not
+            # to spawn, and ``spool_dir`` means "where the child I spawn
+            # writes".  Saying this child's own spool there would be a claim
+            # about the acquisition that is not true.
+            reader = SimpleNamespace(
+                acquisition_launcher=GuidepointAcquisitionLauncher(state_dir=self.state_dir))
+        self._lane_readers[init_kwarg] = reader
+        return reader
 
     @property
     def candidate_staging(self) -> Any:
@@ -897,6 +939,11 @@ _PERMANENT_UNREADABLE = (
     "is encrypted and is not rendered",
     "requires a password and is not rendered",
     "gzip content is incomplete or invalid",
+    # P13ap: the acquisition this review was opened on failed and left no
+    # manifest, and no other launch of the same document completed either.
+    # There is nothing on disk to read and no later run will find one, so the
+    # review is parked with the reason instead of retried hourly forever.
+    "and no completed acquisition of it remains",
 )
 
 
@@ -1355,7 +1402,19 @@ def _admit_complete_reviews(host: ExtractionHost, service: DocumentExtractionSer
         outcomes: list[dict[str, Any]] = []
         gated: str | None = None
         unattributed: str | None = None
-        for offset in offsets:
+        # P13ap: a source that can be read but not staged.  Admission is
+        # skipped rather than attempted -- there is no citation authority to
+        # attempt it through -- but the read itself still completes and the
+        # review still resolves.  Holding it open instead would mean paying to
+        # draft the same note again every five minutes forever, and the
+        # cockpit's read count would go on saying nobody had read it.
+        unstageable = (
+            None if review["source_ref"] in STAGEABLE_SOURCE_REFS else
+            f"{SOURCE_STAGING_GATE_REASON}: {review['source_ref']} documents are read "
+            "and drafted from, but have no candidate citation authority to be staged "
+            "through, so no Claim was published from this read"
+        )
+        for offset in [] if unstageable else offsets:
             try:
                 view = service.view(
                     review_id=review["review_id"], expected_review_hash=review_hash,
@@ -1437,6 +1496,13 @@ def _admit_complete_reviews(host: ExtractionHost, service: DocumentExtractionSer
                                f"{len(rejected)} suggestion(s) refused"),
                     expected_review_hash=review_hash,
                 )
+            elif unstageable is not None:
+                resolution = host.coverage_mission.resolve_document_review(
+                    review["review_id"], resolution="dismissed", actor_ref=actor,
+                    rationale=(f"P13ap: {len(offsets)} window(s) were read and their "
+                               f"suggestions kept on the review. {unstageable}"),
+                    expected_review_hash=review_hash,
+                )
             else:
                 resolution = host.coverage_mission.resolve_document_review(
                     review["review_id"], resolution="dismissed", actor_ref=actor,
@@ -1444,8 +1510,11 @@ def _admit_complete_reviews(host: ExtractionHost, service: DocumentExtractionSer
                                f"{len(offsets)} window(s); {len(rejected)} suggestion(s) refused by policy"),
                     expected_review_hash=review_hash,
                 )
-            summary["resolved_reviews"].append({"review_id": review["review_id"], "status": resolution["state"],
-                                                "admitted": len(carried), "rejected": len(rejected)})
+            entry = {"review_id": review["review_id"], "status": resolution["state"],
+                     "admitted": len(carried), "rejected": len(rejected)}
+            if unstageable is not None:
+                entry["reason"] = unstageable
+            summary["resolved_reviews"].append(entry)
         except Exception as exc:
             summary["resolved_reviews"].append({"review_id": review["review_id"], "status": "unresolved",
                                                 "reason": f"{type(exc).__name__}: {exc}"})
