@@ -186,6 +186,56 @@ def _verify_wheel_payload(wheel: Path, venv: Path) -> None:
                 raise WorkspaceError(f"installed Dalton payload differs from wheel: {name}")
 
 
+def write_release_marker(
+    venv_path: str | Path,
+    *,
+    release_hash: str,
+    wheel_sha256: str,
+    dependency_lock_hash: str | None = None,
+    dependency_wheels: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Write the venv's integrity marker for a release built elsewhere.
+
+    ``install_release`` writes this marker as its last step, and
+    ``validate_release`` -- which every workspace install and repair runs --
+    refuses a venv without it.  ``scripts/build_release.py`` built its venvs
+    without one from 2026-09-17 on, so the first workspace repair against such
+    a release died with "release is incomplete or has no integrity manifest".
+    The record is the same closed shape ``install_release`` writes: schema 0.2
+    with the dependency lock when one is given, 0.1 otherwise.
+    """
+
+    venv = Path(venv_path).expanduser().resolve()
+    for name, value in (("release_hash", release_hash), ("wheel_sha256", wheel_sha256)):
+        if len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
+            raise WorkspaceError(f"{name} must be lowercase SHA-256")
+    if (dependency_lock_hash is None) != (dependency_wheels is None):
+        raise WorkspaceError("dependency_lock_hash and dependency_wheels must be supplied together")
+    executables = [venv / "bin" / name for name in ("python", "daltond", "dalton-writer")]
+    if any(not path.is_file() or not os.access(path, os.X_OK) for path in executables):
+        raise WorkspaceError("installed release is incomplete")
+    marker = venv / MARKER
+    if marker.exists():
+        marker.unlink()
+    files = _inventory(venv)
+    if not files:
+        raise WorkspaceError("installed release is incomplete")
+    body: dict[str, Any] = {
+        "schema_version": "0.2" if dependency_lock_hash is not None else "0.1",
+        "release_ref": f"release:sha256:{release_hash}",
+        "wheel_sha256": wheel_sha256,
+        "files": files,
+    }
+    if dependency_lock_hash is not None:
+        body["dependency_lock_hash"] = dependency_lock_hash
+        body["dependency_wheels"] = [dict(row) for row in dependency_wheels or []]
+    record = {**body, "content_hash": content_hash(body)}
+    marker.write_text(canonical_json(record) + "\n", encoding="utf-8")
+    os.chmod(marker, 0o600)
+    validate_release(venv, release_hash)
+    return record
+
+
 def install_release(
     host_root: str | Path,
     wheel_path: str | Path,

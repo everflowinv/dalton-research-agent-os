@@ -229,6 +229,14 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         wheel_keep = release / wheel.name
         shutil.copyfile(wheel, wheel_keep)
         os.chmod(wheel_keep, 0o600)
+        # venv 内的完整性清单（dalton-release.json）：workspace 的安装/修复在
+        # 指向一个发布之前会核对它；2026-09-17 之前本脚本没有写，于是第一次
+        # 对这类发布做 workspace 修复就报 "release is incomplete"。
+        from dalton_core.workspace_release import write_release_marker
+        write_release_marker(
+            venv, release_hash=digest, wheel_sha256=wheel_sha,
+            dependency_lock_hash=lock["dependency_lock_hash"],
+            dependency_wheels=lock["dependency_wheels"])
         manifest = {
             "schema_version": SCHEMA,
             "release_hash": digest,
