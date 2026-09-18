@@ -312,6 +312,66 @@ def publish_first_mission(
     )
 
 
+#: The first mission's governance policy already names this rule.  Without it
+#: ``DocumentExtractionService._admit_complete_reviews`` holds every completed
+#: document review with "active governance policy does not list
+#: research-auto-commit:mission-document-qualitative:v1" -- reviews the owner
+#: finished, gated on a signature nobody in a fresh workspace knows to make.
+#: The bootstrap policy a blank Core installs carries no auto-commit block at
+#: all, so the first mission is where the owner's confirmation can carry it.
+#: Only the qualitative rule: it asserts no number (value/unit/scale are null)
+#: and is bound to an exact raw span in a verified original.  The SEC and
+#: filed-figure numeric rules stay unsigned until an owner asks for them, with
+#: ``scripts/sign_auto_commit_rules.py``.
+FIRST_MISSION_AUTO_COMMIT_MAX_RECORDS = 20
+
+
+def ensure_first_mission_auto_commit_policy(
+    store: Any, *, actor_ref: str,
+) -> dict[str, str]:
+    """Return the policy binding, publishing one that names the document rule.
+
+    Idempotent: a policy that already lists the rule is bound unchanged and
+    nothing is published.  A policy carrying the exclusive filing-count rule
+    is also left alone -- that rule is only valid as the entire rule set, so
+    extending it would publish a set the evaluator rejects.
+    """
+
+    from .research_auto_commit import DOCUMENT_QUALITATIVE_RULE_REF, RULE_REF
+
+    version = store.active_policy_version().to_dict()
+    rule = version["policy"].get("research_candidate_auto_commit")
+    listed = list(rule.get("rules") or []) if isinstance(rule, Mapping) else []
+    if DOCUMENT_QUALITATIVE_RULE_REF in listed or RULE_REF in listed:
+        return {"ref": version["id"], "hash": version["content_hash"]}
+    body = {
+        **version["policy"],
+        # ``policy_json`` carries the predicates beside the executable policy;
+        # dropping them here would silently relax the independence gate.
+        "independence_predicates": version["independence_predicates"],
+        "research_candidate_auto_commit": {
+            "enabled": True,
+            "rules": listed + [DOCUMENT_QUALITATIVE_RULE_REF],
+            "max_records": (rule.get("max_records") if isinstance(rule, Mapping)
+                            else None) or FIRST_MISSION_AUTO_COMMIT_MAX_RECORDS,
+        },
+    }
+    number = int(version["version"]) + 1
+    published = store.create_policy(
+        body, policy_version_id=f"policy-{number}", version_number=number,
+        activate=True, policy_ref=version["policy_ref"],
+        prior_version_ref=version["id"], actor_ref=actor_ref,
+        change_reason=(
+            "workspace first mission: list "
+            f"{DOCUMENT_QUALITATIVE_RULE_REF} in "
+            "policy.research_candidate_auto_commit.rules so this mission's own "
+            "completed document reviews may be admitted as qualitative Claims "
+            "bound to exact raw spans; every other rule is unchanged"),
+    )
+    return {"ref": published["policy_version_id"],
+            "hash": published["content_hash"]}
+
+
 def prepare_first_mission_bindings(
     store: Any, *, method_foundation: Mapping[str, Any],
     proposal: Mapping[str, Any], actor_ref: str,
@@ -378,14 +438,14 @@ def prepare_first_mission_bindings(
     method = method_spec.get("value") if isinstance(method_spec, Mapping) else None
     if not isinstance(method, Mapping) or method_spec.get("content_hash") != content_hash(method):
         raise WorkspaceMissionSetupError("constitution method template differs")
-    policy = store.active_policy_version()
+    policy = ensure_first_mission_auto_commit_policy(store, actor_ref=actor_ref)
     constitution = ResearchConstitutionAuthority(store).publish_constitution(
         f"constitution:first-mission:{suffix}", industry_ref=industry_ref,
         title=f"{body['title']} Research Constitution",
         bindings={
             "mandate_version": {"ref": mandate["id"], "hash": mandate["content_hash"]},
             "driver_pack_version": {"ref": pack["id"], "hash": pack["content_hash"]},
-            "governance_policy_version": {"ref": policy.id, "hash": policy.content_hash},
+            "governance_policy_version": policy,
             "doctrine_pack_version": None, "weekly_brief_plan": None,
         }, method=method, actor_ref=actor_ref,
         version_id=f"constitution-version:first-mission:{suffix}:1",

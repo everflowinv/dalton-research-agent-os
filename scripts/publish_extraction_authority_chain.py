@@ -49,7 +49,6 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from dalton_core.agenda import AgendaStore  # noqa: E402
 from dalton_core.coverage_mission import CoverageMissionAuthority  # noqa: E402
-from dalton_core.document_extraction import DocumentExtractionService  # noqa: E402
 from dalton_core.research_constitution import ResearchConstitutionAuthority  # noqa: E402
 from dalton_core.store import DaltonStore  # noqa: E402
 
@@ -308,6 +307,12 @@ def rehearse(state_dir: Path, target: Path, *, add_rules: list[str] | None = Non
             raise SystemExit(operation)
 
         result = apply_chain(chain, apply)
+
+        # Imported here, not at module import: the only thing in this file
+        # that needs the extraction service is this rehearsal check, and a
+        # module-level import made every importer of ``apply_chain`` depend on
+        # the whole extraction lane loading cleanly.
+        from dalton_core.document_extraction import DocumentExtractionService
 
         class _Host:
             pass

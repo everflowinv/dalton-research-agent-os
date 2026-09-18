@@ -198,6 +198,20 @@ class WorkspaceFirstMissionTests(unittest.TestCase):
         mission = publish_first_mission_to_store(
             store, self.workspace, proposal=draft, proposal_hash=draft["content_hash"],
             actor_ref="human:owner", method_foundation=foundation)
+        # A workspace created from now on can admit its own finished document
+        # reviews: the first mission's policy already names the qualitative
+        # rule, so ``_admit_complete_reviews`` has nothing to hold them on.
+        from dalton_core.research_auto_commit import (
+            DOCUMENT_QUALITATIVE_RULE_REF, policy_lists_document_rule)
+        active = store.active_policy_version().to_dict()
+        self.assertTrue(policy_lists_document_rule(active))
+        self.assertIn(DOCUMENT_QUALITATIVE_RULE_REF,
+                      active["policy"]["research_candidate_auto_commit"]["rules"])
+        constitution_ref = mission["bindings"]["constitution_version"]["ref"]
+        from dalton_core.research_constitution import ResearchConstitutionAuthority
+        bound = ResearchConstitutionAuthority(store).constitution(
+            constitution_ref)["bindings"]["governance_policy_version"]
+        self.assertEqual(bound, {"ref": active["id"], "hash": active["content_hash"]})
         from dalton_core.macos_launchagent import _web_discovery_plan
         from dalton_core.mission_source_discovery import load_discovery_plan
         selected_plan = load_discovery_plan(_web_discovery_plan(self.workspace.state_dir))

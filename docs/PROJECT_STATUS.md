@@ -1,5 +1,27 @@
 # Dalton 项目进度
 
+## 2026-09-18 23:55 UTC：抽取车道能读的不再只有 AlphaEngine 与网页——Guidepoint、销售笔记、公司 wiki、历史投研全部打开（源码，待部署）
+
+线上 Hyperscaler 工作区最近一轮扫了 143 条 review，**115 条**被同一句话挡在门外：`only acquired AlphaEngine documents and fetched public-web pages can be viewed here`；legacy 环境 156 条里挡了 139 条。这 115 份（销售笔记 59、Guidepoint 摘录 37、公司 wiki 20）**每一份的正文都好端端躺在内容寻址 spool 里**，manifest 写着它自己的哈希、ticket 目录记着是哪次采集写的——只是门关着。cockpit 的 `read` 因此冻在 54，文档来源的 Claim 接近于零。
+
+**改动**：`document_extraction` 里新增一条统一的 `verified_original`，窗口读取（`view`/`context`）与整篇读取（`_document_text`）走同一条分发，来源各自落到自己的 `verified_*`——AlphaEngine 分页、网页/SEC 确定性渲染、Guidepoint 从搜索原始字节重新推导摘录、三个本地语料（销售笔记 / 公司 wiki / 历史投研，历史投研还要把原始文件重新渲染一遍比对）。封闭验证模型一条没松：manifest 说什么都不信，字节从 spool 读回来重新哈希；没有采集产物的文档仍然被拒，**拒绝理由点名缺的是什么**（spool 里没有这个对象 / ticket 文件不可用 / 本进程没装这个来源的 ticket 读取器）。SEC 文件（10-K/10-Q/8-K）此前已随 P11t 走通网页取回路径，本次未再改动。
+
+**读了不等于能入账**：Guidepoint 与三个本地语料没有自己的引用授权（候选链绑的是 AlphaEngine 文档血统 / 网页更正授权），所以自动入账对它们是一条**带理由的门闩**而不是崩溃。但门闩不再把 review 吊在半空：这些来源照常读完、照常出建议留在 review 上、照常写 `document_read_completion_proofs`（cockpit 的 `read` 因此会动），然后带着理由 `dismissed`——否则就是每 5 分钟重新付费读同一份笔记。
+
+**顺带定位 legacy 那 10 条 `completed fetch files are unavailable`**：不是 EveSSD 迁移丢文件。这 10 条 ticket 自己写着 `status: failed, exit_code 1, body_bytes 0`（morningstar / perplexity / investing.com 这类拒爬的页，车道重试了几十次），台账 `ticket_ref` 指着最新那次**失败**的启动，而失败的子进程根本没写 manifest。取回器现在把「这次启动失败了」与「文件不见了」分开说；抽取侧在前者上改问 ticket 目录要一次**成功**的启动——这 10 条里有 4 条确实存在更早的成功取回，会直接恢复；剩下 6 条两头都没有，理由写明两段并列为终局不可读，由扫描把 review 归档，不再每小时重来。
+
+**测试**：新增 `tests/test_corpus_document_reading.py`（四个来源各一条「可读且就是那份文档」——用各自连接器既有的 fixture 跑真协调器 / 真子进程采集；产物被删后按缺什么报什么；没装读取器按来源名拒绝；以及一条完整扫描：销售笔记进入队列、被读完、写下读完凭证、带理由归档且不产生任何正式写入）。`tests/test_fetched_filing_reading.py` 增加失败 ticket 的三条与「被取代的 ticket」三条。全量测试通过。
+
+## 2026-09-18 23:10 UTC：自动入账规则的签署脚本不再绑死 legacy 环境；新工作区的第一版 policy 自带定性规则（源码，待部署）
+
+线上 Hyperscaler 工作区 26 条已读完的文档 review 全部 `held`，理由是 `active governance policy does not list research-auto-commit:mission-document-qualitative:v1`——这个工作区的第一版治理 policy 里**根本没有** `research_candidate_auto_commit` 这个块。legacy 环境 2026-09-16 遇到的是同一堵墙（两条定量规则），当时用 `scripts/sign_quantitative_auto_commit_policy.py` 签过去了，但那个脚本把 mission ref、constitution ref、state 目录全写死成 legacy 的，指不到工作区。
+
+**新增 `scripts/sign_auto_commit_rules.py`**：同一件事，什么都不写死。`--state-dir` 指向任一环境的 dalton-core 目录，从 `coverage_mission_pointer` 读当前 mission，顺着 mission 自己的 bindings 找到 constitution 与 mandate；`--rule` 可重复、按 `KNOWN_RULE_REFS` 校验，不给就默认「所有本 build 实现、而当前 policy 还没列的规则」（`--only-missing` 语义，已列的跳过，`--no-only-missing` 则报错）。`research-auto-commit:sec-public-filing-count:v1` 不进默认集合、也不允许与别的规则混在一起——评估器只接受它**独占**整个规则集，混进去会把原本能过的候选一起拒掉。默认只读：打印 `research_candidate_auto_commit` 的逐字节 before/after 与将要发布的三条记录（policy → constitution → mission，走 `apply_chain` 的同一条级联，因为 constitution 绑着旧 policy 的 mission 是不能花钱的）；`--rehearse <dir>` 在 Core 副本上真发一遍并回读评估器是否接受；`--apply --actor human:<owner>` 走该环境自己的 writer（`<state>/writer-tokens.json`、`<state>/run/writer.sock`）的临时 human principal。已经签过的环境跑出来是一份 `already-signed` 报告而不是报错。`sign_quantitative_auto_commit_policy.py` 改为它的两规则预设，逻辑不再有第二份。
+
+**新工作区从此不需要这个脚本**：空 Core 装的引导 policy 不带自动入账块，而工作区的第一个 mission 是 owner 亲手确认的那一步，所以 `workspace_mission_setup.prepare_first_mission_bindings` 在绑定 policy 前先确保当前 policy 列出定性规则（缺则发布下一版并激活，幂等；只加这一条，SEC 与 figure 三条定量规则仍需 owner 另行签署）。
+
+**测试**：新增 `tests/test_sign_auto_commit_rules.py`（mission/constitution 命名与 legacy 毫无关系的 fixture Core：before/after 与三条发布记录、默认规则集、预演后评估器接受且 mission 绑上新 constitution、已签则幂等、`--no-only-missing` 报错、未实现的规则与 filing-count 混用被拒、只读跑不写任何东西；第一版 policy 自带定性规则且第二次调用不分叉 policy 链）。
+
 ## 2026-09-18 22:15 UTC：文档抽取车道不再把同四份读完的文档反复重走；「读完了」成为终局状态（源码，待部署）
 
 线上「美国 Hyperscaler 研究」工作区的抽取车道两个多小时零进展：`awaiting` 114、cockpit 的 `read` 卡在 54、`waiting` 从 53 涨到 117，模型调用量从 339/小时掉到 7/小时。05:43Z 起的每一轮 summary 形状完全一样：`numeric` 107 个窗口、只落在同样四个 review 上，其中 106 个 `replayed: true`、`recorded: 0`、`verified: 0`，`numeric_fresh: 0`；第 107 个是一份 AlphaEngine 文档，答 `not_attributed`；`admitted` 与 `drafted` 全空。
