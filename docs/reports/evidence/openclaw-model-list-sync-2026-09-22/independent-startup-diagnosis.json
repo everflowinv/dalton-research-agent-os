@@ -1,0 +1,17 @@
+{
+  "checked_at": "2026-09-22T16:48:48.274151+00:00",
+  "diagnosis": "Homebrew Python access to external-volume Dalton state is blocked by TCC-mediated system policy",
+  "observations": [
+    "All three state paths resolve through symlinks onto EveSSD",
+    "Rollback writer sample: 803/803 samples at Python startup getcwd/open",
+    "TCC attributes AllFiles preflight authValue=0 to the same old-release Python process",
+    "Candidate and rollback reproduce before Dalton startup",
+    "EveSSD is mounted read-write APFS with owners enabled; Unix ownership/modes normal; no App Sandbox entitlement"
+  ],
+  "limits": [
+    "No proof of a pending visible permission dialog",
+    "Cannot distinguish required Full Disk Access from Files & Folders/external volume permission from these logs alone"
+  ],
+  "ui_action": "Computer-use tool prohibits UserNotificationCenter; no permission database or security setting was modified",
+  "user_action_pending": "Inspect macOS privacy access for Python/launch host, then verify restarted services"
+}
