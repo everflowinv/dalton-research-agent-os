@@ -258,7 +258,12 @@ def guidance_profile_for(store: DaltonStore, company_ref: str) -> dict[str, Any]
     except ImportError:  # pragma: no cover - both are on main
         return None
     try:
-        guides, actuals = guidance_material(store, company_ref)
+        # Guidance reads every dossier aspect. Bind them to one operation's
+        # ClaimIndex snapshot rather than rescanning the ledger per aspect on
+        # every held earnings-window tick.
+        from .company_research_view import prepare_company_claim_query
+        claim_context = prepare_company_claim_query(store, company_ref)
+        guides, actuals = guidance_material(store, company_ref, claim_context=claim_context)
         return build_profile(company_ref=company_ref, guides=guides, actuals=actuals)
     except Exception:  # noqa: BLE001 - an unreadable profile is no profile
         return None

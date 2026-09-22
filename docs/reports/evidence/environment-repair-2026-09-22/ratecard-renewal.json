@@ -1,0 +1,33 @@
+{
+  "backup_path": "/Users/everflow/.openclaw/openclaw.json.bak-provider-controls-20260922T124733Z",
+  "changes": [
+    {
+      "expires_at": "2026-10-22T12:35:00Z",
+      "old_expires_at": "2026-09-22T00:00:00Z",
+      "old_verified_at": "2026-08-22T00:00:00Z",
+      "profile_id": "profile:gemini-3-8-flash",
+      "verified_at": "2026-09-22T12:35:00Z"
+    },
+    {
+      "expires_at": "2026-10-22T12:35:00Z",
+      "old_expires_at": "2026-09-22T00:00:00Z",
+      "old_verified_at": "2026-08-22T00:00:00Z",
+      "profile_id": "profile:gemini-3-1-pro-preview",
+      "verified_at": "2026-09-22T12:35:00Z"
+    }
+  ],
+  "config_path": "/Users/everflow/.openclaw/openclaw.json",
+  "current_config_sha256": "780a6bc527224228535c599cc0ef8d29090dfb96b01b8f76898ce36724ff40d6",
+  "evidence_sources_to_recheck": [
+    "https://ai.google.dev/gemini-api/docs/pricing",
+    "https://cloud.google.com/gemini-enterprise-agent-platform/generative-ai/pricing"
+  ],
+  "new_config_sha256": "b22a28226c4d279606eec4f06979503f71bd929be156795b42482f0f26d767b2",
+  "status": "applied",
+  "unchanged_fields": [
+    "mode",
+    "model",
+    "thinkingLevel",
+    "rateCard prices"
+  ]
+}

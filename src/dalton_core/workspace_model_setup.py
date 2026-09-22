@@ -100,9 +100,11 @@ def _assert_pinned_chains_are_routable(router: ModelRouter,
     2026-09-16 that was: ``profile:gpt-6-astra`` first in five brain chains
     while it answered 100% HTTP 429, ``model-profile:claude-opus-5`` -- an id
     whose only profile version expired on 2026-08-15 -- in position four, and
-    ``profile:gemini-3-8-flash-antigravity-high`` in a brain chain its 30k
-    transport ceiling cannot serve. Every new environment would have inherited
-    all three.
+    ``profile:gemini-3-8-flash-antigravity-high`` in a brain chain its
+    then-measured 30k transport ceiling could not serve. The endpoint was
+    revalidated at 170k on 2026-09-22; this paragraph records the incident that
+    introduced the export check. Every new environment would otherwise have
+    inherited all three original faults.
 
     So the export checks the *pinned* versions -- the ones a lane will actually
     run, not their whole immutable lineage, which necessarily contains every

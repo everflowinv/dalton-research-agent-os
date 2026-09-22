@@ -37,6 +37,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from .alphaengine_core_acquisition import StaticConnectorGovernance
 from .child_tickets import adopt_finished_child
+from .lane_child_launcher import TICKET_DID_NOT_COMPLETE
 from .store import canonical_json
 
 
@@ -354,11 +355,24 @@ class AlphaEngineAcquisitionLauncher:
                     value = json.loads(handle.read(2000001).decode("utf-8"))
                 if not isinstance(value, dict):
                     raise ValueError("not an object")
+                if name == "ticket.json":
+                    if value.get("id") != ticket_ref or value.get("document_ref") != document_ref:
+                        raise AcquisitionLaunchRejected("ticket, summary and manifest disagree")
+                    # A failed/orphaned launch may have no remaining manifest.
+                    # Only this explicit terminal status allows lookup of a
+                    # different verified completion; corrupt success does not.
+                    if value.get("status") in ("failed", "orphaned"):
+                        raise AcquisitionLaunchRejected(
+                            f"{TICKET_DID_NOT_COMPLETE}: acquisition ticket {ticket_ref} "
+                            f"settled as {value.get('status')}"
+                        )
                 records.append(value)
+            except AcquisitionLaunchRejected:
+                raise
             except (OSError, ValueError) as exc:
                 raise AcquisitionLaunchRejected("completed acquisition files are unavailable") from exc
         ticket, summary, manifest = records
-        if (ticket.get("id") != ticket_ref or ticket.get("status") != "succeeded"
+        if (ticket.get("status") != "succeeded"
                 or ticket.get("document_ref") != document_ref
                 or summary.get("document_ref") != document_ref
                 or manifest.get("document_ref") != document_ref

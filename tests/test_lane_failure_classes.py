@@ -204,6 +204,7 @@ class LaneVocabularyMigrationTests(unittest.TestCase):
         ("research_task", "skipped:pool_exhausted", DEPENDENCY_UNAVAILABLE),
         ("guidepoint_discovery", "unreadable_last_run", TRANSIENT),
         ("mission_source_discovery", "not_registered:ConnectorError", DEPENDENCY_UNAVAILABLE),
+        ("mission_consensus", "RawSpoolCapacityError: raw spool high-water mark reached", DEPENDENCY_UNAVAILABLE),
         ("research_task", TASK_62, DEPENDENCY_UNAVAILABLE),
     )
 

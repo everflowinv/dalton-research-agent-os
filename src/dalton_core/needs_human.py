@@ -39,6 +39,7 @@ over checkpoints that already exist.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -58,6 +59,7 @@ KINDS: tuple[str, ...] = (
     "governance_record",
     "reopen_proposal",
     "gate_auto_returned",
+    "raw_spool_capacity",
 )
 # Blast radius, smallest number first.
 URGENCY: Mapping[str, int] = MappingProxyType({
@@ -69,6 +71,7 @@ URGENCY: Mapping[str, int] = MappingProxyType({
     "governance_record": 3,
     "reopen_proposal": 4,
     "gate_auto_returned": 5,
+    "raw_spool_capacity": 2,
 })
 URGENCY_LABELS: Mapping[int, str] = MappingProxyType({
     1: "挡住了整条研究链",
@@ -123,6 +126,8 @@ MAX_ITEMS = 200
 # turns a to-do list into a noticeboard about the neighbours.  The scope is the
 # workspace slug, or this constant for the legacy environment.
 LEGACY_ENVIRONMENT = "legacy"
+RAW_SPOOL_DEFAULT_MAX_TOTAL_BYTES = 1_000_000_000
+RAW_SPOOL_WARNING_RATIO = 0.9
 
 
 def _now(clock: Any | None = None) -> datetime:
@@ -186,6 +191,41 @@ def _item(kind: str, *, ref: str, at: str, title: str, why: str, action: str,
         "actionable": actionable,
         "detail": dict(detail or {}),
     }
+
+
+def raw_spool_capacity(state_dir: Path | None, *, now: datetime) -> list[dict[str, Any]]:
+    """Warn before the connector spool reaches its configured hard bound."""
+
+    if state_dir is None:
+        return []
+    from .raw_spool import RawSpoolError, RawSpoolReader
+
+    try:
+        reader = RawSpoolReader(state_dir / "connector-spool")
+        used = reader.total_bytes()
+    except (OSError, RawSpoolError):
+        return []
+    configured = os.environ.get("DALTON_RAW_SPOOL_MAX_TOTAL_BYTES")
+    try:
+        limit = int(configured) if configured is not None else RAW_SPOOL_DEFAULT_MAX_TOTAL_BYTES
+    except ValueError:
+        limit = RAW_SPOOL_DEFAULT_MAX_TOTAL_BYTES
+    if limit < 1 or used / limit < RAW_SPOOL_WARNING_RATIO:
+        return []
+    percent = used * 100 // limit
+    return [_item(
+        "raw_spool_capacity",
+        ref="raw-spool:capacity",
+        at=_iso(now),
+        title=f"连接器原始落盘已用到上限的 {percent}%",
+        why=(f"原始落盘已使用 {used} / {limit} 字节；达到硬上限后，所有需要保存"
+             "原始响应的来源都会停住。"),
+        action=("先部署支持无损归档的运行时并排空旧进程，再设置 "
+                "DALTON_RAW_SPOOL_MAX_TOTAL_BYTES 或运行 raw_spool_maintenance archive。"),
+        consequence="不处理，下一次超过上限的抓取会失败，并把依赖这些来源的公司停住。",
+        where="运行状态",
+        detail={"used_bytes": used, "max_total_bytes": limit, "percent": percent},
+    )]
 
 
 # ---------------------------------------------------------------------------
@@ -965,6 +1005,7 @@ def collect(
     items += governance_records(None if governance_dir is None else Path(governance_dir))
     items += open_reopen_proposals(core)
     items += auto_returned_drafts(state)
+    items += raw_spool_capacity(state, now=now)
     if core is not None:
         core.close()
 
@@ -1020,9 +1061,12 @@ __all__ = [
     "PROVIDER_ERROR_CODES",
     "PROVIDER_FAILURE_FLOOR",
     "PROVIDER_WINDOW_HOURS",
+    "RAW_SPOOL_DEFAULT_MAX_TOTAL_BYTES",
+    "RAW_SPOOL_WARNING_RATIO",
     "SCHEMA_VERSION",
     "URGENCY",
     "URGENCY_LABELS",
+    "raw_spool_capacity",
     "auto_returned_drafts",
     "collect",
     "dossier_for",

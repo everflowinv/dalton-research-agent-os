@@ -27,6 +27,9 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
+
+from dalton_core.raw_spool import RawSpool
 
 from dalton_core.needs_human import (
     KINDS,
@@ -62,6 +65,23 @@ class ShapeTests(unittest.TestCase):
         self.assertEqual(result["count"], 0)
         self.assertEqual(result["headline"], "目前没有需要你处理的事。")
         self.assertEqual(result["as_of"], "2026-09-16T12:00:00+00:00")
+
+    def test_a_spool_near_its_bound_is_an_actionable_warning(self):
+        with tempfile.TemporaryDirectory() as name:
+            state = Path(name)
+            spool = RawSpool(
+                state / "connector-spool", max_total_bytes=100,
+                archive_after_seconds=60,
+            )
+            sink = spool.open_sink("raw-sink:" + "a" * 64, max_response_bytes=91)
+            sink.write(b"x" * 91)
+            sink.finalize()
+            with patch.dict("os.environ", {"DALTON_RAW_SPOOL_MAX_TOTAL_BYTES": "100"}):
+                result = collect(state_dir=state, clock=clock)
+        warning = next(item for item in result["items"]
+                       if item["kind"] == "raw_spool_capacity")
+        self.assertEqual(warning["detail"]["used_bytes"], 91)
+        self.assertEqual(warning["detail"]["percent"], 91)
 
 
 class GovernanceTests(unittest.TestCase):

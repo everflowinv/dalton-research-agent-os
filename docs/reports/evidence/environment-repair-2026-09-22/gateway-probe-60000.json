@@ -1,0 +1,21 @@
+{
+  "bytes": 60280,
+  "chars": 31796,
+  "model": "gemini-3.8-flash",
+  "seconds": 8.22,
+  "markers": [
+    "1bd2bd22f343faab",
+    "6218604be215f3d5",
+    "40094241c94f88c5"
+  ],
+  "all_markers_present": true,
+  "response": "```json\n[\n  \"1bd2bd22f343faab\",\n  \"6218604be215f3d5\",\n  \"40094241c94f88c5\"\n]\n```\n",
+  "usage": {
+    "prompt_tokens": 31408,
+    "prompt_tokens_details": {
+      "cached_tokens": 0
+    },
+    "completion_tokens": 39,
+    "total_tokens": 31447
+  }
+}

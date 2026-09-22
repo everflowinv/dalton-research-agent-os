@@ -1,0 +1,6 @@
+{
+  "version": "1.2.8",
+  "binary_sha256": "62913fb38f14d376e67b62014e701063f4061aba60b0e049cb6af9cab62763ef",
+  "gateway_max_prompt_bytes": 190000,
+  "tested_at": "2026-09-22"
+}

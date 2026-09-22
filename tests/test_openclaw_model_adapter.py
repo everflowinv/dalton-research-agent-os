@@ -989,6 +989,112 @@ class OpenClawModelAdapterTests(unittest.TestCase):
         self.assertEqual(sent, [True])
         self.assertTrue(hasattr(response_failure.exception, "post_send_unknown_evidence"))
 
+    def test_antigravity_actual_utf8_bound_precedes_broker_dispatch(self) -> None:
+        profile_wire = endpoint_profile()
+        profile_wire.update({
+            "profile_version_ref": "model-profile-version:antigravity-flash:1",
+            "id": "profile:gemini-3-8-flash-antigravity",
+            "provider": "antigravity-cli-gateway",
+            "model": "gemini-3.8-flash",
+            "family": "google-gemini-3",
+            "credential_slot_ref":
+                "credential-slot:openclaw:antigravity-cli-gateway",
+            "context": {
+                "max_context_tokens": 300_000,
+                "max_output_tokens": 2_000,
+            },
+            "limits": {
+                "max_input_tokens": 250_000,
+                "max_output_tokens": 1_500,
+                "max_total_tokens": 251_500,
+                "max_cost_usd": 2.0,
+            },
+        })
+        self.router.register_profile(profile_wire)
+        policy = routing_policy()
+        policy.update({
+            "policy_version_ref": "model-routing-policy-version:antigravity:1",
+            "id": "model-routing-policy:antigravity",
+            "filters": {
+                **policy["filters"],
+                "allowed_profile_ids": [profile_wire["id"]],
+                "allowed_providers": [profile_wire["provider"]],
+            },
+        })
+        self.router.register_policy(policy)
+        profile = self.router.get_profile(profile_wire["profile_version_ref"])
+
+        def case(suffix: str, prompt: str):
+            wire = work_order().to_dict()
+            wire.update({
+                "id": f"work:antigravity-{suffix}",
+                "question": prompt,
+                "idempotency_key": f"work-key:antigravity-{suffix}",
+                "budget": {
+                    "max_input_tokens": 250_000,
+                    "max_output_tokens": 500,
+                    "max_total_tokens": 250_500,
+                    "max_cost_usd": 0.5,
+                },
+            })
+            work = WorkOrder.from_dict(wire)
+            route = self.router.route(
+                work,
+                attempt_number=1,
+                capability="research",
+                policy_version_ref=policy["policy_version_ref"],
+                credential_slot_refs=[profile_wire["credential_slot_ref"]],
+                required_modalities=["text"],
+                required_context_tokens=1_000,
+                # Deliberately tiny: the adapter must measure the actual prompt
+                # rather than trust this caller-supplied token estimate.
+                estimated_input_tokens=10,
+                estimated_output_tokens=250,
+                idempotency_key=f"route-key:antigravity-{suffix}",
+            )["decision"]
+            return work, route
+
+        over_work, over_route = case("over", "界" * 56_667)  # 170,001 bytes
+        sent: list[bool] = []
+        with self.assertRaisesRegex(
+            ModelAdmissionError, "actual 170001-byte prompt"
+        ):
+            self.run_with(
+                success_response,
+                work=over_work,
+                route=over_route,
+                profile=profile,
+                before_send=lambda: sent.append(True),
+            )
+        self.assertEqual(sent, [])
+
+        under_work, under_route = case("under", "界" * 56_666)  # 169,998 bytes
+
+        def antigravity_success(request):
+            response = success_response(request)
+            response.update({
+                "provider": "antigravity-cli-gateway",
+                "model": "gemini-3.8-flash",
+                "canonicalModel":
+                    "antigravity-cli-gateway/gemini-3.8-flash",
+            })
+            response.pop("contentHash")
+            return seal(response)
+
+        (_, result), broker = self.run_with(
+            antigravity_success,
+            work=under_work,
+            route=under_route,
+            profile=profile,
+            before_send=lambda: sent.append(True),
+        )
+        broker.close()
+        self.assertEqual(sent, [True])
+        self.assertEqual(
+            len(broker.requests[0]["prompt"].encode("utf-8")), 169_998
+        )
+        self.assertEqual(result.status, "succeeded")
+
     def test_timeout_is_hard_wall_clock_boundary(self) -> None:
         def slow(_request: dict[str, Any]):
             time.sleep(0.2)

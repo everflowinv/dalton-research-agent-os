@@ -166,27 +166,48 @@ def _provider_models(config: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
 def _provider_controls_valid(
     value: Any, model_ref: str, checked_at: datetime | None = None
 ) -> bool:
+    return _provider_controls_assessment(
+        value, model_ref, checked_at=checked_at
+    )["state"] == "valid"
+
+
+def _provider_controls_assessment(
+    value: Any, model_ref: str, checked_at: datetime | None = None
+) -> dict[str, str | None]:
+    """Classify the broker declaration without ever inferring support.
+
+    Provider-controlled verification is a live broker contract, not a model
+    trait.  Keeping the expiry visible is important: an immutable older model
+    profile can prove what the broker admitted then, but it cannot make an
+    expired declaration executable now.
+    """
+
+    def result(state: str, expires_at: str | None = None) -> dict[str, str | None]:
+        return {"state": state, "expires_at": expires_at}
+
+    if value is None:
+        return result("absent")
     if not isinstance(value, Mapping) or not {"mode", "rateCard"} <= set(value) \
             or set(value) - {"mode", "rateCard", "thinkingLevel"}:
-        return False
+        return result("invalid")
     providers = {
         "openai-responses-input-count-v1": "openai",
         "google-generative-ai-count-tokens-v1": "google",
     }
     provider = providers.get(value["mode"])
     if provider is None or not model_ref.startswith(f"{provider}/"):
-        return False
+        return result("invalid")
     if "thinkingLevel" in value and value["thinkingLevel"] != "low":
-        return False
+        return result("invalid")
     rate = value["rateCard"]
     if not isinstance(rate, Mapping) or set(rate) != {
         "model", "serviceTier", "inputUsdPerMillion",
         "cachedInputUsdPerMillion", "cacheWriteUsdPerMillion",
         "outputUsdPerMillion", "verifiedAt", "expiresAt",
     }:
-        return False
+        return result("invalid")
     if rate["model"] != model_ref or rate["serviceTier"] != "default":
-        return False
+        return result("invalid")
     for key in (
         "inputUsdPerMillion", "cachedInputUsdPerMillion",
         "cacheWriteUsdPerMillion", "outputUsdPerMillion",
@@ -194,25 +215,33 @@ def _provider_controls_valid(
         if not isinstance(rate[key], str) or not re.fullmatch(
             r"(?:0|[1-9][0-9]*)(?:\.[0-9]+)?", rate[key]
         ):
-            return False
+            return result("invalid")
         try:
             number = float(rate[key])
         except (TypeError, ValueError, OverflowError):
-            return False
+            return result("invalid")
         if not math.isfinite(number) or number <= 0:
-            return False
+            return result("invalid")
     try:
         verified = datetime.fromisoformat(rate["verifiedAt"].replace("Z", "+00:00"))
         expires = datetime.fromisoformat(rate["expiresAt"].replace("Z", "+00:00"))
     except (TypeError, ValueError, AttributeError):
-        return False
+        return result("invalid")
     if verified.tzinfo is None or expires.tzinfo is None:
-        return False
+        return result("invalid")
     verified = verified.astimezone(timezone.utc)
     expires = expires.astimezone(timezone.utc)
     if expires <= verified:
-        return False
-    return checked_at is None or verified <= checked_at < expires
+        return result("invalid")
+    expiry = _wire_time(expires)
+    if checked_at is None:
+        return result("valid", expiry)
+    moment = checked_at.astimezone(timezone.utc)
+    if moment >= expires:
+        return result("expired", expiry)
+    if moment < verified:
+        return result("invalid", expiry)
+    return result("valid", expiry)
 
 
 def _broker_profiles(
@@ -237,7 +266,7 @@ def _broker_profiles(
         if profile_id in output:
             raise OpenClawCatalogError(f"duplicate broker profile id: {profile_id}")
         provider_controls = profile.get("providerControls")
-        controls_declared = _provider_controls_valid(
+        controls = _provider_controls_assessment(
             provider_controls, model_ref, checked_at
         )
         output[profile_id] = {
@@ -248,9 +277,60 @@ def _broker_profiles(
             "max_tokens": profile.get("maxTokens"),
             # Public broker-side admission. The broker still verifies the host
             # runtime's matching advertised transport before provider use.
-            "provider_controls": controls_declared,
+            "provider_controls": controls["state"] == "valid",
+            "provider_controls_state": controls["state"],
+            "provider_controls_expires_at": controls["expires_at"],
         }
     return output
+
+
+def provider_control_catalog_status(
+    config: Mapping[str, Any],
+    *,
+    checked_at: datetime,
+    warning_horizon: timedelta = timedelta(days=7),
+) -> dict[str, Any]:
+    """Return the broker's current, secret-free verification-control state.
+
+    Only profiles that actually declare ``providerControls`` are listed.
+    Missing declarations are ordinary uncontrolled routes; malformed, expired,
+    and soon-to-expire declarations need operator attention because a catalog
+    refresh will refuse (or soon refuse) controlled verification through them.
+    """
+
+    if warning_horizon.total_seconds() < 0:
+        raise OpenClawCatalogError("warning_horizon must not be negative")
+    moment = checked_at.astimezone(timezone.utc)
+    rows: list[dict[str, Any]] = []
+    for profile_id, broker in sorted(
+        _broker_profiles(config, checked_at=checked_at).items()
+    ):
+        state = str(broker["provider_controls_state"])
+        if state == "absent":
+            continue
+        expires_at = broker["provider_controls_expires_at"]
+        expiring = False
+        if state == "valid" and isinstance(expires_at, str):
+            expires = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+            expiring = expires <= moment + warning_horizon
+        rows.append({
+            "profile_id": profile_id,
+            "model_ref": broker["model_ref"],
+            "state": state,
+            "expires_at": expires_at,
+            "expiring": expiring,
+        })
+    return {
+        "profiles": rows,
+        "valid_profile_ids": [row["profile_id"] for row in rows
+                              if row["state"] == "valid"],
+        "expiring_profile_ids": [row["profile_id"] for row in rows
+                                 if row["expiring"]],
+        "expired_profile_ids": [row["profile_id"] for row in rows
+                                if row["state"] == "expired"],
+        "invalid_profile_ids": [row["profile_id"] for row in rows
+                                if row["state"] == "invalid"],
+    }
 
 
 def _static_routes(checked_at: datetime) -> dict[str, dict[str, Any]]:
@@ -289,6 +369,7 @@ def reconcile_openclaw_model_catalog(
     missing_ids = sorted(static_ids - broker_ids)
     calibrated = set(calibrated_profile_ids)
     smoke_required = sorted((set(new_ids) | set(changed_ids)) - calibrated)
+    controls = provider_control_catalog_status(config, checked_at=checked_at)
     return {
         "schema_version": "0.1",
         "checked_at": _wire_time(checked_at),
@@ -303,6 +384,7 @@ def reconcile_openclaw_model_catalog(
         "changed_broker_profile_ids": changed_ids,
         "missing_static_profile_ids": missing_ids,
         "smoke_required_profile_ids": smoke_required,
+        "provider_controls": controls,
         "catalog_in_sync": not any(
             (
                 configured_refs - broker_refs,
@@ -703,7 +785,7 @@ def catalog_sync_status(
     live catalog would make sync unreachable by construction.
     """
 
-    brokers = _broker_profiles(config)
+    brokers = _broker_profiles(config, checked_at=checked_at)
     held = _router_broker_profiles(router)
     desired = {
         profile["id"]: profile
@@ -726,6 +808,7 @@ def catalog_sync_status(
         if canonical_json(_profile_semantics(held[profile_id]))
         != canonical_json(_profile_semantics(desired[profile_id]))
     )
+    controls = provider_control_catalog_status(config, checked_at=checked_at)
     return {
         "schema_version": "0.1",
         "checked_at": _wire_time(checked_at),
@@ -741,6 +824,7 @@ def catalog_sync_status(
             profile_id for profile_id in live & set(desired)
             if _availability_expired(held[profile_id], checked_at)
         ),
+        "provider_controls": controls,
         "catalog_in_sync": (
             not missing_here and not retired_but_offered and not not_offered and not drifted
         ),
@@ -778,6 +862,19 @@ def sync_openclaw_model_catalog(
         )
     }
     held = _router_broker_profiles(router)
+    capability_losses = {
+        profile_id: sorted(
+            set(current.get("capabilities") or [])
+            - set(desired[profile_id].get("capabilities") or [])
+        )
+        for profile_id, current in held.items()
+        if profile_id in desired
+    }
+    capability_losses = {
+        profile_id: capabilities
+        for profile_id, capabilities in capability_losses.items()
+        if capabilities
+    }
     added: list[str] = []
     revived: list[str] = []
     updated: list[str] = []
@@ -821,6 +918,11 @@ def sync_openclaw_model_catalog(
         "revived_profile_ids": revived,
         "updated_profile_ids": updated,
         "refreshed_profile_ids": refreshed,
+        "capabilities_removed_by_profile": {
+            profile_id: capability_losses[profile_id]
+            for profile_id in updated
+            if profile_id in capability_losses
+        },
         "changed": bool(added or retired or revived or updated or refreshed),
     }
 
@@ -834,6 +936,7 @@ __all__ = [
     "catalog_sync_status",
     "load_openclaw_config",
     "openclaw_broker_profiles_from_config",
+    "provider_control_catalog_status",
     "reconcile_openclaw_model_catalog",
     "sync_openclaw_model_catalog",
 ]

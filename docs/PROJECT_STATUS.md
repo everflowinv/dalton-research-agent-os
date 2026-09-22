@@ -1,5 +1,9 @@
 # Dalton 项目进度
 
+## 2026-09-22：环境巡检修复与 Antigravity 复测（候选，验证中）
+
+逐项核实发现：连接器 spool 达到 1 GB 运行上限；Google 受控核验证明到期；两份 AlphaEngine review 指向旧 orphaned 票据；earnings guidance 重复扫描 ClaimIndex。候选修复补齐可逆压缩及容量配置、能力到期诊断、策略更新的阶段审计与预算保护、retrieval envelope 身份和冷 WAL 策略读取，并复用单次 guidance 快照。Google 费率证明已续至 2026-10-22。Antigravity 1.2.8 仍在约 192 KB 截断；完整性复测支持 Flash low/high 的 170 KB 输入范围，适配器按实际 UTF-8 字节阻断越界。完整证据及最终部署状态见 [修复报告](reports/environment-repair-2026-09-22.md)。
+
 ## 2026-09-19 01:30 UTC：一条被规则拒收的候选不再让整个子进程算失败（源码，待部署）
 
 **一、先把被拒的那几句话读出来。** 两个环境一共 7 条 `ResearchAutoCommitRejected: document qualitative rule admits no numeric statement`（legacy 4 条、Hyperscaler 工作区 3 条），草稿都还在 `research-review/candidate-staging.sqlite` 里（按 `mission-document-research-candidate:<admission>` 这把幂等键能原样取回）。逐句核对：**4 条是误判**——它们整句话里唯一的数字是 **`10-K`** 这个表名（"EPAM 的 10-K 并未披露盈亏平衡收入增速"、"AMZN 2025 财年 10-K 文档本身包含可提取的财务数字"这种），`_VALUE_RE = [0-9%$]` 只把期间标签（FY2025 / Q3 / 2024）挖掉，表名里的数字就被当成了数值断言；**3 条是真的在断言数值**（`76.8%、76.7%、74.3%`；Amazon 那条把现金流量表整张抄进了 `normalized_statement`；还有一条 `figures 为 0`）。也就是说：一半以上的钱花在了一个正则的误判上，剩下的是模型确实把数字写进了定性陈述。

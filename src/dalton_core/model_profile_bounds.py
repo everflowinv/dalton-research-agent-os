@@ -5,15 +5,13 @@ a candidate whose estimated input exceeds it.  That check is only as good as the
 number, and the number comes from the broker catalog -- which reports the
 *model's* context window, not the *transport's* ceiling.
 
-``profile:gemini-3-8-flash-antigravity`` and its ``-high`` sibling are the live
-case.  The agy CLI the broker drives them through truncates its own request
-around 30,000 characters, so anything larger fails inside the gateway.  The
-catalog reports 983,040.  The owner corrected the two profiles by hand on
-2026-09-15 (registered at 28,000) and the next catalog sync registered a new
-version at 983,040 again, because a sync writes what the catalog says.
-Meanwhile debate_map and plan prompts sit at a p50 of 29,434 bytes and a p90 of
-30,796: 2 of 207 calls succeeded, and until WP-A/A1 every one of the other 205
-was settled at the chain's reserved ceiling.
+The Antigravity Flash profiles were conservatively limited to 30,000 bytes
+following the 2026-09-15 failures. On 2026-09-22, agy 1.2.8 carried 175,282
+UTF-8 bytes with beginning/middle/end sentinels intact at both low and high
+effort. A direct 269,100-byte call still silently truncated at 191,985 bytes.
+Use 170,000 for Dalton, leaving room under the gateway's 190,000-byte limit
+for host framing. This is a transport bound, not a quality certification.
+Evidence: docs/reports/environment-repair-2026-09-22.md.
 
 So the measured ceiling is kept *here*, beside the code that enforces it,
 rather than in a row a sync can overwrite.  The effective bound is the smaller
@@ -36,15 +34,15 @@ from typing import Any
 #: the endpoint's measured transport ceiling.
 INPUT_BOUND_SKIP_REASON = "input_bound_exceeded"
 
-#: profile id -> the largest input, in the same unit routing estimates in
-#: (bytes of prompt, which every Dalton caller passes as
-#: ``estimated_input_tokens``), that the endpoint's transport has been observed
-#: to carry.  Each entry names what measured it.
+#: profile id -> the largest UTF-8 prompt, in bytes, that the endpoint's
+#: transport has been observed to carry.  Routing uses this as an early skip
+#: when its caller supplies bytes; the OpenClaw adapter measures the actual
+#: prompt again because older callers use token estimates in that field.
+#: Each entry names what measured it.
 MEASURED_INPUT_BOUNDS: Mapping[str, int] = {
-    # agy CLI truncates its own request frame; measured 2026-09-15 against
-    # debate_map/plan prompts, 2 of 207 calls above 30k succeeded.
-    "profile:gemini-3-8-flash-antigravity": 30_000,
-    "profile:gemini-3-8-flash-antigravity-high": 30_000,
+    # Full gateway probes, agy 1.2.8, 2026-09-22; retain framing headroom.
+    "profile:gemini-3-8-flash-antigravity": 170_000,
+    "profile:gemini-3-8-flash-antigravity-high": 170_000,
 }
 
 
@@ -54,6 +52,24 @@ def measured_input_bound(profile_id: Any) -> int | None:
     if not isinstance(profile_id, str):
         return None
     return MEASURED_INPUT_BOUNDS.get(profile_id)
+
+
+def actual_prompt_bytes(prompt: str) -> int:
+    """Size of the exact text the broker serializes as its prompt."""
+
+    if not isinstance(prompt, str):
+        raise TypeError("model prompt must be text")
+    try:
+        return len(prompt.encode("utf-8"))
+    except UnicodeEncodeError as exc:
+        raise ValueError("model prompt must be valid UTF-8") from exc
+
+
+def exceeds_actual_prompt_bound(profile: Mapping[str, Any], prompt: str) -> bool:
+    """Whether the exact UTF-8 prompt exceeds this endpoint's measured bound."""
+
+    bound = measured_input_bound(profile.get("id"))
+    return bound is not None and actual_prompt_bytes(prompt) > bound
 
 
 def effective_input_bound(profile: Mapping[str, Any]) -> dict[str, Any]:
@@ -101,7 +117,9 @@ def input_bound_message(profile: Mapping[str, Any], estimated_input: int) -> str
 __all__ = [
     "INPUT_BOUND_SKIP_REASON",
     "MEASURED_INPUT_BOUNDS",
+    "actual_prompt_bytes",
     "effective_input_bound",
+    "exceeds_actual_prompt_bound",
     "exceeds_input_bound",
     "input_bound_message",
     "measured_input_bound",

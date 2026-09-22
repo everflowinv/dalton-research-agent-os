@@ -299,7 +299,7 @@ class SalesNotesReadingTests(FeedReadingHarness):
         manifest = self.manifest_for(ACN_NOTE)["manifest"]
         digest = manifest["assembled_object"]["content_hash"]
         self.assertTrue(
-            (self.state / "connector-spool" / "connector-spool" / "objects"
+            (self.state / "connector-spool" / "objects"
              / digest[:2] / digest).is_file())
         self.assertFalse(
             (self.state / "spool" / "connector-spool" / "objects"
@@ -337,7 +337,7 @@ class SalesNotesReadingTests(FeedReadingHarness):
         review = self.review(ACN_NOTE)
         manifest = self.manifest_for(ACN_NOTE)["manifest"]
         digest = manifest["assembled_object"]["content_hash"]
-        (self.state / "connector-spool" / "connector-spool" / "objects"
+        (self.state / "connector-spool" / "objects"
          / digest[:2] / digest).unlink()
         with self.assertRaises(Exception) as caught:
             self.view(review)

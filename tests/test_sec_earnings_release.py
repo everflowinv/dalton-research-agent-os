@@ -166,7 +166,7 @@ class SpoolTests(unittest.TestCase):
     def seed(self, *, issuer="0001467373", payload=None):
         body = json.dumps(payload if payload is not None else submissions())
         digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
-        objects = self.state / "connector-spool" / "connector-spool" / "objects"
+        objects = self.state / "connector-spool" / "objects"
         (objects / digest[:2]).mkdir(parents=True, exist_ok=True)
         (objects / digest[:2] / digest).write_text(body, encoding="utf-8")
         connection = self.store.connection
@@ -210,7 +210,7 @@ class SpoolTests(unittest.TestCase):
         # beside "this company has no filings index yet", which is a very
         # different thing to see in a tick summary.
         digest = self.seed()
-        objects = self.state / "connector-spool" / "connector-spool" / "objects"
+        objects = self.state / "connector-spool" / "objects"
         (objects / digest[:2] / digest).write_text("{}", encoding="utf-8")
         found = releases_for_issuer(
             self.store.connection, self.state, issuer="0001467373",
@@ -222,7 +222,7 @@ class SpoolTests(unittest.TestCase):
 
     def test_bytes_that_are_not_json_are_their_own_answer(self):
         digest = self.seed()
-        objects = self.state / "connector-spool" / "connector-spool" / "objects"
+        objects = self.state / "connector-spool" / "objects"
         path = objects / digest[:2] / digest
         path.write_bytes(b"not json at all")
         # Re-point the envelope at the hash of what is actually there, so this

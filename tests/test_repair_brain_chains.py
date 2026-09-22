@@ -105,6 +105,12 @@ class RepairPlanTests(unittest.TestCase):
     def setUp(self) -> None:
         self.profiles = _catalog()
         self.now = NOW.isoformat(timespec="microseconds")
+        # These regressions replay the original September 16 incident.
+        from unittest.mock import patch
+        historical = {ANTIGRAVITY: 30_000, ANTIGRAVITY_HIGH: 30_000}
+        guard = patch.object(REPAIR, "MEASURED_INPUT_BOUNDS", historical)
+        guard.start()
+        self.addCleanup(guard.stop)
 
     def test_the_live_brain_chain_loses_exactly_the_three_links_that_cannot_serve(self):
         repaired = REPAIR.repair_chain(
@@ -365,6 +371,14 @@ class TemplateChainGuardTests(unittest.TestCase):
                     "model-routing-policy:stale",
                     brain=["model-profile:claude-opus-5"])])
             self.assertIn("没有档案", str(raised.exception))
+
+class UpdatedAntigravityBoundsTests(unittest.TestCase):
+    def test_verified_larger_transport_is_retained_in_reasoning_and_deliverable_chains(self):
+        for tier in ("brain", "deliverable"):
+            repaired = REPAIR.repair_chain(
+                [ANTIGRAVITY_HIGH, "profile:claude-opus-5"], tier=tier,
+                profiles=_catalog(), now=NOW.isoformat(timespec="microseconds"))
+            self.assertEqual(repaired["after"], [ANTIGRAVITY_HIGH, "profile:claude-opus-5"])
 
 
 if __name__ == "__main__":

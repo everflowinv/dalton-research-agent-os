@@ -182,6 +182,32 @@ class OpenClawCatalogReconcileTests(unittest.TestCase):
                     "provider-controlled-verify", projected["capabilities"]
                 )
 
+    def test_reports_expiring_and_expired_control_contracts_explicitly(self):
+        config = _config()
+        profile = next(
+            item for item in config["plugins"]["entries"][
+                "dalton-openclaw-model-broker"
+            ]["config"]["profiles"]
+            if item["model"].startswith("google/")
+        )
+        profile["providerControls"] = _controls(
+            profile["model"], expires_at="2026-08-22T08:30:00Z"
+        )
+        before = reconcile_openclaw_model_catalog(config, checked_at=NOW)
+        controls = before["provider_controls"]
+        self.assertEqual(controls["valid_profile_ids"], [profile["id"]])
+        self.assertEqual(controls["expiring_profile_ids"], [profile["id"]])
+        self.assertEqual(controls["expired_profile_ids"], [])
+        self.assertEqual(controls["profiles"][0]["expires_at"],
+                         "2026-08-22T08:30:00.000000+00:00")
+
+        after = reconcile_openclaw_model_catalog(
+            config, checked_at=datetime(2026, 8, 22, 9, 0, tzinfo=timezone.utc)
+        )
+        self.assertEqual(after["provider_controls"]["valid_profile_ids"], [])
+        self.assertEqual(after["provider_controls"]["expired_profile_ids"],
+                         [profile["id"]])
+
     def test_malformed_controls_append_refusing_version_without_mutating_history(self):
         config = _config()
         profile = next(
@@ -224,6 +250,14 @@ class OpenClawCatalogReconcileTests(unittest.TestCase):
                 self.assertNotIn(
                     "provider-controlled-verify", after["capabilities"]
                 )
+                self.assertEqual(
+                    result["capabilities_removed_by_profile"],
+                    {profile["id"]: ["provider-controlled-verify"]},
+                )
+                self.assertEqual(
+                    result["provider_controls"]["invalid_profile_ids"],
+                    [profile["id"]],
+                )
 
     def test_expired_controls_are_removed_by_the_next_catalog_sync(self):
         config = _config()
@@ -259,6 +293,14 @@ class OpenClawCatalogReconcileTests(unittest.TestCase):
                 )
                 self.assertNotIn(
                     "provider-controlled-verify", after["capabilities"]
+                )
+                self.assertEqual(
+                    result["capabilities_removed_by_profile"],
+                    {profile["id"]: ["provider-controlled-verify"]},
+                )
+                self.assertEqual(
+                    result["provider_controls"]["expired_profile_ids"],
+                    [profile["id"]],
                 )
 
     def test_adding_controls_appends_a_profile_version_without_changing_history(self):

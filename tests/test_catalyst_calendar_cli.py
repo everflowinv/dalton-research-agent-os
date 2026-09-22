@@ -77,7 +77,7 @@ class ChildTestCase(unittest.TestCase):
             "acceptanceDateTime": [f"{row[2]}T10:00:00.000Z" for row in rows],
         }}})
         digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
-        objects = self.state / "connector-spool" / "connector-spool" / "objects"
+        objects = self.state / "connector-spool" / "objects"
         (objects / digest[:2]).mkdir(parents=True, exist_ok=True)
         (objects / digest[:2] / digest).write_text(body, encoding="utf-8")
         store = DaltonStore(str(self.state / "core.sqlite"))
@@ -134,7 +134,7 @@ class ArtifactTests(ChildTestCase):
         summary = run(self.args())
         self.assertEqual(summary["status"], "succeeded")
         digest = summary["artifact"]["content_hash"]
-        stored = (self.state / "connector-spool" / "connector-spool" / "objects"
+        stored = (self.state / "connector-spool" / "objects"
                   / digest[:2] / digest)
         self.assertTrue(stored.is_file())
         # The artifact is the call: what the normaliser dropped -- Yahoo's

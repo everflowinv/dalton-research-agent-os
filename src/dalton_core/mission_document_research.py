@@ -44,6 +44,14 @@ _SCHEMA_PATH = Path(__file__).with_name("mission_document_research_schema.sql")
 # still the same piece of research.
 GOVERNANCE_ENVELOPE_FIELDS = ("mandate_binding", "outer_budget")
 
+# These limits are the maximum paid authority the admission received.  A
+# refreshed model configuration may narrow them, but a routine policy roll may
+# not silently turn an old admission into a larger purchase.
+MODEL_BUDGET_LIMIT_FIELDS = (
+    "max_attempts", "max_input_tokens", "max_output_tokens", "max_cost_usd",
+    "max_seconds", "max_elapsed_seconds",
+)
+
 
 class MissionDocumentResearchError(RuntimeError):
     pass
@@ -695,12 +703,76 @@ class MissionDocumentResearchAuthority:
         merged = {**identity, **{
             key: wire[key] for key in GOVERNANCE_ENVELOPE_FIELDS if key in wire
         }}
+        # Model policy/profile authority is also an execution-time envelope.
+        # The installed resolver has just revalidated the workflow capability,
+        # eligible current profiles, producer/verifier family independence and
+        # registered budget policy.  Preserve the admitted bytes for audit and
+        # cap the refreshed execution at the authority originally admitted.
+        for stage in ("draft", "verifier"):
+            admitted = wire["model_execution"][stage]
+            current = identity["model_execution"][stage]
+            if any(
+                Decimal(str(current[field])) > Decimal(str(admitted[field]))
+                for field in MODEL_BUDGET_LIMIT_FIELDS
+            ):
+                raise MissionDocumentResearchError(
+                    "refreshed document model authority exceeds admitted budget"
+                )
+        merged["model_execution"] = wire["model_execution"]
+        merged["model_authority"] = wire["model_authority"]
         if (
             canonical_json(merged) != canonical_json(stored_identity)
             or content_hash(_execution_identity(merged)) != wire["identity_hash"]
         ):
             raise MissionDocumentResearchError("mission document admission is no longer executable")
-        return wire
+        if (
+            canonical_json(identity["model_execution"])
+            == canonical_json(wire["model_execution"])
+            and canonical_json(identity["model_authority"])
+            == canonical_json(wire["model_authority"])
+        ):
+            return wire
+        refresh = {
+            "schema_version": SCHEMA_VERSION,
+            "admission_ref": wire["id"],
+            "admission_hash": wire["content_hash"],
+            "admitted_model_execution_hash": content_hash(wire["model_execution"]),
+            "admitted_model_authority_hash": content_hash(wire["model_authority"]),
+            "execution_model_execution_hash": content_hash(identity["model_execution"]),
+            "execution_model_authority_hash": content_hash(identity["model_authority"]),
+            "stages": {
+                stage: {
+                    "schema_version": SCHEMA_VERSION,
+                    "stage": stage,
+                    "admission_ref": wire["id"],
+                    "admission_hash": wire["content_hash"],
+                    "admitted_execution": wire["model_execution"][stage],
+                    "admitted_authority": wire["model_authority"][stage],
+                    "execution": identity["model_execution"][stage],
+                    "execution_authority": identity["model_authority"][stage],
+                    "changed": (
+                        canonical_json(wire["model_execution"][stage])
+                        != canonical_json(identity["model_execution"][stage])
+                        or canonical_json(wire["model_authority"][stage])
+                        != canonical_json(identity["model_authority"][stage])
+                    ),
+                }
+                for stage in ("draft", "verifier")
+            },
+        }
+        for stage in ("draft", "verifier"):
+            refresh["stages"][stage]["content_hash"] = content_hash(
+                refresh["stages"][stage]
+            )
+        refresh["content_hash"] = content_hash(refresh)
+        return {
+            **wire,
+            "admitted_model_execution": wire["model_execution"],
+            "admitted_model_authority": wire["model_authority"],
+            "model_execution": identity["model_execution"],
+            "model_authority": identity["model_authority"],
+            "model_authority_refresh": refresh,
+        }
 
 
 __all__ = [

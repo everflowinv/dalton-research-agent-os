@@ -5,7 +5,7 @@ On 2026-09-16 every routing policy on this host carried the same brain chain::
 
     profile:deepseek-v4-flash
     profile:zai-glm-5-3
-    profile:gemini-3-8-flash-antigravity-high   <- 30k transport ceiling, 1% success
+    profile:gemini-3-8-flash-antigravity-high   <- then 30k ceiling; 170k revalidated 2026-09-22
     model-profile:claude-opus-5                 <- profile version expired 2026-08-15
     profile:gpt-6-astra                         <- 100% HTTP 429 since 2026-09-14T19:58
 

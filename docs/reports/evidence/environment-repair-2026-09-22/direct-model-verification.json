@@ -1,0 +1,8 @@
+{
+  "input_bytes": 269100,
+  "retained_prefix_bytes": 191985,
+  "truncation_markers": [
+    "<truncated 77520 bytes>"
+  ],
+  "tail_marker_in_model_record": false
+}

@@ -47,6 +47,7 @@ from dalton_core.mission_hkex_lane import (
     hk_universe,
     missing_scopes,
 )
+from dalton_core.raw_spool import RawSpool
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "hkex-filings"
 COMPANY = company_ref("00700")
@@ -232,6 +233,31 @@ class DailyAcquisitionTests(ChildHarness):
         self.assertEqual((cache_dir / "source.xls").stat().st_mode & 0o777, 0o600)
         self.assertTrue(all(row["stock_code"] == "00700" for row in first["wire"]["rows"]))
         self.assertTrue(all(row["stock_code"] == "00001" for row in second["wire"]["rows"]))
+
+    def test_daily_cache_replay_reads_a_compressed_spool_artifact(self) -> None:
+        with mock.patch("dalton_core.hkex_filings_cli.fetch",
+                        return_value=(b"one-market-workbook", "application/vnd.ms-excel")), \
+             mock.patch("dalton_core.hkex_filings_cli._workbook_grid", return_value=self.grid):
+            first = run(self.network_args("00700"))
+        digest = first["artifact"]["content_hash"]
+        spool = RawSpool(
+            self.root / "connector-spool", max_total_bytes=1_000_000_000,
+            archive_after_seconds=0,
+        )
+        archived = spool.archive_old_objects(min_age_seconds=0)
+        self.assertGreaterEqual(archived["archived"], 1)
+        self.assertTrue(any(
+            path.name == f"{digest}.gz"
+            for path in (self.root / "connector-spool" / "objects").glob("*/*.gz")
+        ))
+
+        with mock.patch("dalton_core.hkex_filings_cli.fetch") as fetcher:
+            second = run(self.network_args("00001"))
+
+        fetcher.assert_not_called()
+        self.assertEqual(second["status"], "succeeded")
+        self.assertEqual(second["acquisition"]["cache_status"], "hit")
+        self.assertEqual(second["artifact"], first["artifact"])
 
     def test_cache_corruption_fails_closed_without_refetch(self) -> None:
         with mock.patch("dalton_core.hkex_filings_cli.fetch",

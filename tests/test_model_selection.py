@@ -639,6 +639,29 @@ class SetTierSelectionTests(StateDirectoryCase):
         self.assertIn("profile:gemini-3-8-flash",
                       policy["filters"]["allowed_profile_ids"])
 
+    def test_verifier_tier_save_refuses_profiles_whose_controls_expired(self) -> None:
+        config = self.catalog_config()
+        for profile in config["plugins"]["entries"][
+            "dalton-openclaw-model-broker"
+        ]["config"]["profiles"]:
+            controls = profile.get("providerControls")
+            if controls is not None:
+                controls["rateCard"]["expiresAt"] = NOW.isoformat().replace(
+                    "+00:00", "Z"
+                )
+        sync_openclaw_model_catalog(
+            self.router, config, checked_at=NOW,
+            availability_ttl=timedelta(days=3650),
+        )
+        before = self.config_path.read_text(encoding="utf-8")
+        with self.assertRaisesRegex(ModelSelectionError, "验证控件"):
+            set_tier_selection(
+                self.root, tier="verifier", mode="explicit",
+                chain=["profile:gemini-3-8-flash",
+                       "profile:gemini-3-1-pro-preview"], now=NOW,
+            )
+        self.assertEqual(self.config_path.read_text(encoding="utf-8"), before)
+
     def test_the_deliverable_tier_saves_like_any_other_and_drops_its_own_pins(
             self) -> None:
         # 2026-09-17: the live shape before the split -- the three drafting
@@ -1220,6 +1243,28 @@ class CatalogLaneTests(unittest.TestCase):
         second = self.coordinator().run()
         self.assertEqual(second["status"], "current")
         self.assertEqual(second["registered"], [])
+
+    def test_lane_names_control_expiry_and_capability_loss(self) -> None:
+        config = _allowing_config()
+        profile = next(
+            item for item in config["plugins"]["entries"][
+                "dalton-openclaw-model-broker"
+            ]["config"]["profiles"]
+            if item["id"] == "profile:gemini-3-8-flash"
+        )
+        profile["providerControls"] = _controls(
+            profile["model"], expires_at="2026-09-09T08:30:00Z"
+        )
+        self.openclaw.write_text(json.dumps(config), encoding="utf-8")
+        first = self.coordinator().run()
+        self.assertEqual(first["provider_control_valid"], [profile["id"]])
+        self.assertEqual(first["provider_control_expiring"], [profile["id"]])
+
+        self.moment = NOW + timedelta(hours=1)
+        expired = self.coordinator().run()
+        self.assertEqual(expired["provider_control_expired"], [profile["id"]])
+        self.assertEqual(expired["provider_control_capability_lost"],
+                         [profile["id"]])
 
     def test_the_hour_is_the_window(self) -> None:
         lane = self.coordinator()
@@ -2043,6 +2088,14 @@ class CockpitModelPageTests(unittest.TestCase):
         self.assertNotIn("choice.family_label||choice.family", page)
         self.assertNotIn("choice.capability_labels||choice.capabilities", page)
         self.assertIsInstance(view["choices"][0]["capabilities"], list)
+        verifier = next(card for card in view["tier_cards"]
+                        if card["tier"] == "verifier")
+        self.assertEqual(verifier["capability_coverage"]["status"], "missing")
+        self.assertIn("provider-controlled-verify",
+                      verifier["capability_coverage"]["required"])
+        self.assertIn("调用前被拒绝",
+                      verifier["capability_coverage"]["note"])
+        self.assertIn('coverage.status==="missing"?"err"', page)
         catalog = view["catalog"]
         self.assertTrue(catalog["available"])
         for key in ("in_openclaw_not_allowed", "allowed_not_in_dalton",

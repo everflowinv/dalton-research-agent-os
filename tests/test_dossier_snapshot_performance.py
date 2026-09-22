@@ -100,6 +100,18 @@ class DossierSnapshotPerformanceTests(unittest.TestCase):
                     policy=policy_document(), prior=None)
         self.assertEqual(calls, [1])
 
+    def test_earnings_guidance_reuses_one_snapshot_with_identical_material(self):
+        from dalton_core.company_dossier_cli import guidance_material
+        from dalton_core.earnings_season_cli import guidance_profile_for
+        from dalton_core.guidance_profile import build_profile
+        guides, actuals = guidance_material(self.harness.store, ACN)
+        expected = build_profile(company_ref=ACN, guides=guides, actuals=actuals)
+        calls, counter = self._count_snapshots()
+        with counter:
+            actual = guidance_profile_for(self.harness.store, ACN)
+        self.assertEqual(actual, expected)
+        self.assertEqual(len(calls), 1)
+
     def test_context_cannot_cross_company_or_authority_connection(self):
         context = prepare_company_claim_query(self.harness.store, ACN)
         with self.assertRaisesRegex(CompanyResearchViewValidationError,

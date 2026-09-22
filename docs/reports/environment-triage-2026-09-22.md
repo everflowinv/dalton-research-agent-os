@@ -1,5 +1,7 @@
 # 两个研究环境巡检与待修清单（2026-09-22 12:20 UTC）
 
+> 后续逐项核实发现 P0-2、P0-4、P1-4 的部分根因推测不成立；请同时阅读 [修复与复测报告](environment-repair-2026-09-22.md)。本文保留巡检时的原始判断供追溯。
+
 ## 一句话结论
 
 **两个环境都已经实质停摆。** legacy（IT 服务）自 2026-09-18 22:51 起零产出——连接器原始落盘目录打满 1 GB 硬上限，所有对外抓取一律失败；Hyperscaler 还在动，但产出每天减半（1727 → 380 → 236 → 107 → 25 条 claim），日花费从 $18.7 掉到 $0.24。此外有一条横跨两个环境的路由缺陷：受控核验能力在核验梯队里根本没有可用模型，今天 legacy 已经被拒 110 次。
@@ -55,7 +57,7 @@ RawSpoolCapacityError: raw spool high-water mark reached
 
 **临时缓解（owner 可执行，见文末命令）。** 把 `objects/` 里 09-16 之前的对象移走到备份盘，可立即释放约 20% 余量，让 legacy 恢复抓取。但在 1 之前这只是拖延。
 
-## P0-2　受控核验能力在核验梯队里无可用模型，所有「受控核验」调用被拒
+## P0-2　受控核验 rate card 已过期，当前目录无可用受控模型
 
 **现象。** `model_route_decisions` 里 `capability = provider-controlled-verify` 的决策全部 `rejected`：legacy 今天（09-22）已有 110 条，历史上还有 09-15 的 320 条、09-16 的 70 条；Hyperscaler 今天 1 条。受影响的工单前缀：`research_language_check`（290）、`plan`（82）、`research_localization_verifier`（63）、`event_judgement_verifier`（49）、`debate_map_verifier`（9）。
 
@@ -66,15 +68,17 @@ the verifying call did not run: the model call did not succeed (MODEL_ROUTE_REJE
 subject_ref: company:ticker:amzn
 ```
 
-**根因。** 候选快照里每一个候选的 `rejection_reasons` 都含 `capability_not_supported`。全库 137 个 profile 中只有 **4 个** 声明了 `provider-controlled-verify`，而当前 verifier 梯队链是 `['profile:gemini-3-8-flash', 'profile:gemini-3-1-pro-preview']`——链里解析到的两个 broker profile 变体（`broker-gemini-3-8-flash-2f0573db4aaf424d:4`、`broker-gemini-3-1-pro-preview-75a51b3f72807e58:5`）恰恰**不带**这个能力；带这个能力的是同名模型的另外四个变体（如 `broker-gemini-3-8-flash-a552094a54755d7d:3`、`broker-gemini-3-1-pro-preview-2d8e7f8ca313440a:4`）。
+**复核后的根因（更正原判断）。** 候选快照里每一个候选的 `rejection_reasons` 都含 `capability_not_supported`，但 `broker-gemini-...:3/:4/:5` 不是同名模型的多个可选变体，而是**同一个 `profile_id` 的追加式不可变历史版本**。路由器只使用最新版本；旧版本只供审计，不能因旧版本曾有能力就拿来承接今天的调用。
 
-也就是说：**同一个模型名下存在多个 broker profile 变体，能力声明不一致，梯队按名字解析时选中了没有该能力的那个变体。** 变体的 `checked_at` 是 09-10 与 09-16 两批，说明是模型目录刷新时产生的分叉。
+legacy 当前有 38 个最新 profile，携带 `provider-controlled-verify` 的是 **0 个**。两个 Google profile 的历史版本曾携带该能力，最新版本在 2026-09-22 00:01 UTC 目录同步时正确移除，原因是 OpenClaw 的两份公开 `providerControls.rateCard` 都明确写着 `expiresAt = 2026-09-22T00:00:00Z`。这也解释了为什么 09-21 22:43 UTC 仍有成功选择，而 09-22 起全部拒绝。把能力从历史版本“继承”到最新版本会谎报已经失效的受控合同，不能这样修。
 
-**修复方向。**
+原始 rate card 文档已写明“到期需更新”。2026-09-22 重新核对 Google 官方价格后，当前保守预留价仍覆盖公开价格：Gemini 3.8 Flash 当前促销价为输入/输出 `$0.75/$3.75`，现配置保守使用 `$1.50/$7.50`；Gemini 3.1 Pro Preview 在大于 200k 输入档为 `$4/$18`，与现配置一致。依据：[Gemini Developer API pricing](https://ai.google.dev/gemini-api/docs/pricing)、[Google Cloud Agent Platform pricing](https://cloud.google.com/gemini-enterprise-agent-platform/generative-ai/pricing)。
 
-1. 先查清为什么同名模型会有能力声明不同的多个变体：是目录刷新时上游能力字段缺失，还是本地按 endpoint 拆分后没有继承能力。缺失的一侧应当修正而不是保留两个矛盾版本。
-2. 梯队解析在 `profile:<name>` 落到具体变体时，必须优先选满足本次调用所需能力的变体；一个都没有时，应当在保存梯队配置的当场就拒绝并告诉 owner，而不是等到运行时每次调用被拒。
-3. 在模型配置页对每个梯队显示「该梯队能覆盖哪些能力」，缺能力要显式标红。owner 要求各环境模型配置同步，这类缺陷会被同步机制一起复制到所有环境。
+**修复。**
+
+1. 配置侧需要在保留 model、mode、thinking level 和四个价格字段不变的前提下，按本次官方复核更新两份 rate card 的 `verifiedAt`，并给出不超过 31 天的新 `expiresAt`。仓库新增的 `scripts/renew_google_provider_controls.py` 默认只演练；真正写入必须带演练输出的完整配置 SHA-256，且会先在原目录保留备份。不能只手改到期日，也不能从历史 profile 恢复能力。
+2. 目录同步现在明确报告 valid / expiring / expired / invalid 的 provider controls，并记录本轮从哪个 profile 移除了 `provider-controlled-verify`，不再只留下泛化的 `capability_not_supported` 供事后反推。
+3. verifier 梯队保存会用**最新** profile 当场验证能力覆盖；没有任何仍有效的受控 link 时原子拒绝，不改策略文件。模型配置页同时把该梯队标红，直接说明所有 `provider-controlled-verify` 工单会在调用前被拒。
 
 ## P0-3　文档研究 admission 被模型路由策略版本滚动整批作废（待办里 32 条）
 

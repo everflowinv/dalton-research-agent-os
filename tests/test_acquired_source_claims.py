@@ -253,8 +253,11 @@ class _FeedClaimHarness(_CommittedClaimChecks):
         return self.mission["autonomy"]["automation_principal"]
 
     def spool_object_path(self, digest):
-        for root in (self.state / "connector-spool", self.state / "spool"):
-            path = root / "connector-spool" / "objects" / digest[:2] / digest
+        for root in (
+            self.state / "connector-spool" / "objects",
+            self.state / "spool" / "connector-spool" / "objects",
+        ):
+            path = root / digest[:2] / digest
             if path.is_file():
                 return path
         raise AssertionError(f"no spool root holds {digest}")
@@ -380,7 +383,7 @@ class GuidepointClaimTests(_CommittedClaimChecks, reading.GuidepointReadingTests
 
     def test_a_drifted_excerpt_object_cannot_be_quoted(self) -> None:
         declared = self.manifest["excerpt_object"]
-        path = (self.state / "connector-spool" / "connector-spool" / "objects"
+        path = (self.state / "connector-spool" / "objects"
                 / declared["content_hash"][:2] / declared["content_hash"])
         path.write_bytes(b"x" * declared["size_bytes"])
         with self.assertRaises(Exception) as caught:

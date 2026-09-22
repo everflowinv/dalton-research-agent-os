@@ -447,10 +447,30 @@ def _steps(admission: Mapping[str, Any]) -> list[dict[str, Any]]:
 
 def _blueprints(admission: Mapping[str, Any]) -> list[dict[str, Any]]:
     works = []
+    refresh = admission.get("model_authority_refresh")
+    refresh_hash = (
+        refresh.get("content_hash") if isinstance(refresh, Mapping) else None
+    )
+    refresh_stages = (
+        refresh.get("stages") if isinstance(refresh, Mapping) else None
+    )
     for step in _steps(admission):
         ordinal = step["ordinal"]
-        ref = "work:mission-document-research-" + content_hash({
-            "admission_identity_hash": admission["identity_hash"], "ordinal": ordinal})[:32]
+        work_identity = {
+            "admission_identity_hash": admission["identity_hash"], "ordinal": ordinal
+        }
+        # Retrieval is model-neutral and remains reusable.  A refreshed model
+        # envelope gets fresh downstream WorkOrder identities so immutable
+        # Scheduler authority never aliases two routing/budget configurations.
+        if ordinal >= 2 and refresh_hash is not None:
+            relevant = ["draft"] if ordinal == 2 else ["draft", "verifier"]
+            changed = [stage for stage in relevant
+                       if refresh_stages[stage]["changed"]]
+            if changed:
+                work_identity["model_authority_refresh_hash"] = content_hash({
+                    stage: refresh_stages[stage]["content_hash"] for stage in changed
+                })
+        ref = "work:mission-document-research-" + content_hash(work_identity)[:32]
         prior = works[-1]["id"] if works else None
         model_key = "draft" if ordinal == 2 else "verifier" if ordinal == 3 else None
         execution = None if model_key is None else admission["model_execution"][model_key]
@@ -493,6 +513,9 @@ def _blueprints(admission: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "transport_retry": execution["transport_retry"],
                 **({"broker_frame_policy": execution["broker_frame_policy"]}
                    if "broker_frame_policy" in execution else {}),
+                **({"model_authority_refresh": dict(refresh_stages[model_key])}
+                   if (refresh_hash is not None
+                       and refresh_stages[model_key]["changed"]) else {}),
             })
             budget = {
                 "max_attempts": execution["max_attempts"],
@@ -517,7 +540,12 @@ def _blueprints(admission: Mapping[str, Any]) -> list[dict[str, Any]]:
             "created_at": admission["created_at"], "updated_at": admission["created_at"],
             "question": question, "requested_capabilities": requested_capabilities,
             "runtime_profile_ref": step["runtime_profile_ref"], "budget": budget,
-            "idempotency_key": f"mission-document-research-work:{admission['id']}:{ordinal}",
+            "idempotency_key": (
+                f"mission-document-research-work:{admission['id']}:{ordinal}"
+                + (f":model-authority-refresh:"
+                   f"{work_identity['model_authority_refresh_hash']}"
+                   if "model_authority_refresh_hash" in work_identity else "")
+            ),
             "declared_side_effects": step["declared_side_effects"], "status": "ready",
             "input_refs": [admission["id"], admission["question_version_ref"], step["id"],
                            *([prior] if prior else [])], "metadata": metadata,
@@ -1412,20 +1440,131 @@ def _effective_stage(authority: Any, scheduler: Scheduler,
                      admission: Mapping[str, Any], index: int, *, worker: Any = None
                      ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     originals = _blueprints(admission)
+    admitted = admission
+    if isinstance(admission.get("model_authority_refresh"), Mapping):
+        admitted = {
+            key: value for key, value in admission.items()
+            if key not in {
+                "admitted_model_execution", "admitted_model_authority",
+                "model_authority_refresh",
+            }
+        }
+        admitted["model_execution"] = admission["admitted_model_execution"]
+        admitted["model_authority"] = admission["admitted_model_authority"]
+    admitted_originals = _blueprints(admitted)
     effective = [originals[0]]
     selected_links: list[dict[str, Any]] = []
     for current in range(1, index + 1):
         base = _derive(admission, scheduler, authority.registry,
                        [*effective, originals[current]], current)
+        rows = _recovery_rows(authority.connection, admission, current)
+        known_epoch_work_refs = {
+            originals[current]["id"], admitted_originals[current]["id"],
+            *(row["failed_work_order_ref"] for row in rows),
+            *(row["recovery_work_order_ref"] for row in rows),
+        }
+        stage = originals[current]["metadata"]["stage"]
+        prior_succeeded_epoch = None
+        for stored_row in scheduler.connection.execute(
+            "SELECT work_order_json FROM scheduler_work_orders "
+            "WHERE json_extract(work_order_json, "
+            "'$.metadata.mission_document_research_admission_ref')=? "
+            "AND json_extract(work_order_json, '$.metadata.stage')=?",
+            (admission["id"], stage),
+        ).fetchall():
+            try:
+                stored_work = json.loads(stored_row["work_order_json"])
+            except (TypeError, ValueError, RecursionError) as exc:
+                raise MissionDocumentResearchExecutorError(
+                    "stored stage Work authority is invalid") from exc
+            metadata = stored_work.get("metadata")
+            if (not isinstance(metadata, Mapping)
+                    or metadata.get("mission_document_research_admission_ref")
+                    != admission["id"]
+                    or metadata.get("stage") != stage
+                    or stored_work.get("id") in known_epoch_work_refs):
+                continue
+            # Only a never-claimed stale blueprint is safe to supersede.  An
+            # attempted intermediate refresh epoch may already have spent or
+            # produced evidence; without an explicit epoch-rebind record it
+            # cannot silently authorize yet another current-policy call.
+            history = scheduler.attempt_history(stored_work["id"])
+            formal = scheduler.formal_result(stored_work["id"])
+            if (formal is not None and formal["terminal_state"] == "succeeded"
+                    and not rows
+                    and stored_work["metadata"].get("upstream_work_order_ref")
+                    == base["metadata"].get("upstream_work_order_ref")):
+                if prior_succeeded_epoch is not None:
+                    raise MissionDocumentResearchExecutorError(
+                        "model authority refresh has multiple prior succeeded epochs")
+                if worker is not None:
+                    _exact_model_result(stored_work, formal, worker)
+                prior_succeeded_epoch = stored_work
+                continue
+            if (formal is not None or len(history) != 1
+                    or history[0]["state"] != "ready"):
+                raise MissionDocumentResearchExecutorError(
+                    "model authority refresh has an unresolved prior execution epoch")
+        if prior_succeeded_epoch is not None:
+            effective.append(prior_succeeded_epoch)
+            if current == index:
+                selected_links = []
+            continue
         prior_links: list[dict[str, Any]] = []
-        for row in _recovery_rows(authority.connection, admission, current):
+        remaining = list(rows)
+
+        # A completed stage remains exact authority under the policy/profile
+        # that actually ran it.  Reuse that paid result.  Failed or unfinished
+        # historical epochs are fully audited and count against recovery
+        # limits, but are not applied to the fresh current-authority Work.
+        historical = _derive(
+            admitted, scheduler, authority.registry,
+            [*effective, admitted_originals[current]], current,
+        )
+        historical_base = historical
+        while remaining and remaining[0]["failed_work_order_ref"] == historical_base["id"]:
+            row = remaining.pop(0)
             link = _read_recovery_link(
-                authority.connection, admission, current, row, base, prior_links)
+                authority.connection, admitted, current, row,
+                historical_base, prior_links)
             if worker is not None:
                 _verify_recovery_failure_proof(
-                    authority, scheduler, admission, current, base, link, worker)
-            base = _recovery_work(base, link)
+                    authority, scheduler, admission, current,
+                    historical_base, link, worker)
+            historical_base = _recovery_work(historical_base, link)
             prior_links.append(link)
+        if canonical_json(historical) == canonical_json(base):
+            base = historical_base
+        else:
+            historical_formal = scheduler.formal_result(historical_base["id"])
+            if (historical_formal is not None
+                    and historical_formal["terminal_state"] == "succeeded"):
+                base = historical_base
+            elif scheduler.work_order_authority(historical_base["id"]) is not None:
+                # A refresh is not authority to replace any already-enqueued,
+                # claimed, failed, or recovery-linked Work with a differently
+                # identified paid call.  The old Work cannot be dispatched
+                # under newly resolved authority, and a RecoveryLink only
+                # authorizes its exact recovery_work_order_ref.  Stop pending
+                # an explicit audited epoch rebind instead of resetting spend.
+                raise MissionDocumentResearchExecutorError(
+                    "model authority refresh has an unresolved historical stage")
+            else:
+                while remaining:
+                    row = remaining.pop(0)
+                    link = _read_recovery_link(
+                        authority.connection, admission, current, row,
+                        base, prior_links)
+                    if worker is not None:
+                        _verify_recovery_failure_proof(
+                            authority, scheduler, admission, current,
+                            base, link, worker)
+                    base = _recovery_work(base, link)
+                    prior_links.append(link)
+        if remaining:
+            raise MissionDocumentResearchExecutorError(
+                "recovery link authority epoch drifted")
+        for link in prior_links:
             if current == index:
                 selected_links.append(link)
         effective.append(base)
@@ -2673,7 +2812,11 @@ class MissionDocumentResearchExecutor:
             return {"status": "pending", "work_order_ref": work["id"]}
         envelope = ResultEnvelope(
             schema_version=SCHEMA_VERSION,
-            id=_ref("result-envelope:mission-document-search", proof["content_hash"]),
+            id=_ref("result-envelope:mission-document-search", {
+                "work_order_ref": work["id"],
+                "attempt_number": claim["attempt"]["attempt_number"],
+                "proof_hash": proof["content_hash"],
+            }),
             created_at=_time(self.clock()), work_order_ref=work["id"],
             invocation_ref=_ref("execution:mission-document-search", self._run_id(admission)),
             status="succeeded", outputs=proof, actual_side_effects=(), usage_refs=(),

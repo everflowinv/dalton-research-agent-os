@@ -225,6 +225,13 @@ def render(
             web_search_broker_socket = candidate_socket
             web_search_broker_auth_key = candidate_key
     environment = {"PYTHONUNBUFFERED": "1", "PYTHONDONTWRITEBYTECODE": "1"}
+    if service_config is not None:
+        for key, value in (
+            ("DALTON_RAW_SPOOL_MAX_TOTAL_BYTES", service_config.raw_spool_max_total_bytes),
+            ("DALTON_RAW_SPOOL_ARCHIVE_AFTER_SECONDS", service_config.raw_spool_archive_after_seconds),
+        ):
+            if value is not None:
+                environment[key] = str(value)
     if workspace_manifest_path is not None:
         manifest_path = Path(workspace_manifest_path).expanduser().resolve()
         from .workspace import load_workspace_manifest

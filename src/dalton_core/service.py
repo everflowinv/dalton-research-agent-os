@@ -146,6 +146,10 @@ class ServiceConfig:
     # P12d: the AlphaEngine safety cap. In the config so a plain re-install
     # keeps the owner's number, exactly as the window settings are.
     alphaengine_owner_call_cap: int | None = None
+    # Persist spool policy across LaunchAgent regeneration. Archival remains
+    # opt-in: older releases cannot read compressed evidence objects.
+    raw_spool_max_total_bytes: int | None = None
+    raw_spool_archive_after_seconds: int | None = None
     # Exact host broker/provider contract. Absent keeps the byte-compatible
     # historical Gemini path; an explicit value is rendered into Writer argv.
     web_search_expected_provider: str | None = None
@@ -166,7 +170,7 @@ class ServiceConfig:
         optional = {
             "agenda", "weekly_brief", "bounded_planner", "outbox", "control",
             "backup", "thesis_impact", "document_extraction",
-            "alphaengine_owner_call_cap", "web_search_expected_provider",
+            "alphaengine_owner_call_cap", "web_search_expected_provider", "raw_spool",
             LEGACY_AGENDA_PLANE_KEY, "workspace",
             # B1-4: optional, with a default that is not two seconds.  A
             # config that predates this still carries the key and still wins;
@@ -359,6 +363,14 @@ class ServiceConfig:
         extraction_max_windows = None
         extraction_numeric_windows = None
         extraction_discovery_windows = None
+        spool_raw = raw.get("raw_spool", {})
+        if not isinstance(spool_raw, Mapping) or set(spool_raw) - {
+            "max_total_bytes", "archive_after_seconds",
+        }:
+            raise ServiceConfigError("raw_spool service config is invalid")
+        for key, value in spool_raw.items():
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ServiceConfigError(f"raw_spool.{key} must be a positive integer")
         owner_call_cap = raw.get("alphaengine_owner_call_cap")
         if owner_call_cap is not None and (
             isinstance(owner_call_cap, bool) or not isinstance(owner_call_cap, int)
@@ -423,6 +435,8 @@ class ServiceConfig:
                 identity, _absolute_path(workspace_raw["manifest_path"],
                                          "workspace.manifest_path").resolve(), digest)
         return cls(
+            raw_spool_max_total_bytes=spool_raw.get("max_total_bytes"),
+            raw_spool_archive_after_seconds=spool_raw.get("archive_after_seconds"),
             document_extraction_max_windows=extraction_max_windows,
             document_extraction_numeric_windows=extraction_numeric_windows,
             document_extraction_discovery_windows=extraction_discovery_windows,

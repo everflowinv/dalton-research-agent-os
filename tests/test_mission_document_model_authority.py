@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import unittest
+from pathlib import Path
 
 from dalton_core.mission_document_model_authority import (
     DRAFT_MODEL_CONFIG_NAME,
@@ -123,6 +125,59 @@ class MissionDocumentModelAuthorityTests(unittest.TestCase):
             ):
                 resolver()
         self.assertEqual((len(opens), waits), (3, [0.5, 0.5]))
+
+    def test_cleanly_closed_wal_policy_is_read_without_creating_sidecars(self):
+        """A child may start in the cold interval between budget writers."""
+
+        fixture = self._fixture()
+        budget_path = Path(fixture.budget.path)
+        fixture.budget.close()
+        sidecars = [Path(str(budget_path) + suffix) for suffix in ("-wal", "-shm")]
+        self.assertTrue(all(not path.exists() for path in sidecars))
+        before_bytes = budget_path.read_bytes()
+        before_stat = budget_path.stat()
+        before_names = sorted(path.name for path in budget_path.parent.iterdir())
+
+        executions, proof = MissionDocumentModelAuthority(
+            state_dir=fixture.state,
+            router=fixture.router,
+            clock=fixture.harness.clock,
+        )()
+
+        self.assertEqual(executions["draft"]["budget_policy_ref"],
+                         "budget-policy:mission-annual:1")
+        self.assertEqual(
+            proof["verifier"]["budget_policy_ceiling"]["day_cap_micros"],
+            10_000_000,
+        )
+        self.assertEqual(budget_path.read_bytes(), before_bytes)
+        after_stat = budget_path.stat()
+        self.assertEqual(
+            (after_stat.st_size, after_stat.st_mtime_ns, after_stat.st_ctime_ns),
+            (before_stat.st_size, before_stat.st_mtime_ns, before_stat.st_ctime_ns),
+        )
+        self.assertEqual(
+            sorted(path.name for path in budget_path.parent.iterdir()), before_names
+        )
+        self.assertTrue(all(not path.exists() for path in sidecars))
+
+    def test_cold_wal_snapshot_rejects_a_sidecar_race(self):
+        from dalton_core.readonly_sqlite import connect_cold_wal_snapshot
+
+        fixture = self._fixture()
+        budget_path = Path(fixture.budget.path)
+        fixture.budget.close()
+        wal = Path(str(budget_path) + "-wal")
+        self.assertFalse(wal.exists())
+        try:
+            with self.assertRaisesRegex(
+                sqlite3.OperationalError, "changed during immutable snapshot"
+            ):
+                with connect_cold_wal_snapshot(budget_path) as connection:
+                    self.assertEqual(connection.execute("SELECT 1").fetchone()[0], 1)
+                    wal.write_bytes(b"concurrent-writer-marker")
+        finally:
+            wal.unlink(missing_ok=True)
 
     def test_an_unregistered_budget_policy_still_fails_on_the_first_read(self):
         fixture = self._fixture()

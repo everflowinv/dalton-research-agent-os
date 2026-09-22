@@ -1237,9 +1237,12 @@ function renderModels(sheet,r,overview){sheet.replaceChildren(readerClose(),node
   const stages=node("section");stages.append(node("h3","四类模型"));
   const cards=r.tier_cards||[];
   cards.forEach(card=>{const d=node("div",null,"lane");d.dataset.tier=card.tier;
-    d.append(node("span",null,"st on"));
+    const coverage=card.capability_coverage||{status:"not_required"};
+    const coverageClass=coverage.status==="missing"?"err":coverage.status==="partial"?"wait":"on";
+    d.append(node("span",null,`st ${coverageClass}`));
     const c=node("div");
     c.append(node("b",`${card.label}`),node("small",`覆盖 ${card.purposes.length} 个环节${card.requires_restart?" · 该类含常驻服务固定的环节，保存后需重启才完全生效":""}`));
+    if(coverage.note)c.append(node("div",coverage.note,coverage.status==="covered"?"status ok":"status err"));
     const editor=tierChainEditor(card,r);
     c.append(editor.box);
     const row=node("div",null,"actions");row.append(editor.save,editor.st);c.append(row);

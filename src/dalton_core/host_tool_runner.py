@@ -82,6 +82,7 @@ DEFAULT_TIMEOUT_SECONDS = 180.0
 _PASSTHROUGH_ENV = (
     "PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR",
     "PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV",
+    "DALTON_RAW_SPOOL_MAX_TOTAL_BYTES", "DALTON_RAW_SPOOL_ARCHIVE_AFTER_SECONDS",
 )
 
 
@@ -514,6 +515,15 @@ class HostToolRunner:
             return raw, process.returncode or -1, "response exceeds the profile byte ceiling"
         if process.returncode != 0:
             detail = stderr_tail.decode("utf-8", "replace").strip()
+            if not detail and raw:
+                try:
+                    failure_wire = json.loads(raw.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    failure_wire = None
+                if isinstance(failure_wire, dict):
+                    reason = failure_wire.get("failure_reason")
+                    if isinstance(reason, str) and reason.strip():
+                        detail = reason.strip()
             return raw, process.returncode, (
                 f"exit {process.returncode}: {detail[:300]}" if detail
                 else f"exit {process.returncode}"

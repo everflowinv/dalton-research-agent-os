@@ -44,7 +44,9 @@ from dalton_core.model_fallback_chain import (
 )
 from dalton_core.model_profile_bounds import (
     effective_input_bound,
+    exceeds_actual_prompt_bound,
     exceeds_input_bound,
+    measured_input_bound,
 )
 from dalton_core.model_profile_health import (
     BASE_COOLDOWN_SECONDS,
@@ -394,16 +396,35 @@ class InputBoundTests(_RouterCase):
                        if item["id"] == ANTIGRAVITY)
         resolved = effective_input_bound(profile)
         self.assertEqual(resolved["source"], "measured")
-        self.assertEqual(resolved["bound"], 30_000)
-        self.assertGreater(resolved["declared"], 30_000)
-        self.assertTrue(exceeds_input_bound(profile, 30_796))
-        self.assertFalse(exceeds_input_bound(profile, 29_434))
+        self.assertEqual(resolved["bound"], 170_000)
+        self.assertGreater(resolved["declared"], 170_000)
+        self.assertTrue(exceeds_input_bound(profile, 170_796))
+        self.assertFalse(exceeds_input_bound(profile, 169_434))
+
+    def test_actual_utf8_guard_is_scoped_to_the_two_probed_profiles(self) -> None:
+        for profile_id in (
+            ANTIGRAVITY,
+            "profile:gemini-3-8-flash-antigravity-high",
+        ):
+            with self.subTest(profile_id=profile_id):
+                profile = {"id": profile_id}
+                self.assertEqual(measured_input_bound(profile_id), 170_000)
+                self.assertFalse(exceeds_actual_prompt_bound(
+                    profile, "界" * 56_666
+                ))
+                self.assertTrue(exceeds_actual_prompt_bound(
+                    profile, "界" * 56_667
+                ))
+        self.assertIsNone(measured_input_bound("profile:gemini-3-8-flash"))
+        self.assertFalse(exceeds_actual_prompt_bound(
+            {"id": "profile:gemini-3-8-flash"}, "界" * 56_667
+        ))
 
     def test_routing_refuses_an_oversized_prompt_before_anything_is_dispatched(self) -> None:
-        small = self._route("work:wpa-small", estimated_input=20_000)
+        small = self._route("work:wpa-small", estimated_input=60_000)
         self.assertNotIn("input_bound_exceeded",
                          self._reason_for(small, ANTIGRAVITY))
-        big = self._route("work:wpa-big", estimated_input=30_796)
+        big = self._route("work:wpa-big", estimated_input=170_796)
         self.assertIn("input_bound_exceeded", self._reason_for(big, ANTIGRAVITY))
         # And the call still routes: the point is to skip one link, not to
         # refuse the work.

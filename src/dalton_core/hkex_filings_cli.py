@@ -94,7 +94,7 @@ from .hkex_filings_core import (
     stock_prefix_url,
     title_search_url,
 )
-from .raw_spool import RawSpool
+from .raw_spool import RawSpool, RawSpoolError, RawSpoolReader
 from .store import canonical_json, content_hash
 
 SUMMARY_SCHEMA_VERSION = "0.1"
@@ -411,8 +411,14 @@ def _daily_acquisition(*, state: Path, as_of: str,
                     raise HkexFilingsRunError("daily acquisition cached artifact locator is corrupt")
                 if locator.rsplit("/", 1)[-1] != digest:
                     raise HkexFilingsRunError("daily acquisition cached artifact locator is corrupt")
-                artifact_bytes = (state / DEFAULT_SPOOL_NAME / "connector-spool" /
-                                  locator.removeprefix("spool:")).read_bytes()
+                try:
+                    artifact_bytes = RawSpoolReader(
+                        state / DEFAULT_SPOOL_NAME
+                    ).read_object(digest)
+                except RawSpoolError as exc:
+                    raise HkexFilingsRunError(
+                        "daily acquisition spooled artifact is corrupt"
+                    ) from exc
                 if hashlib.sha256(artifact_bytes).hexdigest() != digest:
                     raise HkexFilingsRunError("daily acquisition spooled artifact is corrupt")
                 expected_invocation = build_invocation_ref(

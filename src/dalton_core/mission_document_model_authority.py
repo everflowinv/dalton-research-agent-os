@@ -9,6 +9,7 @@ no reservation and sends no model request.
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -92,6 +93,24 @@ def _installed_budget_policy(
             with ThesisImpactBudgetStore(budget_db, read_only=True) as budget:
                 return budget.policy(policy_ref)
         except Exception as exc:
+            if (
+                isinstance(exc, sqlite3.OperationalError)
+                and "wal requires existing wal/shm" in str(exc).lower()
+            ):
+                # A clean shutdown checkpoints WAL and removes its sidecars.
+                # Ordinary mode=ro cannot open that file without creating SHM.
+                # Read only the immutable policy row through a guarded cold
+                # snapshot; live usage/accounting never takes this path.
+                try:
+                    from .readonly_sqlite import connect_cold_wal_snapshot
+
+                    with connect_cold_wal_snapshot(budget_db) as connection:
+                        connection.row_factory = sqlite3.Row
+                        return ThesisImpactBudgetStore.policy_from_connection(
+                            connection, policy_ref
+                        )
+                except Exception as cold_exc:
+                    exc = cold_exc
             if attempt < _BUDGET_RETRY_ATTEMPTS and _budget_read_is_retryable(exc):
                 sleep(_BUDGET_RETRY_BACKOFF_SECONDS)
                 continue

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import sqlite3
@@ -586,6 +587,258 @@ class MissionDocumentResearchTests(unittest.TestCase):
         self.assertEqual(fixture.store.connection.execute(
             "SELECT count(*) FROM mission_document_research_admissions"
         ).fetchone()[0], 1)
+
+    def test_model_policy_roll_refreshes_execution_without_rewriting_admission(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        admission = authority.admit_from_plan(**args)
+        admitted_execution = copy.deepcopy(admission["model_execution"])
+        admitted_authority = copy.deepcopy(admission["model_authority"])
+        old_works = executor_module._blueprints(admission)
+        current_execution = copy.deepcopy(admitted_execution)
+        current_authority = copy.deepcopy(admitted_authority)
+        current_execution["draft"]["routing_policy_ref"] = "routing-policy:current:2"
+        current_authority["draft"]["routing_policy_ref"] = "routing-policy:current:2"
+        current_authority["draft"]["routing_policy_hash"] = "9" * 64
+        authority.model_execution_resolver = lambda: (
+            current_execution, current_authority
+        )
+
+        resolved = authority.resolve_for_execution(admission["id"])
+
+        self.assertEqual(authority.admission(admission["id"])["model_execution"],
+                         admitted_execution)
+        self.assertEqual(resolved["admitted_model_execution"], admitted_execution)
+        self.assertEqual(resolved["model_execution"], current_execution)
+        self.assertNotEqual(
+            content_hash({key: value for key, value in resolved.items()
+                          if key != "content_hash"}),
+            admission["content_hash"],
+        )
+        refresh = resolved["model_authority_refresh"]
+        self.assertEqual(refresh["admission_hash"], admission["content_hash"])
+        self.assertEqual(refresh["content_hash"], content_hash({
+            key: value for key, value in refresh.items() if key != "content_hash"
+        }))
+        new_works = executor_module._blueprints(resolved)
+        self.assertEqual(new_works[0]["id"], old_works[0]["id"])
+        self.assertNotEqual(new_works[1]["id"], old_works[1]["id"])
+        self.assertNotEqual(new_works[1]["idempotency_key"],
+                            old_works[1]["idempotency_key"])
+        self.assertEqual(new_works[1]["metadata"]["routing_policy_ref"],
+                         "routing-policy:current:2")
+        self.assertEqual(new_works[1]["metadata"]["model_authority_refresh"],
+                         refresh["stages"]["draft"])
+
+    def test_refreshed_model_authority_is_audited_by_completed_model_work(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        admission = authority.admit_from_plan(**args)
+        executor, _draft, _verifier = self._executor(fixture, authority)
+        before_roll = [executor.run_once(admission["id"]) for _ in range(2)]
+        self.assertEqual([item["status"] for item in before_roll],
+                         ["admitted", "succeeded"])
+        old_draft_ref = executor_module._blueprints(admission)[1]["id"]
+        current_execution = copy.deepcopy(admission["model_execution"])
+        current_authority = copy.deepcopy(admission["model_authority"])
+        current_authority["draft"]["routing_policy_hash"] = "8" * 64
+        authority.model_execution_resolver = lambda: (
+            current_execution, current_authority
+        )
+
+        outcomes = [executor.run_once(admission["id"]) for _ in range(8)]
+
+        self.assertEqual(outcomes[-1]["status"], "complete")
+        works = effective_mission_document_work_orders(
+            authority, executor.scheduler, admission["id"],
+            draft_worker=executor.draft_worker,
+            verifier_worker=executor.verifier_worker,
+        )
+        refresh = works[1]["metadata"]["model_authority_refresh"]
+        self.assertNotEqual(works[1]["id"], old_draft_ref)
+        self.assertNotEqual(works[1]["idempotency_key"],
+                            executor_module._blueprints(admission)[1]["idempotency_key"])
+        self.assertEqual(refresh["admission_hash"], admission["content_hash"])
+        formal = executor.scheduler.formal_result(works[1]["id"])
+        audit = exact_mission_document_model_execution_authority(
+            works[1], formal, executor.draft_worker
+        )
+        self.assertEqual(audit["model_result"]["work_order_ref"], works[1]["id"])
+        self.assertEqual(
+            audit["execution_proof"]["route_decision_ref"],
+            audit["model_result"]["route_decision_ref"],
+        )
+
+    def test_refreshed_model_idempotency_does_not_alias_enqueued_old_epoch(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        admission = authority.admit_from_plan(**args)
+        executor, _draft, _verifier = self._executor(fixture, authority)
+        old = executor_module._blueprints(admission)[1]
+        self.assertEqual(executor.scheduler.enqueue(old)["status"], "fresh")
+        current_execution = copy.deepcopy(admission["model_execution"])
+        current_authority = copy.deepcopy(admission["model_authority"])
+        current_authority["draft"]["routing_policy_hash"] = "4" * 64
+        authority.model_execution_resolver = lambda: (
+            current_execution, current_authority
+        )
+        refreshed = executor_module._blueprints(
+            authority.resolve_for_execution(admission["id"])
+        )[1]
+
+        self.assertNotEqual(refreshed["id"], old["id"])
+        self.assertNotEqual(refreshed["idempotency_key"], old["idempotency_key"])
+        self.assertEqual(executor.scheduler.enqueue(refreshed)["status"], "fresh")
+
+    def test_model_roll_reuses_already_succeeded_paid_stage(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        admission = authority.admit_from_plan(**args)
+        executor, draft, _verifier = self._executor(fixture, authority)
+        before_roll = [executor.run_once(admission["id"]) for _ in range(4)]
+        self.assertEqual([item["status"] for item in before_roll],
+                         ["admitted", "succeeded", "admitted", "succeeded"])
+        old_draft_ref = before_roll[-1]["work_order_ref"]
+        self.assertEqual(draft.calls, 1)
+        current_execution = copy.deepcopy(admission["model_execution"])
+        current_authority = copy.deepcopy(admission["model_authority"])
+        current_authority["draft"]["routing_policy_hash"] = "5" * 64
+        authority.model_execution_resolver = lambda: (
+            current_execution, current_authority
+        )
+
+        completed = self._run_until(
+            executor, admission,
+            lambda item: item.get("research_status") == "candidate_staged",
+        )
+
+        self.assertEqual(completed["research_status"], "candidate_staged")
+        self.assertEqual(draft.calls, 1)
+        works = effective_mission_document_work_orders(
+            authority, executor.scheduler, admission["id"],
+            draft_worker=executor.draft_worker,
+            verifier_worker=executor.verifier_worker,
+        )
+        self.assertEqual(works[1]["id"], old_draft_ref)
+
+    def test_second_model_roll_reuses_succeeded_intermediate_epoch(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        admission = authority.admit_from_plan(**args)
+        executor, draft, verifier = self._executor(fixture, authority)
+        v2_execution = copy.deepcopy(admission["model_execution"])
+        v2_authority = copy.deepcopy(admission["model_authority"])
+        v2_authority["draft"]["routing_policy_hash"] = "3" * 64
+        authority.model_execution_resolver = lambda: (
+            v2_execution, v2_authority
+        )
+        self._run_until(
+            executor, admission,
+            lambda item: item.get("research_status") == "candidate_staged",
+        )
+        v2_works = effective_mission_document_work_orders(
+            authority, executor.scheduler, admission["id"],
+            draft_worker=executor.draft_worker,
+            verifier_worker=executor.verifier_worker,
+        )
+        calls = (draft.calls, verifier.calls)
+        v3_execution = copy.deepcopy(admission["model_execution"])
+        v3_authority = copy.deepcopy(admission["model_authority"])
+        v3_authority["draft"]["routing_policy_hash"] = "4" * 64
+        authority.model_execution_resolver = lambda: (
+            v3_execution, v3_authority
+        )
+
+        v3_works = effective_mission_document_work_orders(
+            authority, executor.scheduler, admission["id"],
+            draft_worker=executor.draft_worker,
+            verifier_worker=executor.verifier_worker,
+        )
+
+        self.assertEqual(v3_works[1]["id"], v2_works[1]["id"])
+        self.assertEqual(v3_works[2]["id"], v2_works[2]["id"])
+        self.assertEqual((draft.calls, verifier.calls), calls)
+
+    def test_model_policy_roll_cannot_expand_admitted_call_budget(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        admission = authority.admit_from_plan(**args)
+        current_execution = copy.deepcopy(admission["model_execution"])
+        current_execution["draft"]["max_cost_usd"] += 0.01
+        authority.model_execution_resolver = lambda: (
+            current_execution, copy.deepcopy(admission["model_authority"])
+        )
+        with self.assertRaisesRegex(
+            MissionDocumentResearchError, "exceeds admitted budget"
+        ):
+            authority.resolve_for_execution(admission["id"])
+
+    def test_verifier_only_roll_keeps_draft_work_byte_identical(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        admission = authority.admit_from_plan(**args)
+        before = executor_module._blueprints(admission)
+        current_execution = copy.deepcopy(admission["model_execution"])
+        current_authority = copy.deepcopy(admission["model_authority"])
+        current_authority["verifier"]["routing_policy_hash"] = "6" * 64
+        authority.model_execution_resolver = lambda: (
+            current_execution, current_authority
+        )
+
+        after = executor_module._blueprints(
+            authority.resolve_for_execution(admission["id"])
+        )
+
+        self.assertEqual(after[1], before[1])
+        self.assertNotEqual(after[2]["id"], before[2]["id"])
+        self.assertNotEqual(after[2]["idempotency_key"],
+                            before[2]["idempotency_key"])
+
+    def test_equal_retrieval_proofs_get_distinct_completion_ids(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        admission = authority.admit_from_plan(**args)
+        executor, _draft, _verifier = self._executor(fixture, authority)
+        first = executor_module._blueprints(admission)[0]
+        second = copy.deepcopy(first)
+        second["id"] = "work:mission-document-research-distinct-retrieval"
+        second["idempotency_key"] = "mission-document-research-work:distinct:1"
+        executor.scheduler.enqueue(first)
+        executor.scheduler.enqueue(second)
+
+        one = executor._complete_retrieval(admission, first)
+        two = executor._complete_retrieval(
+            {**admission, "id": "mission-document-research-admission:distinct"},
+            second,
+        )
+
+        self.assertEqual((one["status"], two["status"]),
+                         ("succeeded", "succeeded"))
+        rows = fixture.store.connection.execute(
+            "SELECT result_envelope_id,work_order_id FROM scheduler_result_envelopes "
+            "WHERE work_order_id IN (?,?) ORDER BY work_order_id",
+            (first["id"], second["id"]),
+        ).fetchall()
+        self.assertEqual(len(rows), 2)
+        self.assertNotEqual(rows[0]["result_envelope_id"],
+                            rows[1]["result_envelope_id"])
+
+    def test_retrieval_reentry_after_expiry_gets_attempt_scoped_result_id(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        admission = authority.admit_from_plan(**args)
+        executor, _draft, _verifier = self._executor(fixture, authority)
+        work = executor_module._blueprints(admission)[0]
+        executor.scheduler.enqueue(work)
+        first = executor.scheduler.claim(
+            executor.actor_ref, work_order_id=work["id"], lease_seconds=1
+        )
+        fixture.harness.clock.value += timedelta(seconds=2)
+
+        completed = executor._complete_retrieval(admission, work)
+
+        self.assertEqual(completed["status"], "succeeded")
+        formal = executor.scheduler.formal_result(work["id"])
+        self.assertEqual(formal["attempt_number"], 2)
+        proof_hash = formal["result_envelope"]["outputs"]["content_hash"]
+        first_id = executor_module._ref(
+            "result-envelope:mission-document-search", {
+                "work_order_ref": work["id"], "attempt_number": 1,
+                "proof_hash": proof_hash,
+            })
+        self.assertNotEqual(formal["result_envelope_id"], first_id)
+        self.assertEqual(first["attempt"]["attempt_number"], 1)
 
     def test_typed_target_is_replayed_and_never_retags_legacy_admission(self):
         fixture, authority, args, _registration, _launcher = self._fixture()
@@ -1186,6 +1439,51 @@ class MissionDocumentResearchTests(unittest.TestCase):
             "SELECT count(*) FROM mission_document_research_recovery_links").fetchone()[0], 1)
         self.assertEqual(fixture.budget.connection.execute(
             "SELECT count(*) FROM thesis_impact_day_admissions").fetchone()[0], 3)
+
+    def test_model_authority_roll_preserves_prior_recovery_spend(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        self._enable_recovery(fixture, maximum=1)
+        admission = authority.admit_from_plan(**args)
+        statement = "Managed services revenue is recognized over time."
+        adapter = AlwaysCapacityAdapter({
+            "schema_version": "0.1", "status": "answered", "answer": statement,
+            "candidate": {"normalized_statement": statement,
+                          "metric_or_aspect": "revenue", "period": "current",
+                          "basis": "reported", "cited_match_indexes": [0]},
+            "missing": [],
+        })
+        executor, _draft, _verifier = self._executor(
+            fixture, authority, draft_adapter=adapter)
+        recovery = self._run_until(
+            executor, admission,
+            lambda item: item.get("reason") == "fresh_work_recovery",
+        )
+        old_recovery_ref = recovery["work_order_ref"]
+        self.assertEqual(executor.scheduler.status(old_recovery_ref)["state"], "ready")
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM mission_document_research_recovery_links"
+        ).fetchone()[0], 1)
+
+        current_execution = copy.deepcopy(admission["model_execution"])
+        current_authority = copy.deepcopy(admission["model_authority"])
+        current_authority["draft"]["routing_policy_hash"] = "7" * 64
+        authority.model_execution_resolver = lambda: (
+            current_execution, current_authority
+        )
+        calls_before_roll = adapter.calls
+        with self.assertRaisesRegex(
+            MissionDocumentResearchExecutorError,
+            "unresolved historical stage",
+        ):
+            executor.run_once(admission["id"])
+        self.assertEqual(adapter.calls, calls_before_roll)
+        # The old link remains immutable audit and continues to consume the
+        # admission/stage recovery allowance.  Refresh does not replay it or
+        # fabricate another authorization/link under the new Work epoch.
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM mission_document_research_recovery_links"
+        ).fetchone()[0], 1)
+        self.assertEqual(executor.scheduler.status(old_recovery_ref)["state"], "ready")
 
     def test_zero_policy_and_unknown_send_state_take_their_own_doors(self):
         """A disabled policy creates nothing; an unproved send buys one retry."""

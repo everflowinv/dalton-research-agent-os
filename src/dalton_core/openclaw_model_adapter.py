@@ -44,6 +44,10 @@ from .model_router import (
     canonical_hash as _dalton_hash,
     canonical_json as _dalton_json,
 )
+from .model_profile_bounds import (
+    actual_prompt_bytes,
+    measured_input_bound,
+)
 from .model_transport import DEFAULT_BROKER_MAX_FRAME_BYTES
 from .thesis_impact import (
     VERIFIER_BINDING_MODE,
@@ -1347,6 +1351,26 @@ class OpenClawModelAdapter:
             raise ModelAdmissionError("adapter clock must return a timezone-aware datetime")
         authoritative_route = self._resolve_authoritative_route(route_decision)
         route = _validate_route(authoritative_route, work, profile, now_dt)
+        # Some older Router callers put token estimates in the field used for
+        # its measured transport check.  The broker request below carries the
+        # exact prompt text, so enforce byte-measured endpoint ceilings here as
+        # the final local preflight.  Replay only reads the broker journal and
+        # cannot dispatch a provider call.
+        if not replay_only:
+            measured_bound = measured_input_bound(profile["id"])
+            if measured_bound is not None:
+                try:
+                    prompt_bytes = actual_prompt_bytes(work.question)
+                except (TypeError, ValueError) as exc:
+                    raise ModelAdmissionError(
+                        "model prompt is not valid UTF-8"
+                    ) from exc
+                if prompt_bytes > measured_bound:
+                    raise ModelAdmissionError(
+                        f"selected profile {profile['id']} measured UTF-8 input bound "
+                        f"{measured_bound} bytes is smaller than "
+                        f"the actual {prompt_bytes}-byte prompt"
+                    )
         if not _WORK_ID_RE.fullmatch(work.id):
             raise ModelAdmissionError("WorkOrder id is not accepted by broker protocol")
         if not _PROFILE_ID_RE.fullmatch(profile["id"]):

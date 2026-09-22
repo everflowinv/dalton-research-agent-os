@@ -182,6 +182,24 @@ class ModelCatalogSyncCoordinator:
             "registered": _names(sync["added_profile_ids"]),
             "retired": _names(sync["retired_profile_ids_this_run"]),
             "revived": _names(sync["revived_profile_ids"]),
+            # Provider-controlled verification is time-bound broker evidence.
+            # Keep its loss visible in the ordinary tick result instead of
+            # making an operator reconstruct it from two immutable profile
+            # versions after verifier calls have already gone dark.
+            "provider_control_valid": _names(
+                sync["provider_controls"]["valid_profile_ids"]),
+            "provider_control_expiring": _names(
+                sync["provider_controls"]["expiring_profile_ids"]),
+            "provider_control_expired": _names(
+                sync["provider_controls"]["expired_profile_ids"]),
+            "provider_control_invalid": _names(
+                sync["provider_controls"]["invalid_profile_ids"]),
+            "provider_control_capability_lost": _names(
+                profile_id
+                for profile_id, capabilities in
+                sync["capabilities_removed_by_profile"].items()
+                if "provider-controlled-verify" in capabilities
+            ),
             # The three diff sets, by name and capped: a tick summary is read
             # in a heartbeat file and must not grow with the catalog.
             "in_openclaw_not_allowed": _names(discovery["in_openclaw_not_allowed"]),

@@ -1,0 +1,16 @@
+{
+  "source_objects": 80,
+  "bytes_before": 4095420,
+  "bytes_after_archive": 949770,
+  "archive": {
+    "archived": 80,
+    "freed_bytes": 3145650
+  },
+  "every_archive_hash_valid": true,
+  "restore": {
+    "restored": 80,
+    "added_bytes": 3145650
+  },
+  "every_restored_byte_equal": true,
+  "production_writes": false
+}

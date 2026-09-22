@@ -272,6 +272,8 @@ RULES: tuple[Rule, ...] = (
     Rule("model_unavailable", "model_unavailable", DEPENDENCY_UNAVAILABLE, "model"),
     Rule("interpreter_unavailable", "interpreter_unavailable",
          DEPENDENCY_UNAVAILABLE, "model"),
+    Rule("raw_spool_capacity", "rawspoolcapacityerror",
+         DEPENDENCY_UNAVAILABLE, "raw_spool"),
 
     # -- content the source did return and nobody can use -------------------
     Rule("content_refused", "content_refused", CONTENT_REFUSED),

@@ -6646,6 +6646,10 @@ class CockpitPlane:
                                          if bound_catalogue is not None else catalogue)),
                 "family": link["family"], "unpriced": link["unpriced"],
                 "retired": link["status"] == "retired",
+                "capabilities": list(((bound_catalogue
+                                        if bound_catalogue is not None else catalogue)
+                                       .get(link["profile_id"]) or {})
+                                     .get("capabilities") or []),
                 "cooldown": cooling.get(link["profile_id"]),
                 "note": chain_link_note(
                     (
@@ -6785,11 +6789,15 @@ class CockpitPlane:
                 "mode": row["mode"], "mode_label": row["mode_label"],
                 "requires_restart": row["requires_restart"],
                 "editable": row["editable"],
+                "pin_note": row["pin_note"],
             })
             card["requires_restart"] = card["requires_restart"] or row["requires_restart"]
             if not card["chain"] and row["mode"] == "tier":
                 card["chain"] = list(row["chain"])
             card.setdefault("_pinned", []).append(list(row["chain"]))
+            card.setdefault("_coverage_chains", []).append(
+                (row["purpose"], list(row["chain"]))
+            )
         # A tier none of whose stages follows the tier -- every member still
         # carrying a per-stage pin, which is what the deliverable tier looks
         # like until scripts/split_deliverable_tier.py has run -- would open an
@@ -6803,6 +6811,49 @@ class CockpitPlane:
             models = [[link["model"] for link in chain] for chain in pinned]
             if all(chain == models[0] for chain in models):
                 card["chain"] = list(pinned[0])
+        for card in tier_cards.values():
+            if card["tier"] != "verifier":
+                card.pop("_coverage_chains", None)
+                card["capability_coverage"] = {
+                    "status": "not_required", "required": [], "covered_by": [],
+                }
+                continue
+            chains = card.pop("_coverage_chains", [])
+            covered_purposes: list[str] = []
+            missing_purposes: list[str] = []
+            controlled: set[str] = set()
+            for purpose, chain in chains:
+                links = [
+                    link["model"] for link in chain
+                    if "provider-controlled-verify" in
+                    (link.get("capabilities") or [])
+                ]
+                if links:
+                    covered_purposes.append(purpose)
+                    controlled.update(links)
+                else:
+                    missing_purposes.append(purpose)
+            status = (
+                "missing" if not covered_purposes else
+                "partial" if missing_purposes else "covered"
+            )
+            card["capability_coverage"] = {
+                "status": status,
+                "required": ["provider-controlled-verify"],
+                "covered_by": sorted(controlled),
+                "covered_purposes": covered_purposes,
+                "missing_purposes": missing_purposes,
+                "note": (
+                    "受控核验可用：调用链中有仍有效的供应商验证控件。"
+                    if status == "covered" else
+                    "受控核验部分不可用：有环节的调用链缺少仍有效的供应商验证控件；"
+                    "这些环节会在调用前被拒绝。"
+                    if status == "partial" else
+                    "受控核验不可用：当前调用链没有仍有效的供应商验证控件；"
+                    "所有 provider-controlled-verify 工单都会在调用前被拒绝。"
+                    "请先在模型网关更新有依据且未过期的 providerControls 声明。"
+                ),
+            }
         from .model_fallback_chain import CHAIN_ELIGIBILITY_ENFORCED
         # 2026-09-16: the picker's verifier column keeps the honest contract
         # facts even with eligibility enforcement off. The owner's freedom

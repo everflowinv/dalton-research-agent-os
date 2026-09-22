@@ -279,8 +279,16 @@ class ThesisImpactBudgetStore:
         return {**wire, "status": "fresh"}
 
     def policy(self, policy_version_id: str) -> dict[str, Any]:
+        return self.policy_from_connection(self.connection, policy_version_id)
+
+    @staticmethod
+    def policy_from_connection(
+        connection: sqlite3.Connection, policy_version_id: str
+    ) -> dict[str, Any]:
+        """Validate one immutable policy through a caller-owned connection."""
+
         policy_version_id = _text(policy_version_id, "policy_version_id")
-        row = self.connection.execute(
+        row = connection.execute(
             "SELECT * FROM thesis_impact_budget_policies "
             "WHERE policy_version_id=?",
             (policy_version_id,),

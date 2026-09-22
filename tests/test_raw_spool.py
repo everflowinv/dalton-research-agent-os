@@ -11,6 +11,7 @@ from pathlib import Path
 from dalton_core.raw_spool import (
     RawSpool,
     RawSpoolCapacityError,
+    RawSpoolReader,
     RawSpoolLimitExceeded,
 )
 
@@ -58,6 +59,63 @@ class RawSpoolTests(unittest.TestCase):
         del orphan
         self.assertEqual(spool.gc_orphans(), 1)
         self.assertEqual(spool.gc_orphans(), 0)
+
+    def test_capacity_pressure_losslessly_archives_old_objects(self) -> None:
+        payload = b'{"repeated":"' + b"value," * 100 + b'"}'
+        spool = RawSpool(
+            self.temp.name, max_total_bytes=len(payload) + 30,
+            archive_after_seconds=0,
+        )
+        sink = spool.open_sink(self.sink_ref("a"), max_response_bytes=len(payload))
+        sink.write(payload)
+        original = sink.finalize()
+        second = spool.open_sink(self.sink_ref("b"), max_response_bytes=64)
+        archived = list((Path(self.temp.name) / "connector-spool" / "objects").glob("*/*.gz"))
+        self.assertEqual(len(archived), 1)
+        self.assertEqual(spool.read_object(original.content_hash), payload)
+        self.assertEqual(
+            RawSpoolReader(self.temp.name).read_object(original.content_hash), payload
+        )
+        second.abort()
+        restored = spool.restore_archived_objects()
+        self.assertEqual(restored["restored"], 1)
+        self.assertFalse(archived[0].exists())
+        self.assertEqual(spool.read_object(original.content_hash), payload)
+
+    def test_capacity_error_reports_actionable_numbers(self) -> None:
+        spool = RawSpool(self.temp.name, max_total_bytes=8, archive_after_seconds=0)
+        sink = spool.open_sink(self.sink_ref("c"), max_response_bytes=4)
+        sink.write(b"1234")
+        sink.finalize()
+        with self.assertRaisesRegex(
+            RawSpoolCapacityError,
+            r"used_bytes=4 .*requested_bytes=5 .*max_total_bytes=8",
+        ):
+            spool.open_sink(self.sink_ref("d"), max_response_bytes=5)
+
+    def test_named_connector_spool_is_not_doubled_for_new_install(self) -> None:
+        named = Path(self.temp.name) / "connector-spool"
+        named.mkdir()
+        RawSpool(named, max_total_bytes=64)
+        self.assertTrue((named / "objects").is_dir())
+        self.assertFalse((named / "connector-spool").exists())
+
+    def test_existing_historical_nested_spool_remains_readable(self) -> None:
+        named = Path(self.temp.name) / "connector-spool"
+        historical = named / "connector-spool"
+        (historical / "objects").mkdir(parents=True)
+        (historical / "tmp").mkdir()
+        spool = RawSpool(named, max_total_bytes=64)
+        sink = spool.open_sink(self.sink_ref("e"), max_response_bytes=4)
+        sink.write(b"live")
+        obj = sink.finalize()
+        self.assertTrue((historical / "objects" / obj.content_hash[:2] / obj.content_hash).is_file())
+
+    def test_runtime_capacity_override_replaces_hard_coded_default(self) -> None:
+        with patch.dict("os.environ", {"DALTON_RAW_SPOOL_MAX_TOTAL_BYTES": "4"}):
+            spool = RawSpool(self.temp.name, max_total_bytes=1_000_000_000)
+        with self.assertRaises(RawSpoolCapacityError):
+            spool.open_sink(self.sink_ref("f"), max_response_bytes=5)
 
     def test_other_instance_gc_preserves_inflight_download_and_completed_original(self):
         first = RawSpool(self.temp.name, max_total_bytes=4096)

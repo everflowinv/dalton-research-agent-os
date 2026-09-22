@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .lane_registry import LaneSpec, register_lane
+from .raw_spool import RawSpoolError, RawSpoolReader
 
 REQUIRED_QUARTERS = 4
 MAX_QUEUED_PER_RUN = 4
@@ -99,10 +100,16 @@ def read_artifact(state_dir: Path, content_sha256: str) -> Mapping[str, Any] | N
     """The exact artifact bytes, verified against the hash authority recorded."""
 
     for name in SPOOL_ROOTS:
-        path = state_dir / name / "connector-spool" / "objects" / content_sha256[:2] / content_sha256
-        if not path.is_file():
+        try:
+            reader = RawSpoolReader(state_dir / name)
+        except RawSpoolError:
             continue
-        raw = path.read_bytes()
+        if not reader.object_exists(content_sha256):
+            continue
+        try:
+            raw = reader.read_object(content_sha256)
+        except RawSpoolError:
+            return None
         if hashlib.sha256(raw).hexdigest() != content_sha256:
             return None
         try:

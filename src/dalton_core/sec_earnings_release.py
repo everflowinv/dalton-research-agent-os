@@ -43,6 +43,8 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
+from .raw_spool import RawSpoolError, RawSpoolReader
+
 SOURCE_REF = "source:sec-edgar"
 FILINGS_INDEX_OPERATION = "list_filings"
 # "Results of Operations and Financial Condition": the item a company files
@@ -371,16 +373,25 @@ def read_submissions_artifact(state_dir: Path, content_sha256: str) -> dict[str,
     """
 
     for name in SPOOL_ROOTS:
-        path = (state_dir / name / "connector-spool" / "objects"
-                / content_sha256[:2] / content_sha256)
-        if not path.is_file():
+        root = state_dir / name
+        try:
+            reader = RawSpoolReader(root)
+        except RawSpoolError:
             continue
-        raw = path.read_bytes()
+        if not reader.object_exists(content_sha256):
+            continue
+        try:
+            raw = reader.read_object(content_sha256)
+        except RawSpoolError as exc:
+            return {
+                "status": "tampered",
+                "reason": f"the spooled submissions artifact under {root} is corrupt: {exc}",
+            }
         if hashlib.sha256(raw).hexdigest() != content_sha256:
             return {
                 "status": "tampered",
                 "reason": (
-                    f"the spooled submissions artifact at {path} does not hash "
+                    f"the spooled submissions artifact under {root} does not hash "
                     f"to {content_sha256}; it is refused rather than read"
                 ),
             }

@@ -903,7 +903,7 @@ class SpoolReaderTests(unittest.TestCase):
     def seed(self, issuer: str = "0001467373") -> str:
         body = json.dumps(self.SUBMISSIONS)
         sha = hashlib.sha256(body.encode("utf-8")).hexdigest()
-        objects = self.state / "connector-spool" / "connector-spool" / "objects"
+        objects = self.state / "connector-spool" / "objects"
         (objects / sha[:2]).mkdir(parents=True, exist_ok=True)
         (objects / sha[:2] / sha).write_text(body, encoding="utf-8")
         connection = self.store.connection
@@ -951,7 +951,7 @@ class SpoolReaderTests(unittest.TestCase):
         from dalton_core.sec_ownership_core import ownership_filings_for_issuer
 
         sha = self.seed()
-        objects = self.state / "connector-spool" / "connector-spool" / "objects"
+        objects = self.state / "connector-spool" / "objects"
         (objects / sha[:2] / sha).write_text("{}", encoding="utf-8")
         found = ownership_filings_for_issuer(
             self.store.connection, self.state, issuer="0001467373",

@@ -184,7 +184,7 @@ class ChildTests(unittest.TestCase):
     def test_the_whole_parse_is_kept_and_hashed_before_it_is_read(self):
         summary = self.run_child()
         artifact = summary["artifact"]
-        stored = (self.state / "connector-spool" / "connector-spool" / "objects"
+        stored = (self.state / "connector-spool" / "objects"
                   / artifact["content_hash"][:2] / artifact["content_hash"])
         self.assertTrue(stored.is_file())
         self.assertEqual(hashlib.sha256(stored.read_bytes()).hexdigest(),
