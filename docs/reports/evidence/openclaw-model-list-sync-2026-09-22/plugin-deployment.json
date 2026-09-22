@@ -1,0 +1,31 @@
+{
+  "source_commit": "31d41894b252a33215f060d64a0668deabe3c4fe",
+  "old_path": "/Users/everflow/.openclaw/managed-plugins/openclaw-model-broker-3855c1e3c20e8d731f256e256d0fe833cca3ac65",
+  "new_path": "/Users/everflow/.openclaw/managed-plugins/openclaw-model-broker-31d41894b252a33215f060d64a0668deabe3c4fe",
+  "before_sha256": "5f79af34297c6656216bb09142f2f5717e8e487839c59395f366e03a3d0552a4",
+  "after_sha256": "87c69fcc3bf64bc26d70c6c5b9f77ba182fb7337e75d8eb833ce8c20150c3700",
+  "provider_catalog_sha256": "19ddc3144b2a960a30b0236ed4b57e0dfcda954ac823a1afa8c7828f234cb946",
+  "broker_profile_ids": [
+    "profile:deepseek-v4-flash",
+    "profile:gpt-5-6-sol",
+    "profile:gpt-5-6-terra",
+    "profile:gpt-5-6-luna",
+    "profile:claude-fable-5",
+    "profile:claude-fable-5-1",
+    "profile:claude-opus-5",
+    "profile:claude-sonnet-5",
+    "profile:gemini-3-8-flash",
+    "profile:gemini-3-1-pro-preview",
+    "profile:gemini-3-5-flash-lite",
+    "profile:zai-glm-5-3",
+    "profile:zai-glm-5-3-flash",
+    "profile:grok-4-7",
+    "profile:grok-build-0-1",
+    "profile:grok-4-3",
+    "profile:grok-4-20-beta-reasoning",
+    "profile:grok-4-20-beta-non-reasoning",
+    "profile:gpt-6-astra",
+    "profile:gemini-3-8-flash-antigravity",
+    "profile:gemini-3-8-flash-antigravity-high"
+  ]
+}

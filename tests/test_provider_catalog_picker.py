@@ -9,6 +9,31 @@ from tests import test_model_selection as fixtures
 
 
 class ProviderCatalogPickerTests(unittest.TestCase):
+    def test_follow_mode_hides_legacy_routes_removed_from_provider_catalog(self):
+        from dalton_core.model_deployment import openclaw_broker_profiles
+
+        fixture = fixtures.CockpitModelPageTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.install()
+        plane = fixture.plane(with_model_config=True)
+        profile = openclaw_broker_profiles(checked_at=fixtures.NOW)[0]
+        profile.update(id="model-profile:legacy-removed",
+                       profile_version_ref="model-profile-version:legacy-removed:1",
+                       model="legacy-removed")
+        profile.pop("content_hash", None)
+        with ModelRouter(fixture.router_db) as router:
+            router.register_profile(profile)
+        self.assertIn(profile["id"], [x["model"] for x in plane.models()["choices"]])
+        (fixture.root / "model-catalog-sync.json").write_text(json.dumps({
+            "openclaw_config_path": str(fixture.openclaw),
+            "model_router_db": str(fixture.router_db),
+            "follow_provider_catalog": True,
+        }))
+        self.assertNotIn(profile["id"], [x["model"] for x in plane.models()["choices"]])
+        with ModelRouter(fixture.router_db) as router:
+            self.assertIn(profile["id"], [x["id"] for x in router.latest_profiles()])
+
     def test_provider_add_update_remove_and_revive_reach_picker_without_reselecting_chains(self):
         fixture = fixtures.CockpitModelPageTests()
         fixture.setUp()

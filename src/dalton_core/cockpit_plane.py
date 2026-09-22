@@ -6873,6 +6873,12 @@ class CockpitPlane:
         catalog_settings = _load_json(self.config.state_dir / "model-catalog-sync.json")
         follows_providers = (isinstance(catalog_settings, Mapping)
                              and catalog_settings.get("follow_provider_catalog") is True)
+        if follows_providers and broker is not None:
+            # Historical model-profile: records remain replayable, but an
+            # obsolete route must not survive in the current selection list.
+            offered = set(discovery.get("provider_model_refs") or [])
+            choices = [choice for choice in choices
+                       if f"{choice['provider']}/{choice['model_ref']}" in offered]
         return {
             "available": True,
             "as_of": _iso(self.clock()),

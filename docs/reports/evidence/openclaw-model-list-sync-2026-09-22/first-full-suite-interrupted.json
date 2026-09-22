@@ -1,0 +1,31 @@
+{
+  "source_commit": "31d41894b252a33215f060d64a0668deabe3c4fe",
+  "source_trees": {
+    "src": "3933190a7a3ffdf32df70e1ff14ff6ef57e0072b",
+    "tests": "11506341b9c2b0043765ac516d49c71e9b503e89",
+    "scripts": "301d28ce58e6df6f051d9b76a868588b6dcfe807",
+    "deploy": "8870260dbe6c5c69d68328da01951681c6beb4b0",
+    "integrations": "6a68530f6138f554b563ed5d06d49160cbda8d18"
+  },
+  "command": [
+    "/Users/everflow/Projects/dalton-research-agent-os/.venv/bin/python",
+    "-W",
+    "ignore::ResourceWarning",
+    "-m",
+    "unittest",
+    "discover",
+    "-s",
+    "tests",
+    "-q"
+  ],
+  "started_at": "2026-09-22T16:20:44.639291+00:00",
+  "finished_at": "2026-09-22T16:39:43.286435+00:00",
+  "wall_seconds": 1138.65,
+  "returncode": -2,
+  "tests": null,
+  "test_seconds": null,
+  "native_result_tail": "rameworks/Python.framework/Versions/3.13/lib/python3.13/unittest/case.py\", line 603, in _callSetUp\n    self.setUp()\n    ~~~~~~~~~~^^\n  File \"/Users/everflow/Projects/dalton-research-agent-os/tests/test_rehearse_deploy.py\", line 232, in setUp\n    self.code = _install_script_code()\n                ~~~~~~~~~~~~~~~~~~~~^^\n  File \"/Users/everflow/Projects/dalton-research-agent-os/tests/test_rehearse_deploy.py\", line 112, in _install_script_code\n    return install_script_code(INSTALL_SH)\n  File \"/Users/everflow/Projects/dalton-research-agent-os/scripts/rehearse_deploy.py\", line 907, in install_script_code\n    return expand_for_loops(strip_shell_comments(\n        install_sh.read_text(encoding=\"utf-8\")))\n  File \"/Users/everflow/Projects/dalton-research-agent-os/scripts/rehearse_deploy.py\", line 893, in expand_for_loops\n    match = pattern.search(joined)\nKeyboardInterrupt\n{\"status\": \"passed\", \"summary\": \"/private/var/folders/6p/6dk73jnd7kz660zrb5109t340000gn/T/tmpsymjp6vs/health/summary.json\"}\n",
+  "log_sha256": "539a8066ba15275cb230ca53ee8cb11ca0dc81784d5b4cb3a90630d0b3828bb7",
+  "source_changed_during_run": false,
+  "changed_paths": []
+}

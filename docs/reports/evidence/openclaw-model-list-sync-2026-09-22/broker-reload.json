@@ -1,0 +1,10 @@
+[
+  {
+    "at": "2026-09-22T12:20:56.624-04:00",
+    "message": "config change detected; evaluating reload (plugins.load.paths)"
+  },
+  {
+    "at": "2026-09-22T12:20:56.665-04:00",
+    "message": "config change requires gateway restart (plugins.load.paths) \u2014 deferring until 4 operation(s), 2 reply(ies), 2 embedded run(s), 1 gateway request(s) complete"
+  }
+]

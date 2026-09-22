@@ -1,0 +1,15 @@
+{
+  "source_commit": "31d41894b252a33215f060d64a0668deabe3c4fe",
+  "python_tests": 144,
+  "python_returncode": 0,
+  "broker_node_tests": 35,
+  "broker_returncode": 0,
+  "covered": [
+    "provider add/update/remove/revive through actual picker",
+    "three-process shared host config convergence",
+    "noncooperating external config edit preservation",
+    "custom paths and explicit false preserved",
+    "empty provider catalog",
+    "existing variants and selected chains unchanged"
+  ]
+}

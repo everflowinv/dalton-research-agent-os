@@ -358,6 +358,25 @@ class InstallSeedTests(unittest.TestCase):
             self.assertIn(f"{word}-v1.json", expanded)
         self.assertNotIn("${k}", expanded)
 
+    def test_python_heredoc_for_does_not_consume_a_later_shell_loop(self) -> None:
+        code = (
+            "python3 - <<'PY'\n"
+            "for key in (\n"
+            "    'model_router_db',\n"
+            "    'openclaw_config_path',\n"
+            "):\n"
+            "    print(key)\n"
+            "PY\n"
+            "for kind in alpha beta; do\n"
+            "  cp \"$repo_root/${kind}.json\" \"$state/${kind}.json\"\n"
+            "done\n"
+        )
+        expanded = expand_for_loops(code)
+        self.assertIn("for key in (", expanded)
+        self.assertIn("$repo_root/alpha.json", expanded)
+        self.assertIn("$repo_root/beta.json", expanded)
+        self.assertNotIn("${kind}", expanded)
+
     def test_a_comment_naming_a_record_is_not_a_seed(self) -> None:
         raw = INSTALL_SH.read_text(encoding="utf-8")
         self.assertIn("roic-list-transcripts-v1.json", raw)

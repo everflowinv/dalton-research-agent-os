@@ -1,0 +1,30 @@
+{
+  "checked_at": "2026-09-22T16:36:41.422759+00:00",
+  "status": "system_disk_access_blocked_after_rollback",
+  "candidate_source_commit": "31d41894b252a33215f060d64a0668deabe3c4fe",
+  "candidate_release": "0c10396ac44a8d7444cc3f38c47fb11905d88dd29de5583418747e4b6e0aa307",
+  "restored_release": "30a9e0d4af1654d45e560bfe9d82fa699cc7a0d429c4052caefbe2e1a34d930a",
+  "environments": {
+    "legacy": {
+      "started_at": "2026-09-22T15:17:15.348368+00:00",
+      "last_tick_at": "2026-09-22T16:24:24.254399+00:00",
+      "last_error": null,
+      "writer_socket_exists": false,
+      "follow_provider_catalog": false
+    },
+    "ws-e399ececd5aa7a3762b1a0a4": {
+      "started_at": "2026-09-22T15:17:15.370455+00:00",
+      "last_tick_at": "2026-09-22T16:24:23.928412+00:00",
+      "last_error": null,
+      "writer_socket_exists": false,
+      "follow_provider_catalog": false
+    },
+    "ws-7d894366d1132e2930475a60": {
+      "started_at": "2026-09-22T15:17:15.371587+00:00",
+      "last_tick_at": "2026-09-22T16:24:24.001301+00:00",
+      "last_error": null,
+      "writer_socket_exists": false,
+      "follow_provider_catalog": false
+    }
+  }
+}

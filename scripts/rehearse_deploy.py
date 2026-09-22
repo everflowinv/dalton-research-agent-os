@@ -886,7 +886,10 @@ def expand_for_loops(code: str) -> str:
 
     joined = re.sub(r"\\\n\s*", " ", code)
     pattern = re.compile(
-        r"^ *for +(\w+) +in +(.+?); *do\n(.*?)^ *done *$",
+        # A shell word list ends on this logical line.  Keeping it bounded is
+        # also what stops a Python ``for key in (`` inside a heredoc from
+        # searching across thousands of lines for some later shell ``; do``.
+        r"^ *for +(\w+) +in +([^;\n]+); *do\n(.*?)^ *done *$",
         re.DOTALL | re.MULTILINE,
     )
     while True:
