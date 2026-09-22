@@ -1,0 +1,56 @@
+{
+  "source_commit": "d76d787895c2dc87f627318e834d537524f13b6b",
+  "release_hash": "30a9e0d4af1654d45e560bfe9d82fa699cc7a0d429c4052caefbe2e1a34d930a",
+  "dependencies_match_lock": true,
+  "full_suite": {
+    "source_commit": "d76d787895c2dc87f627318e834d537524f13b6b",
+    "source_trees": {
+      "src": "1d904b551b901ec4130fe6f3a2b7d6e2d44811cf",
+      "tests": "420a524313ecdf18dc3c4e82efbd76f4ed9a0837",
+      "scripts": "301d28ce58e6df6f051d9b76a868588b6dcfe807"
+    },
+    "command": [
+      "/Users/everflow/Projects/dalton-research-agent-os/.venv/bin/python",
+      "-W",
+      "ignore::ResourceWarning",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "tests",
+      "-q"
+    ],
+    "started_at": "2026-09-22T15:02:21.197665+00:00",
+    "finished_at": "2026-09-22T15:15:54.552582+00:00",
+    "wall_seconds": 813.356,
+    "returncode": 0,
+    "tests": 9708,
+    "test_seconds": 812.298,
+    "native_result_tail": " operation=stage_transcript_candidate request=79b94dab55a149e4bdf2710f1a9d8b39 error=VerificationRejected: candidate staging is not configured on this writer\n{\"results\": [], \"status\": \"completed\"}\n{\"status\": \"idle\"}\n{\"results\": [], \"status\": \"blocked_pending_human\"}\n{\"results\": [], \"status\": \"incomplete\"}\nLooking in links: /private/var/folders/6p/6dk73jnd7kz660zrb5109t340000gn/T/tmppzysuewe\nProcessing /private/var/folders/6p/6dk73jnd7kz660zrb5109t340000gn/T/tmppzysuewe/dalton_test-0.1-py3-none-any.whl\nInstalling collected packages: dalton-test\nSuccessfully installed dalton-test-0.1\nwriter read replica unavailable, reads share the store thread error=OperationalError: locked\nwriter lane held operation=dispatch_sales_notes_feed kind=governance until_fingerprint=9aec07b09a5d9841 reason=FeedLaunchRejected: list_notes governance record is not approved; owner approval is required\n----------------------------------------------------------------------\nRan 9708 tests in 812.298s\n\nOK (skipped=4)\n",
+    "log_sha256": "8e941d2571e009642766c39e0c2f9f76c387747767cef651c305d26824c25451",
+    "source_changed_during_run": false,
+    "changed_paths": []
+  },
+  "release_python_3_14_smoke": {
+    "tests": 171,
+    "seconds": 63.831,
+    "status": "passed",
+    "log_sha256": "484749c22c835b65cfe8d80d3f00614f4bba56a3f6e8334d66ea36fb3986b2ff"
+  },
+  "hermetic_replay": {
+    "canary": "hermetic-research-replay",
+    "elapsed_seconds": 3.951,
+    "errors": 0,
+    "failures": 0,
+    "model_provider_calls": 0,
+    "network": "recorded-only",
+    "schema_version": "0.1",
+    "skipped": 0,
+    "status": "passed",
+    "test": "tests.test_thesis_impact_control.ResearchPlanThesisImpactControlTests.test_recorded_supports_path_replays_without_thesis_mutation",
+    "tests_run": 1
+  },
+  "historical_atomic_budget_focused_tests": 5,
+  "peer_review": "passed; no unresolved blockers",
+  "live16_receipt_sha256": "964469b444a6cdf7d07d7667761cf4c748659ddbe3fbd638b29fb7d2c2f2a9df"
+}

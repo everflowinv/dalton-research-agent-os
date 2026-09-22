@@ -4,5 +4,11 @@
   "truncation_markers": [
     "<truncated 77520 bytes>"
   ],
-  "tail_marker_in_model_record": false
+  "tail_marker_in_model_record": false,
+  "cli_result_status": "SUCCESS",
+  "stderr_bytes": 0,
+  "stdout_sha256": "6c6c863031d466b479a797cc7394d213bf0ac353c1f401d08a00e73e597e8ca4",
+  "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "process_returncode_observed": 0,
+  "process_returncode_provenance": "Observed subprocess receipt in the original probe tool output; process return code was not independently written into the stdout JSONL artifact."
 }

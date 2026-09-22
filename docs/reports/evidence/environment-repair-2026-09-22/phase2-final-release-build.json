@@ -1,0 +1,24 @@
+{
+  "built_from": "git archive of source commit",
+  "candidate_manifest_sha256": "4314bcee10c3de3b374e66f22c25c5ed6d636f2d6fbdf8ec12d15923eea3fd87",
+  "clean_tree": true,
+  "dependency_lock_hash": "031fdbe75e53ff9782b71625f9211df883e14148a03bc164745123a101afb02e",
+  "dependency_verification": {
+    "changed_versions": [],
+    "extra": [],
+    "matches": true,
+    "missing": []
+  },
+  "git_src_tree": "1d904b551b901ec4130fe6f3a2b7d6e2d44811cf",
+  "python": "/opt/homebrew/opt/python@3.14/bin/python3.14",
+  "release_hash": "30a9e0d4af1654d45e560bfe9d82fa699cc7a0d429c4052caefbe2e1a34d930a",
+  "release_manifest_path": "/Users/everflow/.dalton/runtime/releases/30a9e0d4af1654d45e560bfe9d82fa699cc7a0d429c4052caefbe2e1a34d930a/release-manifest.json",
+  "release_path": "/Users/everflow/.dalton/runtime/releases/30a9e0d4af1654d45e560bfe9d82fa699cc7a0d429c4052caefbe2e1a34d930a/venv",
+  "release_ref": "release:sha256:30a9e0d4af1654d45e560bfe9d82fa699cc7a0d429c4052caefbe2e1a34d930a",
+  "schema_version": "dalton-release-build:0.3",
+  "source_commit": "d76d787895c2dc87f627318e834d537524f13b6b",
+  "status": "installed",
+  "wheel_file": "dalton_core-0.1.0.dev0-py3-none-any.whl",
+  "wheel_sha256": "ac25489e3eaea937577b89a5daf338db49ffd86a28f58a4ebb4c4863db765435",
+  "writes_performed": true
+}

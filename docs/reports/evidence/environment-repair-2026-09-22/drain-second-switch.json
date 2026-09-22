@@ -1,0 +1,66 @@
+{
+  "stopped": [
+    {
+      "label": "space.lumos.dalton.controller",
+      "returncode": 0
+    },
+    {
+      "label": "space.lumos.dalton.workspace.ws-7d894366d1132e2930475a60.controller",
+      "returncode": 0
+    },
+    {
+      "label": "space.lumos.dalton.workspace.ws-e399ececd5aa7a3762b1a0a4.controller",
+      "returncode": 0
+    },
+    {
+      "label": "com.dalton.research-publication-worker",
+      "returncode": 0
+    },
+    {
+      "label": "space.lumos.dalton.control",
+      "returncode": 0
+    },
+    {
+      "label": "space.lumos.dalton.workspace.ws-7d894366d1132e2930475a60.control",
+      "returncode": 0
+    },
+    {
+      "label": "space.lumos.dalton.workspace.ws-7d894366d1132e2930475a60.writer",
+      "returncode": 0
+    },
+    {
+      "label": "space.lumos.dalton.workspace.ws-e399ececd5aa7a3762b1a0a4.control",
+      "returncode": 0
+    },
+    {
+      "label": "space.lumos.dalton.workspace.ws-e399ececd5aa7a3762b1a0a4.writer",
+      "returncode": 0
+    },
+    {
+      "label": "space.lumos.dalton.writer",
+      "returncode": 0
+    },
+    {
+      "label": "com.dalton.log-rotate",
+      "returncode": 0
+    }
+  ],
+  "drained": [
+    "/Volumes/EveSSD/Dalton/legacy-state/dalton-core",
+    "/Volumes/EveSSD/Dalton/workspaces/ws-e399ececd5aa7a3762b1a0a4/state/dalton-core",
+    "/Volumes/EveSSD/Dalton/workspaces/ws-7d894366d1132e2930475a60/state/dalton-core"
+  ],
+  "writes": [],
+  "exited_pids": [
+    24737,
+    24741,
+    24747,
+    49401,
+    24735,
+    24739,
+    24743,
+    24745,
+    24749,
+    24751
+  ]
+}

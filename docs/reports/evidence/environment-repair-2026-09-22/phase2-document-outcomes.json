@@ -1,0 +1,204 @@
+{
+  "generated_at": "2026-09-22T15:21:08.784292+00:00",
+  "since": "2026-09-22T15:17:00",
+  "summaries": [
+    {
+      "environment": "legacy",
+      "ticket_ref": "mission-document-research:9cbb196a784ab29c18f15687",
+      "admission_ref": "mission-document-research-admission:03c4103b1eee94421bacce23ae719c2f",
+      "created_at": "2026-09-22T15:20:57.302949+00:00",
+      "status": "complete",
+      "error": null,
+      "outcomes": [
+        {
+          "research_status": null,
+          "status": "admitted"
+        },
+        {
+          "research_status": null,
+          "status": "succeeded"
+        },
+        {
+          "research_status": null,
+          "status": "admitted"
+        },
+        {
+          "research_status": null,
+          "status": "retryable"
+        },
+        {
+          "research_status": null,
+          "status": "retryable"
+        },
+        {
+          "research_status": null,
+          "status": "retryable"
+        },
+        {
+          "research_status": null,
+          "status": "failed"
+        },
+        {
+          "research_status": null,
+          "status": "admitted"
+        },
+        {
+          "research_status": null,
+          "status": "succeeded"
+        },
+        {
+          "research_status": null,
+          "status": "admitted"
+        },
+        {
+          "research_status": "canonical_claim_promoted",
+          "status": "complete"
+        }
+      ],
+      "summary_sha256": "e3a012588f76cbe6d4f97b53a7ee31d0d3c4eb2bdfde13cfef01305d8fcb9cf7"
+    }
+  ],
+  "environments": {
+    "legacy": {
+      "summary_status_counts": {
+        "complete": 1
+      },
+      "holds": [
+        {
+          "admission_ref": "mission-document-research-admission:02fcf3c6c6390f29a8979efc7b0789ea",
+          "reason": "reentry_failed_after_automatic_rebind:controlled reentry was already attempted",
+          "disposition": "recovery_required"
+        },
+        {
+          "admission_ref": "mission-document-research-admission:16a7a1374b3ca802e87bc59c9d1e865e",
+          "reason": "reentry_failed_after_automatic_rebind:controlled reentry was already attempted",
+          "disposition": "recovery_required"
+        },
+        {
+          "admission_ref": "mission-document-research-admission:28632c70eea0d8209b89ec6353e0a51b",
+          "reason": "reentry_failed_after_automatic_rebind:controlled reentry was already attempted",
+          "disposition": "recovery_required"
+        },
+        {
+          "admission_ref": "mission-document-research-admission:3953fd12844107bafdcf2eb7729d82fa",
+          "reason": "reentry_failed_after_automatic_rebind:controlled reentry was already attempted",
+          "disposition": "recovery_required"
+        },
+        {
+          "admission_ref": "mission-document-research-admission:49d92fa70b8ef1b2e3163f5d8dbd8449",
+          "reason": "reentry_failed_after_automatic_rebind:controlled reentry was already attempted",
+          "disposition": "recovery_required"
+        },
+        {
+          "admission_ref": "mission-document-research-admission:54bbe3fd82702735aa639dcc37f44ce3",
+          "reason": "failed",
+          "disposition": "terminal_hold"
+        },
+        {
+          "admission_ref": "mission-document-research-admission:5bbcf776cca6e4cde589b3940d60dddc",
+          "reason": "reentry_failed_after_automatic_rebind:controlled reentry was already attempted",
+          "disposition": "recovery_required"
+        },
+        {
+          "admission_ref": "mission-document-research-admission:6a2bcd446237e1bd9732690b4b542b3a",
+          "reason": "reentry_failed_after_automatic_rebind:controlled reentry was already attempted",
+          "disposition": "recovery_required"
+        },
+        {
+          "admission_ref": "mission-document-research-admission:867a9e566947d00cfd17d1a1662e5c6f",
+          "reason": "reentry_failed_after_automatic_rebind:controlled reentry was already attempted",
+          "disposition": "recovery_required"
+        },
+        {
+          "admission_ref": "mission-document-research-admission:918307dc4626f6a8d549501eb7e193a9",
+          "reason": "reentry_failed_after_automatic_rebind:controlled reentry was already attempted",
+          "disposition": "recovery_required"
+        },
+        {
+          "admission_ref": "mission-document-research-admission:a2d4854ebf0cb7d90c7fe055af4b5eb1",
+          "reason": "reentry_failed_after_automatic_rebind:controlled reentry was already attempted",
+          "disposition": "recovery_required"
+        },
+        {
+          "admission_ref": "mission-document-research-admission:a680e6427271b195d6874d57ea7c6c01",
+          "reason": "reentry_failed_after_automatic_rebind:controlled reentry was already attempted",
+          "disposition": "recovery_required"
+        },
+        {
+          "admission_ref": "mission-document-research-admission:a9e588b02de9c7a713167cdafec2d9f1",
+          "reason": "reentry_failed_after_automatic_rebind:controlled reentry was already attempted",
+          "disposition": "recovery_required"
+        },
+        {
+          "admission_ref": "mission-document-research-admission:b244891a85150a760150c8f69d456eb3",
+          "reason": "failed",
+          "disposition": "terminal_hold"
+        },
+        {
+          "admission_ref": "mission-document-research-admission:bca93fcbeca301720289fab14728086f",
+          "reason": "reentry_failed_after_automatic_rebind:controlled reentry was already attempted",
+          "disposition": "recovery_required"
+        },
+        {
+          "admission_ref": "mission-document-research-admission:c141b6637483ecf1270b4f22218c2520",
+          "reason": "reentry_failed_after_automatic_rebind:controlled reentry was already attempted",
+          "disposition": "recovery_required"
+        },
+        {
+          "admission_ref": "mission-document-research-admission:ca9bac39454f3ee9bcfd3f0508f342e3",
+          "reason": "reentry_failed_after_automatic_rebind:controlled reentry was already attempted",
+          "disposition": "recovery_required"
+        },
+        {
+          "admission_ref": "mission-document-research-admission:e83cce990352f095ec10cf101b2542ca",
+          "reason": "controlled_reentry_unavailable:controlled reentry summary is unavailable",
+          "disposition": "recovery_required"
+        },
+        {
+          "admission_ref": "mission-document-research-admission:f806824e8fa1a67d310d77d37b22aa42",
+          "reason": "reentry_failed_after_automatic_rebind:controlled reentry was already attempted",
+          "disposition": "recovery_required"
+        }
+      ]
+    },
+    "ws-e399ececd5aa7a3762b1a0a4": {
+      "summary_status_counts": {},
+      "holds": []
+    },
+    "ws-7d894366d1132e2930475a60": {
+      "summary_status_counts": {},
+      "holds": [
+        {
+          "admission_ref": "mission-document-research-admission:256f7569b79b8f72ba2fa3fa4bc6e408",
+          "reason": "controlled_reentry_unavailable:controlled reentry summary is unavailable",
+          "disposition": "recovery_required"
+        },
+        {
+          "admission_ref": "mission-document-research-admission:29bf4a59c1232b1022effcd21159e9b0",
+          "reason": "reentry_failed_after_automatic_rebind:controlled reentry was already attempted",
+          "disposition": "recovery_required"
+        },
+        {
+          "admission_ref": "mission-document-research-admission:3153c50736e51fb42b9c21f3e32319a5",
+          "reason": "reentry_failed_after_automatic_rebind:controlled reentry was already attempted",
+          "disposition": "recovery_required"
+        },
+        {
+          "admission_ref": "mission-document-research-admission:42459ee5ed0988599d9266139ff0c05d",
+          "reason": "reentry_failed_after_automatic_rebind:controlled reentry was already attempted",
+          "disposition": "recovery_required"
+        },
+        {
+          "admission_ref": "mission-document-research-admission:c65e97e7fba75b2012c5331de5967f6d",
+          "reason": "reentry_failed_after_automatic_rebind:controlled reentry was already attempted",
+          "disposition": "recovery_required"
+        },
+        {
+          "admission_ref": "mission-document-research-admission:d02eaa60abfaf68042fccfda18a28ec5",
+          "reason": "reentry_failed_after_automatic_rebind:controlled reentry was already attempted",
+          "disposition": "recovery_required"
+        }
+      ]
+    }
+  }
+}

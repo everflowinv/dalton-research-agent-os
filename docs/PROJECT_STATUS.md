@@ -1,8 +1,8 @@
 # Dalton 项目进度
 
-## 2026-09-22：环境巡检修复与 Antigravity 复测（第一批已上线）
+## 2026-09-22：环境巡检修复与 Antigravity 复测（已上线）
 
-逐项核实发现：连接器 spool 达到 1 GB 运行上限；Google 受控核验证明到期；两份 AlphaEngine review 指向旧 orphaned 票据；earnings guidance 重复扫描 ClaimIndex。发布 `f3ee7e46`（源码 `061cdc59`）补齐可逆压缩及容量配置、能力到期诊断、策略更新的阶段审计与预算保护、retrieval envelope 身份和冷 WAL 策略读取，并复用单次 guidance 快照。Google 费率证明已续至 2026-10-22。Antigravity 1.2.8 仍在约 192 KB 截断；完整性复测支持 Flash low/high 的 170 KB 输入范围，适配器按实际 UTF-8 字节阻断越界。完整证据及最终部署状态见 [修复报告](reports/environment-repair-2026-09-22.md)。
+逐项核实发现：连接器 spool 达到 1 GB 运行上限；Google 受控核验证明到期；两份 AlphaEngine review 指向旧 orphaned 票据；earnings guidance 重复扫描 ClaimIndex。第一批恢复抓取、核验及产出；最终发布 `30a9e0d4`（源码 `d76d7878`）进一步修复历史提示词、材料身份、恢复授权原子重绑定、历史预算凭证与新库初始化顺序。全量 **9,708 项通过（4 skipped）**，实际 Python 3.14 发布包关键测试 **171 项通过**；全部 11 个服务与发布指针一致，三个环境心跳正常。Google 费率证明已续至 2026-10-22。Antigravity 1.2.8 仍在约 192 KB 截断；抽样标记与结构化抽取复测支持让两个 Flash low/high 档案在 30k–170k 范围恢复候选资格，适配器按实际 UTF-8 字节阻断越界，尚非通用质量认证。完整证据及队列验收状态见 [修复报告](reports/environment-repair-2026-09-22.md)。
 
 ## 2026-09-19 01:30 UTC：一条被规则拒收的候选不再让整个子进程算失败（源码，待部署）
 

@@ -1,0 +1,110 @@
+{
+  "generated_at": "2026-09-22T15:21:09.803672+00:00",
+  "entries": [
+    {
+      "admission_ref": "mission-document-research-admission:16a7a1374b3ca802e87bc59c9d1e865e",
+      "state_dir": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core",
+      "original_succeeded_proofs_unchanged": true,
+      "original_succeeded_work_count": 2,
+      "invocations_before": 2,
+      "invocations_after": 2,
+      "new_invocations": 0,
+      "latest_summary": {
+        "created_at": "2026-09-22T13:55:04.839172+00:00",
+        "status": "failed",
+        "error": "MissionDocumentResearchExecutorError: stored Work drifted",
+        "content_hash": "152b3da8079a59fce249a36844344256dd674b42884532abee8ee64b7c8819d2"
+      }
+    },
+    {
+      "admission_ref": "mission-document-research-admission:28632c70eea0d8209b89ec6353e0a51b",
+      "state_dir": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core",
+      "original_succeeded_proofs_unchanged": true,
+      "original_succeeded_work_count": 2,
+      "invocations_before": 2,
+      "invocations_after": 2,
+      "new_invocations": 0,
+      "latest_summary": {
+        "created_at": "2026-09-22T14:20:28.188074+00:00",
+        "status": "failed",
+        "error": "MissionDocumentResearchExecutorError: stored Work drifted",
+        "content_hash": "c7e4ed9dba0e53be643cabdac6036ab0c49391c9e144f5ecbbbc5234f0617cc7"
+      }
+    },
+    {
+      "admission_ref": "mission-document-research-admission:5bbcf776cca6e4cde589b3940d60dddc",
+      "state_dir": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core",
+      "original_succeeded_proofs_unchanged": true,
+      "original_succeeded_work_count": 2,
+      "invocations_before": 2,
+      "invocations_after": 2,
+      "new_invocations": 0,
+      "latest_summary": {
+        "created_at": "2026-09-22T14:00:13.460763+00:00",
+        "status": "failed",
+        "error": "MissionDocumentResearchExecutorError: stored Work drifted",
+        "content_hash": "120ff35a55a4abe8a9901235593cdc65a5bb1c005dd2cf0f030750bb778adf6d"
+      }
+    },
+    {
+      "admission_ref": "mission-document-research-admission:a680e6427271b195d6874d57ea7c6c01",
+      "state_dir": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core",
+      "original_succeeded_proofs_unchanged": true,
+      "original_succeeded_work_count": 2,
+      "invocations_before": 3,
+      "invocations_after": 3,
+      "new_invocations": 0,
+      "latest_summary": {
+        "created_at": "2026-09-22T14:10:15.977347+00:00",
+        "status": "failed",
+        "error": "MissionDocumentResearchExecutorError: stored Work drifted",
+        "content_hash": "49f94000de6be72a49cbfe67e860dbbcfea829af02a2c21bc1ce3c9f6c48dbbd"
+      }
+    },
+    {
+      "admission_ref": "mission-document-research-admission:42459ee5ed0988599d9266139ff0c05d",
+      "state_dir": "/Volumes/EveSSD/Dalton/workspaces/ws-7d894366d1132e2930475a60/state/dalton-core",
+      "original_succeeded_proofs_unchanged": true,
+      "original_succeeded_work_count": 2,
+      "invocations_before": 2,
+      "invocations_after": 2,
+      "new_invocations": 0,
+      "latest_summary": {
+        "created_at": "2026-09-22T13:48:13.035299+00:00",
+        "status": "failed",
+        "error": "MissionDocumentResearchExecutorError: stored Work drifted",
+        "content_hash": "97c8d94acbb3b4bdf513da9e32e17dd60448264ab007865d37cfc4d738545d3b"
+      }
+    },
+    {
+      "admission_ref": "mission-document-research-admission:d02eaa60abfaf68042fccfda18a28ec5",
+      "state_dir": "/Volumes/EveSSD/Dalton/workspaces/ws-7d894366d1132e2930475a60/state/dalton-core",
+      "original_succeeded_proofs_unchanged": true,
+      "original_succeeded_work_count": 2,
+      "invocations_before": 2,
+      "invocations_after": 2,
+      "new_invocations": 0,
+      "latest_summary": {
+        "created_at": "2026-09-22T13:58:18.766870+00:00",
+        "status": "failed",
+        "error": "MissionDocumentResearchExecutorError: stored Work drifted",
+        "content_hash": "90b48666b29950ef48f5ed0363f8999d5ee39bdf575dbbbeead8f16e5f5ad3bf"
+      }
+    },
+    {
+      "admission_ref": "mission-document-research-admission:c141b6637483ecf1270b4f22218c2520",
+      "state_dir": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core",
+      "original_succeeded_proofs_unchanged": true,
+      "original_succeeded_work_count": 2,
+      "invocations_before": 4,
+      "invocations_after": 4,
+      "new_invocations": 0,
+      "latest_summary": {
+        "created_at": "2026-09-22T13:45:23.473138+00:00",
+        "status": "failed",
+        "error": "MissionDocumentResearchExecutorError: candidate_source_materials identity conflict",
+        "content_hash": "7831d998ee3df247d238cf8cc35220efdac54dc3ce4a9bc995019def559fa7df"
+      }
+    }
+  ]
+}

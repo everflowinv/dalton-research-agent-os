@@ -1,0 +1,148 @@
+{
+  "source_commit": "d76d787895c2dc87f627318e834d537524f13b6b",
+  "release_hash": "30a9e0d4af1654d45e560bfe9d82fa699cc7a0d429c4052caefbe2e1a34d930a",
+  "health": {
+    "agents": [
+      {
+        "label": "com.dalton.log-rotate",
+        "on_target": true,
+        "release": "30a9e0d4af1654d45e560bfe9d82fa699cc7a0d429c4052caefbe2e1a34d930a"
+      },
+      {
+        "label": "com.dalton.research-publication-worker",
+        "on_target": true,
+        "release": "30a9e0d4af1654d45e560bfe9d82fa699cc7a0d429c4052caefbe2e1a34d930a"
+      },
+      {
+        "label": "space.lumos.dalton.control",
+        "on_target": true,
+        "release": "30a9e0d4af1654d45e560bfe9d82fa699cc7a0d429c4052caefbe2e1a34d930a"
+      },
+      {
+        "label": "space.lumos.dalton.controller",
+        "on_target": true,
+        "release": "30a9e0d4af1654d45e560bfe9d82fa699cc7a0d429c4052caefbe2e1a34d930a"
+      },
+      {
+        "label": "space.lumos.dalton.workspace.ws-7d894366d1132e2930475a60.control",
+        "on_target": true,
+        "release": "30a9e0d4af1654d45e560bfe9d82fa699cc7a0d429c4052caefbe2e1a34d930a"
+      },
+      {
+        "label": "space.lumos.dalton.workspace.ws-7d894366d1132e2930475a60.controller",
+        "on_target": true,
+        "release": "30a9e0d4af1654d45e560bfe9d82fa699cc7a0d429c4052caefbe2e1a34d930a"
+      },
+      {
+        "label": "space.lumos.dalton.workspace.ws-7d894366d1132e2930475a60.writer",
+        "on_target": true,
+        "release": "30a9e0d4af1654d45e560bfe9d82fa699cc7a0d429c4052caefbe2e1a34d930a"
+      },
+      {
+        "label": "space.lumos.dalton.workspace.ws-e399ececd5aa7a3762b1a0a4.control",
+        "on_target": true,
+        "release": "30a9e0d4af1654d45e560bfe9d82fa699cc7a0d429c4052caefbe2e1a34d930a"
+      },
+      {
+        "label": "space.lumos.dalton.workspace.ws-e399ececd5aa7a3762b1a0a4.controller",
+        "on_target": true,
+        "release": "30a9e0d4af1654d45e560bfe9d82fa699cc7a0d429c4052caefbe2e1a34d930a"
+      },
+      {
+        "label": "space.lumos.dalton.workspace.ws-e399ececd5aa7a3762b1a0a4.writer",
+        "on_target": true,
+        "release": "30a9e0d4af1654d45e560bfe9d82fa699cc7a0d429c4052caefbe2e1a34d930a"
+      },
+      {
+        "label": "space.lumos.dalton.writer",
+        "on_target": true,
+        "release": "30a9e0d4af1654d45e560bfe9d82fa699cc7a0d429c4052caefbe2e1a34d930a"
+      }
+    ],
+    "controller_heartbeat_advanced": null,
+    "every_agent_on_target": true,
+    "heartbeat_after": null,
+    "heartbeat_before": null,
+    "manager_matches": true,
+    "ok": true,
+    "writer_socket_readable": true
+  },
+  "environments": {
+    "legacy": {
+      "new_process_started": true,
+      "heartbeat_advanced": true,
+      "last_error": null,
+      "claim_delta": 11,
+      "provider_controlled_profiles_available": true
+    },
+    "ws-e399ececd5aa7a3762b1a0a4": {
+      "new_process_started": true,
+      "heartbeat_advanced": true,
+      "last_error": null,
+      "claim_delta": 0,
+      "provider_controlled_profiles_available": true
+    },
+    "ws-7d894366d1132e2930475a60": {
+      "new_process_started": true,
+      "heartbeat_advanced": true,
+      "last_error": null,
+      "claim_delta": 30,
+      "provider_controlled_profiles_available": true
+    }
+  },
+  "launchagent_spool_environment": {
+    "com.dalton.log-rotate": {},
+    "com.dalton.research-publication-worker": {
+      "DALTON_RAW_SPOOL_ARCHIVE_AFTER_SECONDS": "604800",
+      "DALTON_RAW_SPOOL_MAX_TOTAL_BYTES": "4000000000"
+    },
+    "space.lumos.dalton.control": {
+      "DALTON_RAW_SPOOL_ARCHIVE_AFTER_SECONDS": "604800",
+      "DALTON_RAW_SPOOL_MAX_TOTAL_BYTES": "4000000000"
+    },
+    "space.lumos.dalton.controller": {
+      "DALTON_RAW_SPOOL_ARCHIVE_AFTER_SECONDS": "604800",
+      "DALTON_RAW_SPOOL_MAX_TOTAL_BYTES": "4000000000"
+    },
+    "space.lumos.dalton.workspace.ws-7d894366d1132e2930475a60.control": {
+      "DALTON_RAW_SPOOL_ARCHIVE_AFTER_SECONDS": "604800",
+      "DALTON_RAW_SPOOL_MAX_TOTAL_BYTES": "4000000000"
+    },
+    "space.lumos.dalton.workspace.ws-7d894366d1132e2930475a60.controller": {
+      "DALTON_RAW_SPOOL_ARCHIVE_AFTER_SECONDS": "604800",
+      "DALTON_RAW_SPOOL_MAX_TOTAL_BYTES": "4000000000"
+    },
+    "space.lumos.dalton.workspace.ws-7d894366d1132e2930475a60.writer": {
+      "DALTON_RAW_SPOOL_ARCHIVE_AFTER_SECONDS": "604800",
+      "DALTON_RAW_SPOOL_MAX_TOTAL_BYTES": "4000000000"
+    },
+    "space.lumos.dalton.workspace.ws-e399ececd5aa7a3762b1a0a4.control": {
+      "DALTON_RAW_SPOOL_ARCHIVE_AFTER_SECONDS": "604800",
+      "DALTON_RAW_SPOOL_MAX_TOTAL_BYTES": "4000000000"
+    },
+    "space.lumos.dalton.workspace.ws-e399ececd5aa7a3762b1a0a4.controller": {
+      "DALTON_RAW_SPOOL_ARCHIVE_AFTER_SECONDS": "604800",
+      "DALTON_RAW_SPOOL_MAX_TOTAL_BYTES": "4000000000"
+    },
+    "space.lumos.dalton.workspace.ws-e399ececd5aa7a3762b1a0a4.writer": {
+      "DALTON_RAW_SPOOL_ARCHIVE_AFTER_SECONDS": "604800",
+      "DALTON_RAW_SPOOL_MAX_TOTAL_BYTES": "4000000000"
+    },
+    "space.lumos.dalton.writer": {
+      "DALTON_RAW_SPOOL_ARCHIVE_AFTER_SECONDS": "604800",
+      "DALTON_RAW_SPOOL_MAX_TOTAL_BYTES": "4000000000"
+    }
+  },
+  "safe_reentry": {
+    "applied": 7,
+    "skipped_changed": 4,
+    "new_model_budget_grants": 0
+  },
+  "classified_reentry": {
+    "applied": 14,
+    "new_model_budget_grants": 0
+  },
+  "unproved_expired_work_left_held": 2,
+  "full_suite_passed": true,
+  "installed_release_smoke_passed": true
+}

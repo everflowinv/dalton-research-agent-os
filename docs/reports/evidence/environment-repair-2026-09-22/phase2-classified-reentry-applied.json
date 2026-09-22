@@ -1,0 +1,620 @@
+[
+  {
+    "admission_ref": "mission-document-research-admission:02fcf3c6c6390f29a8979efc7b0789ea",
+    "state_dir": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core",
+    "classification": {
+      "admission_ref": "mission-document-research-admission:02fcf3c6c6390f29a8979efc7b0789ea",
+      "stages": [
+        {
+          "action": "none",
+          "reason": "exact_succeeded_stage_reused",
+          "stage": "draft",
+          "status": "succeeded",
+          "used_recovery_links": 0,
+          "work_order_ref": "work:mission-document-research-8c7a51a42508c48b825c8e59a074ba62"
+        },
+        {
+          "action": "existing_paid_contract_recovery_door",
+          "reason": "paid_send_output_contract_failed",
+          "stage": "verifier",
+          "status": "historical_failure",
+          "used_recovery_links": 0,
+          "work_order_ref": "work:mission-document-research-d6ee13d30db161c679399b3114cfb795"
+        }
+      ]
+    },
+    "classification_receipt_sha256": "964469b444a6cdf7d07d7667761cf4c748659ddbe3fbd638b29fb7d2c2f2a9df",
+    "model_budget_grant": false,
+    "model_works_before": [
+      {
+        "work_order_id": "work:mission-document-research-8c7a51a42508c48b825c8e59a074ba62",
+        "work_order_hash": "36e0dc3974bfafdee96c93760b6bfff2a6322373842207131d2ec1953b3c05f1"
+      },
+      {
+        "work_order_id": "work:mission-document-research-d6ee13d30db161c679399b3114cfb795",
+        "work_order_hash": "38bcd7157d7c6ba731dd17c97491b9079f89abb8d7b0bda29e94d2ab5daf9807"
+      }
+    ],
+    "chosen_formal": {
+      "terminal_state": "failed",
+      "result_envelope_hash": "aa323071755bcf6dd9a3ff6eeb1181ca9dcc6e4b449eb763d51185e2dcc7e39d"
+    },
+    "recovery_links_before": 0,
+    "controlled_authorizations_before": 0,
+    "returncode": 0,
+    "stdout": "{\n \"admission_ref\": \"mission-document-research-admission:02fcf3c6c6390f29a8979efc7b0789ea\",\n \"escalated\": true,\n \"reason\": \"reentry_failed_after_automatic_rebind:controlled reentry was already attempted\",\n \"operation\": \"authorize_mission_document_reentry\",\n \"lane_door_for_this_reason\": \"authorize_mission_document_reentry\",\n \"max_cost_usd\": null\n}\n{\n \"actor_ref\": \"human:owner-authorized-environment-repair-2026-09-22\",\n \"admission_ref\": \"mission-document-research-admission:02fcf3c6c6390f29a8979efc7b0789ea\",\n \"grant_path\": \"/Volumes/EveSSD/Dalton/legacy-state/dalton-core/mission-document-research-runs/controlled-reentry-grant-41102b87b57de744e88c0cd0.json\",\n \"granted_at\": \"2026-09-22T15:19:19.168058+00:00\",\n \"kind\": \"owner_authorized_controlled_reentry\",\n \"max_reentries\": 1,\n \"schema_version\": \"0.1\",\n \"status\": \"granted\"\n}\n",
+    "stderr": "",
+    "status": "applied"
+  },
+  {
+    "admission_ref": "mission-document-research-admission:03c4103b1eee94421bacce23ae719c2f",
+    "state_dir": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core",
+    "classification": {
+      "admission_ref": "mission-document-research-admission:03c4103b1eee94421bacce23ae719c2f",
+      "stages": [
+        {
+          "action": "existing_paid_contract_recovery_door",
+          "reason": "paid_send_output_contract_failed",
+          "stage": "draft",
+          "status": "historical_failure",
+          "used_recovery_links": 0,
+          "work_order_ref": "work:mission-document-research-10cb1cda86e1794d7150c581a21c5a12"
+        },
+        {
+          "action": "inspect_exact_historical_authority",
+          "reason": "child requires exact succeeded upstream",
+          "stage": "verifier",
+          "status": "blocked"
+        }
+      ]
+    },
+    "classification_receipt_sha256": "964469b444a6cdf7d07d7667761cf4c748659ddbe3fbd638b29fb7d2c2f2a9df",
+    "model_budget_grant": false,
+    "model_works_before": [
+      {
+        "work_order_id": "work:mission-document-research-10cb1cda86e1794d7150c581a21c5a12",
+        "work_order_hash": "f28f2f72cde729326ed138476081e16b8eb654957b255643f3413f905dfa6e01"
+      }
+    ],
+    "chosen_formal": {
+      "terminal_state": "failed",
+      "result_envelope_hash": "5a54069bf01ef7ebba228fddc8d70446bf41ad39b2fbcfa42c16a337cb9f9554"
+    },
+    "recovery_links_before": 0,
+    "controlled_authorizations_before": 0,
+    "returncode": 0,
+    "stdout": "{\n \"admission_ref\": \"mission-document-research-admission:03c4103b1eee94421bacce23ae719c2f\",\n \"escalated\": true,\n \"reason\": \"reentry_failed_after_automatic_rebind:controlled reentry was already attempted\",\n \"operation\": \"authorize_mission_document_reentry\",\n \"lane_door_for_this_reason\": \"authorize_mission_document_reentry\",\n \"max_cost_usd\": null\n}\n{\n \"actor_ref\": \"human:owner-authorized-environment-repair-2026-09-22\",\n \"admission_ref\": \"mission-document-research-admission:03c4103b1eee94421bacce23ae719c2f\",\n \"grant_path\": \"/Volumes/EveSSD/Dalton/legacy-state/dalton-core/mission-document-research-runs/controlled-reentry-grant-ef94d2d6cd13821b93aeb7e0.json\",\n \"granted_at\": \"2026-09-22T15:19:19.436859+00:00\",\n \"kind\": \"owner_authorized_controlled_reentry\",\n \"max_reentries\": 1,\n \"schema_version\": \"0.1\",\n \"status\": \"granted\"\n}\n",
+    "stderr": "",
+    "status": "applied"
+  },
+  {
+    "admission_ref": "mission-document-research-admission:3953fd12844107bafdcf2eb7729d82fa",
+    "state_dir": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core",
+    "classification": {
+      "admission_ref": "mission-document-research-admission:3953fd12844107bafdcf2eb7729d82fa",
+      "stages": [
+        {
+          "action": "none",
+          "reason": "exact_succeeded_stage_reused",
+          "stage": "draft",
+          "status": "succeeded",
+          "used_recovery_links": 0,
+          "work_order_ref": "work:mission-document-research-61bfdaf77712d98a63691dad06f9330d"
+        },
+        {
+          "action": "existing_unproved_send_recovery_door",
+          "reason": "send_state_unproved",
+          "stage": "verifier",
+          "status": "historical_failure",
+          "used_recovery_links": 0,
+          "work_order_ref": "work:mission-document-research-1af3282a5ecbbcbbe1e64d453652efc6"
+        }
+      ]
+    },
+    "classification_receipt_sha256": "964469b444a6cdf7d07d7667761cf4c748659ddbe3fbd638b29fb7d2c2f2a9df",
+    "model_budget_grant": false,
+    "model_works_before": [
+      {
+        "work_order_id": "work:mission-document-research-61bfdaf77712d98a63691dad06f9330d",
+        "work_order_hash": "cf0f2a65bfcffa76b44ee51c1b0e7203314e01da7c3886a9d18ae79b959347ee"
+      },
+      {
+        "work_order_id": "work:mission-document-research-1af3282a5ecbbcbbe1e64d453652efc6",
+        "work_order_hash": "14dd497b55a2a89e043cf562ca6e7c4053b307392f4bb562ca3635115eac3c28"
+      }
+    ],
+    "chosen_formal": {
+      "terminal_state": "failed",
+      "result_envelope_hash": "6ea11aed8c8eafe4613cc976c15d6e67b42df0a6bb089204fea495b91e20359d"
+    },
+    "recovery_links_before": 0,
+    "controlled_authorizations_before": 0,
+    "returncode": 0,
+    "stdout": "{\n \"admission_ref\": \"mission-document-research-admission:3953fd12844107bafdcf2eb7729d82fa\",\n \"escalated\": true,\n \"reason\": \"reentry_failed_after_automatic_rebind:controlled reentry was already attempted\",\n \"operation\": \"authorize_mission_document_reentry\",\n \"lane_door_for_this_reason\": \"authorize_mission_document_reentry\",\n \"max_cost_usd\": null\n}\n{\n \"actor_ref\": \"human:owner-authorized-environment-repair-2026-09-22\",\n \"admission_ref\": \"mission-document-research-admission:3953fd12844107bafdcf2eb7729d82fa\",\n \"grant_path\": \"/Volumes/EveSSD/Dalton/legacy-state/dalton-core/mission-document-research-runs/controlled-reentry-grant-e6287312e44b7b600d335ca7.json\",\n \"granted_at\": \"2026-09-22T15:19:20.013644+00:00\",\n \"kind\": \"owner_authorized_controlled_reentry\",\n \"max_reentries\": 1,\n \"schema_version\": \"0.1\",\n \"status\": \"granted\"\n}\n",
+    "stderr": "",
+    "status": "applied"
+  },
+  {
+    "admission_ref": "mission-document-research-admission:49d92fa70b8ef1b2e3163f5d8dbd8449",
+    "state_dir": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core",
+    "classification": {
+      "admission_ref": "mission-document-research-admission:49d92fa70b8ef1b2e3163f5d8dbd8449",
+      "stages": [
+        {
+          "action": "none",
+          "reason": "exact_succeeded_stage_reused",
+          "stage": "draft",
+          "status": "succeeded",
+          "used_recovery_links": 0,
+          "work_order_ref": "work:mission-document-research-d6ec590783f4c1219fb04ac32dc80566"
+        },
+        {
+          "action": "existing_unproved_send_recovery_door",
+          "reason": "send_state_unproved",
+          "stage": "verifier",
+          "status": "historical_failure",
+          "used_recovery_links": 0,
+          "work_order_ref": "work:mission-document-research-570d1df4e2f8373d9409dfec8528b001"
+        }
+      ]
+    },
+    "classification_receipt_sha256": "964469b444a6cdf7d07d7667761cf4c748659ddbe3fbd638b29fb7d2c2f2a9df",
+    "model_budget_grant": false,
+    "model_works_before": [
+      {
+        "work_order_id": "work:mission-document-research-d6ec590783f4c1219fb04ac32dc80566",
+        "work_order_hash": "efaf16cafbae746efc2ea50a5ed7269cef2da0fee34c64c08c103cfd7473e920"
+      },
+      {
+        "work_order_id": "work:mission-document-research-570d1df4e2f8373d9409dfec8528b001",
+        "work_order_hash": "e8b2ffc758b5e901bf4cbf10203768449da0d4f16137ed69090306a6ff01a865"
+      }
+    ],
+    "chosen_formal": {
+      "terminal_state": "failed",
+      "result_envelope_hash": "3eb0685b74ae416cfead83f520dc58bc635c1e1c324557919bedc9281f102778"
+    },
+    "recovery_links_before": 0,
+    "controlled_authorizations_before": 0,
+    "returncode": 0,
+    "stdout": "{\n \"admission_ref\": \"mission-document-research-admission:49d92fa70b8ef1b2e3163f5d8dbd8449\",\n \"escalated\": true,\n \"reason\": \"reentry_failed_after_automatic_rebind:controlled reentry was already attempted\",\n \"operation\": \"authorize_mission_document_reentry\",\n \"lane_door_for_this_reason\": \"authorize_mission_document_reentry\",\n \"max_cost_usd\": null\n}\n{\n \"actor_ref\": \"human:owner-authorized-environment-repair-2026-09-22\",\n \"admission_ref\": \"mission-document-research-admission:49d92fa70b8ef1b2e3163f5d8dbd8449\",\n \"grant_path\": \"/Volumes/EveSSD/Dalton/legacy-state/dalton-core/mission-document-research-runs/controlled-reentry-grant-1f2a39eb9a7c9262e1286992.json\",\n \"granted_at\": \"2026-09-22T15:19:20.305965+00:00\",\n \"kind\": \"owner_authorized_controlled_reentry\",\n \"max_reentries\": 1,\n \"schema_version\": \"0.1\",\n \"status\": \"granted\"\n}\n",
+    "stderr": "",
+    "status": "applied"
+  },
+  {
+    "admission_ref": "mission-document-research-admission:6a2bcd446237e1bd9732690b4b542b3a",
+    "state_dir": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core",
+    "classification": {
+      "admission_ref": "mission-document-research-admission:6a2bcd446237e1bd9732690b4b542b3a",
+      "stages": [
+        {
+          "action": "existing_paid_contract_recovery_door",
+          "reason": "paid_send_output_contract_failed",
+          "stage": "draft",
+          "status": "historical_failure",
+          "used_recovery_links": 1,
+          "work_order_ref": "work:mission-document-recovery-b73845dd8f28d08826401a9c2272dbfb"
+        },
+        {
+          "action": "inspect_exact_historical_authority",
+          "reason": "child requires exact succeeded upstream",
+          "stage": "verifier",
+          "status": "blocked"
+        }
+      ]
+    },
+    "classification_receipt_sha256": "964469b444a6cdf7d07d7667761cf4c748659ddbe3fbd638b29fb7d2c2f2a9df",
+    "model_budget_grant": false,
+    "model_works_before": [
+      {
+        "work_order_id": "work:mission-document-research-efc0a7b0e1617f9d62c367f04bcce06e",
+        "work_order_hash": "3baac772c7fd42a9a855af69da549ba3fe3295c991b34fd907f8c7ad4ddc2900"
+      },
+      {
+        "work_order_id": "work:mission-document-recovery-b73845dd8f28d08826401a9c2272dbfb",
+        "work_order_hash": "25eed1f08660bbc2a71612e78ffccb3e72866ab5a971ea8f197a3e823d302277"
+      }
+    ],
+    "chosen_formal": {
+      "terminal_state": "failed",
+      "result_envelope_hash": "304f56afae0e7faa27af31fe88165af8787b74b3b1d01bdde0554d5b0b518dd0"
+    },
+    "recovery_links_before": 1,
+    "controlled_authorizations_before": 0,
+    "returncode": 0,
+    "stdout": "{\n \"admission_ref\": \"mission-document-research-admission:6a2bcd446237e1bd9732690b4b542b3a\",\n \"escalated\": true,\n \"reason\": \"reentry_failed_after_automatic_rebind:controlled reentry was already attempted\",\n \"operation\": \"authorize_mission_document_reentry\",\n \"lane_door_for_this_reason\": \"authorize_mission_document_reentry\",\n \"max_cost_usd\": null\n}\n{\n \"actor_ref\": \"human:owner-authorized-environment-repair-2026-09-22\",\n \"admission_ref\": \"mission-document-research-admission:6a2bcd446237e1bd9732690b4b542b3a\",\n \"grant_path\": \"/Volumes/EveSSD/Dalton/legacy-state/dalton-core/mission-document-research-runs/controlled-reentry-grant-c61949b0a1cccb85ca58240b.json\",\n \"granted_at\": \"2026-09-22T15:19:21.604261+00:00\",\n \"kind\": \"owner_authorized_controlled_reentry\",\n \"max_reentries\": 1,\n \"schema_version\": \"0.1\",\n \"status\": \"granted\"\n}\n",
+    "stderr": "",
+    "status": "applied"
+  },
+  {
+    "admission_ref": "mission-document-research-admission:867a9e566947d00cfd17d1a1662e5c6f",
+    "state_dir": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core",
+    "classification": {
+      "admission_ref": "mission-document-research-admission:867a9e566947d00cfd17d1a1662e5c6f",
+      "stages": [
+        {
+          "action": "existing_unproved_send_recovery_door",
+          "reason": "send_state_unproved",
+          "stage": "draft",
+          "status": "historical_failure",
+          "used_recovery_links": 0,
+          "work_order_ref": "work:mission-document-research-65aa62ea9626b8de9ccfa0f3b18359b2"
+        },
+        {
+          "action": "inspect_exact_historical_authority",
+          "reason": "child requires exact succeeded upstream",
+          "stage": "verifier",
+          "status": "blocked"
+        }
+      ]
+    },
+    "classification_receipt_sha256": "964469b444a6cdf7d07d7667761cf4c748659ddbe3fbd638b29fb7d2c2f2a9df",
+    "model_budget_grant": false,
+    "model_works_before": [
+      {
+        "work_order_id": "work:mission-document-research-65aa62ea9626b8de9ccfa0f3b18359b2",
+        "work_order_hash": "e2e2665a7619811bb34652b7f1178c8e5878d51259946b2bdabb9f20e52cb92b"
+      }
+    ],
+    "chosen_formal": {
+      "terminal_state": "failed",
+      "result_envelope_hash": "d8d66c2119de0d742806c4bda1653f5e7d5c8a75713a7a972da5f81c0c7ad68a"
+    },
+    "recovery_links_before": 0,
+    "controlled_authorizations_before": 0,
+    "returncode": 0,
+    "stdout": "{\n \"admission_ref\": \"mission-document-research-admission:867a9e566947d00cfd17d1a1662e5c6f\",\n \"escalated\": true,\n \"reason\": \"reentry_failed_after_automatic_rebind:controlled reentry was already attempted\",\n \"operation\": \"authorize_mission_document_reentry\",\n \"lane_door_for_this_reason\": \"authorize_mission_document_reentry\",\n \"max_cost_usd\": null\n}\n{\n \"actor_ref\": \"human:owner-authorized-environment-repair-2026-09-22\",\n \"admission_ref\": \"mission-document-research-admission:867a9e566947d00cfd17d1a1662e5c6f\",\n \"grant_path\": \"/Volumes/EveSSD/Dalton/legacy-state/dalton-core/mission-document-research-runs/controlled-reentry-grant-8d293c05658d3e32f5430dc2.json\",\n \"granted_at\": \"2026-09-22T15:19:21.828450+00:00\",\n \"kind\": \"owner_authorized_controlled_reentry\",\n \"max_reentries\": 1,\n \"schema_version\": \"0.1\",\n \"status\": \"granted\"\n}\n",
+    "stderr": "",
+    "status": "applied"
+  },
+  {
+    "admission_ref": "mission-document-research-admission:918307dc4626f6a8d549501eb7e193a9",
+    "state_dir": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core",
+    "classification": {
+      "admission_ref": "mission-document-research-admission:918307dc4626f6a8d549501eb7e193a9",
+      "stages": [
+        {
+          "action": "existing_paid_contract_recovery_door",
+          "reason": "paid_send_output_contract_failed",
+          "stage": "draft",
+          "status": "historical_failure",
+          "used_recovery_links": 0,
+          "work_order_ref": "work:mission-document-research-b4280b9b853c3a801dc5c8fb7f2c72bc"
+        },
+        {
+          "action": "inspect_exact_historical_authority",
+          "reason": "child requires exact succeeded upstream",
+          "stage": "verifier",
+          "status": "blocked"
+        }
+      ]
+    },
+    "classification_receipt_sha256": "964469b444a6cdf7d07d7667761cf4c748659ddbe3fbd638b29fb7d2c2f2a9df",
+    "model_budget_grant": false,
+    "model_works_before": [
+      {
+        "work_order_id": "work:mission-document-research-b4280b9b853c3a801dc5c8fb7f2c72bc",
+        "work_order_hash": "e5b170c60bebf2e76e1321d2a87ffaa25b582afb0037e950d0c06e91eae1d89b"
+      }
+    ],
+    "chosen_formal": {
+      "terminal_state": "failed",
+      "result_envelope_hash": "dbe762e3f795e5e0e75c681c2f7bddd60205afd7271d1a7c1421aa1c66145f93"
+    },
+    "recovery_links_before": 0,
+    "controlled_authorizations_before": 0,
+    "returncode": 0,
+    "stdout": "{\n \"admission_ref\": \"mission-document-research-admission:918307dc4626f6a8d549501eb7e193a9\",\n \"escalated\": true,\n \"reason\": \"reentry_failed_after_automatic_rebind:controlled reentry was already attempted\",\n \"operation\": \"authorize_mission_document_reentry\",\n \"lane_door_for_this_reason\": \"authorize_mission_document_reentry\",\n \"max_cost_usd\": null\n}\n{\n \"actor_ref\": \"human:owner-authorized-environment-repair-2026-09-22\",\n \"admission_ref\": \"mission-document-research-admission:918307dc4626f6a8d549501eb7e193a9\",\n \"grant_path\": \"/Volumes/EveSSD/Dalton/legacy-state/dalton-core/mission-document-research-runs/controlled-reentry-grant-ef1f746878c6dd6eddf4adf0.json\",\n \"granted_at\": \"2026-09-22T15:19:22.034473+00:00\",\n \"kind\": \"owner_authorized_controlled_reentry\",\n \"max_reentries\": 1,\n \"schema_version\": \"0.1\",\n \"status\": \"granted\"\n}\n",
+    "stderr": "",
+    "status": "applied"
+  },
+  {
+    "admission_ref": "mission-document-research-admission:a2d4854ebf0cb7d90c7fe055af4b5eb1",
+    "state_dir": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core",
+    "classification": {
+      "admission_ref": "mission-document-research-admission:a2d4854ebf0cb7d90c7fe055af4b5eb1",
+      "stages": [
+        {
+          "action": "none",
+          "reason": "exact_succeeded_stage_reused",
+          "stage": "draft",
+          "status": "succeeded",
+          "used_recovery_links": 0,
+          "work_order_ref": "work:mission-document-research-37c4622cfe20e3640b60aba476d4d7d0"
+        },
+        {
+          "action": "existing_unproved_send_recovery_door",
+          "reason": "send_state_unproved",
+          "stage": "verifier",
+          "status": "historical_failure",
+          "used_recovery_links": 0,
+          "work_order_ref": "work:mission-document-research-3c7f5e7295e4f2d0aef62094f68ff429"
+        }
+      ]
+    },
+    "classification_receipt_sha256": "964469b444a6cdf7d07d7667761cf4c748659ddbe3fbd638b29fb7d2c2f2a9df",
+    "model_budget_grant": false,
+    "model_works_before": [
+      {
+        "work_order_id": "work:mission-document-research-37c4622cfe20e3640b60aba476d4d7d0",
+        "work_order_hash": "24efd66e4778449b118817b19515574c040c9f238aa3b90e5c8f7d40b35bdad7"
+      },
+      {
+        "work_order_id": "work:mission-document-research-3c7f5e7295e4f2d0aef62094f68ff429",
+        "work_order_hash": "646535d95098a2565b6dc4e5612755367d14baa6b794361bf274fd53522f0806"
+      }
+    ],
+    "chosen_formal": {
+      "terminal_state": "failed",
+      "result_envelope_hash": "e7d866adf2e1887d00d7401429d9ab7c3c5aa9fce90f2b3a2b07de7cd7dc039c"
+    },
+    "recovery_links_before": 0,
+    "controlled_authorizations_before": 0,
+    "returncode": 0,
+    "stdout": "{\n \"admission_ref\": \"mission-document-research-admission:a2d4854ebf0cb7d90c7fe055af4b5eb1\",\n \"escalated\": true,\n \"reason\": \"reentry_failed_after_automatic_rebind:controlled reentry was already attempted\",\n \"operation\": \"authorize_mission_document_reentry\",\n \"lane_door_for_this_reason\": \"authorize_mission_document_reentry\",\n \"max_cost_usd\": null\n}\n{\n \"actor_ref\": \"human:owner-authorized-environment-repair-2026-09-22\",\n \"admission_ref\": \"mission-document-research-admission:a2d4854ebf0cb7d90c7fe055af4b5eb1\",\n \"grant_path\": \"/Volumes/EveSSD/Dalton/legacy-state/dalton-core/mission-document-research-runs/controlled-reentry-grant-ac45a10f854fa4940e72c0df.json\",\n \"granted_at\": \"2026-09-22T15:19:22.245053+00:00\",\n \"kind\": \"owner_authorized_controlled_reentry\",\n \"max_reentries\": 1,\n \"schema_version\": \"0.1\",\n \"status\": \"granted\"\n}\n",
+    "stderr": "",
+    "status": "applied"
+  },
+  {
+    "admission_ref": "mission-document-research-admission:a9e588b02de9c7a713167cdafec2d9f1",
+    "state_dir": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core",
+    "classification": {
+      "admission_ref": "mission-document-research-admission:a9e588b02de9c7a713167cdafec2d9f1",
+      "stages": [
+        {
+          "action": "existing_unproved_send_recovery_door",
+          "reason": "send_state_unproved",
+          "stage": "draft",
+          "status": "historical_failure",
+          "used_recovery_links": 0,
+          "work_order_ref": "work:mission-document-research-bbc99ecbbf9f61e28a13d31e14cafb05"
+        },
+        {
+          "action": "inspect_exact_historical_authority",
+          "reason": "child requires exact succeeded upstream",
+          "stage": "verifier",
+          "status": "blocked"
+        }
+      ]
+    },
+    "classification_receipt_sha256": "964469b444a6cdf7d07d7667761cf4c748659ddbe3fbd638b29fb7d2c2f2a9df",
+    "model_budget_grant": false,
+    "model_works_before": [
+      {
+        "work_order_id": "work:mission-document-research-bbc99ecbbf9f61e28a13d31e14cafb05",
+        "work_order_hash": "26ddda4a444443e78ef89edad67b60f3606e50bc127d6d694eea95fce125d4e7"
+      }
+    ],
+    "chosen_formal": {
+      "terminal_state": "failed",
+      "result_envelope_hash": "145cd30992b4f6afc4f3df0370c503ac6304177c1303a42997600036f266a1d3"
+    },
+    "recovery_links_before": 0,
+    "controlled_authorizations_before": 0,
+    "returncode": 0,
+    "stdout": "{\n \"admission_ref\": \"mission-document-research-admission:a9e588b02de9c7a713167cdafec2d9f1\",\n \"escalated\": true,\n \"reason\": \"reentry_failed_after_automatic_rebind:controlled reentry was already attempted\",\n \"operation\": \"authorize_mission_document_reentry\",\n \"lane_door_for_this_reason\": \"authorize_mission_document_reentry\",\n \"max_cost_usd\": null\n}\n{\n \"actor_ref\": \"human:owner-authorized-environment-repair-2026-09-22\",\n \"admission_ref\": \"mission-document-research-admission:a9e588b02de9c7a713167cdafec2d9f1\",\n \"grant_path\": \"/Volumes/EveSSD/Dalton/legacy-state/dalton-core/mission-document-research-runs/controlled-reentry-grant-ed5c887b44009d6ea7bcfc71.json\",\n \"granted_at\": \"2026-09-22T15:19:22.459270+00:00\",\n \"kind\": \"owner_authorized_controlled_reentry\",\n \"max_reentries\": 1,\n \"schema_version\": \"0.1\",\n \"status\": \"granted\"\n}\n",
+    "stderr": "",
+    "status": "applied"
+  },
+  {
+    "admission_ref": "mission-document-research-admission:bca93fcbeca301720289fab14728086f",
+    "state_dir": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core",
+    "classification": {
+      "admission_ref": "mission-document-research-admission:bca93fcbeca301720289fab14728086f",
+      "stages": [
+        {
+          "action": "none",
+          "reason": "exact_succeeded_stage_reused",
+          "stage": "draft",
+          "status": "succeeded",
+          "used_recovery_links": 0,
+          "work_order_ref": "work:mission-document-research-796416c12698a3119128aea7c2dd79a7"
+        },
+        {
+          "action": "existing_unproved_send_recovery_door",
+          "reason": "send_state_unproved",
+          "stage": "verifier",
+          "status": "historical_failure",
+          "used_recovery_links": 0,
+          "work_order_ref": "work:mission-document-research-ab8e61db72c758ee97651f26c59e1f08"
+        }
+      ]
+    },
+    "classification_receipt_sha256": "964469b444a6cdf7d07d7667761cf4c748659ddbe3fbd638b29fb7d2c2f2a9df",
+    "model_budget_grant": false,
+    "model_works_before": [
+      {
+        "work_order_id": "work:mission-document-research-796416c12698a3119128aea7c2dd79a7",
+        "work_order_hash": "26614d20fd72eebf829b9289d34db695bf77afa26a04c18bd3440b98f9b7223e"
+      },
+      {
+        "work_order_id": "work:mission-document-research-ab8e61db72c758ee97651f26c59e1f08",
+        "work_order_hash": "9a16f27cd34551491b503c62b948febb06c9966b134f08db1c7dc2551e546d7f"
+      }
+    ],
+    "chosen_formal": {
+      "terminal_state": "failed",
+      "result_envelope_hash": "28efbe4d522273931ba3612cbd47c4b556962b6a937bc592b609a4a4a3ebf093"
+    },
+    "recovery_links_before": 0,
+    "controlled_authorizations_before": 0,
+    "returncode": 0,
+    "stdout": "{\n \"admission_ref\": \"mission-document-research-admission:bca93fcbeca301720289fab14728086f\",\n \"escalated\": true,\n \"reason\": \"reentry_failed_after_automatic_rebind:controlled reentry was already attempted\",\n \"operation\": \"authorize_mission_document_reentry\",\n \"lane_door_for_this_reason\": \"authorize_mission_document_reentry\",\n \"max_cost_usd\": null\n}\n{\n \"actor_ref\": \"human:owner-authorized-environment-repair-2026-09-22\",\n \"admission_ref\": \"mission-document-research-admission:bca93fcbeca301720289fab14728086f\",\n \"grant_path\": \"/Volumes/EveSSD/Dalton/legacy-state/dalton-core/mission-document-research-runs/controlled-reentry-grant-5ab4ed16dd0f54e21ed246f3.json\",\n \"granted_at\": \"2026-09-22T15:19:22.670534+00:00\",\n \"kind\": \"owner_authorized_controlled_reentry\",\n \"max_reentries\": 1,\n \"schema_version\": \"0.1\",\n \"status\": \"granted\"\n}\n",
+    "stderr": "",
+    "status": "applied"
+  },
+  {
+    "admission_ref": "mission-document-research-admission:ca9bac39454f3ee9bcfd3f0508f342e3",
+    "state_dir": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core",
+    "classification": {
+      "admission_ref": "mission-document-research-admission:ca9bac39454f3ee9bcfd3f0508f342e3",
+      "stages": [
+        {
+          "action": "none",
+          "reason": "exact_succeeded_stage_reused",
+          "stage": "draft",
+          "status": "succeeded",
+          "used_recovery_links": 1,
+          "work_order_ref": "work:mission-document-recovery-9ff5ddc6051c9341529233b01ba2d9e0"
+        },
+        {
+          "action": "enqueue",
+          "reason": "model_stage_not_enqueued",
+          "stage": "verifier",
+          "status": "not_enqueued",
+          "used_recovery_links": 0,
+          "work_order_ref": "work:mission-document-research-0d3974b52e541cdb0a7a5338b29c912b"
+        }
+      ]
+    },
+    "classification_receipt_sha256": "964469b444a6cdf7d07d7667761cf4c748659ddbe3fbd638b29fb7d2c2f2a9df",
+    "model_budget_grant": false,
+    "model_works_before": [
+      {
+        "work_order_id": "work:mission-document-research-ddb1725ad66dcec35e0f22b94c43b24a",
+        "work_order_hash": "154e5cdbf80aebc00e6c7ac94c0eeaa56ccfd83516c99fe45f50034fe826d52c"
+      },
+      {
+        "work_order_id": "work:mission-document-recovery-9ff5ddc6051c9341529233b01ba2d9e0",
+        "work_order_hash": "0975de2b88983483b8dbc1f0adffbfb8f45e21cfb93673d79dbaa4e0b0ef3b1c"
+      }
+    ],
+    "recovery_links_before": 1,
+    "controlled_authorizations_before": 0,
+    "returncode": 0,
+    "stdout": "{\n \"admission_ref\": \"mission-document-research-admission:ca9bac39454f3ee9bcfd3f0508f342e3\",\n \"escalated\": true,\n \"reason\": \"reentry_failed_after_automatic_rebind:controlled reentry was already attempted\",\n \"operation\": \"authorize_mission_document_reentry\",\n \"lane_door_for_this_reason\": \"authorize_mission_document_reentry\",\n \"max_cost_usd\": null\n}\n{\n \"actor_ref\": \"human:owner-authorized-environment-repair-2026-09-22\",\n \"admission_ref\": \"mission-document-research-admission:ca9bac39454f3ee9bcfd3f0508f342e3\",\n \"grant_path\": \"/Volumes/EveSSD/Dalton/legacy-state/dalton-core/mission-document-research-runs/controlled-reentry-grant-6dffc94689b5393cc530dfea.json\",\n \"granted_at\": \"2026-09-22T15:19:22.881140+00:00\",\n \"kind\": \"owner_authorized_controlled_reentry\",\n \"max_reentries\": 1,\n \"schema_version\": \"0.1\",\n \"status\": \"granted\"\n}\n",
+    "stderr": "",
+    "status": "applied"
+  },
+  {
+    "admission_ref": "mission-document-research-admission:f806824e8fa1a67d310d77d37b22aa42",
+    "state_dir": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core",
+    "classification": {
+      "admission_ref": "mission-document-research-admission:f806824e8fa1a67d310d77d37b22aa42",
+      "stages": [
+        {
+          "action": "existing_unproved_send_recovery_door",
+          "reason": "send_state_unproved",
+          "stage": "draft",
+          "status": "historical_failure",
+          "used_recovery_links": 0,
+          "work_order_ref": "work:mission-document-research-e82584e0d5b7a3a98fbf428a084481df"
+        },
+        {
+          "action": "inspect_exact_historical_authority",
+          "reason": "child requires exact succeeded upstream",
+          "stage": "verifier",
+          "status": "blocked"
+        }
+      ]
+    },
+    "classification_receipt_sha256": "964469b444a6cdf7d07d7667761cf4c748659ddbe3fbd638b29fb7d2c2f2a9df",
+    "model_budget_grant": false,
+    "model_works_before": [
+      {
+        "work_order_id": "work:mission-document-research-e82584e0d5b7a3a98fbf428a084481df",
+        "work_order_hash": "acc84e691e37ab4322bc0faaf4ea179a32ed025fe366eb6da326ec2a737a6866"
+      }
+    ],
+    "chosen_formal": {
+      "terminal_state": "failed",
+      "result_envelope_hash": "72412a50d35966b2e5a50b788688869dd1d93b812b5122e133010f8f82b09e60"
+    },
+    "recovery_links_before": 0,
+    "controlled_authorizations_before": 0,
+    "returncode": 0,
+    "stdout": "{\n \"admission_ref\": \"mission-document-research-admission:f806824e8fa1a67d310d77d37b22aa42\",\n \"escalated\": true,\n \"reason\": \"reentry_failed_after_automatic_rebind:controlled reentry was already attempted\",\n \"operation\": \"authorize_mission_document_reentry\",\n \"lane_door_for_this_reason\": \"authorize_mission_document_reentry\",\n \"max_cost_usd\": null\n}\n{\n \"actor_ref\": \"human:owner-authorized-environment-repair-2026-09-22\",\n \"admission_ref\": \"mission-document-research-admission:f806824e8fa1a67d310d77d37b22aa42\",\n \"grant_path\": \"/Volumes/EveSSD/Dalton/legacy-state/dalton-core/mission-document-research-runs/controlled-reentry-grant-1a871305eea3250504df5601.json\",\n \"granted_at\": \"2026-09-22T15:19:23.086974+00:00\",\n \"kind\": \"owner_authorized_controlled_reentry\",\n \"max_reentries\": 1,\n \"schema_version\": \"0.1\",\n \"status\": \"granted\"\n}\n",
+    "stderr": "",
+    "status": "applied"
+  },
+  {
+    "admission_ref": "mission-document-research-admission:29bf4a59c1232b1022effcd21159e9b0",
+    "state_dir": "/Volumes/EveSSD/Dalton/workspaces/ws-7d894366d1132e2930475a60/state/dalton-core",
+    "classification": {
+      "admission_ref": "mission-document-research-admission:29bf4a59c1232b1022effcd21159e9b0",
+      "stages": [
+        {
+          "action": "none",
+          "reason": "exact_succeeded_stage_reused",
+          "stage": "draft",
+          "status": "succeeded",
+          "used_recovery_links": 0,
+          "work_order_ref": "work:mission-document-research-c61c0243e528cc6f90c8ac710d739024"
+        },
+        {
+          "action": "none",
+          "reason": "exact_succeeded_stage_reused",
+          "stage": "verifier",
+          "status": "succeeded",
+          "used_recovery_links": 1,
+          "work_order_ref": "work:mission-document-recovery-237cafb22b0249c4424f38e429a62f91"
+        }
+      ]
+    },
+    "classification_receipt_sha256": "964469b444a6cdf7d07d7667761cf4c748659ddbe3fbd638b29fb7d2c2f2a9df",
+    "model_budget_grant": false,
+    "model_works_before": [
+      {
+        "work_order_id": "work:mission-document-research-c61c0243e528cc6f90c8ac710d739024",
+        "work_order_hash": "4c06a55e896bcdc61d5cc3d3865cc667553d37711701dcbc10f48cf8fcac3342"
+      },
+      {
+        "work_order_id": "work:mission-document-research-e31335c2697cd37e147e52275022ec28",
+        "work_order_hash": "1c97d5a9dc5dd03b55c325c441336ecd3307927b09656406cbcbd5d3715a6e98"
+      },
+      {
+        "work_order_id": "work:mission-document-recovery-237cafb22b0249c4424f38e429a62f91",
+        "work_order_hash": "59c388ee34c5963c7bc57b2f22a7d1a1e02fcf28b6303c615ac3a6f9c6935c5a"
+      }
+    ],
+    "recovery_links_before": 1,
+    "controlled_authorizations_before": 1,
+    "returncode": 0,
+    "stdout": "{\n \"admission_ref\": \"mission-document-research-admission:29bf4a59c1232b1022effcd21159e9b0\",\n \"escalated\": true,\n \"reason\": \"reentry_failed_after_automatic_rebind:controlled reentry was already attempted\",\n \"operation\": \"authorize_mission_document_reentry\",\n \"lane_door_for_this_reason\": \"authorize_mission_document_reentry\",\n \"max_cost_usd\": null\n}\n{\n \"actor_ref\": \"human:owner-authorized-environment-repair-2026-09-22\",\n \"admission_ref\": \"mission-document-research-admission:29bf4a59c1232b1022effcd21159e9b0\",\n \"grant_path\": \"/Volumes/EveSSD/Dalton/workspaces/ws-7d894366d1132e2930475a60/state/dalton-core/mission-document-research-runs/controlled-reentry-grant-c85fc09056a1fd32fe7b072a.json\",\n \"granted_at\": \"2026-09-22T15:19:23.319046+00:00\",\n \"kind\": \"owner_authorized_controlled_reentry\",\n \"max_reentries\": 1,\n \"schema_version\": \"0.1\",\n \"status\": \"granted\"\n}\n",
+    "stderr": "",
+    "status": "applied"
+  },
+  {
+    "admission_ref": "mission-document-research-admission:c65e97e7fba75b2012c5331de5967f6d",
+    "state_dir": "/Volumes/EveSSD/Dalton/workspaces/ws-7d894366d1132e2930475a60/state/dalton-core",
+    "classification": {
+      "admission_ref": "mission-document-research-admission:c65e97e7fba75b2012c5331de5967f6d",
+      "stages": [
+        {
+          "action": "none",
+          "reason": "exact_succeeded_stage_reused",
+          "stage": "draft",
+          "status": "succeeded",
+          "used_recovery_links": 1,
+          "work_order_ref": "work:mission-document-recovery-bf859873dfde4f4d15aee5a1370b3ecb"
+        },
+        {
+          "action": "enqueue",
+          "reason": "model_stage_not_enqueued",
+          "stage": "verifier",
+          "status": "not_enqueued",
+          "used_recovery_links": 0,
+          "work_order_ref": "work:mission-document-research-7f29a4de618d4bd72b830a2b35ed22de"
+        }
+      ]
+    },
+    "classification_receipt_sha256": "964469b444a6cdf7d07d7667761cf4c748659ddbe3fbd638b29fb7d2c2f2a9df",
+    "model_budget_grant": false,
+    "model_works_before": [
+      {
+        "work_order_id": "work:mission-document-research-5f9d6ccc95045180c1eded83aea67c7c",
+        "work_order_hash": "32bd1ccd7e4c89e73353c30db1b8cb5e8a0f707ff7f3a538e6225ba55b301e50"
+      },
+      {
+        "work_order_id": "work:mission-document-recovery-bf859873dfde4f4d15aee5a1370b3ecb",
+        "work_order_hash": "1666145177c9452a3924dbae5431903d2897bb11649f000db1018f9328c3dd13"
+      }
+    ],
+    "recovery_links_before": 1,
+    "controlled_authorizations_before": 1,
+    "returncode": 0,
+    "stdout": "{\n \"admission_ref\": \"mission-document-research-admission:c65e97e7fba75b2012c5331de5967f6d\",\n \"escalated\": true,\n \"reason\": \"reentry_failed_after_automatic_rebind:controlled reentry was already attempted\",\n \"operation\": \"authorize_mission_document_reentry\",\n \"lane_door_for_this_reason\": \"authorize_mission_document_reentry\",\n \"max_cost_usd\": null\n}\n{\n \"actor_ref\": \"human:owner-authorized-environment-repair-2026-09-22\",\n \"admission_ref\": \"mission-document-research-admission:c65e97e7fba75b2012c5331de5967f6d\",\n \"grant_path\": \"/Volumes/EveSSD/Dalton/workspaces/ws-7d894366d1132e2930475a60/state/dalton-core/mission-document-research-runs/controlled-reentry-grant-1ff9677b9319767c8dc75cfb.json\",\n \"granted_at\": \"2026-09-22T15:19:23.520344+00:00\",\n \"kind\": \"owner_authorized_controlled_reentry\",\n \"max_reentries\": 1,\n \"schema_version\": \"0.1\",\n \"status\": \"granted\"\n}\n",
+    "stderr": "",
+    "status": "applied"
+  }
+]
