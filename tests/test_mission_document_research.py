@@ -281,6 +281,32 @@ class MissionDocumentResearchTests(unittest.TestCase):
             }
             path.write_text(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n",
                             encoding="utf-8")
+
+    def _ready_atomic_day_recovery(self, *, draft_adapter=None):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        self._enable_recovery(fixture, maximum=1, elapsed=7200)
+        admission = authority.admit_from_plan(**args)
+        other = fixture.budget.admit(
+            policy_version_id="budget-policy:mission-annual:1",
+            day=NOW.date().isoformat(), work_order_ref="work:other-settled-consumer",
+            attempt_number=1, phase="assessment", route_decision_ref="route:other",
+            reserved_micros=9_500_000,
+        )
+        fixture.budget.settle(other["admission_id"], actual_micros=9_500_000)
+        executor, draft, verifier = self._executor(
+            fixture, authority, draft_adapter=draft_adapter)
+        for _ in range(4):
+            failed = executor.run_once(admission["id"])
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(
+            executor.run_once(admission["id"])["reason"],
+            "fresh_work_recovery_backoff",
+        )
+        fixture.harness.clock.value += timedelta(hours=12)
+        recovery = executor.run_once(admission["id"])
+        self.assertEqual(recovery["reason"], "fresh_work_recovery")
+        return fixture, authority, admission, executor, draft, verifier, recovery
+
     def _record_plan(self, fixture, plan):
         raw = {
             "schema_version": "0.1", "assessment": plan["assessment"],
@@ -1696,6 +1722,21 @@ class MissionDocumentResearchTests(unittest.TestCase):
             "SELECT count(*) FROM "
             "mission_document_research_model_authority_epoch_rebinds"
         ).fetchone()[0], 1)
+
+    def test_epoch_inspector_classifies_an_unenqueued_model_prefix(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        admission = authority.admit_from_plan(**args)
+        executor, draft, verifier = self._executor(fixture, authority)
+        executor.run_once(admission["id"])
+        executor.run_once(admission["id"])
+
+        inspected = executor.inspect_model_authority_epoch_recovery(admission["id"])
+
+        draft_status = next(
+            item for item in inspected["stages"] if item["stage"] == "draft")
+        self.assertEqual(draft_status["status"], "not_enqueued")
+        self.assertEqual(draft_status["action"], "enqueue")
+        self.assertEqual((draft.calls, verifier.calls), (0, 0))
 
     def test_model_roll_never_rebinds_claimed_historical_recovery(self):
         fixture, authority, args, _registration, _launcher = self._fixture()
@@ -3483,6 +3524,128 @@ class MissionDocumentResearchTests(unittest.TestCase):
         ).fetchone()[0])
         self.assertEqual(link["failure_proof"]["classification"],
                          "atomic_day_budget_refusal")
+
+    def test_governance_roll_reuses_succeeded_atomic_day_recovery(self):
+        (fixture, authority, admission, executor, draft, _verifier,
+         recovery) = self._ready_atomic_day_recovery()
+        succeeded = executor.run_once(admission["id"])
+        self.assertEqual(succeeded["status"], "succeeded")
+        self.assertEqual(succeeded["work_order_ref"], recovery["work_order_ref"])
+        calls = draft.calls
+        rolled = self._roll_mission(fixture, budget={
+            **fixture.mission["budget"], "max_daily_cost_usd": 9.0,
+        })
+        self.assertNotEqual(rolled["id"], fixture.mission["id"])
+
+        inspected = executor.inspect_model_authority_epoch_recovery(admission["id"])
+
+        stage = next(item for item in inspected["stages"] if item["stage"] == "draft")
+        self.assertEqual(stage["status"], "succeeded")
+        self.assertEqual(stage["work_order_ref"], recovery["work_order_ref"])
+        self.assertEqual(draft.calls, calls)
+
+    def test_atomic_day_recovery_created_after_governance_roll_uses_current_binding(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        self._enable_recovery(fixture, maximum=1, elapsed=7200)
+        admission = authority.admit_from_plan(**args)
+        self._roll_mission(fixture, budget={
+            **fixture.mission["budget"], "max_daily_cost_usd": 9.0,
+        })
+        other = fixture.budget.admit(
+            policy_version_id="budget-policy:mission-annual:1",
+            day=NOW.date().isoformat(), work_order_ref="work:other-after-roll",
+            attempt_number=1, phase="assessment", route_decision_ref="route:other",
+            reserved_micros=9_500_000,
+        )
+        fixture.budget.settle(other["admission_id"], actual_micros=9_500_000)
+        executor, draft, _verifier = self._executor(fixture, authority)
+        for _ in range(4):
+            failed = executor.run_once(admission["id"])
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(
+            executor.run_once(admission["id"])["reason"],
+            "fresh_work_recovery_backoff",
+        )
+        fixture.harness.clock.value += timedelta(hours=12)
+        recovery = executor.run_once(admission["id"])
+        self.assertEqual(recovery["reason"], "fresh_work_recovery")
+
+        succeeded = executor.run_once(admission["id"])
+        inspected = executor.inspect_model_authority_epoch_recovery(admission["id"])
+
+        self.assertEqual(succeeded["status"], "succeeded")
+        stage = next(item for item in inspected["stages"] if item["stage"] == "draft")
+        self.assertEqual(stage["status"], "succeeded")
+        self.assertEqual(stage["work_order_ref"], recovery["work_order_ref"])
+        self.assertEqual(draft.calls, 1)
+
+    def test_governance_roll_preserves_failed_atomic_day_recovery_typed_door(self):
+        adapter = CountingFakeAdapter({"schema_version": "0.1", "status": "answered"})
+        (fixture, authority, admission, executor, draft, _verifier,
+         recovery) = self._ready_atomic_day_recovery(draft_adapter=adapter)
+        failed = self._run_until(
+            executor, admission, lambda item: item.get("status") == "failed")
+        self.assertEqual(failed["work_order_ref"], recovery["work_order_ref"])
+        calls = draft.calls
+        self._roll_mission(fixture, budget={
+            **fixture.mission["budget"], "max_daily_cost_usd": 9.0,
+        })
+
+        inspected = executor.inspect_model_authority_epoch_recovery(admission["id"])
+
+        stage = next(item for item in inspected["stages"] if item["stage"] == "draft")
+        self.assertEqual(stage["status"], "historical_failure")
+        self.assertEqual(stage["reason"], "paid_send_output_contract_failed")
+        self.assertEqual(stage["action"], "existing_paid_contract_recovery_door")
+        self.assertEqual(stage["work_order_ref"], recovery["work_order_ref"])
+        self.assertEqual(draft.calls, calls)
+
+    def test_historical_atomic_day_binding_tampering_is_rejected(self):
+        for field in ("outer_budget", "pool", "hash"):
+            with self.subTest(field=field):
+                (fixture, authority, admission, executor, _draft, _verifier,
+                 _recovery) = self._ready_atomic_day_recovery()
+                self._roll_mission(fixture, budget={
+                    **fixture.mission["budget"], "max_daily_cost_usd": 9.0,
+                })
+                link = json.loads(fixture.store.connection.execute(
+                    "SELECT record_json FROM mission_document_research_recovery_links"
+                ).fetchone()[0])
+                rejection_ref = link["failure_proof"]["budget_authority_ref"]
+                row = fixture.budget.connection.execute(
+                    "SELECT record_json FROM thesis_impact_day_rejections "
+                    "WHERE rejection_id=?", (rejection_ref,),
+                ).fetchone()
+                refusal = json.loads(row["record_json"])
+                if field == "outer_budget":
+                    refusal["mission_binding"]["outer_budget"] = {
+                        **refusal["mission_binding"]["outer_budget"],
+                        "max_daily_paid_calls": (
+                            refusal["mission_binding"]["outer_budget"]
+                            ["max_daily_paid_calls"] + 1),
+                    }
+                elif field == "pool":
+                    refusal["mission_binding"]["pool"] = "coverage"
+                if field != "hash":
+                    body = dict(refusal)
+                    body.pop("content_hash")
+                    refusal["content_hash"] = content_hash(body)
+                fixture.budget.connection.execute(
+                    "DROP TRIGGER thesis_impact_day_rejections_no_update")
+                fixture.budget.connection.execute(
+                    "UPDATE thesis_impact_day_rejections SET record_json=?,content_hash=? "
+                    "WHERE rejection_id=?",
+                    (canonical_json(refusal),
+                     ("0" * 64 if field == "hash" else refusal["content_hash"]),
+                     rejection_ref),
+                )
+
+                inspected = executor.inspect_model_authority_epoch_recovery(
+                    admission["id"])
+                stage = next(
+                    item for item in inspected["stages"] if item["stage"] == "draft")
+                self.assertEqual(stage["status"], "blocked")
+                self.assertEqual(stage["reason"], "recovery refusal proof drifted")
 
     def test_pre_change_contract_hold_is_picked_up_by_the_automatic_retry(self):
         """The nineteen live holds: recorded before the retry existed, not spent."""

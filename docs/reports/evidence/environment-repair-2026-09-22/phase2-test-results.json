@@ -1,0 +1,40 @@
+{
+  "source_commit": "c1a2ba36c4c48dc83642d4d8d8e972a4e4c318bc",
+  "release_hash": "2db7019f80466a64fca44b68d4659744951648280e0a381a424c678b1619aa0a",
+  "dependencies_match_lock": true,
+  "full_suite": {
+    "status": "failed",
+    "started_from_source_commit": "c1a2ba36c4c48dc83642d4d8d8e972a4e4c318bc",
+    "tests": 9702,
+    "seconds": 867.682,
+    "failures": 1,
+    "errors": 47,
+    "skipped": 4,
+    "root_cause": "New cross-table lease guard CREATE TRIGGER ran before scheduler_leases existed during service/bootstrap and schema-only migration; candidate never deployed."
+  },
+  "release_python_3_14_smoke": {
+    "tests": 166,
+    "seconds": 58.713,
+    "status": "passed"
+  },
+  "hermetic_replay": {
+    "tests": 1,
+    "seconds": 3.948,
+    "status": "passed",
+    "model_calls": 0,
+    "network_calls": 0
+  },
+  "live_historical_derivation": {
+    "cases": 2,
+    "byte_exact": true,
+    "live_writes": 0,
+    "model_calls": 0
+  },
+  "peer_review": "No outstanding blockers; exact proof-chain, componentwise budget, prior counts, atomic unused transfer, dual SQLite connection ordering, crash convergence, and different-epoch orphan refusal checked.",
+  "diagnostic_only_followup": {
+    "tests": 77,
+    "seconds": 57.173,
+    "status": "passed",
+    "note": "Small incomplete-prefix inspector change added during full run, separately tested; execution paths unchanged."
+  }
+}

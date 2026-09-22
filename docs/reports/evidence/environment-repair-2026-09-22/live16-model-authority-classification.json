@@ -1,0 +1,515 @@
+{
+  "admissions": [
+    {
+      "admission_ref": "mission-document-research-admission:02fcf3c6c6390f29a8979efc7b0789ea",
+      "classification": {
+        "admission_ref": "mission-document-research-admission:02fcf3c6c6390f29a8979efc7b0789ea",
+        "stages": [
+          {
+            "action": "none",
+            "reason": "exact_succeeded_stage_reused",
+            "stage": "draft",
+            "status": "succeeded",
+            "used_recovery_links": 0,
+            "work_order_ref": "work:mission-document-research-8c7a51a42508c48b825c8e59a074ba62"
+          },
+          {
+            "action": "existing_paid_contract_recovery_door",
+            "reason": "paid_send_output_contract_failed",
+            "stage": "verifier",
+            "status": "historical_failure",
+            "used_recovery_links": 0,
+            "work_order_ref": "work:mission-document-research-d6ee13d30db161c679399b3114cfb795"
+          }
+        ]
+      },
+      "environment": "legacy",
+      "model_calls": 0,
+      "original_report_p0_3": false,
+      "snapshot_inspection_writes": 0,
+      "ticket_ref": "mission-document-research:68c5028a99e04e7865c40765"
+    },
+    {
+      "admission_ref": "mission-document-research-admission:03c4103b1eee94421bacce23ae719c2f",
+      "classification": {
+        "admission_ref": "mission-document-research-admission:03c4103b1eee94421bacce23ae719c2f",
+        "stages": [
+          {
+            "action": "existing_paid_contract_recovery_door",
+            "reason": "paid_send_output_contract_failed",
+            "stage": "draft",
+            "status": "historical_failure",
+            "used_recovery_links": 0,
+            "work_order_ref": "work:mission-document-research-10cb1cda86e1794d7150c581a21c5a12"
+          },
+          {
+            "action": "inspect_exact_historical_authority",
+            "reason": "child requires exact succeeded upstream",
+            "stage": "verifier",
+            "status": "blocked"
+          }
+        ]
+      },
+      "environment": "legacy",
+      "model_calls": 0,
+      "original_report_p0_3": true,
+      "snapshot_inspection_writes": 0,
+      "ticket_ref": "mission-document-research:9cbb196a784ab29c18f15687"
+    },
+    {
+      "admission_ref": "mission-document-research-admission:3953fd12844107bafdcf2eb7729d82fa",
+      "classification": {
+        "admission_ref": "mission-document-research-admission:3953fd12844107bafdcf2eb7729d82fa",
+        "stages": [
+          {
+            "action": "none",
+            "reason": "exact_succeeded_stage_reused",
+            "stage": "draft",
+            "status": "succeeded",
+            "used_recovery_links": 0,
+            "work_order_ref": "work:mission-document-research-61bfdaf77712d98a63691dad06f9330d"
+          },
+          {
+            "action": "existing_unproved_send_recovery_door",
+            "reason": "send_state_unproved",
+            "stage": "verifier",
+            "status": "historical_failure",
+            "used_recovery_links": 0,
+            "work_order_ref": "work:mission-document-research-1af3282a5ecbbcbbe1e64d453652efc6"
+          }
+        ]
+      },
+      "environment": "legacy",
+      "model_calls": 0,
+      "original_report_p0_3": true,
+      "snapshot_inspection_writes": 0,
+      "ticket_ref": "mission-document-research:8ba1b0c33995fb0cb2dff68e"
+    },
+    {
+      "admission_ref": "mission-document-research-admission:49d92fa70b8ef1b2e3163f5d8dbd8449",
+      "classification": {
+        "admission_ref": "mission-document-research-admission:49d92fa70b8ef1b2e3163f5d8dbd8449",
+        "stages": [
+          {
+            "action": "none",
+            "reason": "exact_succeeded_stage_reused",
+            "stage": "draft",
+            "status": "succeeded",
+            "used_recovery_links": 0,
+            "work_order_ref": "work:mission-document-research-d6ec590783f4c1219fb04ac32dc80566"
+          },
+          {
+            "action": "existing_unproved_send_recovery_door",
+            "reason": "send_state_unproved",
+            "stage": "verifier",
+            "status": "historical_failure",
+            "used_recovery_links": 0,
+            "work_order_ref": "work:mission-document-research-570d1df4e2f8373d9409dfec8528b001"
+          }
+        ]
+      },
+      "environment": "legacy",
+      "model_calls": 0,
+      "original_report_p0_3": true,
+      "snapshot_inspection_writes": 0,
+      "ticket_ref": "mission-document-research:ca982475ff31e5a51c6b1c44"
+    },
+    {
+      "admission_ref": "mission-document-research-admission:6a2bcd446237e1bd9732690b4b542b3a",
+      "classification": {
+        "admission_ref": "mission-document-research-admission:6a2bcd446237e1bd9732690b4b542b3a",
+        "stages": [
+          {
+            "action": "existing_paid_contract_recovery_door",
+            "reason": "paid_send_output_contract_failed",
+            "stage": "draft",
+            "status": "historical_failure",
+            "used_recovery_links": 1,
+            "work_order_ref": "work:mission-document-recovery-b73845dd8f28d08826401a9c2272dbfb"
+          },
+          {
+            "action": "inspect_exact_historical_authority",
+            "reason": "child requires exact succeeded upstream",
+            "stage": "verifier",
+            "status": "blocked"
+          }
+        ]
+      },
+      "environment": "legacy",
+      "model_calls": 0,
+      "original_report_p0_3": true,
+      "snapshot_inspection_writes": 0,
+      "ticket_ref": "mission-document-research:08872f07df8b734a2ae1e53d"
+    },
+    {
+      "admission_ref": "mission-document-research-admission:867a9e566947d00cfd17d1a1662e5c6f",
+      "classification": {
+        "admission_ref": "mission-document-research-admission:867a9e566947d00cfd17d1a1662e5c6f",
+        "stages": [
+          {
+            "action": "existing_unproved_send_recovery_door",
+            "reason": "send_state_unproved",
+            "stage": "draft",
+            "status": "historical_failure",
+            "used_recovery_links": 0,
+            "work_order_ref": "work:mission-document-research-65aa62ea9626b8de9ccfa0f3b18359b2"
+          },
+          {
+            "action": "inspect_exact_historical_authority",
+            "reason": "child requires exact succeeded upstream",
+            "stage": "verifier",
+            "status": "blocked"
+          }
+        ]
+      },
+      "environment": "legacy",
+      "model_calls": 0,
+      "original_report_p0_3": true,
+      "snapshot_inspection_writes": 0,
+      "ticket_ref": "mission-document-research:4dd1d762f64bd11b399f7093"
+    },
+    {
+      "admission_ref": "mission-document-research-admission:918307dc4626f6a8d549501eb7e193a9",
+      "classification": {
+        "admission_ref": "mission-document-research-admission:918307dc4626f6a8d549501eb7e193a9",
+        "stages": [
+          {
+            "action": "existing_paid_contract_recovery_door",
+            "reason": "paid_send_output_contract_failed",
+            "stage": "draft",
+            "status": "historical_failure",
+            "used_recovery_links": 0,
+            "work_order_ref": "work:mission-document-research-b4280b9b853c3a801dc5c8fb7f2c72bc"
+          },
+          {
+            "action": "inspect_exact_historical_authority",
+            "reason": "child requires exact succeeded upstream",
+            "stage": "verifier",
+            "status": "blocked"
+          }
+        ]
+      },
+      "environment": "legacy",
+      "model_calls": 0,
+      "original_report_p0_3": true,
+      "snapshot_inspection_writes": 0,
+      "ticket_ref": "mission-document-research:8035494500260b634d5b5108"
+    },
+    {
+      "admission_ref": "mission-document-research-admission:a2d4854ebf0cb7d90c7fe055af4b5eb1",
+      "classification": {
+        "admission_ref": "mission-document-research-admission:a2d4854ebf0cb7d90c7fe055af4b5eb1",
+        "stages": [
+          {
+            "action": "none",
+            "reason": "exact_succeeded_stage_reused",
+            "stage": "draft",
+            "status": "succeeded",
+            "used_recovery_links": 0,
+            "work_order_ref": "work:mission-document-research-37c4622cfe20e3640b60aba476d4d7d0"
+          },
+          {
+            "action": "existing_unproved_send_recovery_door",
+            "reason": "send_state_unproved",
+            "stage": "verifier",
+            "status": "historical_failure",
+            "used_recovery_links": 0,
+            "work_order_ref": "work:mission-document-research-3c7f5e7295e4f2d0aef62094f68ff429"
+          }
+        ]
+      },
+      "environment": "legacy",
+      "model_calls": 0,
+      "original_report_p0_3": false,
+      "snapshot_inspection_writes": 0,
+      "ticket_ref": "mission-document-research:2c5eefe0f59b1488126ca25a"
+    },
+    {
+      "admission_ref": "mission-document-research-admission:a9e588b02de9c7a713167cdafec2d9f1",
+      "classification": {
+        "admission_ref": "mission-document-research-admission:a9e588b02de9c7a713167cdafec2d9f1",
+        "stages": [
+          {
+            "action": "existing_unproved_send_recovery_door",
+            "reason": "send_state_unproved",
+            "stage": "draft",
+            "status": "historical_failure",
+            "used_recovery_links": 0,
+            "work_order_ref": "work:mission-document-research-bbc99ecbbf9f61e28a13d31e14cafb05"
+          },
+          {
+            "action": "inspect_exact_historical_authority",
+            "reason": "child requires exact succeeded upstream",
+            "stage": "verifier",
+            "status": "blocked"
+          }
+        ]
+      },
+      "environment": "legacy",
+      "model_calls": 0,
+      "original_report_p0_3": true,
+      "snapshot_inspection_writes": 0,
+      "ticket_ref": "mission-document-research:c614cf762c7601c537dc02f9"
+    },
+    {
+      "admission_ref": "mission-document-research-admission:bca93fcbeca301720289fab14728086f",
+      "classification": {
+        "admission_ref": "mission-document-research-admission:bca93fcbeca301720289fab14728086f",
+        "stages": [
+          {
+            "action": "none",
+            "reason": "exact_succeeded_stage_reused",
+            "stage": "draft",
+            "status": "succeeded",
+            "used_recovery_links": 0,
+            "work_order_ref": "work:mission-document-research-796416c12698a3119128aea7c2dd79a7"
+          },
+          {
+            "action": "existing_unproved_send_recovery_door",
+            "reason": "send_state_unproved",
+            "stage": "verifier",
+            "status": "historical_failure",
+            "used_recovery_links": 0,
+            "work_order_ref": "work:mission-document-research-ab8e61db72c758ee97651f26c59e1f08"
+          }
+        ]
+      },
+      "environment": "legacy",
+      "model_calls": 0,
+      "original_report_p0_3": true,
+      "snapshot_inspection_writes": 0,
+      "ticket_ref": "mission-document-research:6facc30e3ed5d1d915515998"
+    },
+    {
+      "admission_ref": "mission-document-research-admission:ca9bac39454f3ee9bcfd3f0508f342e3",
+      "classification": {
+        "admission_ref": "mission-document-research-admission:ca9bac39454f3ee9bcfd3f0508f342e3",
+        "stages": [
+          {
+            "action": "none",
+            "reason": "exact_succeeded_stage_reused",
+            "stage": "draft",
+            "status": "succeeded",
+            "used_recovery_links": 1,
+            "work_order_ref": "work:mission-document-recovery-9ff5ddc6051c9341529233b01ba2d9e0"
+          },
+          {
+            "action": "enqueue",
+            "reason": "model_stage_not_enqueued",
+            "stage": "verifier",
+            "status": "not_enqueued",
+            "used_recovery_links": 0,
+            "work_order_ref": "work:mission-document-research-0d3974b52e541cdb0a7a5338b29c912b"
+          }
+        ]
+      },
+      "environment": "legacy",
+      "model_calls": 0,
+      "original_report_p0_3": true,
+      "snapshot_inspection_writes": 0,
+      "ticket_ref": "mission-document-research:88c43f96e7d3c537ea991e68"
+    },
+    {
+      "admission_ref": "mission-document-research-admission:e83cce990352f095ec10cf101b2542ca",
+      "classification": {
+        "admission_ref": "mission-document-research-admission:e83cce990352f095ec10cf101b2542ca",
+        "stages": [
+          {
+            "action": "inspect_exact_historical_authority",
+            "reason": "model authority refresh has an unresolved historical stage",
+            "stage": "draft",
+            "status": "blocked"
+          },
+          {
+            "action": "inspect_exact_historical_authority",
+            "reason": "model authority refresh has an unresolved historical stage",
+            "stage": "verifier",
+            "status": "blocked"
+          }
+        ]
+      },
+      "environment": "legacy",
+      "model_calls": 0,
+      "original_report_p0_3": false,
+      "snapshot_inspection_writes": 0,
+      "ticket_ref": "mission-document-research:499e8ac9a6cd5d72d7d9e4bd"
+    },
+    {
+      "admission_ref": "mission-document-research-admission:f806824e8fa1a67d310d77d37b22aa42",
+      "classification": {
+        "admission_ref": "mission-document-research-admission:f806824e8fa1a67d310d77d37b22aa42",
+        "stages": [
+          {
+            "action": "existing_unproved_send_recovery_door",
+            "reason": "send_state_unproved",
+            "stage": "draft",
+            "status": "historical_failure",
+            "used_recovery_links": 0,
+            "work_order_ref": "work:mission-document-research-e82584e0d5b7a3a98fbf428a084481df"
+          },
+          {
+            "action": "inspect_exact_historical_authority",
+            "reason": "child requires exact succeeded upstream",
+            "stage": "verifier",
+            "status": "blocked"
+          }
+        ]
+      },
+      "environment": "legacy",
+      "model_calls": 0,
+      "original_report_p0_3": true,
+      "snapshot_inspection_writes": 0,
+      "ticket_ref": "mission-document-research:8aa205cf87ec1a16adf9a63b"
+    },
+    {
+      "admission_ref": "mission-document-research-admission:256f7569b79b8f72ba2fa3fa4bc6e408",
+      "classification": {
+        "admission_ref": "mission-document-research-admission:256f7569b79b8f72ba2fa3fa4bc6e408",
+        "stages": [
+          {
+            "action": "inspect_exact_historical_authority",
+            "reason": "model authority refresh has an unresolved historical stage",
+            "stage": "draft",
+            "status": "blocked"
+          },
+          {
+            "action": "inspect_exact_historical_authority",
+            "reason": "model authority refresh has an unresolved historical stage",
+            "stage": "verifier",
+            "status": "blocked"
+          }
+        ]
+      },
+      "environment": "hyperscaler",
+      "model_calls": 0,
+      "original_report_p0_3": false,
+      "snapshot_inspection_writes": 0,
+      "ticket_ref": "mission-document-research:2efd9a13c69e1ab50026c6d0"
+    },
+    {
+      "admission_ref": "mission-document-research-admission:29bf4a59c1232b1022effcd21159e9b0",
+      "classification": {
+        "admission_ref": "mission-document-research-admission:29bf4a59c1232b1022effcd21159e9b0",
+        "stages": [
+          {
+            "action": "none",
+            "reason": "exact_succeeded_stage_reused",
+            "stage": "draft",
+            "status": "succeeded",
+            "used_recovery_links": 0,
+            "work_order_ref": "work:mission-document-research-c61c0243e528cc6f90c8ac710d739024"
+          },
+          {
+            "action": "none",
+            "reason": "exact_succeeded_stage_reused",
+            "stage": "verifier",
+            "status": "succeeded",
+            "used_recovery_links": 1,
+            "work_order_ref": "work:mission-document-recovery-237cafb22b0249c4424f38e429a62f91"
+          }
+        ]
+      },
+      "environment": "hyperscaler",
+      "model_calls": 0,
+      "original_report_p0_3": false,
+      "snapshot_inspection_writes": 0,
+      "ticket_ref": "mission-document-research:9032f3155fa395e675bad648"
+    },
+    {
+      "admission_ref": "mission-document-research-admission:c65e97e7fba75b2012c5331de5967f6d",
+      "classification": {
+        "admission_ref": "mission-document-research-admission:c65e97e7fba75b2012c5331de5967f6d",
+        "stages": [
+          {
+            "action": "none",
+            "reason": "exact_succeeded_stage_reused",
+            "stage": "draft",
+            "status": "succeeded",
+            "used_recovery_links": 1,
+            "work_order_ref": "work:mission-document-recovery-bf859873dfde4f4d15aee5a1370b3ecb"
+          },
+          {
+            "action": "enqueue",
+            "reason": "model_stage_not_enqueued",
+            "stage": "verifier",
+            "status": "not_enqueued",
+            "used_recovery_links": 0,
+            "work_order_ref": "work:mission-document-research-7f29a4de618d4bd72b830a2b35ed22de"
+          }
+        ]
+      },
+      "environment": "hyperscaler",
+      "model_calls": 0,
+      "original_report_p0_3": false,
+      "snapshot_inspection_writes": 0,
+      "ticket_ref": null
+    }
+  ],
+  "content_hash": "9832f472af69922f3e44fa5da9222a935084027a8c1db90b501cc4982a09584b",
+  "generated_at": "2026-09-22T15:01:15.784530+00:00",
+  "limitations": [
+    "Classification is read-only against point-in-time snapshots and does not authorize or dispatch Work.",
+    "Current policy/profile/prices/limits/credential refs and configured absolute DB path strings are preserved from live; underlying SQLite reads use byte-copied snapshots."
+  ],
+  "live_writes": 0,
+  "mode": "live SQLite online-backup snapshots; core/router/budget/planner scheduler cloned; exact live model execution/authority resolved through cloned Router/budget bytes while retaining original configured DB path strings; historical admission/Work/Link/proof bytes preserved",
+  "model_calls": 0,
+  "schema_version": "live16-model-authority-classification:0.1",
+  "source_receipt_content_hash": "56c508388d97f52e45e4d3203c2e7ea68c1e67e76d627c2237e821f0836af751",
+  "summary": [
+    {
+      "action": "inspect_exact_historical_authority",
+      "count": 2,
+      "stage": "draft",
+      "status": "blocked"
+    },
+    {
+      "action": "existing_paid_contract_recovery_door",
+      "count": 3,
+      "stage": "draft",
+      "status": "historical_failure"
+    },
+    {
+      "action": "existing_unproved_send_recovery_door",
+      "count": 3,
+      "stage": "draft",
+      "status": "historical_failure"
+    },
+    {
+      "action": "none",
+      "count": 8,
+      "stage": "draft",
+      "status": "succeeded"
+    },
+    {
+      "action": "inspect_exact_historical_authority",
+      "count": 8,
+      "stage": "verifier",
+      "status": "blocked"
+    },
+    {
+      "action": "existing_paid_contract_recovery_door",
+      "count": 1,
+      "stage": "verifier",
+      "status": "historical_failure"
+    },
+    {
+      "action": "existing_unproved_send_recovery_door",
+      "count": 4,
+      "stage": "verifier",
+      "status": "historical_failure"
+    },
+    {
+      "action": "enqueue",
+      "count": 2,
+      "stage": "verifier",
+      "status": "not_enqueued"
+    },
+    {
+      "action": "none",
+      "count": 1,
+      "stage": "verifier",
+      "status": "succeeded"
+    }
+  ]
+}

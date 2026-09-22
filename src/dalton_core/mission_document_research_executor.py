@@ -34,6 +34,36 @@ from .store import authorization_flag, authorized_flag, canonical_json, content_
 SCHEMA_VERSION = "0.1"
 AUTHORITY_KIND = "mission_document_research_admission"
 _SCHEMA_PATH = Path(__file__).with_name("mission_document_research_executor_schema.sql")
+_SCHEDULER_LEASE_GUARDS = """
+CREATE TRIGGER IF NOT EXISTS scheduler_leases_no_epoch_rebound_source
+BEFORE INSERT ON scheduler_leases
+WHEN EXISTS (
+ SELECT 1 FROM mission_document_research_model_authority_epoch_rebinds
+ WHERE authorized_recovery_work_ref=NEW.work_order_id
+)
+BEGIN SELECT RAISE(ABORT,'model authority epoch rebind already consumed recovery Work'); END;
+CREATE TRIGGER IF NOT EXISTS scheduler_leases_require_epoch_rebind_mapping
+BEFORE INSERT ON scheduler_leases
+WHEN json_extract(
+ (SELECT work_order_json FROM scheduler_work_orders
+  WHERE work_order_id=NEW.work_order_id),
+ '$.metadata.mission_document_model_authority_epoch_rebind.rebind_ref'
+) IS NOT NULL
+AND NOT EXISTS (
+ SELECT 1
+ FROM scheduler_work_orders w
+ JOIN mission_document_research_model_authority_epoch_rebinds r
+  ON r.rebound_work_order_ref=w.work_order_id
+ WHERE w.work_order_id=NEW.work_order_id
+  AND r.rebind_id=json_extract(
+   w.work_order_json,
+   '$.metadata.mission_document_model_authority_epoch_rebind.rebind_ref')
+  AND r.content_hash=json_extract(
+   w.work_order_json,
+   '$.metadata.mission_document_model_authority_epoch_rebind.rebind_hash')
+)
+BEGIN SELECT RAISE(ABORT,'model authority rebound Work lacks exact mapping'); END;
+"""
 _HISTORICAL_NOSEND_RECEIPT_SHA256 = (
     "171bb64af42149ce58c5c7160d37419e7efcfbbbb805bcd4d3da4a154b43d3fa")
 _HISTORICAL_NOSEND_CONTENT_HASH = (
@@ -953,13 +983,20 @@ def _exact_model_execution(work: Mapping[str, Any], formal: Mapping[str, Any], w
         work_order_ref=work["id"], attempt_number=formal["attempt_number"], phase=phase)
     ceiling = int(Decimal(str(work["budget"]["max_cost_usd"])) * 1_000_000)
     expected_binding = _expected_budget_binding(authority, admission, index)
+    actual_binding = (None if exact_budget is None else exact_budget["mission_binding"])
+    if (actual_binding is not None
+            and canonical_json(actual_binding) != canonical_json(expected_binding)):
+        historical_binding = _historical_atomic_day_recovery_binding(
+            authority, budget_store, admission, index, work, worker,
+        )
+        if (historical_binding is None
+                or canonical_json(actual_binding) != canonical_json(historical_binding)):
+            raise MissionDocumentResearchExecutorError("model budget binding drifted")
     if (exact_budget is None
             or exact_budget["admission"].get("route_decision_ref") != route["id"]
             or exact_budget["admission"].get("policy_version_id")
             != work["metadata"]["budget_policy_ref"]
-            or exact_budget["admission"].get("reserved_micros") != ceiling
-            or canonical_json(exact_budget["mission_binding"])
-            != canonical_json(expected_binding)):
+            or exact_budget["admission"].get("reserved_micros") != ceiling):
         raise MissionDocumentResearchExecutorError("model budget binding drifted")
     try:
         usage = worker.observability.latest_usage(invocation["id"])
@@ -1063,6 +1100,41 @@ def _expected_budget_binding(authority: Any, admission: Mapping[str, Any], index
     except Exception as exc:
         raise MissionDocumentResearchExecutorError(
             "recovery mission/budget authority is unavailable") from exc
+
+
+def _admitted_budget_binding(authority: Any, admission: Mapping[str, Any], index: int):
+    """Rebuild the immutable budget envelope admitted with historical Work."""
+
+    try:
+        original = authority.admission(admission["id"])
+        mission = authority._missions.mission(original["mission_version_ref"])
+        from .budget_pools import mission_pool_scope
+        if (original["content_hash"] != admission["content_hash"]
+                or mission["id"] != original["mission_version_ref"]
+                or mission["content_hash"] != original["mission_version_hash"]
+                or mission["mission_ref"] != original["mission_ref"]):
+            raise ValueError("admitted mission identity drifted")
+        return {
+            "mission_ref": mission["mission_ref"],
+            "mission_version_ref": mission["id"],
+            "mission_version_hash": mission["content_hash"],
+            "max_daily_paid_calls": mission["budget"]["max_daily_paid_calls"],
+            "max_daily_cost_micros": int(
+                Decimal(str(mission["budget"]["max_daily_cost_usd"])) * 1_000_000),
+            "outer_budget": dict(original["outer_budget"]),
+            **mission_pool_scope(
+                mission, purpose=DRAFT_PURPOSE if index == 1 else VERIFIER_PURPOSE),
+        }
+    except Exception as exc:
+        raise MissionDocumentResearchExecutorError(
+            "historical recovery mission/budget authority is unavailable") from exc
+
+
+def _same_stable_budget_scope(historical: Mapping[str, Any],
+                              current: Mapping[str, Any]) -> bool:
+    return all(historical.get(key) == current.get(key) for key in (
+        "mission_ref", "mission_version_ref", "mission_version_hash", "pool", "pool_lane",
+    ))
 
 
 def _no_send_receipt(envelope: Mapping[str, Any], work: Mapping[str, Any],
@@ -1303,9 +1375,10 @@ def _verify_recovery_failure_proof(authority: Any, scheduler: Scheduler,
         raise MissionDocumentResearchExecutorError("recovery budget authority is unavailable")
     phase = "assessment" if index == 1 else "verification"
     binding = _expected_budget_binding(authority, admission, index)
-    if proof.get("mission_binding_hash") != content_hash(binding):
-        raise MissionDocumentResearchExecutorError("recovery mission binding drifted")
     classification = proof.get("classification")
+    if (classification != "atomic_day_budget_refusal"
+            and proof.get("mission_binding_hash") != content_hash(binding)):
+        raise MissionDocumentResearchExecutorError("recovery mission binding drifted")
     if classification == "adapter_proved_definitely_not_sent":
         if (_no_send_receipt(envelope, failed, common["route_decision_ref"])
                 != "typed_transport_exception"
@@ -1363,7 +1436,15 @@ def _verify_recovery_failure_proof(authority: Any, scheduler: Scheduler,
             or refusal.get("day") != proof.get("refusal_day")):
         raise MissionDocumentResearchExecutorError("recovery refusal proof drifted")
     if classification == "atomic_day_budget_refusal":
-        if (refusal.get("mission_binding") != binding
+        historical_binding = refusal.get("mission_binding")
+        admitted_binding = _admitted_budget_binding(authority, admission, index)
+        historical_wire = (None if not isinstance(historical_binding, Mapping)
+                           else canonical_json(historical_binding))
+        if (not isinstance(historical_binding, Mapping)
+                or historical_wire not in {
+                    canonical_json(admitted_binding), canonical_json(binding)}
+                or proof.get("mission_binding_hash") != content_hash(historical_binding)
+                or not _same_stable_budget_scope(historical_binding, binding)
                 or refusal.get("policy_version_id") != failed["metadata"]["budget_policy_ref"]):
             raise MissionDocumentResearchExecutorError("day-budget recovery proof drifted")
     elif (refusal.get("reason") != "pool_exhausted"
@@ -1371,6 +1452,93 @@ def _verify_recovery_failure_proof(authority: Any, scheduler: Scheduler,
           or refusal.get("pool") != binding["pool"]
           or refusal.get("pool_lane") != binding.get("pool_lane")):
         raise MissionDocumentResearchExecutorError("pool-budget recovery proof drifted")
+
+
+def _historical_atomic_day_recovery_binding(
+    authority: Any, budget_store: Any, admission: Mapping[str, Any], index: int,
+    work: Mapping[str, Any], worker: Any,
+) -> dict[str, Any] | None:
+    """Return a fully reverified historical binding for one succeeded recovery.
+
+    This is deliberately limited to the exact RecoveryWork created from an
+    atomic day-budget refusal.  It cannot authorize new Work; it only lets a
+    completed result retain the budget envelope that was current when it ran.
+    """
+
+    receipt = work.get("metadata", {}).get("mission_document_recovery")
+    if not isinstance(receipt, Mapping):
+        return None
+    row = authority.store.connection.execute(
+        "SELECT * FROM mission_document_research_recovery_links "
+        "WHERE recovery_link_id=?", (receipt.get("recovery_link_ref"),),
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        link = json.loads(row["record_json"])
+    except (TypeError, ValueError, RecursionError) as exc:
+        raise MissionDocumentResearchExecutorError(
+            "historical recovery link is invalid") from exc
+    body = dict(link) if isinstance(link, Mapping) else {}
+    asserted = body.pop("content_hash", None)
+    expected_receipt = {
+        "schema_version": SCHEMA_VERSION,
+        "recovery_link_ref": link.get("id"),
+        "recovery_link_hash": link.get("content_hash"),
+        "recovery_number": link.get("recovery_number"),
+        "policy_hash": link.get("policy_hash"),
+        "window_started_at": link.get("window_started_at"),
+    }
+    if (not isinstance(link, Mapping)
+            or canonical_json(link) != row["record_json"]
+            or asserted != row["content_hash"] or asserted != content_hash(body)
+            or link.get("id") != row["recovery_link_id"]
+            or link.get("admission_ref") != row["admission_ref"]
+            or link.get("stage_ordinal") != row["stage_ordinal"]
+            or link.get("recovery_number") != row["recovery_number"]
+            or link.get("failed_work_order_ref") != row["failed_work_order_ref"]
+            or link.get("recovery_work_order_ref") != row["recovery_work_order_ref"]
+            or link.get("created_at") != row["created_at"]
+            or link.get("admission_ref") != admission["id"]
+            or link.get("admission_hash") != admission["content_hash"]
+            or link.get("stage_ordinal") != index + 1
+            or link.get("recovery_work_order_ref") != work["id"]
+            or canonical_json(receipt) != canonical_json(expected_receipt)
+            or link.get("failure_proof", {}).get("classification")
+            != "atomic_day_budget_refusal"):
+        raise MissionDocumentResearchExecutorError(
+            "historical recovery link authority drifted")
+    failed_authority = authority.store.connection.execute(
+        "SELECT work_order_json,work_order_hash FROM scheduler_work_orders "
+        "WHERE work_order_id=?", (link["failed_work_order_ref"],),
+    ).fetchone()
+    if failed_authority is None:
+        raise MissionDocumentResearchExecutorError(
+            "historical recovery failed Work is unavailable")
+    try:
+        failed = WorkOrder.from_dict(
+            json.loads(failed_authority["work_order_json"])).to_dict()
+    except Exception as exc:
+        raise MissionDocumentResearchExecutorError(
+            "historical recovery failed Work is invalid") from exc
+    if (canonical_json(failed) != failed_authority["work_order_json"]
+            or content_hash(failed) != failed_authority["work_order_hash"]
+            or link.get("failed_work_order_hash") != content_hash(failed)):
+        raise MissionDocumentResearchExecutorError(
+            "historical recovery failed Work drifted")
+    _verify_recovery_failure_proof(
+        authority, worker.scheduler, admission, index, failed, link, worker,
+    )
+    proof = link["failure_proof"]
+    refusal_row = budget_store.connection.execute(
+        "SELECT record_json,content_hash FROM thesis_impact_day_rejections "
+        "WHERE rejection_id=?", (proof.get("budget_authority_ref"),),
+    ).fetchone()
+    if refusal_row is None:
+        raise MissionDocumentResearchExecutorError(
+            "historical recovery refusal proof is unavailable")
+    refusal = json.loads(refusal_row["record_json"])
+    return dict(refusal["mission_binding"])
 
 
 def _recovery_work(base: Mapping[str, Any], link: Mapping[str, Any]) -> dict[str, Any]:
@@ -2047,6 +2215,8 @@ class MissionDocumentResearchExecutor:
         if (draft_worker.mission_document_research_authority is not authority
                 or verifier_worker.mission_document_research_authority is not authority):
             raise TypeError("model workers must share directed-document authority")
+        if authority.connection is not scheduler.connection:
+            raise TypeError("executor and Scheduler must share storage")
         self.authority, self.connection, self.scheduler = authority, authority.connection, scheduler
         self.registry, self.draft_worker, self.verifier_worker = registry, draft_worker, verifier_worker
         self.staging, self.actor_ref, self.clock = staging, actor_ref, clock
@@ -2068,6 +2238,20 @@ class MissionDocumentResearchExecutor:
         self._authorization_flag = authorization_flag(
             self.connection, "dalton_mission_document_research_executor_authorized")
         self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
+        # The packaged schema is also applied by fresh bootstrap and by
+        # schema-only deployment rehearsal, before Scheduler tables exist in
+        # the Core database.  Install the cross-authority lease CAS only here:
+        # Scheduler has initialized those tables on this exact connection, and
+        # no epoch mapping can be appended before this executor exists.
+        scheduler_tables = {
+            row["name"] for row in self.connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name IN "
+                "('scheduler_work_orders','scheduler_leases')"
+            ).fetchall()
+        }
+        if scheduler_tables != {"scheduler_work_orders", "scheduler_leases"}:
+            raise TypeError("executor requires initialized shared Scheduler storage")
+        self.connection.executescript(_SCHEDULER_LEASE_GUARDS)
 
     @contextmanager
     def _transaction(self) -> Iterator[Any]:
@@ -2328,8 +2512,11 @@ class MissionDocumentResearchExecutor:
                     "action": action,
                 })
                 continue
-            formal = self.scheduler.formal_result(work["id"])
-            terminal = _terminal_model_failure(self.scheduler, work)
+            stored = self.scheduler.work_order_authority(work["id"])
+            formal = (None if stored is None else
+                      self.scheduler.formal_result(work["id"]))
+            terminal = (None if stored is None else
+                        _terminal_model_failure(self.scheduler, work))
             if formal is not None and formal["terminal_state"] == "succeeded":
                 status, reason, action = (
                     "succeeded", "exact_succeeded_stage_reused", "none")
@@ -2362,7 +2549,11 @@ class MissionDocumentResearchExecutor:
                         "authorized_rebound_in_progress", work_status,
                         "wait_for_exact_rebound_work")
             else:
-                status, reason, action = "ready", "model_stage_ready", "dispatch"
+                status, reason, action = (
+                    ("not_enqueued", "model_stage_not_enqueued", "enqueue")
+                    if stored is None else
+                    ("ready", "model_stage_ready", "dispatch")
+                )
             stages.append({
                 "stage": name, "status": status, "reason": reason,
                 "action": action, "work_order_ref": work["id"],

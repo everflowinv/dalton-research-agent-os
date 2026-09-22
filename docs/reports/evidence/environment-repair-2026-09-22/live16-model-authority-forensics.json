@@ -1,0 +1,439 @@
+{
+  "cases": [
+    {
+      "admission_hash": "78d5cbfea3f1743aa2be2fdf9df5a9fbb53a504cb3ca7ae31ca92926b7c6333d",
+      "admission_ref": "mission-document-research-admission:6a2bcd446237e1bd9732690b4b542b3a",
+      "environment": "legacy",
+      "model_authority_refresh_hash": "48e8038c24d1cec962f6664d14b75bdd70db48e6b653731f65fcd710307fa9fb",
+      "stages": [
+        {
+          "admitted_base_work_order_ref": "work:mission-document-research-efc0a7b0e1617f9d62c367f04bcce06e",
+          "current_base_work_order_ref": "work:mission-document-research-44fec34fea1bf66012c3645e34f68147",
+          "recovery_links": [
+            {
+              "classification": "atomic_day_budget_refusal",
+              "current_expected_mission_binding": {
+                "max_daily_cost_micros": 500000000,
+                "max_daily_paid_calls": 100000,
+                "mission_ref": "coverage-mission:us-it-services",
+                "mission_version_hash": "0bae07a75bf1a7685d3dc9896317502aa3468eaa187e84ba9108c957983e6bb5",
+                "mission_version_ref": "coverage-mission-version:us-it-services:14",
+                "outer_budget": {
+                  "governance_policy_ref": "commit-gate",
+                  "governance_policy_version_hash": "2d15b0e292ef1ac40cf4ed0abd8df1d9fed537e046adb90d8a8b402f78602a15",
+                  "governance_policy_version_ref": "policy-17",
+                  "mandate_ref": "mandate:us-it-services-constitution-p8a",
+                  "mandate_version_hash": "7efbf585207f6a2bf3e8444b4c8c6dd7707908c8f90b729fb2e77f30cb2b9d99",
+                  "mandate_version_ref": "mandate-version:us-it-services-constitution-p8a:12",
+                  "max_daily_cost_micros": 500000000,
+                  "max_daily_paid_calls": 100000
+                },
+                "pool": "adhoc",
+                "pool_caps_micros": {
+                  "adhoc": 25000000,
+                  "coverage": 100000000,
+                  "event_response": 50000000,
+                  "maintenance": 5000000
+                },
+                "pool_enforcement": "off",
+                "pool_lane": "mission_directed_document_draft"
+              },
+              "current_expected_mission_binding_hash": "f1192acf4e3f605f4e149d40a5cb90ca60e1877860c0918af2acdf1851c69610",
+              "failed_work_order_ref": "work:mission-document-research-efc0a7b0e1617f9d62c367f04bcce06e",
+              "persisted_refusal_hash": "a0d3ceb47cd20f52bcf0118272e9b90364072c4f9e838ad1023a091d9c222033",
+              "persisted_refusal_mission_binding": {
+                "max_daily_cost_micros": 100000000,
+                "max_daily_paid_calls": 9000,
+                "mission_ref": "coverage-mission:us-it-services",
+                "mission_version_hash": "0bae07a75bf1a7685d3dc9896317502aa3468eaa187e84ba9108c957983e6bb5",
+                "mission_version_ref": "coverage-mission-version:us-it-services:14",
+                "outer_budget": {
+                  "governance_policy_ref": "commit-gate",
+                  "governance_policy_version_hash": "358c6b8bb0897e55121a4f20bdb50de0b12315ed86dc8f7ec2d8e1728214c13a",
+                  "governance_policy_version_ref": "policy-11",
+                  "mandate_ref": "mandate:us-it-services-constitution-p8a",
+                  "mandate_version_hash": "3c438e7974bd3d27e453b9180321532458741558466ae03a5819c77515ef71b5",
+                  "mandate_version_ref": "mandate-version:us-it-services-constitution-p8a:7",
+                  "max_daily_cost_micros": 100000000,
+                  "max_daily_paid_calls": 9000
+                },
+                "pool": "adhoc",
+                "pool_caps_micros": {
+                  "adhoc": 25000000,
+                  "coverage": 55000000,
+                  "event_response": 15000000,
+                  "maintenance": 5000000
+                },
+                "pool_lane": "mission_directed_document_draft"
+              },
+              "persisted_refusal_mission_binding_hash": "c17bb810cfafa5d766f4548cd4a5534ad2232467dc986898162fc007ebadc496",
+              "persisted_refusal_ref": "thesis-impact-rejection:11d882b97fba7915641b1432e3e9e774",
+              "proof_mission_binding_hash": "c17bb810cfafa5d766f4548cd4a5534ad2232467dc986898162fc007ebadc496",
+              "recovery_link_hash": "af4ebf8228b6936ad09f27ec80ae70609aafddb0570bf4f53490634c1df505c7",
+              "recovery_link_ref": "mission-document-research-recovery-link:b73845dd8f28d08826401a9c2272dbfb",
+              "recovery_work_order_ref": "work:mission-document-recovery-b73845dd8f28d08826401a9c2272dbfb"
+            }
+          ],
+          "stage": "draft",
+          "stored_stage_works": [
+            {
+              "formal": {
+                "attempt_number": 1,
+                "result_envelope_hash": "0ec2d52903893fa2f1e7e43d805e8f421df15519d287ab3a2ec9d1d7bc6e92a9",
+                "terminal_state": "failed"
+              },
+              "history": [
+                {
+                  "attempt_number": 1,
+                  "event_seq": 564,
+                  "state": "ready"
+                },
+                {
+                  "attempt_number": 1,
+                  "event_seq": 565,
+                  "state": "leased"
+                },
+                {
+                  "attempt_number": 1,
+                  "event_seq": 566,
+                  "state": "failed"
+                }
+              ],
+              "work_model_authority_refresh_hash": null,
+              "work_order_hash": "3baac772c7fd42a9a855af69da549ba3fe3295c991b34fd907f8c7ad4ddc2900",
+              "work_order_ref": "work:mission-document-research-efc0a7b0e1617f9d62c367f04bcce06e"
+            },
+            {
+              "formal": {
+                "attempt_number": 4,
+                "result_envelope_hash": "304f56afae0e7faa27af31fe88165af8787b74b3b1d01bdde0554d5b0b518dd0",
+                "terminal_state": "failed"
+              },
+              "history": [
+                {
+                  "attempt_number": 1,
+                  "event_seq": 567,
+                  "state": "ready"
+                },
+                {
+                  "attempt_number": 1,
+                  "event_seq": 568,
+                  "state": "leased"
+                },
+                {
+                  "attempt_number": 1,
+                  "event_seq": 569,
+                  "state": "retryable"
+                },
+                {
+                  "attempt_number": 2,
+                  "event_seq": 570,
+                  "state": "ready"
+                },
+                {
+                  "attempt_number": 2,
+                  "event_seq": 571,
+                  "state": "leased"
+                },
+                {
+                  "attempt_number": 2,
+                  "event_seq": 572,
+                  "state": "retryable"
+                },
+                {
+                  "attempt_number": 3,
+                  "event_seq": 573,
+                  "state": "ready"
+                },
+                {
+                  "attempt_number": 3,
+                  "event_seq": 574,
+                  "state": "leased"
+                },
+                {
+                  "attempt_number": 3,
+                  "event_seq": 575,
+                  "state": "retryable"
+                },
+                {
+                  "attempt_number": 4,
+                  "event_seq": 576,
+                  "state": "ready"
+                },
+                {
+                  "attempt_number": 4,
+                  "event_seq": 577,
+                  "state": "leased"
+                },
+                {
+                  "attempt_number": 4,
+                  "event_seq": 578,
+                  "state": "failed"
+                }
+              ],
+              "work_model_authority_refresh_hash": null,
+              "work_order_hash": "25eed1f08660bbc2a71612e78ffccb3e72866ab5a971ea8f197a3e823d302277",
+              "work_order_ref": "work:mission-document-recovery-b73845dd8f28d08826401a9c2272dbfb"
+            }
+          ]
+        },
+        {
+          "admitted_base_work_order_ref": "work:mission-document-research-2484c864cc1fff786ae2f4954fa30826",
+          "current_base_work_order_ref": "work:mission-document-research-82d24192547cc8797efe97b341418013",
+          "recovery_links": [],
+          "stage": "verifier",
+          "stored_stage_works": []
+        }
+      ]
+    },
+    {
+      "admission_hash": "3b25cdd5ca031887087ba014e317088c21c63d5e94b8239219a690f4c8c3e488",
+      "admission_ref": "mission-document-research-admission:ca9bac39454f3ee9bcfd3f0508f342e3",
+      "environment": "legacy",
+      "model_authority_refresh_hash": "3d094c4578090c813c9090b170139df4e8cd754028b751a5a584a779ed08150b",
+      "stages": [
+        {
+          "admitted_base_work_order_ref": "work:mission-document-research-ddb1725ad66dcec35e0f22b94c43b24a",
+          "current_base_work_order_ref": "work:mission-document-research-46ea429785adc241d49abf045a7b1f95",
+          "recovery_links": [
+            {
+              "classification": "atomic_day_budget_refusal",
+              "current_expected_mission_binding": {
+                "max_daily_cost_micros": 500000000,
+                "max_daily_paid_calls": 100000,
+                "mission_ref": "coverage-mission:us-it-services",
+                "mission_version_hash": "0bae07a75bf1a7685d3dc9896317502aa3468eaa187e84ba9108c957983e6bb5",
+                "mission_version_ref": "coverage-mission-version:us-it-services:14",
+                "outer_budget": {
+                  "governance_policy_ref": "commit-gate",
+                  "governance_policy_version_hash": "2d15b0e292ef1ac40cf4ed0abd8df1d9fed537e046adb90d8a8b402f78602a15",
+                  "governance_policy_version_ref": "policy-17",
+                  "mandate_ref": "mandate:us-it-services-constitution-p8a",
+                  "mandate_version_hash": "7efbf585207f6a2bf3e8444b4c8c6dd7707908c8f90b729fb2e77f30cb2b9d99",
+                  "mandate_version_ref": "mandate-version:us-it-services-constitution-p8a:12",
+                  "max_daily_cost_micros": 500000000,
+                  "max_daily_paid_calls": 100000
+                },
+                "pool": "adhoc",
+                "pool_caps_micros": {
+                  "adhoc": 25000000,
+                  "coverage": 100000000,
+                  "event_response": 50000000,
+                  "maintenance": 5000000
+                },
+                "pool_enforcement": "off",
+                "pool_lane": "mission_directed_document_draft"
+              },
+              "current_expected_mission_binding_hash": "f1192acf4e3f605f4e149d40a5cb90ca60e1877860c0918af2acdf1851c69610",
+              "failed_work_order_ref": "work:mission-document-research-ddb1725ad66dcec35e0f22b94c43b24a",
+              "persisted_refusal_hash": "ead102654993471b12c821ee0fed9a9d2a8def5eba500a6eb64b4061cc425860",
+              "persisted_refusal_mission_binding": {
+                "max_daily_cost_micros": 100000000,
+                "max_daily_paid_calls": 9000,
+                "mission_ref": "coverage-mission:us-it-services",
+                "mission_version_hash": "0bae07a75bf1a7685d3dc9896317502aa3468eaa187e84ba9108c957983e6bb5",
+                "mission_version_ref": "coverage-mission-version:us-it-services:14",
+                "outer_budget": {
+                  "governance_policy_ref": "commit-gate",
+                  "governance_policy_version_hash": "358c6b8bb0897e55121a4f20bdb50de0b12315ed86dc8f7ec2d8e1728214c13a",
+                  "governance_policy_version_ref": "policy-11",
+                  "mandate_ref": "mandate:us-it-services-constitution-p8a",
+                  "mandate_version_hash": "3c438e7974bd3d27e453b9180321532458741558466ae03a5819c77515ef71b5",
+                  "mandate_version_ref": "mandate-version:us-it-services-constitution-p8a:7",
+                  "max_daily_cost_micros": 100000000,
+                  "max_daily_paid_calls": 9000
+                },
+                "pool": "adhoc",
+                "pool_caps_micros": {
+                  "adhoc": 25000000,
+                  "coverage": 55000000,
+                  "event_response": 15000000,
+                  "maintenance": 5000000
+                },
+                "pool_lane": "mission_directed_document_draft"
+              },
+              "persisted_refusal_mission_binding_hash": "c17bb810cfafa5d766f4548cd4a5534ad2232467dc986898162fc007ebadc496",
+              "persisted_refusal_ref": "thesis-impact-rejection:25344ab92a2a808bf4814a2a42e12dcf",
+              "proof_mission_binding_hash": "c17bb810cfafa5d766f4548cd4a5534ad2232467dc986898162fc007ebadc496",
+              "recovery_link_hash": "d2af19a05ef44c9d1ac35d05d7cdf862d422ae86175d4502d9fcf804015a9fed",
+              "recovery_link_ref": "mission-document-research-recovery-link:9ff5ddc6051c9341529233b01ba2d9e0",
+              "recovery_work_order_ref": "work:mission-document-recovery-9ff5ddc6051c9341529233b01ba2d9e0"
+            }
+          ],
+          "stage": "draft",
+          "stored_stage_works": [
+            {
+              "formal": {
+                "attempt_number": 1,
+                "result_envelope_hash": "38b8a5cbc1667b6903463a76a822db94f33896ceecfb536123e1d301a0baa9f9",
+                "terminal_state": "failed"
+              },
+              "history": [
+                {
+                  "attempt_number": 1,
+                  "event_seq": 558,
+                  "state": "ready"
+                },
+                {
+                  "attempt_number": 1,
+                  "event_seq": 559,
+                  "state": "leased"
+                },
+                {
+                  "attempt_number": 1,
+                  "event_seq": 560,
+                  "state": "failed"
+                }
+              ],
+              "work_model_authority_refresh_hash": null,
+              "work_order_hash": "154e5cdbf80aebc00e6c7ac94c0eeaa56ccfd83516c99fe45f50034fe826d52c",
+              "work_order_ref": "work:mission-document-research-ddb1725ad66dcec35e0f22b94c43b24a"
+            },
+            {
+              "formal": {
+                "attempt_number": 1,
+                "result_envelope_hash": "2a62842983b4e83ad2f23a2594d9a32ed8e4745f4f8537780d254931dcd23bd3",
+                "terminal_state": "succeeded"
+              },
+              "history": [
+                {
+                  "attempt_number": 1,
+                  "event_seq": 579,
+                  "state": "ready"
+                },
+                {
+                  "attempt_number": 1,
+                  "event_seq": 580,
+                  "state": "leased"
+                },
+                {
+                  "attempt_number": 1,
+                  "event_seq": 581,
+                  "state": "succeeded"
+                }
+              ],
+              "work_model_authority_refresh_hash": null,
+              "work_order_hash": "0975de2b88983483b8dbc1f0adffbfb8f45e21cfb93673d79dbaa4e0b0ef3b1c",
+              "work_order_ref": "work:mission-document-recovery-9ff5ddc6051c9341529233b01ba2d9e0"
+            }
+          ]
+        },
+        {
+          "admitted_base_work_order_ref": "work:mission-document-research-6f4960c17f581c8f0d7c1f82a2cc626a",
+          "current_base_work_order_ref": "work:mission-document-research-0d3974b52e541cdb0a7a5338b29c912b",
+          "recovery_links": [],
+          "stage": "verifier",
+          "stored_stage_works": []
+        }
+      ]
+    },
+    {
+      "admission_hash": "6842a989e8d45bb417e3e787b310fe6d1de22e494600f4adde215aa6577496d5",
+      "admission_ref": "mission-document-research-admission:e83cce990352f095ec10cf101b2542ca",
+      "environment": "legacy",
+      "model_authority_refresh_hash": "e0f860603c4887a1f2f1f9d6434e96c8ef150fa8162fe3a248655345fb81629c",
+      "stages": [
+        {
+          "admitted_base_work_order_ref": "work:mission-document-research-5f5fef2f3b47d3e4f6a098cca8151da4",
+          "current_base_work_order_ref": "work:mission-document-research-b18fdbec5ca43fde7c35c3304a150630",
+          "recovery_links": [],
+          "stage": "draft",
+          "stored_stage_works": [
+            {
+              "formal": null,
+              "history": [
+                {
+                  "attempt_number": 1,
+                  "event_seq": 753,
+                  "state": "ready"
+                },
+                {
+                  "attempt_number": 1,
+                  "event_seq": 754,
+                  "state": "leased"
+                },
+                {
+                  "attempt_number": 1,
+                  "event_seq": 783,
+                  "state": "expired"
+                },
+                {
+                  "attempt_number": 2,
+                  "event_seq": 784,
+                  "state": "ready"
+                }
+              ],
+              "work_model_authority_refresh_hash": null,
+              "work_order_hash": "85ed32cfe01a8c875bfe0ee2e89f897d64fe5a855cd3f804653926557bc88e09",
+              "work_order_ref": "work:mission-document-research-5f5fef2f3b47d3e4f6a098cca8151da4"
+            }
+          ]
+        },
+        {
+          "admitted_base_work_order_ref": "work:mission-document-research-fc6671c01093ef3ae7a31ba170175b58",
+          "current_base_work_order_ref": "work:mission-document-research-f860cf948642452493f9790482c4a277",
+          "recovery_links": [],
+          "stage": "verifier",
+          "stored_stage_works": []
+        }
+      ]
+    },
+    {
+      "admission_hash": "56ec6ee37edad657ac55b7b3c9a83e656516d84c4aa0242458b805f359ecdadb",
+      "admission_ref": "mission-document-research-admission:256f7569b79b8f72ba2fa3fa4bc6e408",
+      "environment": "hyperscaler",
+      "model_authority_refresh_hash": "98cf75d92f6d43f9974e8adeba9e76d9ec9d15ab1cfaeb974d313c4fffd26936",
+      "stages": [
+        {
+          "admitted_base_work_order_ref": "work:mission-document-research-05f88fad96439c22540e6b621ec66c29",
+          "current_base_work_order_ref": "work:mission-document-research-b871079a810807f826c477ae75c1bbf7",
+          "recovery_links": [],
+          "stage": "draft",
+          "stored_stage_works": [
+            {
+              "formal": null,
+              "history": [
+                {
+                  "attempt_number": 1,
+                  "event_seq": 70,
+                  "state": "ready"
+                },
+                {
+                  "attempt_number": 1,
+                  "event_seq": 71,
+                  "state": "leased"
+                },
+                {
+                  "attempt_number": 1,
+                  "event_seq": 124,
+                  "state": "expired"
+                },
+                {
+                  "attempt_number": 2,
+                  "event_seq": 125,
+                  "state": "ready"
+                }
+              ],
+              "work_model_authority_refresh_hash": null,
+              "work_order_hash": "caa5e02955068f564fe8f81b3a89fa03c16c75ac77a4c5d8cccb12320cdad788",
+              "work_order_ref": "work:mission-document-research-05f88fad96439c22540e6b621ec66c29"
+            }
+          ]
+        },
+        {
+          "admitted_base_work_order_ref": "work:mission-document-research-04089c3e32bbbe9e09691d977428aaa9",
+          "current_base_work_order_ref": "work:mission-document-research-47c0d6b1b2204965b4207d4df85d7549",
+          "recovery_links": [],
+          "stage": "verifier",
+          "stored_stage_works": []
+        }
+      ]
+    }
+  ],
+  "content_hash": "d5cd57876eccaa9cbe1e996b6e28715110b13e07cfa20b5f2ec0af271b86fac3",
+  "generated_at": "2026-09-22T14:43:22.367108+00:00",
+  "live_writes": 0,
+  "mode": "same exact-path preserved read-only snapshot inspection as classification receipt",
+  "model_calls": 0,
+  "schema_version": "live16-model-authority-forensics:0.1"
+}

@@ -104,3 +104,12 @@ P0-3 的历史规模必须按 **Core 内的 Scheduler 表** 统计，外部 `sch
 - 已用授权与恢复次数持续累计；策略更新本身不创造恢复额度，未知送达状态和已付费契约失败仍使用原有不同恢复入口。
 
 第二批冻结前：文档研究完整模块 76 项通过，独立复核通过；最终不同 epoch 竞争、双连接领取约束及中断恢复专项 3 项通过。确定性上下文与 consensus 专项 62 项通过。源码 diff 检查通过。
+
+
+第二批候选 `c1a2ba36` 的全量检查发现新库初始化顺序缺陷：9,702 项中 47 errors、1 failure，全部追溯到 Scheduler 表建立前安装跨表 lease trigger。该候选没有上线。修复将这两条 guard 延至共享 Scheduler 存储已初始化的 Executor 构造阶段，保留映射写入及双连接领取约束；fresh bootstrap、Service、schema-only migration 涉及的 16 个模块共 317 项复跑通过，文档研究 77 项通过。随后重新冻结并运行最终全量，结果另记。
+
+逐条只读审计另识别两条旧 `atomic_day_budget_refusal` RecoveryLink：当时完整预算 binding 与不可变拒绝凭证一致，但当前 policy-17 / mandate 12 覆盖旧 policy-11 / mandate 7 的治理外壳后，被错误地判为历史 proof 漂移。修复仅从 canonical、完整哈希及 Work/attempt/route/policy/day 均核对的原始拒绝行验证历史 binding；其完整字段必须精确匹配当前预算，或由不可变原 admission 与 mission 重建的原始预算。当前 mission 身份、pool/lane 仍必须一致；未知中间治理版本继续拒绝。成功恢复结果还须重验完整链及自身已结算预算。新发送继续使用当前预算。这样一条可复用既有成功结果，另一条回到原有付费契约失败入口，不凭空增加额度。
+
+另外两条历史 admission（legacy `e83cce…`、Hyperscaler `256f75…`）只有 `ready → leased → expired → ready`，没有 formal result，也没有 refresh/recovery marker。无法证明未发送，继续暂停是正确行为；不能将其冒充可安全重放的旧成功结果。
+
+最终冻结前的历史预算专项 5/5 通过，独立复核无未决阻塞；16 条实案在保留精确线上执行权威与原始绝对路径的一致性副本中复跑，0 live writes、0 model calls。两条预算误挡已分别恢复成功结果复用与付费契约失败入口；只余上述两条缺 formal result 的任务继续拒绝。收据见 `live16-model-authority-classification.json`。

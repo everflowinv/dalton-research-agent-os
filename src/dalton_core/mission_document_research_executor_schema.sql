@@ -126,31 +126,3 @@ WHEN NOT (
   WHERE work_order_ref=NEW.authorized_recovery_work_ref)
 )
 BEGIN SELECT RAISE(ABORT,'model authority epoch rebind requires atomically unused recovery Work'); END;
-CREATE TRIGGER IF NOT EXISTS scheduler_leases_no_epoch_rebound_source
-BEFORE INSERT ON scheduler_leases
-WHEN EXISTS (
- SELECT 1 FROM mission_document_research_model_authority_epoch_rebinds
- WHERE authorized_recovery_work_ref=NEW.work_order_id
-)
-BEGIN SELECT RAISE(ABORT,'model authority epoch rebind already consumed recovery Work'); END;
-CREATE TRIGGER IF NOT EXISTS scheduler_leases_require_epoch_rebind_mapping
-BEFORE INSERT ON scheduler_leases
-WHEN json_extract(
- (SELECT work_order_json FROM scheduler_work_orders
-  WHERE work_order_id=NEW.work_order_id),
- '$.metadata.mission_document_model_authority_epoch_rebind.rebind_ref'
-) IS NOT NULL
-AND NOT EXISTS (
- SELECT 1
- FROM scheduler_work_orders w
- JOIN mission_document_research_model_authority_epoch_rebinds r
-  ON r.rebound_work_order_ref=w.work_order_id
- WHERE w.work_order_id=NEW.work_order_id
-  AND r.rebind_id=json_extract(
-   w.work_order_json,
-   '$.metadata.mission_document_model_authority_epoch_rebind.rebind_ref')
-  AND r.content_hash=json_extract(
-   w.work_order_json,
-   '$.metadata.mission_document_model_authority_epoch_rebind.rebind_hash')
-)
-BEGIN SELECT RAISE(ABORT,'model authority rebound Work lacks exact mapping'); END;

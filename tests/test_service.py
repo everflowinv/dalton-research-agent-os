@@ -609,6 +609,30 @@ class BootstrapSchemaTests(unittest.TestCase):
             second = bootstrap(root / "state", root / "service.json")
             self.assertEqual(first, second)
 
+    def test_fresh_service_defers_model_epoch_lease_guards_until_executor_init(self) -> None:
+        """Schema-only bootstrap must not require Core Scheduler tables."""
+
+        from dalton_core.bootstrap import bootstrap
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            result = bootstrap(root / "state", root / "service.json")
+            with sqlite3.connect(root / "state" / "core.sqlite") as connection:
+                self.assertIsNotNone(connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name="
+                    "'mission_document_research_model_authority_epoch_rebinds'"
+                ).fetchone())
+                self.assertIsNone(connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name='scheduler_leases'"
+                ).fetchone())
+                self.assertEqual(connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='trigger' "
+                    "AND name LIKE 'scheduler_leases_%epoch_%'"
+                ).fetchall(), [])
+            service = DaltonService(ServiceConfig.from_file(result["config"]))
+            service.close()
+
     def test_bootstrap_keeps_public_dashboard_publish_opted_out(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

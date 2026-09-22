@@ -1,0 +1,66 @@
+{
+  "admissions": [
+    {
+      "admission_ref": "mission-document-research-admission:6a2bcd446237e1bd9732690b4b542b3a",
+      "classification": {
+        "admission_ref": "mission-document-research-admission:6a2bcd446237e1bd9732690b4b542b3a",
+        "stages": [
+          {
+            "action": "existing_paid_contract_recovery_door",
+            "reason": "paid_send_output_contract_failed",
+            "stage": "draft",
+            "status": "historical_failure",
+            "used_recovery_links": 1,
+            "work_order_ref": "work:mission-document-recovery-b73845dd8f28d08826401a9c2272dbfb"
+          },
+          {
+            "action": "inspect_exact_historical_authority",
+            "reason": "child requires exact succeeded upstream",
+            "stage": "verifier",
+            "status": "blocked"
+          }
+        ]
+      },
+      "environment": "legacy",
+      "model_calls": 0,
+      "snapshot_inspection_writes": 0
+    },
+    {
+      "admission_ref": "mission-document-research-admission:ca9bac39454f3ee9bcfd3f0508f342e3",
+      "classification": {
+        "admission_ref": "mission-document-research-admission:ca9bac39454f3ee9bcfd3f0508f342e3",
+        "stages": [
+          {
+            "action": "none",
+            "reason": "exact_succeeded_stage_reused",
+            "stage": "draft",
+            "status": "succeeded",
+            "used_recovery_links": 1,
+            "work_order_ref": "work:mission-document-recovery-9ff5ddc6051c9341529233b01ba2d9e0"
+          },
+          {
+            "action": "enqueue",
+            "reason": "model_stage_not_enqueued",
+            "stage": "verifier",
+            "status": "not_enqueued",
+            "used_recovery_links": 0,
+            "work_order_ref": "work:mission-document-research-0d3974b52e541cdb0a7a5338b29c912b"
+          }
+        ]
+      },
+      "environment": "legacy",
+      "model_calls": 0,
+      "snapshot_inspection_writes": 0
+    }
+  ],
+  "content_hash": "e31337e70ed0ba9ef4b46ceda54355d931e0a2aa7e64d4912e2c868e45dedb44",
+  "generated_at": "2026-09-22T14:45:38.646992+00:00",
+  "limitations": [
+    "This is forensic evidence for a proposed compatibility rule, not executable authorization and not a source-code change.",
+    "Every other executor check remains active, including canonical link/refusal rows, Work/formal/route/result/accounting authority."
+  ],
+  "live_writes": 0,
+  "mode": "read-only point-in-time snapshots; exact live execution resolver; forensic substitution uses canonical persisted budget-ledger mission_binding only for the historical RecoveryLink verification step",
+  "model_calls": 0,
+  "schema_version": "historical-mission-binding-reverification:0.1"
+}
