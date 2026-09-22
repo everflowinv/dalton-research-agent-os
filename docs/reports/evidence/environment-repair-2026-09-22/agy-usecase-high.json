@@ -1,0 +1,41 @@
+{
+  "kind": "synthetic_latest_revision_structured_extraction",
+  "model": "gemini-3.8-flash",
+  "effort": "high",
+  "prompt_utf8_bytes": 130000,
+  "seconds": 10.224,
+  "exact_schema_and_values": true,
+  "expected": [
+    {
+      "project_id": "SYN-663eaca8",
+      "owner": "青杉",
+      "revision": 2,
+      "units": 137,
+      "currency": "CNY"
+    },
+    {
+      "project_id": "SYN-eef25b3e",
+      "owner": "白鹭",
+      "revision": 2,
+      "units": 246,
+      "currency": "CNY"
+    },
+    {
+      "project_id": "SYN-47be0c2d",
+      "owner": "澄湖",
+      "revision": 2,
+      "units": 359,
+      "currency": "CNY"
+    }
+  ],
+  "response": "[\n  {\"project_id\": \"SYN-663eaca8\", \"owner\": \"青杉\", \"revision\": 2, \"units\": 137, \"currency\": \"CNY\"},\n  {\"project_id\": \"SYN-eef25b3e\", \"owner\": \"白鹭\", \"revision\": 2, \"units\": 246, \"currency\": \"CNY\"},\n  {\"project_id\": \"SYN-47be0c2d\", \"owner\": \"澄湖\", \"revision\": 2, \"units\": 359, \"currency\": \"CNY\"}\n]\n",
+  "usage": {
+    "prompt_tokens": 40673,
+    "prompt_tokens_details": {
+      "cached_tokens": 0
+    },
+    "completion_tokens": 1165,
+    "total_tokens": 41838
+  },
+  "scope": "One synthetic example per effort; no quality certification or verifier capability grant."
+}

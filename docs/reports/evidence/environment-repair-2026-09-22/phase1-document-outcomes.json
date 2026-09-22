@@ -1,0 +1,105 @@
+{
+  "generated_at": "2026-09-22T14:12:52.675553+00:00",
+  "source_release": "f3ee7e46",
+  "summaries": [
+    {
+      "environment": "ws-7d894366d1132e2930475a60",
+      "ticket_ref": "mission-document-research:89385a85a1fda104164969b2",
+      "admission_ref": "mission-document-research-admission:27dcac6c151d921bfaa1ee15af5d3f7f",
+      "created_at": "2026-09-22T13:33:48.318150+00:00",
+      "status": "complete",
+      "error": null,
+      "summary_sha256": "c352c27f48d538c785fb63d30e5ca9c370859287dc9be19f500aad8966ef5236"
+    },
+    {
+      "environment": "legacy",
+      "ticket_ref": "mission-document-research:adc3ba6c8bae21be51310c17",
+      "admission_ref": "mission-document-research-admission:7a0c669b05831ad0160ec231b16e60b1",
+      "created_at": "2026-09-22T13:35:31.754712+00:00",
+      "status": "complete",
+      "error": null,
+      "summary_sha256": "13de556f34f586462b596a07bc54ffbe51bbe2c4f9bdf5b8d6b1baf3ed34ba3e"
+    },
+    {
+      "environment": "ws-7d894366d1132e2930475a60",
+      "ticket_ref": "mission-document-research:e4bb693fe2bd233483aee750",
+      "admission_ref": "mission-document-research-admission:6c67385f2f8d9d0cf357ce59590f63e3",
+      "created_at": "2026-09-22T13:38:12.770481+00:00",
+      "status": "complete",
+      "error": null,
+      "summary_sha256": "45c92ec981ca7b521045c311449e71bc44e7b9fc97a6c774b14275e06a091926"
+    },
+    {
+      "environment": "legacy",
+      "ticket_ref": "mission-document-research:d4e0bdd32a8ade62e2200314",
+      "admission_ref": "mission-document-research-admission:c141b6637483ecf1270b4f22218c2520",
+      "created_at": "2026-09-22T13:45:23.473138+00:00",
+      "status": "failed",
+      "error": "MissionDocumentResearchExecutorError: candidate_source_materials identity conflict",
+      "summary_sha256": "52df3bf99cfe66a109ff9791ccb4dde2a7c42790aa5f3be5490fd8445b627a0b"
+    },
+    {
+      "environment": "ws-7d894366d1132e2930475a60",
+      "ticket_ref": "mission-document-research:cc0d932680d9ef1f0d7db821",
+      "admission_ref": "mission-document-research-admission:42459ee5ed0988599d9266139ff0c05d",
+      "created_at": "2026-09-22T13:48:13.035299+00:00",
+      "status": "failed",
+      "error": "MissionDocumentResearchExecutorError: stored Work drifted",
+      "summary_sha256": "ea7859cca53ff510e09847ae2e4ef1f140aed33a7aa6fab2dc45fb4be7608c1a"
+    },
+    {
+      "environment": "legacy",
+      "ticket_ref": "mission-document-research:a8d5fb337894aa157f64e083",
+      "admission_ref": "mission-document-research-admission:16a7a1374b3ca802e87bc59c9d1e865e",
+      "created_at": "2026-09-22T13:55:04.839172+00:00",
+      "status": "failed",
+      "error": "MissionDocumentResearchExecutorError: stored Work drifted",
+      "summary_sha256": "550d0807356e4edf582e4c4b9f5e9e0a8a66e8e61b10d51db18ca33b82fc1f30"
+    },
+    {
+      "environment": "ws-7d894366d1132e2930475a60",
+      "ticket_ref": "mission-document-research:a2f0a5e1cbc4009605c2a429",
+      "admission_ref": "mission-document-research-admission:d02eaa60abfaf68042fccfda18a28ec5",
+      "created_at": "2026-09-22T13:58:18.766870+00:00",
+      "status": "failed",
+      "error": "MissionDocumentResearchExecutorError: stored Work drifted",
+      "summary_sha256": "1ebf7813f76b603e13b7a8cf061177f2dc12e9e9d306e6f6480439bb1025fdfd"
+    },
+    {
+      "environment": "legacy",
+      "ticket_ref": "mission-document-research:ef49f3c18bfd0bf2bddbbd15",
+      "admission_ref": "mission-document-research-admission:5bbcf776cca6e4cde589b3940d60dddc",
+      "created_at": "2026-09-22T14:00:13.460763+00:00",
+      "status": "failed",
+      "error": "MissionDocumentResearchExecutorError: stored Work drifted",
+      "summary_sha256": "2859849d2080adb2e0e4831f822997b5798ac960de8eb256f73f3cf48c30671b"
+    },
+    {
+      "environment": "ws-7d894366d1132e2930475a60",
+      "ticket_ref": "mission-document-research:687ebac15f9a49fc72b9eecd",
+      "admission_ref": "mission-document-research-admission:053a3d5d21263186e94bb0a8ac9f2852",
+      "created_at": "2026-09-22T14:03:24.637129+00:00",
+      "status": "complete",
+      "error": null,
+      "summary_sha256": "8b1f484bfe07602943989374016ef74f87c1a7a02f7d6c4a740a33c9f66f12c1"
+    },
+    {
+      "environment": "ws-7d894366d1132e2930475a60",
+      "ticket_ref": "mission-document-research:69dd368d763102d9b99016a2",
+      "admission_ref": "mission-document-research-admission:a9ba7b717317fb580c077af8a7b60775",
+      "created_at": "2026-09-22T14:08:38.432861+00:00",
+      "status": "complete",
+      "error": null,
+      "summary_sha256": "4384f8e75cce6043011ec81bd420465ce5d1571cf2a70d027bfb140b0fdc7a40"
+    },
+    {
+      "environment": "legacy",
+      "ticket_ref": "mission-document-research:66c77f3401dc9b57ee9dd293",
+      "admission_ref": "mission-document-research-admission:a680e6427271b195d6874d57ea7c6c01",
+      "created_at": "2026-09-22T14:10:15.977347+00:00",
+      "status": "failed",
+      "error": "MissionDocumentResearchExecutorError: stored Work drifted",
+      "summary_sha256": "d17944f49ccb8e4b936441d20343b46fcca94defafa377366477d54b1b2bd1b8"
+    }
+  ]
+}

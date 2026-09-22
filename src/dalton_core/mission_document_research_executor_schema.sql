@@ -40,6 +40,17 @@ CREATE TABLE IF NOT EXISTS mission_document_research_controlled_recovery_authori
  record_json TEXT NOT NULL, content_hash TEXT NOT NULL UNIQUE,
  created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS mission_document_research_model_authority_epoch_rebinds (
+ rebind_id TEXT PRIMARY KEY, admission_ref TEXT NOT NULL,
+ stage_ordinal INTEGER NOT NULL CHECK(stage_ordinal IN (2,3)),
+ recovery_link_ref TEXT NOT NULL UNIQUE,
+ authorized_recovery_work_ref TEXT NOT NULL UNIQUE,
+ current_base_work_ref TEXT NOT NULL,
+ rebound_work_order_ref TEXT NOT NULL UNIQUE,
+ record_json TEXT NOT NULL, content_hash TEXT NOT NULL UNIQUE,
+ created_at TEXT NOT NULL,
+ UNIQUE(admission_ref,stage_ordinal,current_base_work_ref)
+);
 CREATE TRIGGER IF NOT EXISTS mission_document_research_starts_no_update
 BEFORE UPDATE ON mission_document_research_starts BEGIN SELECT RAISE(ABORT,'mission document starts are append-only'); END;
 CREATE TRIGGER IF NOT EXISTS mission_document_research_starts_no_delete
@@ -84,3 +95,62 @@ CREATE TRIGGER IF NOT EXISTS mission_document_research_controlled_recovery_autho
 BEFORE INSERT ON mission_document_research_controlled_recovery_authorizations
 WHEN dalton_mission_document_research_executor_authorized()=0
 BEGIN SELECT RAISE(ABORT,'mission document controlled recovery authorization insert requires executor'); END;
+CREATE TRIGGER IF NOT EXISTS mission_document_research_model_authority_epoch_rebinds_no_update
+BEFORE UPDATE ON mission_document_research_model_authority_epoch_rebinds BEGIN
+ SELECT RAISE(ABORT,'mission document model authority epoch rebinds are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS mission_document_research_model_authority_epoch_rebinds_no_delete
+BEFORE DELETE ON mission_document_research_model_authority_epoch_rebinds BEGIN
+ SELECT RAISE(ABORT,'mission document model authority epoch rebinds are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS mission_document_research_model_authority_epoch_rebinds_authorized_insert
+BEFORE INSERT ON mission_document_research_model_authority_epoch_rebinds
+WHEN dalton_mission_document_research_executor_authorized()=0
+BEGIN SELECT RAISE(ABORT,'mission document model authority epoch rebind insert requires executor'); END;
+CREATE TRIGGER IF NOT EXISTS mission_document_research_model_authority_epoch_rebinds_unused_insert
+BEFORE INSERT ON mission_document_research_model_authority_epoch_rebinds
+WHEN NOT (
+ EXISTS (
+  SELECT 1 FROM mission_document_research_recovery_links l
+  WHERE l.recovery_link_id=NEW.recovery_link_ref
+   AND l.recovery_work_order_ref=NEW.authorized_recovery_work_ref
+   AND l.admission_ref=NEW.admission_ref
+   AND l.stage_ordinal=NEW.stage_ordinal)
+ AND (SELECT count(*) FROM scheduler_attempt_events
+  WHERE work_order_id=NEW.authorized_recovery_work_ref)=1
+ AND (SELECT state FROM scheduler_attempt_events
+      WHERE work_order_id=NEW.authorized_recovery_work_ref LIMIT 1)='ready'
+ AND NOT EXISTS (
+  SELECT 1 FROM scheduler_formal_results
+  WHERE work_order_id=NEW.authorized_recovery_work_ref)
+ AND NOT EXISTS (
+  SELECT 1 FROM model_invocations
+  WHERE work_order_ref=NEW.authorized_recovery_work_ref)
+)
+BEGIN SELECT RAISE(ABORT,'model authority epoch rebind requires atomically unused recovery Work'); END;
+CREATE TRIGGER IF NOT EXISTS scheduler_leases_no_epoch_rebound_source
+BEFORE INSERT ON scheduler_leases
+WHEN EXISTS (
+ SELECT 1 FROM mission_document_research_model_authority_epoch_rebinds
+ WHERE authorized_recovery_work_ref=NEW.work_order_id
+)
+BEGIN SELECT RAISE(ABORT,'model authority epoch rebind already consumed recovery Work'); END;
+CREATE TRIGGER IF NOT EXISTS scheduler_leases_require_epoch_rebind_mapping
+BEFORE INSERT ON scheduler_leases
+WHEN json_extract(
+ (SELECT work_order_json FROM scheduler_work_orders
+  WHERE work_order_id=NEW.work_order_id),
+ '$.metadata.mission_document_model_authority_epoch_rebind.rebind_ref'
+) IS NOT NULL
+AND NOT EXISTS (
+ SELECT 1
+ FROM scheduler_work_orders w
+ JOIN mission_document_research_model_authority_epoch_rebinds r
+  ON r.rebound_work_order_ref=w.work_order_id
+ WHERE w.work_order_id=NEW.work_order_id
+  AND r.rebind_id=json_extract(
+   w.work_order_json,
+   '$.metadata.mission_document_model_authority_epoch_rebind.rebind_ref')
+  AND r.content_hash=json_extract(
+   w.work_order_json,
+   '$.metadata.mission_document_model_authority_epoch_rebind.rebind_hash')
+)
+BEGIN SELECT RAISE(ABORT,'model authority rebound Work lacks exact mapping'); END;

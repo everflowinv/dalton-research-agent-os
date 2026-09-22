@@ -1294,6 +1294,24 @@ class DocumentExtractionService:
                 "outer_budget": self.outer_budget(base["mission_version_ref"])}
         return _record({"id": "document-extraction-context:" + content_hash(base)[:32], **base})
 
+    def source_context(self, review_id, expected_review_hash, offset, actor_ref,
+                       require_open=True):
+        """Return the verified local source window without model authority.
+
+        Deterministic readers use this boundary when they do not dispatch a
+        model.  Source, receipt, spool, mission, and window validation remain
+        identical to :meth:`context`; only the model routing and budget
+        binding is intentionally absent.
+        """
+        base = self._source_context(
+            review_id, expected_review_hash, offset, actor_ref,
+            require_open=require_open,
+        )
+        return _record({
+            "id": "document-extraction-source-context:" + content_hash(base)[:32],
+            **base,
+        })
+
     def outer_budget(self, mission_version_ref):
         """ADR-0004: a mission cannot manufacture its outer spend authority.
 

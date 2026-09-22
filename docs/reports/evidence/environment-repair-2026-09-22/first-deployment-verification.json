@@ -1,0 +1,20 @@
+{
+  "release_hash": "f3ee7e46e675c6f7f2f351b1ac223c700b1a7099f17dffcc7191bbfe9a899d3d",
+  "source_commit": "061cdc59fb71f031ec239e8aa4d6b0c21e224208",
+  "health_recheck_ok": true,
+  "archived_objects": 993,
+  "freed_bytes": 72673795,
+  "physical_spool_bytes_after": 920385993,
+  "at": "2026-09-22T13:36:06Z",
+  "claim_deltas": {
+    "legacy": 8,
+    "hyperscaler": 1
+  },
+  "safe_reentry_grants": 10,
+  "new_model_budget_grants": 0,
+  "extraction_summary": {
+    "status": "succeeded",
+    "failure_reason": null,
+    "ticket_disagreement_present": false
+  }
+}

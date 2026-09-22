@@ -1,0 +1,321 @@
+{
+  "candidate_source_material_collision": {
+    "admission_ref": "mission-document-research-admission:c141b6637483ecf1270b4f22218c2520",
+    "attempted_admission_ref": "mission-document-research-admission:c141b6637483ecf1270b4f22218c2520",
+    "attempted_material_content_hash": "8d130277183c33fb6cd1bb7beb36fb57bd0681467a3ef3820b5bc77632fa7b49",
+    "candidate_stage_request_exists": false,
+    "candidate_staging_db": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core/research-review/candidate-staging.sqlite",
+    "candidate_work_binding_hash": "f50c18519a08f6616c8b13c71124b838d7deded8a3f90b8de26e816de9170bd9",
+    "candidate_work_idempotency_key": "mission-document-research-work:mission-document-research-admission:c141b6637483ecf1270b4f22218c2520:4:model-authority-refresh:5f31992b068cb251c32847968b630ad2151277468735ddc7807cf4d81b9b2291",
+    "candidate_work_order_ref": "work:mission-document-research-4e79b1e2ffc3bb50ef71410da11ecc9f",
+    "candidate_work_upstream_ref": "work:mission-document-research-e9e6f99533fdd9c5a4604cfef236d82f",
+    "canonical_diff_count": 35,
+    "canonical_diff_paths": [
+      "authority_resolution_hash",
+      "authority_resolution_ref",
+      "content_hash",
+      "created_at",
+      "normalized_payload.draft_proof.content_hash",
+      "normalized_payload.draft_proof.id",
+      "normalized_payload.draft_proof.model_invocation_ref",
+      "normalized_payload.draft_proof.output.answer",
+      "normalized_payload.draft_proof.output.candidate.basis",
+      "normalized_payload.draft_proof.output.candidate.cited_match_indexes",
+      "normalized_payload.draft_proof.output.candidate.metric_or_aspect",
+      "normalized_payload.draft_proof.output.candidate.normalized_statement",
+      "normalized_payload.draft_proof.output.candidate.period",
+      "normalized_payload.draft_proof.output_hash",
+      "normalized_payload.draft_proof.prompt_hash",
+      "normalized_payload.draft_proof.request_binding_hash",
+      "normalized_payload.draft_proof.route_decision_ref",
+      "normalized_payload.draft_proof.work_order_hash",
+      "normalized_payload.draft_proof.work_order_ref",
+      "normalized_payload.mission_document_admission.hash",
+      "normalized_payload.mission_document_admission.ref",
+      "normalized_payload.verifier_proof.content_hash",
+      "normalized_payload.verifier_proof.id",
+      "normalized_payload.verifier_proof.model_invocation_ref",
+      "normalized_payload.verifier_proof.output.findings",
+      "normalized_payload.verifier_proof.output.verified_statement",
+      "normalized_payload.verifier_proof.output_hash",
+      "normalized_payload.verifier_proof.prompt_hash",
+      "normalized_payload.verifier_proof.request_binding_hash",
+      "normalized_payload.verifier_proof.route_decision_ref",
+      "normalized_payload.verifier_proof.work_order_hash",
+      "normalized_payload.verifier_proof.work_order_ref",
+      "normalized_payload_hash",
+      "retrieved_at",
+      "source_lineage"
+    ],
+    "cause": "legacy source material id is derived only from search_proof.content_hash while its immutable record embeds admission-specific draft/verifier proofs and admission identity",
+    "colliding_material_id": "source-material:mission-document:7be04699310eddf6e6df85a1f071e588b2569f972617c1224c0a4b8885dc6674",
+    "core_scheduler_db": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core/core.sqlite",
+    "environment": "legacy",
+    "existing_admission_ref": "mission-document-research-admission:28632c70eea0d8209b89ec6353e0a51b",
+    "existing_material_content_hash": "fca3093a57b09b77c3f3861fcd833dde9782a437fd161c0d7c1c2d573afbfedf",
+    "fixed_id_collides_with_legacy_row": false,
+    "fixed_versioned_material_hash": "e59f3ac8f95b842f2ffe1cd93722431ab0ca74df8a4d7578adc5b4cca12c294f",
+    "fixed_versioned_material_id": "source-material:mission-document:v2:61c725a6ba2e075c1612582c4dfdc93359ee206dbfa591782b236226fba9f24f",
+    "shared_search_proof_ref": "document-search-proof:sha256:fb6bf648300db5d705bebd4130ad7d016adb6a8a9b6535847434c468fea349e2",
+    "state_dir": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core",
+    "ticket_ref": "mission-document-research:d4e0bdd32a8ade62e2200314"
+  },
+  "content_hash": "af14faf906280ae846ce46a4c793a074a858abebd689ad232aa035cd18f5c3dc",
+  "findings": {
+    "candidate_collision": "A distinct admission reused the same document search proof. The material id aliases the prior admission while the immutable material body includes distinct admission and model-proof authority, so CandidateStaging correctly rejects the overwrite.",
+    "stored_work_drift": "Both resumes fail first at the historical draft Work. The stored Work exactly matches the known pre-ebf7273d draft template; current re-derivation changes only question, metadata.prompt_hash, and metadata.model_request_binding_hash. Verifier and candidate-staging historical Works re-derive byte-exact."
+  },
+  "generated_at": "2026-09-22T14:07:15.818691+00:00",
+  "guards": [
+    "SQLite URI mode=ro",
+    "PRAGMA query_only=ON",
+    "read-only ModelRouter"
+  ],
+  "mode": "read_only_live_forensic",
+  "release_source": "061cdc59",
+  "schema_version": "0.1",
+  "stored_work_drift_cases": [
+    {
+      "admission_ref": "mission-document-research-admission:42459ee5ed0988599d9266139ff0c05d",
+      "admitted_stage_rederivation": [
+        {
+          "canonical_diff_paths": [],
+          "canonical_scalar_diffs": {},
+          "current_derivation_hash": "e37e3ba18ab58443eed59a048cc11993e8f0aee4b4e00d15209cbe8a7e450cf6",
+          "ordinal": 1,
+          "stage": "registered_document_retrieval",
+          "stored_hash": "e37e3ba18ab58443eed59a048cc11993e8f0aee4b4e00d15209cbe8a7e450cf6",
+          "work_order_ref": "work:mission-document-research-47c2093fa7edd9851c893002657e61d3"
+        },
+        {
+          "canonical_diff_paths": [
+            "metadata.model_request_binding_hash",
+            "metadata.prompt_hash",
+            "question"
+          ],
+          "canonical_scalar_diffs": {
+            "metadata.model_request_binding_hash": {
+              "current_derivation": "6fb1d053073918d1ca0a87dab56820749bfe90c6662c4d742cac6d22206f494a",
+              "stored": "778378d1027f540b761935d4b57d87a429b3bfccef2ee217a2bc5ecebf76ed38"
+            },
+            "metadata.prompt_hash": {
+              "current_derivation": "307f5ef8560910b0afcf0be63f43d2470619ec1c4d1b136d0448963a38dc5748",
+              "stored": "89294518c4070327dceb7e45ee9b83e11788ac16a8e02cb29b47fc52f0620c12"
+            }
+          },
+          "current_derivation_hash": "68a8a72cb5d137efc356deee39b6999653e809c76b91de6ac4d067064c7b1975",
+          "ordinal": 2,
+          "stage": "qualitative_model_draft",
+          "stored_hash": "4d558bc752e3ae330173586c4ac3b43baa1676f814a58349c5dd1f5606f1e2d3",
+          "work_order_ref": "work:mission-document-research-76295e8c06b2b8e66522f7365413ee81"
+        },
+        {
+          "canonical_diff_paths": [],
+          "canonical_scalar_diffs": {},
+          "current_derivation_hash": "315276fc3b21bf1707349fe539964707b217a54f425c1222c07241b48175008a",
+          "ordinal": 3,
+          "stage": "independent_qualitative_verifier",
+          "stored_hash": "315276fc3b21bf1707349fe539964707b217a54f425c1222c07241b48175008a",
+          "work_order_ref": "work:mission-document-research-3824f2048da4d0b5a7fa6ca354f2ca42"
+        },
+        {
+          "canonical_diff_paths": [],
+          "canonical_scalar_diffs": {},
+          "current_derivation_hash": "1c547dd07530e6adbfb60117aeaf826f5783ffca966198fab25887222c121ae1",
+          "ordinal": 4,
+          "stage": "qualitative_candidate_staging",
+          "stored_hash": "1c547dd07530e6adbfb60117aeaf826f5783ffca966198fab25887222c121ae1",
+          "work_order_ref": "work:mission-document-research-aab3661a914fdbc98fa06ac98a45dcaa"
+        }
+      ],
+      "current_refresh": {
+        "blueprints": [
+          {
+            "admitted_work_order_ref": "work:mission-document-research-47c2093fa7edd9851c893002657e61d3",
+            "idempotency_key": "mission-document-research-work:mission-document-research-admission:42459ee5ed0988599d9266139ff0c05d:1",
+            "mission_document_work_binding_hash": "48a7ada6c4a2a78b46b0260774d81155c001ef4a92f825107d7e420be4b5c5f1",
+            "ordinal": 1,
+            "refreshed_blueprint_work_order_ref": "work:mission-document-research-47c2093fa7edd9851c893002657e61d3",
+            "stage": "registered_document_retrieval",
+            "upstream_work_order_ref": null
+          },
+          {
+            "admitted_work_order_ref": "work:mission-document-research-76295e8c06b2b8e66522f7365413ee81",
+            "idempotency_key": "mission-document-research-work:mission-document-research-admission:42459ee5ed0988599d9266139ff0c05d:2:model-authority-refresh:e64af6255718a16c607a708a04a7024313817a95707d7ed2b35f7911a91460c7",
+            "mission_document_work_binding_hash": "0c6f4a8195cc13954482400d78ebad2c15634d21511596f071cac313e99e5eb7",
+            "ordinal": 2,
+            "refreshed_blueprint_work_order_ref": "work:mission-document-research-f3152187c4ac657b4522d9656ffa5d4f",
+            "stage": "qualitative_model_draft",
+            "upstream_work_order_ref": "work:mission-document-research-47c2093fa7edd9851c893002657e61d3"
+          },
+          {
+            "admitted_work_order_ref": "work:mission-document-research-3824f2048da4d0b5a7fa6ca354f2ca42",
+            "idempotency_key": "mission-document-research-work:mission-document-research-admission:42459ee5ed0988599d9266139ff0c05d:3:model-authority-refresh:ac8f07bfda841811d8cd7eb113913b18f001badbc94a80824603bd3c9eb69756",
+            "mission_document_work_binding_hash": "4b52a235c32987f72755c2231991842433bccdb1b1fc629101bdf04536c2bfcc",
+            "ordinal": 3,
+            "refreshed_blueprint_work_order_ref": "work:mission-document-research-cec4976640651b99b67a10b92550e135",
+            "stage": "independent_qualitative_verifier",
+            "upstream_work_order_ref": "work:mission-document-research-f3152187c4ac657b4522d9656ffa5d4f"
+          },
+          {
+            "admitted_work_order_ref": "work:mission-document-research-aab3661a914fdbc98fa06ac98a45dcaa",
+            "idempotency_key": "mission-document-research-work:mission-document-research-admission:42459ee5ed0988599d9266139ff0c05d:4:model-authority-refresh:ac8f07bfda841811d8cd7eb113913b18f001badbc94a80824603bd3c9eb69756",
+            "mission_document_work_binding_hash": "e467e1478b69d5f6bc4b0636ea0954c7c6a81f2f992653312a1fcb29d38e69dd",
+            "ordinal": 4,
+            "refreshed_blueprint_work_order_ref": "work:mission-document-research-d802d7de3d45436d3f40c56ac91c5816",
+            "stage": "qualitative_candidate_staging",
+            "upstream_work_order_ref": "work:mission-document-research-cec4976640651b99b67a10b92550e135"
+          }
+        ],
+        "content_hash": "a8fa0c79f5d5f94635ef8672626943df450622d424ecf07cb035e75cb8e42362",
+        "stages": {
+          "draft": {
+            "admitted_routing_policy_ref": "model-routing-policy-version:dalton-openclaw-company-dossier:51",
+            "changed": true,
+            "content_hash": "add1b8b0444d496f5c523a22692272f271e533b2336eef23f95ab7962b92ae49",
+            "current_routing_policy_ref": "model-routing-policy-version:dalton-openclaw-company-dossier:54"
+          },
+          "verifier": {
+            "admitted_routing_policy_ref": "model-routing-policy-version:dalton-openclaw-dossier-verifier:54",
+            "changed": true,
+            "content_hash": "4f865ab2c5f0ebf2caf13e20cc4a4c2f38681d8d7aca972ec9b5867df4cb4441",
+            "current_routing_policy_ref": "model-routing-policy-version:dalton-openclaw-dossier-verifier:57"
+          }
+        }
+      },
+      "environment": "hyperscaler",
+      "first_drift_stage": "qualitative_model_draft",
+      "historical_template_proof": {
+        "current_prompt_hash": "307f5ef8560910b0afcf0be63f43d2470619ec1c4d1b136d0448963a38dc5748",
+        "known_pre_ebf7273d_template_exact_match": true,
+        "reconstructed_historical_prompt_hash": "89294518c4070327dceb7e45ee9b83e11788ac16a8e02cb29b47fc52f0620c12",
+        "stored_prompt_hash": "89294518c4070327dceb7e45ee9b83e11788ac16a8e02cb29b47fc52f0620c12",
+        "template_change_commit": "ebf7273d"
+      },
+      "scheduler_db": "/Volumes/EveSSD/Dalton/workspaces/ws-7d894366d1132e2930475a60/state/dalton-core/core.sqlite",
+      "state_dir": "/Volumes/EveSSD/Dalton/workspaces/ws-7d894366d1132e2930475a60/state/dalton-core",
+      "ticket_ref": "mission-document-research:cc0d932680d9ef1f0d7db821"
+    },
+    {
+      "admission_ref": "mission-document-research-admission:16a7a1374b3ca802e87bc59c9d1e865e",
+      "admitted_stage_rederivation": [
+        {
+          "canonical_diff_paths": [],
+          "canonical_scalar_diffs": {},
+          "current_derivation_hash": "be3cd1bf951775f5d1280fa292b1738744f65e0b1e24cec2e147a6c6a6e233f3",
+          "ordinal": 1,
+          "stage": "registered_document_retrieval",
+          "stored_hash": "be3cd1bf951775f5d1280fa292b1738744f65e0b1e24cec2e147a6c6a6e233f3",
+          "work_order_ref": "work:mission-document-research-7be86530ba9cd24821729cf0379c90c6"
+        },
+        {
+          "canonical_diff_paths": [
+            "metadata.model_request_binding_hash",
+            "metadata.prompt_hash",
+            "question"
+          ],
+          "canonical_scalar_diffs": {
+            "metadata.model_request_binding_hash": {
+              "current_derivation": "05f48754c18998a0a7a7d2d10e035c225746fb31a206abea2f70a37742ce83ea",
+              "stored": "e8148537e4ce89e5ed0906ed556259a3267baa2498046bc47b9bba35f56d91c8"
+            },
+            "metadata.prompt_hash": {
+              "current_derivation": "36085e025348c77d065af895a18aec7b70c7b3d4cefabca989b94169441c3888",
+              "stored": "824cf15d5bee4688fdc81ba1e58dc1398727a3c47f71c74ec92a4cbf46d0ee7b"
+            }
+          },
+          "current_derivation_hash": "c5003e0aa4dd9656bf1f907d1b4b51d8cca257fdf7c60fa45fd785ace22fcb34",
+          "ordinal": 2,
+          "stage": "qualitative_model_draft",
+          "stored_hash": "72cbcc022284fdf0c6cc76d1aaf3656382672b7087ba8ccaa7a04c9bf931068c",
+          "work_order_ref": "work:mission-document-research-879fc689ef12efc8eb71486d2f8da82a"
+        },
+        {
+          "canonical_diff_paths": [],
+          "canonical_scalar_diffs": {},
+          "current_derivation_hash": "313c665035cc41b6f1117b2a2e5410673924a3ad895fad31f3d68ff433803341",
+          "ordinal": 3,
+          "stage": "independent_qualitative_verifier",
+          "stored_hash": "313c665035cc41b6f1117b2a2e5410673924a3ad895fad31f3d68ff433803341",
+          "work_order_ref": "work:mission-document-research-708234555c11df2609f7b373e6277139"
+        },
+        {
+          "canonical_diff_paths": [],
+          "canonical_scalar_diffs": {},
+          "current_derivation_hash": "5c63b699127ed586f1f2bf32b719095eef318f32898baeb5c2de8a33eeb20aa8",
+          "ordinal": 4,
+          "stage": "qualitative_candidate_staging",
+          "stored_hash": "5c63b699127ed586f1f2bf32b719095eef318f32898baeb5c2de8a33eeb20aa8",
+          "work_order_ref": "work:mission-document-research-0f239441f97b85bcdb37b1677e86dcab"
+        }
+      ],
+      "current_refresh": {
+        "blueprints": [
+          {
+            "admitted_work_order_ref": "work:mission-document-research-7be86530ba9cd24821729cf0379c90c6",
+            "idempotency_key": "mission-document-research-work:mission-document-research-admission:16a7a1374b3ca802e87bc59c9d1e865e:1",
+            "mission_document_work_binding_hash": "a5388f9244be8b24f08621c380a49cce6619a56746a61c23d97ea5a792ee454c",
+            "ordinal": 1,
+            "refreshed_blueprint_work_order_ref": "work:mission-document-research-7be86530ba9cd24821729cf0379c90c6",
+            "stage": "registered_document_retrieval",
+            "upstream_work_order_ref": null
+          },
+          {
+            "admitted_work_order_ref": "work:mission-document-research-879fc689ef12efc8eb71486d2f8da82a",
+            "idempotency_key": "mission-document-research-work:mission-document-research-admission:16a7a1374b3ca802e87bc59c9d1e865e:2:model-authority-refresh:2b50678f7955798f8a92ec4b51ea5864065aa1f9fdabbd6342a63609177669b8",
+            "mission_document_work_binding_hash": "b0a3d5ce60bca9ee545f654cb8e7bdb6f4322131f8a6ea133e21a2fd7952ae9b",
+            "ordinal": 2,
+            "refreshed_blueprint_work_order_ref": "work:mission-document-research-23119a65c74eacb15b0a23b2e6cdc4bb",
+            "stage": "qualitative_model_draft",
+            "upstream_work_order_ref": "work:mission-document-research-7be86530ba9cd24821729cf0379c90c6"
+          },
+          {
+            "admitted_work_order_ref": "work:mission-document-research-708234555c11df2609f7b373e6277139",
+            "idempotency_key": "mission-document-research-work:mission-document-research-admission:16a7a1374b3ca802e87bc59c9d1e865e:3:model-authority-refresh:877ef8ae7f5e51f9f4c57f929c70a85c0c8d6468fe1902f7866f05bf797b9465",
+            "mission_document_work_binding_hash": "f6b5d52ffe39817884fdd478e282e1c8f2876bc22c97e9a02bbd34836c8c76bf",
+            "ordinal": 3,
+            "refreshed_blueprint_work_order_ref": "work:mission-document-research-3a27a76da4997f058aa84dcb92beb1df",
+            "stage": "independent_qualitative_verifier",
+            "upstream_work_order_ref": "work:mission-document-research-23119a65c74eacb15b0a23b2e6cdc4bb"
+          },
+          {
+            "admitted_work_order_ref": "work:mission-document-research-0f239441f97b85bcdb37b1677e86dcab",
+            "idempotency_key": "mission-document-research-work:mission-document-research-admission:16a7a1374b3ca802e87bc59c9d1e865e:4:model-authority-refresh:877ef8ae7f5e51f9f4c57f929c70a85c0c8d6468fe1902f7866f05bf797b9465",
+            "mission_document_work_binding_hash": "d37f04b8e974c831b24b4b9525917776ead044d2bb3c6545f7163fd90378aed6",
+            "ordinal": 4,
+            "refreshed_blueprint_work_order_ref": "work:mission-document-research-b7ea05567d7cf99c6b52a9553d69e3a7",
+            "stage": "qualitative_candidate_staging",
+            "upstream_work_order_ref": "work:mission-document-research-3a27a76da4997f058aa84dcb92beb1df"
+          }
+        ],
+        "content_hash": "96e1cde925ed0a206ea12405c674162a860fcb5a219d37ac62145fdd243e6a22",
+        "stages": {
+          "draft": {
+            "admitted_routing_policy_ref": "model-routing-policy-version:dalton-openclaw-company-dossier:48",
+            "changed": true,
+            "content_hash": "b0c05d8db69e3bc8ba60dd8dfb0371f180c43b789bd16735e163bf0246c0129b",
+            "current_routing_policy_ref": "model-routing-policy-version:dalton-openclaw-company-dossier:53"
+          },
+          "verifier": {
+            "admitted_routing_policy_ref": "model-routing-policy-version:dalton-openclaw-dossier-verifier:51",
+            "changed": true,
+            "content_hash": "504d106afb9cc92a471552f9b07b831fcabf34bf9ef86c5ba3ea9b5b63b9e0fc",
+            "current_routing_policy_ref": "model-routing-policy-version:dalton-openclaw-dossier-verifier:56"
+          }
+        }
+      },
+      "environment": "legacy",
+      "first_drift_stage": "qualitative_model_draft",
+      "historical_template_proof": {
+        "current_prompt_hash": "36085e025348c77d065af895a18aec7b70c7b3d4cefabca989b94169441c3888",
+        "known_pre_ebf7273d_template_exact_match": true,
+        "reconstructed_historical_prompt_hash": "824cf15d5bee4688fdc81ba1e58dc1398727a3c47f71c74ec92a4cbf46d0ee7b",
+        "stored_prompt_hash": "824cf15d5bee4688fdc81ba1e58dc1398727a3c47f71c74ec92a4cbf46d0ee7b",
+        "template_change_commit": "ebf7273d"
+      },
+      "scheduler_db": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core/core.sqlite",
+      "state_dir": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core",
+      "ticket_ref": "mission-document-research:a8d5fb337894aa157f64e083"
+    }
+  ]
+}

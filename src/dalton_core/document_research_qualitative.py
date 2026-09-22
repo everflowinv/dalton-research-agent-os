@@ -237,12 +237,32 @@ class MissionDocumentVerifierWorker(MissionDocumentModelWorker):
 class _MissionDocumentCandidateAuthority:
     def __init__(self, *, question: str, proof: Mapping[str, Any],
                  draft_proof: Mapping[str, Any], verifier_proof: Mapping[str, Any],
-                 admission: Mapping[str, Any]):
+                 admission: Mapping[str, Any],
+                 material_identity_version: str = "0.2"):
+        if material_identity_version not in {"0.2", "0.1-legacy"}:
+            raise ValueError("unsupported mission document material identity version")
         self.question = question
         self.proof = dict(proof)
         self.draft_proof = dict(draft_proof)
         self.verifier_proof = dict(verifier_proof)
         self.admission = dict(admission)
+        self.material_identity_version = material_identity_version
+
+    def _material_ref(self) -> str:
+        if self.material_identity_version == "0.1-legacy":
+            return "source-material:mission-document:" + self.proof["content_hash"]
+        identity = {
+            "identity_version": self.material_identity_version,
+            "search_proof_ref": self.proof["id"],
+            "search_proof_hash": self.proof["content_hash"],
+            "admission_ref": self.admission["id"],
+            "admission_hash": self.admission["content_hash"],
+            "draft_proof_ref": self.draft_proof["id"],
+            "draft_proof_hash": self.draft_proof["content_hash"],
+            "verifier_proof_ref": self.verifier_proof["id"],
+            "verifier_proof_hash": self.verifier_proof["content_hash"],
+        }
+        return "source-material:mission-document:v2:" + content_hash(identity)
 
     def build_material(self, created_at: str) -> dict[str, Any]:
         registration = self.proof["request"]["registration"]
@@ -262,7 +282,7 @@ class _MissionDocumentCandidateAuthority:
         locations = list(dict.fromkeys(item["source_location"] for item in self.proof["matches"]))
         base = {
             "schema_version": "0.2",
-            "id": "source-material:mission-document:" + self.proof["content_hash"],
+            "id": self._material_ref(),
             "created_at": created_at,
             "source_envelope_ref": registration["id"],
             "source_envelope_hash": registration["content_hash"],
@@ -363,7 +383,8 @@ def _claim(evidence, source_verification, *, admission, candidate, actor_ref, cr
 
 
 def _build_candidate_bundle(*, admission, proof, draft_proof, verifier_proof,
-                            draft_work, verifier_work, created_at):
+                            draft_work, verifier_work, created_at,
+                            material_identity_version="0.2"):
     draft_proof = validate_model_proof(
         draft_proof, stage="qualitative_model_draft", work=draft_work)
     verifier_proof = validate_model_proof(
@@ -372,7 +393,8 @@ def _build_candidate_bundle(*, admission, proof, draft_proof, verifier_proof,
         raise VerificationRejected("independent qualitative verifier rejected the draft")
     authority = _MissionDocumentCandidateAuthority(
         question=admission["planner_inquiry"]["question"], proof=proof,
-        draft_proof=draft_proof, verifier_proof=verifier_proof, admission=admission)
+        draft_proof=draft_proof, verifier_proof=verifier_proof, admission=admission,
+        material_identity_version=material_identity_version)
     material = authority.build_material(created_at)
     source_verification = authority.verify_source_material(material)
     evidence = build_candidate_evidence(

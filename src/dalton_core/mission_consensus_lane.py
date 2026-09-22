@@ -363,6 +363,9 @@ class MissionConsensusLaneCoordinator:
             try:
                 context = self.next_context(company_ref, scanned)
             except Exception as exc:  # noqa: BLE001 - one company, not the tick
+                self._scan_cursor = (
+                    [row["company_ref"] for row in universe].index(company_ref) + 1
+                )
                 return {"company_ref": company_ref, "outcome": "unreadable",
                         "reason": f"{type(exc).__name__}: {exc}"}
             if context is None:
@@ -608,7 +611,7 @@ def _context_reader(server: Any) -> Callable[[str, set[str]], dict[str, Any] | N
                     held = provenance.get(document_ref) or {}
                 except Exception:  # noqa: BLE001 - one document, not the tick
                     held = {}
-            context = service.context(
+            context = service.source_context(
                 review["review_id"], content_hash(review), 0,
                 "automation:coverage-mission", require_open=False,
             )

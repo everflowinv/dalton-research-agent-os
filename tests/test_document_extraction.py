@@ -270,6 +270,35 @@ class DocumentExtractionTests(unittest.TestCase):
         self.assertIsNone(second['next_offset'])
         self.assertNotEqual(context['content_hash'], second['content_hash'])
 
+    def test_source_context_does_not_open_cold_model_authorities(self):
+        from dalton_core.thesis_impact_budget import ThesisImpactBudgetStore
+
+        router_path = self.h.root / "cold-router.sqlite"
+        budget_path = self.h.root / "cold-budget.sqlite"
+        cold_router = ModelRouter(str(router_path))
+        cold_router.close()
+        cold_budget = ThesisImpactBudgetStore(str(budget_path))
+        cold_budget.close()
+        for path in (router_path, budget_path):
+            self.assertTrue(path.is_file())
+            self.assertFalse(Path(str(path) + "-wal").exists())
+            self.assertFalse(Path(str(path) + "-shm").exists())
+
+        self.h.writer._document_extraction_model_config = {
+            "model_router_db": str(router_path),
+            "budget_db": str(budget_path),
+            "routing_policy_ref": "routing-policy:cold",
+            "budget_policy_ref": "budget-policy:cold",
+        }
+        context = self.h.service.source_context(**self.h.params)
+        self.assertTrue(context["quotes"])
+        self.assertNotIn("model_binding", context)
+        with self.assertRaisesRegex(Exception, "existing WAL/SHM"):
+            self.h.service.context(**self.h.params)
+        for path in (router_path, budget_path):
+            self.assertFalse(Path(str(path) + "-wal").exists())
+            self.assertFalse(Path(str(path) + "-shm").exists())
+
     def test_routed_fixture_suggestion_replays_and_preserves_human_authority(self):
         h = self.h; counts = h.counts(); h.enable_fixture()
         first = h.generate()

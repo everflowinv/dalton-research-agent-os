@@ -32,6 +32,7 @@ from dalton_core.mission_document_research import (
 from dalton_core.model_accounting import record_model_accounting
 from dalton_core.document_research_qualitative import (
     MissionDocumentDraftWorker, MissionDocumentVerifierWorker,
+    _MissionDocumentCandidateAuthority, _build_candidate_bundle,
 )
 from dalton_core.mission_document_research_executor import (
     MissionDocumentResearchExecutor, MissionDocumentResearchExecutorError,
@@ -49,6 +50,8 @@ from dalton_core.annual_report_runtime import (
 )
 from dalton_core.raw_spool import RawSpool
 from dalton_core.research_question_backlog import ResearchQuestionBacklog
+from dalton_core.research_verification import MISSION_DOCUMENT_AUTHORITY_MODE
+from dalton_core.scheduler import Scheduler
 from dalton_core.research_planner import build_prompt, project_state_for_prompt
 from dalton_core.research_planner_cli import run_planner
 from dalton_core.research_task import inquiry_content_hash, inquiry_ref_for
@@ -717,6 +720,85 @@ class MissionDocumentResearchTests(unittest.TestCase):
         )
         self.assertEqual(works[1]["id"], old_draft_ref)
 
+    def test_model_roll_reuses_exact_pre_numeric_prompt_draft(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        admission = authority.admit_from_plan(**args)
+        executor, draft, _verifier = self._executor(fixture, authority)
+        derive = executor_module._derive
+
+        def legacy_derive(admission_wire, scheduler, registry, blueprints, index,
+                          **kwargs):
+            if index == 1:
+                kwargs["draft_prompt_builder"] = (
+                    executor_module._pre_numeric_normalization_draft_prompt)
+            return derive(
+                admission_wire, scheduler, registry, blueprints, index, **kwargs)
+
+        with patch.object(executor_module, "_derive", side_effect=legacy_derive):
+            before_roll = [executor.run_once(admission["id"]) for _ in range(4)]
+        self.assertEqual([item["status"] for item in before_roll],
+                         ["admitted", "succeeded", "admitted", "succeeded"])
+        legacy_ref = before_roll[-1]["work_order_ref"]
+        legacy = executor.scheduler.work_order_authority(legacy_ref)["work_order"]
+        current = derive(
+            admission, executor.scheduler, authority.registry,
+            executor_module._blueprints(admission), 1,
+        )
+        self.assertEqual(current["id"], legacy["id"])
+        self.assertNotEqual(content_hash(current), content_hash(legacy))
+        self.assertEqual(
+            json.loads(legacy["question"])["task"],
+            executor_module._PRE_NUMERIC_NORMALIZATION_DRAFT_TASK,
+        )
+        current_execution = copy.deepcopy(admission["model_execution"])
+        current_authority = copy.deepcopy(admission["model_authority"])
+        current_authority["draft"]["routing_policy_hash"] = "c" * 64
+        authority.model_execution_resolver = lambda: (
+            current_execution, current_authority
+        )
+        calls = draft.calls
+
+        result = executor.run_once(admission["id"])
+
+        self.assertEqual(result["status"], "admitted")
+        self.assertEqual(draft.calls, calls)
+        effective = effective_mission_document_work_orders(
+            authority, executor.scheduler, admission["id"],
+            draft_worker=executor.draft_worker,
+            verifier_worker=executor.verifier_worker,
+        )
+        self.assertEqual(effective[1]["id"], legacy_ref)
+        self.assertEqual(content_hash(effective[1]), content_hash(legacy))
+
+    def test_model_roll_rejects_unknown_historical_prompt_drift(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        admission = authority.admit_from_plan(**args)
+        executor, draft, _verifier = self._executor(fixture, authority)
+        executor.run_once(admission["id"])
+        executor.run_once(admission["id"])
+        legacy = executor_module._derive(
+            admission, executor.scheduler, authority.registry,
+            executor_module._blueprints(admission), 1,
+            draft_prompt_builder=(
+                executor_module._pre_numeric_normalization_draft_prompt),
+        )
+        unknown = copy.deepcopy(legacy)
+        unknown["metadata"]["prompt_hash"] = "1" * 64
+        self.assertEqual(executor.scheduler.enqueue(unknown)["status"], "fresh")
+        current_execution = copy.deepcopy(admission["model_execution"])
+        current_authority = copy.deepcopy(admission["model_authority"])
+        current_authority["draft"]["routing_policy_hash"] = "9" * 64
+        authority.model_execution_resolver = lambda: (
+            current_execution, current_authority
+        )
+
+        with self.assertRaisesRegex(
+            MissionDocumentResearchExecutorError, "unresolved historical stage",
+        ):
+            executor.run_once(admission["id"])
+
+        self.assertEqual(draft.calls, 0)
+
     def test_second_model_roll_reuses_succeeded_intermediate_epoch(self):
         fixture, authority, args, _registration, _launcher = self._fixture()
         admission = authority.admit_from_plan(**args)
@@ -1186,6 +1268,112 @@ class MissionDocumentResearchTests(unittest.TestCase):
         self.assertIsNotNone(
             model_authority["execution_proof"]["budget_settlement_ref"])
 
+    def test_candidate_material_identity_scopes_shared_search_proof_and_replays_legacy(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        admission = authority.admit_from_plan(**args)
+        executor, _draft, _verifier = self._executor(fixture, authority)
+        outcomes = [executor.run_once(admission["id"]) for _ in range(7)]
+        self.assertEqual([item["status"] for item in outcomes], [
+            "admitted", "succeeded", "admitted", "succeeded", "admitted",
+            "succeeded", "admitted",
+        ])
+        works = effective_mission_document_work_orders(
+            authority, executor.scheduler, admission["id"],
+            draft_worker=executor.draft_worker,
+            verifier_worker=executor.verifier_worker,
+        )
+        verifier_proof = executor.scheduler.formal_result(
+            works[2]["id"])["result_envelope"]["outputs"]
+        common = {
+            "proof": works[3]["metadata"]["retrieval_proof"],
+            "draft_proof": works[3]["metadata"]["draft_proof"],
+            "verifier_proof": verifier_proof,
+            "draft_work": works[1], "verifier_work": works[2],
+            "created_at": works[3]["created_at"],
+        }
+
+        # An already staged pre-versioning bundle remains an exact, closed
+        # replay.  The fallback verifies every record; it does not bless an
+        # arbitrary row merely because its material id has the legacy shape.
+        legacy = _build_candidate_bundle(
+            admission=admission, material_identity_version="0.1-legacy", **common)
+        legacy_resolver = _MissionDocumentCandidateAuthority(
+            question=admission["planner_inquiry"]["question"],
+            proof=common["proof"], draft_proof=common["draft_proof"],
+            verifier_proof=common["verifier_proof"], admission=admission,
+            material_identity_version="0.1-legacy",
+        )
+        legacy_key = f"mission-document-research-candidate:{admission['id']}"
+        legacy_result = fixture.harness.staging.stage(
+            material=legacy["material"],
+            source_verification=legacy["source_verification"],
+            evidence=legacy["evidence"], claim=legacy["claim"],
+            idempotency_key=legacy_key,
+            verification_mode=MISSION_DOCUMENT_AUTHORITY_MODE,
+            authority_resolver=legacy_resolver,
+        )
+        legacy_records = {
+            "authority_ref": admission["id"],
+            "question_version_ref": admission["question_version_ref"],
+            "question_version_hash": admission["question_version_hash"],
+            "research_status": "candidate_staged",
+            "candidate_evidence_ref": legacy_result["candidate_evidence_ref"],
+            "candidate_evidence_hash": legacy_result["candidate_evidence_hash"],
+            "candidate_claim_ref": legacy_result["candidate_claim_ref"],
+            "candidate_claim_hash": legacy_result["candidate_claim_hash"],
+        }
+        self.assertEqual(
+            executor._validate_records(admission, works, legacy_records),
+            legacy_records,
+        )
+        resumed = executor.run_once(admission["id"])
+        self.assertEqual(resumed["status"], "complete")
+        self.assertEqual(executor.scheduler.formal_result(
+            works[3]["id"])["terminal_state"], "succeeded")
+        self.assertEqual(fixture.harness.staging.connection.execute(
+            "SELECT count(*) FROM candidate_stage_requests WHERE idempotency_key=?",
+            (legacy_key,),
+        ).fetchone()[0], 1)
+
+        second = copy.deepcopy(admission)
+        second["id"] = "mission-document-research-admission:shared-proof-second"
+        second["question_version_ref"] = "research-question-version:shared-proof-second"
+        second["question_version_hash"] = "8" * 64
+        second["content_hash"] = content_hash({
+            "prior_admission_hash": admission["content_hash"],
+            "admission_ref": second["id"],
+            "question_version_ref": second["question_version_ref"],
+        })
+        versioned = _build_candidate_bundle(admission=second, **common)
+        self.assertNotEqual(versioned["material"]["id"], legacy["material"]["id"])
+        second_resolver = _MissionDocumentCandidateAuthority(
+            question=second["planner_inquiry"]["question"],
+            proof=common["proof"], draft_proof=common["draft_proof"],
+            verifier_proof=common["verifier_proof"], admission=second,
+        )
+        second_key = f"mission-document-research-candidate:{second['id']}"
+        first = fixture.harness.staging.stage(
+            material=versioned["material"],
+            source_verification=versioned["source_verification"],
+            evidence=versioned["evidence"], claim=versioned["claim"],
+            idempotency_key=second_key,
+            verification_mode=MISSION_DOCUMENT_AUTHORITY_MODE,
+            authority_resolver=second_resolver,
+        )
+        replay = fixture.harness.staging.stage(
+            material=versioned["material"],
+            source_verification=versioned["source_verification"],
+            evidence=versioned["evidence"], claim=versioned["claim"],
+            idempotency_key=second_key,
+            verification_mode=MISSION_DOCUMENT_AUTHORITY_MODE,
+            authority_resolver=second_resolver,
+        )
+        self.assertEqual((first["write_status"], replay["write_status"]),
+                         ("fresh", "duplicate"))
+        self.assertEqual(fixture.harness.staging.connection.execute(
+            "SELECT count(*) FROM candidate_source_materials"
+        ).fetchone()[0], 2)
+
     def test_model_worker_rejects_substituted_question_before_budget_or_adapter(self):
         fixture, authority, args, _registration, _launcher = self._fixture()
         admission = authority.admit_from_plan(**args)
@@ -1460,6 +1648,170 @@ class MissionDocumentResearchTests(unittest.TestCase):
         )
         old_recovery_ref = recovery["work_order_ref"]
         self.assertEqual(executor.scheduler.status(old_recovery_ref)["state"], "ready")
+
+    def test_model_roll_keeps_historical_failure_on_existing_recovery_door(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        self._enable_recovery(fixture, maximum=1)
+        admission = authority.admit_from_plan(**args)
+        adapter = AlwaysCapacityAdapter({"unused": True})
+        executor, _draft, _verifier = self._executor(
+            fixture, authority, draft_adapter=adapter)
+        failed = self._run_until(
+            executor, admission, lambda item: item.get("status") == "failed")
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM mission_document_research_recovery_links"
+        ).fetchone()[0], 0)
+        calls = adapter.calls
+        current_execution = copy.deepcopy(admission["model_execution"])
+        current_authority = copy.deepcopy(admission["model_authority"])
+        current_authority["draft"]["routing_policy_hash"] = "2" * 64
+        authority.model_execution_resolver = lambda: (
+            current_execution, current_authority
+        )
+
+        inspected = executor.inspect_model_authority_epoch_recovery(admission["id"])
+
+        draft_status = next(
+            item for item in inspected["stages"] if item["stage"] == "draft")
+        self.assertEqual(draft_status["status"], "historical_failure")
+        self.assertEqual(draft_status["action"], "existing_bounded_recovery_policy")
+        self.assertEqual(adapter.calls, calls)
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM mission_document_research_recovery_links"
+        ).fetchone()[0], 0)
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM "
+            "mission_document_research_model_authority_epoch_rebinds"
+        ).fetchone()[0], 0)
+
+        recovery = executor.run_once(admission["id"])
+
+        self.assertEqual(recovery["reason"], "fresh_work_recovery")
+        self.assertEqual(adapter.calls, calls)
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM mission_document_research_recovery_links"
+        ).fetchone()[0], 1)
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM "
+            "mission_document_research_model_authority_epoch_rebinds"
+        ).fetchone()[0], 1)
+
+    def test_model_roll_never_rebinds_claimed_historical_recovery(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        self._enable_recovery(fixture, maximum=1)
+        admission = authority.admit_from_plan(**args)
+        adapter = AlwaysCapacityAdapter({"unused": True})
+        executor, _draft, _verifier = self._executor(
+            fixture, authority, draft_adapter=adapter)
+        recovery = self._run_until(
+            executor, admission,
+            lambda item: item.get("reason") == "fresh_work_recovery",
+        )
+        old_recovery_ref = recovery["work_order_ref"]
+        core_path = next(
+            row["file"] for row in fixture.store.connection.execute(
+                "PRAGMA database_list") if row["name"] == "main")
+        competing_scheduler = Scheduler(
+            core_path, clock=fixture.harness.clock)
+        self.addCleanup(competing_scheduler.close)
+        claimed = competing_scheduler.claim(
+            "worker:historical-recovery", work_order_id=old_recovery_ref,
+        )
+        self.assertIsNotNone(claimed)
+        current_execution = copy.deepcopy(admission["model_execution"])
+        current_authority = copy.deepcopy(admission["model_authority"])
+        current_authority["draft"]["routing_policy_hash"] = "1" * 64
+        authority.model_execution_resolver = lambda: (
+            current_execution, current_authority
+        )
+        calls = adapter.calls
+
+        with self.assertRaisesRegex(
+            MissionDocumentResearchExecutorError,
+            "requires exact unused recovery Work",
+        ):
+            executor.run_once(admission["id"])
+        exact_link_ref = fixture.store.connection.execute(
+            "SELECT recovery_link_id FROM mission_document_research_recovery_links "
+            "WHERE recovery_work_order_ref=?", (old_recovery_ref,),
+        ).fetchone()["recovery_link_id"]
+        with self.assertRaisesRegex(
+            sqlite3.IntegrityError,
+            "requires atomically unused recovery Work",
+        ):
+            with executor._transaction() as cur:
+                cur.execute(
+                    "INSERT INTO "
+                    "mission_document_research_model_authority_epoch_rebinds "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    ("rebind:lost-race", admission["id"], 2,
+                     exact_link_ref, old_recovery_ref, "work:current",
+                     "work:rebound", "{}", "f" * 64, admission["created_at"]),
+                )
+
+        self.assertEqual(adapter.calls, calls)
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM "
+            "mission_document_research_model_authority_epoch_rebinds"
+        ).fetchone()[0], 0)
+
+    def test_model_epoch_rebind_recovers_enqueue_before_row_crash(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        self._enable_recovery(fixture, maximum=1)
+        admission = authority.admit_from_plan(**args)
+        adapter = AlwaysCapacityAdapter({"unused": True})
+        executor, _draft, _verifier = self._executor(
+            fixture, authority, draft_adapter=adapter)
+        recovery = self._run_until(
+            executor, admission,
+            lambda item: item.get("reason") == "fresh_work_recovery",
+        )
+        old_recovery_ref = recovery["work_order_ref"]
+        current_execution = copy.deepcopy(admission["model_execution"])
+        current_authority = copy.deepcopy(admission["model_authority"])
+        current_authority["draft"]["routing_policy_hash"] = "0" * 64
+        authority.model_execution_resolver = lambda: (
+            current_execution, current_authority
+        )
+        fired = []
+        crashing, _draft, _verifier = self._executor(
+            fixture, authority, draft_adapter=adapter,
+            fault_injector=lambda seam: (
+                fired.append(seam),
+                (_ for _ in ()).throw(RuntimeError("crash")),
+            )[1] if seam == "after_model_authority_epoch_rebind_enqueue" else None,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "crash"):
+            crashing.run_once(admission["id"])
+        self.assertEqual(fired, ["after_model_authority_epoch_rebind_enqueue"])
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM "
+            "mission_document_research_model_authority_epoch_rebinds"
+        ).fetchone()[0], 1)
+        restarted, _draft, _verifier = self._executor(
+            fixture, authority, draft_adapter=adapter)
+
+        restarted.run_once(admission["id"])
+
+        core_path = next(
+            row["file"] for row in fixture.store.connection.execute(
+                "PRAGMA database_list") if row["name"] == "main")
+        competing_scheduler = Scheduler(
+            core_path, clock=fixture.harness.clock)
+        self.addCleanup(competing_scheduler.close)
+        with self.assertRaisesRegex(
+            sqlite3.IntegrityError,
+            "epoch rebind already consumed recovery Work",
+        ):
+            competing_scheduler.claim(
+                "worker:lost-race", work_order_id=old_recovery_ref)
+
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM "
+            "mission_document_research_model_authority_epoch_rebinds"
+        ).fetchone()[0], 1)
         self.assertEqual(fixture.store.connection.execute(
             "SELECT count(*) FROM mission_document_research_recovery_links"
         ).fetchone()[0], 1)
@@ -1473,17 +1825,253 @@ class MissionDocumentResearchTests(unittest.TestCase):
         calls_before_roll = adapter.calls
         with self.assertRaisesRegex(
             MissionDocumentResearchExecutorError,
-            "unresolved historical stage",
+            "model authority recovery is bound to an unresolved prior epoch",
         ):
-            executor.run_once(admission["id"])
+            restarted.run_once(admission["id"])
         self.assertEqual(adapter.calls, calls_before_roll)
-        # The old link remains immutable audit and continues to consume the
-        # admission/stage recovery allowance.  Refresh does not replay it or
-        # fabricate another authorization/link under the new Work epoch.
+        # The old link and its one mapping remain immutable audit.  A second
+        # policy roll cannot migrate the same authorization through another
+        # epoch or fabricate another recovery allowance.
         self.assertEqual(fixture.store.connection.execute(
             "SELECT count(*) FROM mission_document_research_recovery_links"
         ).fetchone()[0], 1)
-        self.assertEqual(executor.scheduler.status(old_recovery_ref)["state"], "ready")
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM "
+            "mission_document_research_model_authority_epoch_rebinds"
+        ).fetchone()[0], 1)
+
+    def test_model_epoch_rebind_recovers_mapping_before_enqueue_crash(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        self._enable_recovery(fixture, maximum=1)
+        admission = authority.admit_from_plan(**args)
+        adapter = AlwaysCapacityAdapter({"unused": True})
+        executor, _draft, _verifier = self._executor(
+            fixture, authority, draft_adapter=adapter)
+        recovery = self._run_until(
+            executor, admission,
+            lambda item: item.get("reason") == "fresh_work_recovery",
+        )
+        old_recovery_ref = recovery["work_order_ref"]
+        current_execution = copy.deepcopy(admission["model_execution"])
+        current_authority = copy.deepcopy(admission["model_authority"])
+        current_authority["draft"]["routing_policy_hash"] = "d" * 64
+        authority.model_execution_resolver = lambda: (
+            current_execution, current_authority
+        )
+        fired = []
+        crashing, _draft, _verifier = self._executor(
+            fixture, authority, draft_adapter=adapter,
+            fault_injector=lambda seam: (
+                fired.append(seam),
+                (_ for _ in ()).throw(RuntimeError("crash")),
+            )[1] if seam == "after_model_authority_epoch_rebind_reservation" else None,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "crash"):
+            crashing.run_once(admission["id"])
+
+        self.assertEqual(
+            fired, ["after_model_authority_epoch_rebind_reservation"])
+        row = fixture.store.connection.execute(
+            "SELECT rebound_work_order_ref FROM "
+            "mission_document_research_model_authority_epoch_rebinds"
+        ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertIsNone(
+            crashing.scheduler.work_order_authority(row["rebound_work_order_ref"]))
+        inspected = crashing.inspect_model_authority_epoch_recovery(admission["id"])
+        draft_status = next(
+            item for item in inspected["stages"] if item["stage"] == "draft")
+        self.assertEqual(draft_status["status"], "reserved_rebound_missing")
+        self.assertEqual(
+            draft_status["action"], "enqueue_exact_reserved_rebound_work")
+        link = json.loads(fixture.store.connection.execute(
+            "SELECT record_json FROM mission_document_research_recovery_links "
+            "WHERE recovery_work_order_ref=?", (old_recovery_ref,),
+        ).fetchone()["record_json"])
+        authorized = crashing.scheduler.work_order_authority(
+            old_recovery_ref)["work_order"]
+        competing_authority = copy.deepcopy(current_authority)
+        competing_authority["draft"]["routing_policy_hash"] = "8" * 64
+        authority.model_execution_resolver = lambda: (
+            current_execution, competing_authority
+        )
+        competing_admission = authority.resolve_for_execution(admission["id"])
+        competing_blueprints = executor_module._blueprints(competing_admission)
+        competing_base = executor_module._derive(
+            competing_admission, crashing.scheduler, authority.registry,
+            competing_blueprints[:2], 1,
+        )
+        competing_record = executor_module._epoch_rebind_record(
+            competing_admission, 1, link, authorized, competing_base)
+        work_count = fixture.store.connection.execute(
+            "SELECT count(*) FROM scheduler_work_orders"
+        ).fetchone()[0]
+        with self.assertRaisesRegex(
+            MissionDocumentResearchExecutorError,
+            "model authority epoch rebind drifted",
+        ):
+            crashing._append_model_authority_epoch_rebind(
+                competing_admission, 1, link, authorized, competing_base)
+        self.assertIsNone(crashing.scheduler.work_order_authority(
+            competing_record["rebound_work_order_ref"]))
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM scheduler_work_orders"
+        ).fetchone()[0], work_count)
+        authority.model_execution_resolver = lambda: (
+            current_execution, current_authority
+        )
+        with self.assertRaisesRegex(
+            sqlite3.IntegrityError,
+            "epoch rebind already consumed recovery Work",
+        ):
+            crashing.scheduler.claim(
+                "worker:lost-race", work_order_id=old_recovery_ref)
+        restarted, _draft, _verifier = self._executor(
+            fixture, authority, draft_adapter=adapter)
+
+        restarted.run_once(admission["id"])
+
+        self.assertIsNotNone(
+            restarted.scheduler.work_order_authority(row["rebound_work_order_ref"]))
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM "
+            "mission_document_research_model_authority_epoch_rebinds"
+        ).fetchone()[0], 1)
+
+    def test_succeeded_epoch_rebound_is_reused_after_another_policy_roll(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        self._enable_recovery(fixture, maximum=1)
+        admission = authority.admit_from_plan(**args)
+        statement = "Managed services revenue is recognized over time."
+        adapter = CapacityOnceAdapter({
+            "schema_version": "0.1", "status": "answered", "answer": statement,
+            "candidate": {"normalized_statement": statement,
+                          "metric_or_aspect": "revenue", "period": "current",
+                          "basis": "reported", "cited_match_indexes": [0]},
+            "missing": [],
+        })
+        executor, _draft, _verifier = self._executor(
+            fixture, authority, draft_adapter=adapter)
+        self._run_until(
+            executor, admission,
+            lambda item: item.get("reason") == "fresh_work_recovery",
+        )
+        current_execution = copy.deepcopy(admission["model_execution"])
+        first_authority = copy.deepcopy(admission["model_authority"])
+        first_authority["draft"]["routing_policy_hash"] = "3" * 64
+        authority.model_execution_resolver = lambda: (
+            current_execution, first_authority
+        )
+
+        succeeded = executor.run_once(admission["id"])
+
+        self.assertEqual(succeeded["status"], "succeeded")
+        calls = adapter.calls
+        rebound_ref = succeeded["work_order_ref"]
+        second_authority = copy.deepcopy(first_authority)
+        second_authority["draft"]["routing_policy_hash"] = "4" * 64
+        authority.model_execution_resolver = lambda: (
+            current_execution, second_authority
+        )
+
+        executor.run_once(admission["id"])
+
+        self.assertEqual(adapter.calls, calls)
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM "
+            "mission_document_research_model_authority_epoch_rebinds"
+        ).fetchone()[0], 1)
+        effective = effective_mission_document_work_orders(
+            authority, executor.scheduler, admission["id"],
+            draft_worker=executor.draft_worker,
+            verifier_worker=executor.verifier_worker,
+        )
+        self.assertEqual(effective[1]["id"], rebound_ref)
+
+    def test_failed_epoch_rebound_can_append_its_next_bounded_link(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        self._enable_recovery(fixture, maximum=2)
+        admission = authority.admit_from_plan(**args)
+        adapter = AlwaysCapacityAdapter({"unused": True})
+        executor, _draft, _verifier = self._executor(
+            fixture, authority, draft_adapter=adapter)
+        first = self._run_until(
+            executor, admission,
+            lambda item: item.get("reason") == "fresh_work_recovery",
+        )
+        first_recovery_ref = first["work_order_ref"]
+        current_execution = copy.deepcopy(admission["model_execution"])
+        current_authority = copy.deepcopy(admission["model_authority"])
+        current_authority["draft"]["routing_policy_hash"] = "b" * 64
+        authority.model_execution_resolver = lambda: (
+            current_execution, current_authority
+        )
+        failed = self._run_until(
+            executor, admission, lambda item: item.get("status") == "failed")
+        rebound_ref = failed["work_order_ref"]
+        self.assertNotEqual(rebound_ref, first_recovery_ref)
+        second = executor.run_once(admission["id"])
+
+        self.assertEqual(second["reason"], "fresh_work_recovery")
+        self.assertNotEqual(second["work_order_ref"], rebound_ref)
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM mission_document_research_recovery_links"
+        ).fetchone()[0], 2)
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM "
+            "mission_document_research_model_authority_epoch_rebinds"
+        ).fetchone()[0], 1)
+        self.assertIsNotNone(
+            executor.scheduler.work_order_authority(second["work_order_ref"]))
+
+    def test_roll_reuses_succeeded_historical_recovery_leaf(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        self._enable_recovery(fixture, maximum=1)
+        admission = authority.admit_from_plan(**args)
+        statement = "Managed services revenue is recognized over time."
+        adapter = CapacityOnceAdapter({
+            "schema_version": "0.1", "status": "answered", "answer": statement,
+            "candidate": {"normalized_statement": statement,
+                          "metric_or_aspect": "revenue", "period": "current",
+                          "basis": "reported", "cited_match_indexes": [0]},
+            "missing": [],
+        })
+        executor, _draft, _verifier = self._executor(
+            fixture, authority, draft_adapter=adapter)
+        recovered = self._run_until(
+            executor, admission,
+            lambda item: (item.get("status") == "succeeded"
+                          and item.get("stage") == "qualitative_model_draft"
+                          and item.get("work_order_ref")
+                          != adapter.failed_work_id),
+        )
+        recovered_ref = recovered["work_order_ref"]
+        calls = adapter.calls
+        current_execution = copy.deepcopy(admission["model_execution"])
+        current_authority = copy.deepcopy(admission["model_authority"])
+        current_authority["draft"]["routing_policy_hash"] = "6" * 64
+        authority.model_execution_resolver = lambda: (
+            current_execution, current_authority
+        )
+
+        result = executor.run_once(admission["id"])
+
+        self.assertEqual(result["status"], "admitted")
+        self.assertEqual(adapter.calls, calls)
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM mission_document_research_recovery_links"
+        ).fetchone()[0], 1)
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM "
+            "mission_document_research_model_authority_epoch_rebinds"
+        ).fetchone()[0], 0)
+        effective = effective_mission_document_work_orders(
+            authority, executor.scheduler, admission["id"],
+            draft_worker=executor.draft_worker,
+            verifier_worker=executor.verifier_worker,
+        )
+        self.assertEqual(effective[1]["id"], recovered_ref)
 
     def test_zero_policy_and_unknown_send_state_take_their_own_doors(self):
         """A disabled policy creates nothing; an unproved send buys one retry."""
@@ -2353,6 +2941,123 @@ class MissionDocumentResearchTests(unittest.TestCase):
         self.assertEqual(len(links), 1)
         self.assertEqual(executor.scheduler.formal_result(work["id"])["terminal_state"],
                          "succeeded")
+
+    def test_policy_roll_rebinds_one_paid_retry_without_new_authorization(self):
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        self._enable_recovery(fixture, maximum=2)
+        admission = authority.admit_from_plan(**args)
+        adapter = CountingFakeAdapter({"schema_version": "0.1", "status": "answered"})
+        executor, _draft, _verifier = self._executor(
+            fixture, authority, draft_adapter=adapter)
+        self._run_until(
+            executor, admission, lambda item: item.get("status") == "failed")
+        current_execution = copy.deepcopy(admission["model_execution"])
+        current_authority = copy.deepcopy(admission["model_authority"])
+        current_authority["draft"]["routing_policy_hash"] = "a" * 64
+        authority.model_execution_resolver = lambda: (
+            current_execution, current_authority
+        )
+
+        result = executor.run_once(admission["id"])
+
+        self.assertEqual(result["reason"], "automatic_bounded_contract_retry")
+        authorizations = fixture.store.connection.execute(
+            "SELECT * FROM "
+            "mission_document_research_controlled_recovery_authorizations"
+        ).fetchall()
+        links = fixture.store.connection.execute(
+            "SELECT record_json FROM mission_document_research_recovery_links"
+        ).fetchall()
+        rebinds = fixture.store.connection.execute(
+            "SELECT record_json FROM "
+            "mission_document_research_model_authority_epoch_rebinds"
+        ).fetchall()
+        self.assertEqual((len(authorizations), len(links), len(rebinds)), (1, 1, 1))
+        link = json.loads(links[0]["record_json"])
+        rebind = json.loads(rebinds[0]["record_json"])
+        self.assertEqual(rebind["recovery_authorization_ref"],
+                         link["failure_proof"]["authorization_ref"])
+        self.assertEqual(rebind["recovery_authorization_hash"],
+                         link["failure_proof"]["authorization_hash"])
+        self.assertEqual(rebind["recovery_authorization_ref"],
+                         authorizations[0]["authorization_id"])
+        for field in executor_module._EPOCH_REBIND_BUDGET_FIELDS:
+            self.assertLessEqual(
+                rebind["current_budget"][field], rebind["authorized_budget"][field])
+
+        expanded = copy.deepcopy(rebind["current_base_work_order"])
+        expanded["budget"]["max_output_tokens"] += 1
+        with self.assertRaisesRegex(
+            MissionDocumentResearchExecutorError, "expands an authorized budget",
+        ):
+            executor_module._epoch_rebind_identity(
+                authority.resolve_for_execution(admission["id"]), 1, link,
+                executor.scheduler.work_order_authority(
+                    link["recovery_work_order_ref"])["work_order"], expanded,
+            )
+
+    def test_succeeded_rebound_reverifies_link_and_authorization_on_next_roll(self):
+        statement = "Managed services revenue is recognized over time."
+        good = {
+            "schema_version": "0.1", "status": "answered", "answer": statement,
+            "candidate": {"normalized_statement": statement,
+                          "metric_or_aspect": "revenue", "period": "current",
+                          "basis": "reported", "cited_match_indexes": [0]},
+            "missing": [],
+        }
+        for target, trigger, error in (
+            ("mission_document_research_recovery_links",
+             "mission_document_research_recovery_links_no_update",
+             "recovery link authority drifted"),
+            ("mission_document_research_controlled_recovery_authorizations",
+             "mission_document_research_controlled_recovery_authorizations_no_update",
+             "(automatic contract retry|paid recovery) authorization drifted"),
+        ):
+            with self.subTest(target=target):
+                fixture, authority, args, _registration, _launcher = self._fixture()
+                self._enable_recovery(fixture, maximum=2)
+                admission = authority.admit_from_plan(**args)
+                adapter = ContractRejectOnceAdapter(
+                    good, {"schema_version": "0.1", "status": "answered"})
+                executor, _draft, _verifier = self._executor(
+                    fixture, authority, draft_adapter=adapter)
+                self._run_until(
+                    executor, admission,
+                    lambda item: item.get("status") == "failed")
+                current_execution = copy.deepcopy(admission["model_execution"])
+                v2_authority = copy.deepcopy(admission["model_authority"])
+                v2_authority["draft"]["routing_policy_hash"] = "e" * 64
+                authority.model_execution_resolver = lambda: (
+                    current_execution, v2_authority
+                )
+                admitted = executor.run_once(admission["id"])
+                self.assertEqual(
+                    admitted["reason"], "automatic_bounded_contract_retry")
+                succeeded = executor.run_once(admission["id"])
+                self.assertEqual(succeeded["status"], "succeeded")
+                calls = adapter.calls
+                v3_authority = copy.deepcopy(v2_authority)
+                v3_authority["draft"]["routing_policy_hash"] = "f" * 64
+                authority.model_execution_resolver = lambda: (
+                    current_execution, v3_authority
+                )
+                fixture.store.connection.execute(f"DROP TRIGGER {trigger}")
+                row = fixture.store.connection.execute(
+                    f"SELECT rowid,record_json FROM {target} LIMIT 1"
+                ).fetchone()
+                wire = json.loads(row["record_json"])
+                wire["tampered"] = True
+                fixture.store.connection.execute(
+                    f"UPDATE {target} SET record_json=? WHERE rowid=?",
+                    (canonical_json(wire), row["rowid"]),
+                )
+
+                with self.assertRaisesRegex(
+                    MissionDocumentResearchExecutorError, error,
+                ):
+                    executor.run_once(admission["id"])
+
+                self.assertEqual(adapter.calls, calls)
 
     def test_automatic_contract_retry_stops_at_the_daily_cap_and_waits_for_utc_reset(self):
         """The cap is a spending bound, so its answer is tomorrow, not a person."""

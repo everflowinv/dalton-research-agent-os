@@ -1,0 +1,19 @@
+{
+  "scope": "Pure historical Work derivation, not a replacement for execution proof validation",
+  "live_writes": 0,
+  "model_calls": 0,
+  "cases": [
+    {
+      "admission_ref": "mission-document-research-admission:16a7a1374b3ca802e87bc59c9d1e865e",
+      "work_order_ref": "work:mission-document-research-879fc689ef12efc8eb71486d2f8da82a",
+      "work_sha256": "72cbcc022284fdf0c6cc76d1aaf3656382672b7087ba8ccaa7a04c9bf931068c",
+      "historical_derivation_byte_exact": true
+    },
+    {
+      "admission_ref": "mission-document-research-admission:42459ee5ed0988599d9266139ff0c05d",
+      "work_order_ref": "work:mission-document-research-76295e8c06b2b8e66522f7365413ee81",
+      "work_sha256": "4d558bc752e3ae330173586c4ac3b43baa1676f814a58349c5dd1f5606f1e2d3",
+      "historical_derivation_byte_exact": true
+    }
+  ]
+}

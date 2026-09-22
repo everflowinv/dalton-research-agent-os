@@ -404,6 +404,26 @@ class RoundRobinTests(LaneTestCase):
         served = [lane.dispatch_once()["scan"]["company_ref"] for _ in range(3)]
         self.assertEqual(served, [ACN, EPAM, EPAM])
 
+    def test_an_unreadable_company_yields_the_next_scan_turn(self):
+        self.note("alphaengine-doc:epam0", company_ref=EPAM,
+                  subject_names=["EPAM"],
+                  document_companies=["EPAM Systems, Inc."])
+        lane = self.coordinator()
+        ordinary = lane.next_context
+
+        def context(company_ref, scanned):
+            if company_ref == ACN:
+                raise RuntimeError("cold local authority")
+            return ordinary(company_ref, scanned)
+
+        lane.next_context = context
+        first = lane.dispatch_once()["scan"]
+        second = lane.dispatch_once()["scan"]
+        self.assertEqual(first["company_ref"], ACN)
+        self.assertEqual(first["outcome"], "unreadable")
+        self.assertEqual(second["company_ref"], EPAM)
+        self.assertNotEqual(second["outcome"], "unreadable")
+
 
 class ScanLedgerTests(LaneTestCase):
     def test_a_refusal_records_the_reader_that_made_it(self):

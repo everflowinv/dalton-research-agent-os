@@ -1,0 +1,1268 @@
+{
+  "admissions": [
+    {
+      "admission_ref": "mission-document-research-admission:02fcf3c6c6390f29a8979efc7b0789ea",
+      "controlled_recovery_authorizations": [],
+      "environment": "legacy",
+      "exact_recovery_disposition": {
+        "classification": "no_existing_exact_recovery_link",
+        "epoch_rebind_eligible_under_exact_link_rule": false,
+        "reason": "No RecoveryLink exists to transfer; formal failure codes alone do not prove no-send or authorize fresh Work."
+      },
+      "model_stage_works": [
+        {
+          "attempt_event_count": 3,
+          "attempt_event_states": [
+            "ready",
+            "leased",
+            "succeeded"
+          ],
+          "created_at": "2026-09-17T04:22:09.283598+00:00",
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-17T04:22:15.459380+00:00",
+              "error_code": null,
+              "terminal_state": "succeeded"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-17T04:22:15.459380+00:00",
+            "event_seq": 840,
+            "reason": "worker_completion",
+            "state": "succeeded"
+          },
+          "stage": "qualitative_model_draft",
+          "work_order_ref": "work:mission-document-research-8c7a51a42508c48b825c8e59a074ba62"
+        },
+        {
+          "attempt_event_count": 12,
+          "attempt_event_states": [
+            "ready",
+            "leased",
+            "retryable",
+            "ready",
+            "leased",
+            "retryable",
+            "ready",
+            "leased",
+            "retryable",
+            "ready",
+            "leased",
+            "failed"
+          ],
+          "created_at": "2026-09-17T04:22:17.323585+00:00",
+          "formal_results": [
+            {
+              "attempt_number": 4,
+              "created_at": "2026-09-17T04:22:44.117667+00:00",
+              "error_code": "MODEL_OUTPUT_CONTRACT_REJECTED",
+              "terminal_state": "failed"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 4,
+            "created_at": "2026-09-17T04:22:44.117667+00:00",
+            "event_seq": 852,
+            "reason": "worker_completion",
+            "state": "failed"
+          },
+          "stage": "independent_qualitative_verifier",
+          "work_order_ref": "work:mission-document-research-d6ee13d30db161c679399b3114cfb795"
+        }
+      ],
+      "original_report_p0_3": false,
+      "recovery_links": [],
+      "scheduler_authority": "runtime_core",
+      "scheduler_db": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core/core.sqlite",
+      "selection_classification": "unresolved_or_failed_model_stage",
+      "ticket_ref": "mission-document-research:68c5028a99e04e7865c40765"
+    },
+    {
+      "admission_ref": "mission-document-research-admission:03c4103b1eee94421bacce23ae719c2f",
+      "controlled_recovery_authorizations": [],
+      "environment": "legacy",
+      "exact_recovery_disposition": {
+        "classification": "no_existing_exact_recovery_link",
+        "epoch_rebind_eligible_under_exact_link_rule": false,
+        "reason": "No RecoveryLink exists to transfer; formal failure codes alone do not prove no-send or authorize fresh Work."
+      },
+      "model_stage_works": [
+        {
+          "attempt_event_count": 12,
+          "attempt_event_states": [
+            "ready",
+            "leased",
+            "retryable",
+            "ready",
+            "leased",
+            "retryable",
+            "ready",
+            "leased",
+            "retryable",
+            "ready",
+            "leased",
+            "failed"
+          ],
+          "created_at": "2026-09-12T01:24:53.096709+00:00",
+          "formal_results": [
+            {
+              "attempt_number": 4,
+              "created_at": "2026-09-12T01:26:03.085466+00:00",
+              "error_code": "MODEL_OUTPUT_CONTRACT_REJECTED",
+              "terminal_state": "failed"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 4,
+            "created_at": "2026-09-12T01:26:03.085466+00:00",
+            "event_seq": 683,
+            "reason": "worker_completion",
+            "state": "failed"
+          },
+          "stage": "qualitative_model_draft",
+          "work_order_ref": "work:mission-document-research-10cb1cda86e1794d7150c581a21c5a12"
+        }
+      ],
+      "original_report_p0_3": true,
+      "recovery_links": [],
+      "scheduler_authority": "runtime_core",
+      "scheduler_db": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core/core.sqlite",
+      "selection_classification": "unresolved_or_failed_model_stage",
+      "ticket_ref": "mission-document-research:9cbb196a784ab29c18f15687"
+    },
+    {
+      "admission_ref": "mission-document-research-admission:3953fd12844107bafdcf2eb7729d82fa",
+      "controlled_recovery_authorizations": [],
+      "environment": "legacy",
+      "exact_recovery_disposition": {
+        "classification": "no_existing_exact_recovery_link",
+        "epoch_rebind_eligible_under_exact_link_rule": false,
+        "reason": "No RecoveryLink exists to transfer; formal failure codes alone do not prove no-send or authorize fresh Work."
+      },
+      "model_stage_works": [
+        {
+          "attempt_event_count": 3,
+          "attempt_event_states": [
+            "ready",
+            "leased",
+            "succeeded"
+          ],
+          "created_at": "2026-09-11T20:01:01.976578+00:00",
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-11T20:01:19.314808+00:00",
+              "error_code": null,
+              "terminal_state": "succeeded"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-11T20:01:19.314808+00:00",
+            "event_seq": 551,
+            "reason": "worker_completion",
+            "state": "succeeded"
+          },
+          "stage": "qualitative_model_draft",
+          "work_order_ref": "work:mission-document-research-61bfdaf77712d98a63691dad06f9330d"
+        },
+        {
+          "attempt_event_count": 3,
+          "attempt_event_states": [
+            "ready",
+            "leased",
+            "failed"
+          ],
+          "created_at": "2026-09-11T20:01:19.533151+00:00",
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-11T20:01:20.184663+00:00",
+              "error_code": "REQUIRED_CONTROLS_UNAVAILABLE",
+              "terminal_state": "failed"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-11T20:01:20.184663+00:00",
+            "event_seq": 554,
+            "reason": "worker_completion",
+            "state": "failed"
+          },
+          "stage": "independent_qualitative_verifier",
+          "work_order_ref": "work:mission-document-research-1af3282a5ecbbcbbe1e64d453652efc6"
+        }
+      ],
+      "original_report_p0_3": true,
+      "recovery_links": [],
+      "scheduler_authority": "runtime_core",
+      "scheduler_db": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core/core.sqlite",
+      "selection_classification": "unresolved_or_failed_model_stage",
+      "ticket_ref": "mission-document-research:8ba1b0c33995fb0cb2dff68e"
+    },
+    {
+      "admission_ref": "mission-document-research-admission:49d92fa70b8ef1b2e3163f5d8dbd8449",
+      "controlled_recovery_authorizations": [],
+      "environment": "legacy",
+      "exact_recovery_disposition": {
+        "classification": "no_existing_exact_recovery_link",
+        "epoch_rebind_eligible_under_exact_link_rule": false,
+        "reason": "No RecoveryLink exists to transfer; formal failure codes alone do not prove no-send or authorize fresh Work."
+      },
+      "model_stage_works": [
+        {
+          "attempt_event_count": 3,
+          "attempt_event_states": [
+            "ready",
+            "leased",
+            "succeeded"
+          ],
+          "created_at": "2026-09-12T00:29:10.579658+00:00",
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-12T00:29:23.200322+00:00",
+              "error_code": null,
+              "terminal_state": "succeeded"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-12T00:29:23.200322+00:00",
+            "event_seq": 593,
+            "reason": "worker_completion",
+            "state": "succeeded"
+          },
+          "stage": "qualitative_model_draft",
+          "work_order_ref": "work:mission-document-research-d6ec590783f4c1219fb04ac32dc80566"
+        },
+        {
+          "attempt_event_count": 3,
+          "attempt_event_states": [
+            "ready",
+            "leased",
+            "failed"
+          ],
+          "created_at": "2026-09-12T00:29:23.576619+00:00",
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-12T00:29:28.406447+00:00",
+              "error_code": "REQUIRED_CONTROLS_UNAVAILABLE",
+              "terminal_state": "failed"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-12T00:29:28.406447+00:00",
+            "event_seq": 596,
+            "reason": "worker_completion",
+            "state": "failed"
+          },
+          "stage": "independent_qualitative_verifier",
+          "work_order_ref": "work:mission-document-research-570d1df4e2f8373d9409dfec8528b001"
+        }
+      ],
+      "original_report_p0_3": true,
+      "recovery_links": [],
+      "scheduler_authority": "runtime_core",
+      "scheduler_db": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core/core.sqlite",
+      "selection_classification": "unresolved_or_failed_model_stage",
+      "ticket_ref": "mission-document-research:ca982475ff31e5a51c6b1c44"
+    },
+    {
+      "admission_ref": "mission-document-research-admission:6a2bcd446237e1bd9732690b4b542b3a",
+      "controlled_recovery_authorizations": [],
+      "environment": "legacy",
+      "exact_recovery_disposition": {
+        "classification": "authorized_recovery_attempted_and_failed",
+        "epoch_rebind_eligible_under_exact_link_rule": false,
+        "reason": "The authorized recovery was attempted and failed; the persisted terminal error remains available to the existing typed recovery classifier.",
+        "terminal_error_code": "MODEL_OUTPUT_CONTRACT_REJECTED"
+      },
+      "model_stage_works": [
+        {
+          "attempt_event_count": 3,
+          "attempt_event_states": [
+            "ready",
+            "leased",
+            "failed"
+          ],
+          "created_at": "2026-09-11T20:40:17.974266+00:00",
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-11T20:40:19.891910+00:00",
+              "error_code": "MODEL_ADAPTER_REJECTED",
+              "terminal_state": "failed"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-11T20:40:19.891910+00:00",
+            "event_seq": 566,
+            "reason": "worker_completion",
+            "state": "failed"
+          },
+          "stage": "qualitative_model_draft",
+          "work_order_ref": "work:mission-document-research-efc0a7b0e1617f9d62c367f04bcce06e"
+        },
+        {
+          "attempt_event_count": 12,
+          "attempt_event_states": [
+            "ready",
+            "leased",
+            "retryable",
+            "ready",
+            "leased",
+            "retryable",
+            "ready",
+            "leased",
+            "retryable",
+            "ready",
+            "leased",
+            "failed"
+          ],
+          "created_at": "2026-09-12T00:11:12.814391+00:00",
+          "formal_results": [
+            {
+              "attempt_number": 4,
+              "created_at": "2026-09-12T00:13:13.395430+00:00",
+              "error_code": "MODEL_OUTPUT_CONTRACT_REJECTED",
+              "terminal_state": "failed"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 4,
+            "created_at": "2026-09-12T00:13:13.395430+00:00",
+            "event_seq": 578,
+            "reason": "worker_completion",
+            "state": "failed"
+          },
+          "stage": "qualitative_model_draft",
+          "work_order_ref": "work:mission-document-recovery-b73845dd8f28d08826401a9c2272dbfb"
+        }
+      ],
+      "original_report_p0_3": true,
+      "recovery_links": [
+        {
+          "authorization_ref": null,
+          "created_at": "2026-09-12T00:00:00.000000+00:00",
+          "failed_work_order_ref": "work:mission-document-research-efc0a7b0e1617f9d62c367f04bcce06e",
+          "failure_classification": "atomic_day_budget_refusal",
+          "paid_contract_classification": null,
+          "recovery_link_ref": "mission-document-research-recovery-link:b73845dd8f28d08826401a9c2272dbfb",
+          "recovery_number": 1,
+          "recovery_work_execution": {
+            "classification": "attempted_or_terminal",
+            "event_count": 12,
+            "event_states": [
+              "ready",
+              "leased",
+              "retryable",
+              "ready",
+              "leased",
+              "retryable",
+              "ready",
+              "leased",
+              "retryable",
+              "ready",
+              "leased",
+              "failed"
+            ],
+            "formal_results": [
+              {
+                "attempt_number": 4,
+                "created_at": "2026-09-12T00:13:13.395430+00:00",
+                "error_code": "MODEL_OUTPUT_CONTRACT_REJECTED",
+                "terminal_state": "failed"
+              }
+            ],
+            "latest_event": {
+              "attempt_number": 4,
+              "created_at": "2026-09-12T00:13:13.395430+00:00",
+              "event_seq": 578,
+              "reason": "worker_completion",
+              "state": "failed"
+            },
+            "work_present": true
+          },
+          "recovery_work_order_ref": "work:mission-document-recovery-b73845dd8f28d08826401a9c2272dbfb",
+          "refusal_day": "2026-09-11",
+          "stage_ordinal": 2
+        }
+      ],
+      "scheduler_authority": "runtime_core",
+      "scheduler_db": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core/core.sqlite",
+      "selection_classification": "unresolved_or_failed_model_stage",
+      "ticket_ref": "mission-document-research:08872f07df8b734a2ae1e53d"
+    },
+    {
+      "admission_ref": "mission-document-research-admission:867a9e566947d00cfd17d1a1662e5c6f",
+      "controlled_recovery_authorizations": [],
+      "environment": "legacy",
+      "exact_recovery_disposition": {
+        "classification": "no_existing_exact_recovery_link",
+        "epoch_rebind_eligible_under_exact_link_rule": false,
+        "reason": "No RecoveryLink exists to transfer; formal failure codes alone do not prove no-send or authorize fresh Work."
+      },
+      "model_stage_works": [
+        {
+          "attempt_event_count": 3,
+          "attempt_event_states": [
+            "ready",
+            "leased",
+            "failed"
+          ],
+          "created_at": "2026-09-14T13:48:58.537267+00:00",
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-14T13:49:03.158241+00:00",
+              "error_code": "MODEL_ADAPTER_REJECTED",
+              "terminal_state": "failed"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-14T13:49:03.158241+00:00",
+            "event_seq": 713,
+            "reason": "worker_completion",
+            "state": "failed"
+          },
+          "stage": "qualitative_model_draft",
+          "work_order_ref": "work:mission-document-research-65aa62ea9626b8de9ccfa0f3b18359b2"
+        }
+      ],
+      "original_report_p0_3": true,
+      "recovery_links": [],
+      "scheduler_authority": "runtime_core",
+      "scheduler_db": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core/core.sqlite",
+      "selection_classification": "unresolved_or_failed_model_stage",
+      "ticket_ref": "mission-document-research:4dd1d762f64bd11b399f7093"
+    },
+    {
+      "admission_ref": "mission-document-research-admission:918307dc4626f6a8d549501eb7e193a9",
+      "controlled_recovery_authorizations": [],
+      "environment": "legacy",
+      "exact_recovery_disposition": {
+        "classification": "no_existing_exact_recovery_link",
+        "epoch_rebind_eligible_under_exact_link_rule": false,
+        "reason": "No RecoveryLink exists to transfer; formal failure codes alone do not prove no-send or authorize fresh Work."
+      },
+      "model_stage_works": [
+        {
+          "attempt_event_count": 12,
+          "attempt_event_states": [
+            "ready",
+            "leased",
+            "retryable",
+            "ready",
+            "leased",
+            "retryable",
+            "ready",
+            "leased",
+            "retryable",
+            "ready",
+            "leased",
+            "failed"
+          ],
+          "created_at": "2026-09-12T01:09:29.181802+00:00",
+          "formal_results": [
+            {
+              "attempt_number": 4,
+              "created_at": "2026-09-12T01:11:04.868117+00:00",
+              "error_code": "MODEL_OUTPUT_CONTRACT_REJECTED",
+              "terminal_state": "failed"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 4,
+            "created_at": "2026-09-12T01:11:04.868117+00:00",
+            "event_seq": 653,
+            "reason": "worker_completion",
+            "state": "failed"
+          },
+          "stage": "qualitative_model_draft",
+          "work_order_ref": "work:mission-document-research-b4280b9b853c3a801dc5c8fb7f2c72bc"
+        }
+      ],
+      "original_report_p0_3": true,
+      "recovery_links": [],
+      "scheduler_authority": "runtime_core",
+      "scheduler_db": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core/core.sqlite",
+      "selection_classification": "unresolved_or_failed_model_stage",
+      "ticket_ref": "mission-document-research:8035494500260b634d5b5108"
+    },
+    {
+      "admission_ref": "mission-document-research-admission:a2d4854ebf0cb7d90c7fe055af4b5eb1",
+      "controlled_recovery_authorizations": [],
+      "environment": "legacy",
+      "exact_recovery_disposition": {
+        "classification": "no_existing_exact_recovery_link",
+        "epoch_rebind_eligible_under_exact_link_rule": false,
+        "reason": "No RecoveryLink exists to transfer; formal failure codes alone do not prove no-send or authorize fresh Work."
+      },
+      "model_stage_works": [
+        {
+          "attempt_event_count": 6,
+          "attempt_event_states": [
+            "ready",
+            "leased",
+            "retryable",
+            "ready",
+            "leased",
+            "succeeded"
+          ],
+          "created_at": "2026-09-17T03:52:14.217676+00:00",
+          "formal_results": [
+            {
+              "attempt_number": 2,
+              "created_at": "2026-09-17T03:52:29.266385+00:00",
+              "error_code": null,
+              "terminal_state": "succeeded"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 2,
+            "created_at": "2026-09-17T03:52:29.266385+00:00",
+            "event_seq": 798,
+            "reason": "worker_completion",
+            "state": "succeeded"
+          },
+          "stage": "qualitative_model_draft",
+          "work_order_ref": "work:mission-document-research-37c4622cfe20e3640b60aba476d4d7d0"
+        },
+        {
+          "attempt_event_count": 3,
+          "attempt_event_states": [
+            "ready",
+            "leased",
+            "failed"
+          ],
+          "created_at": "2026-09-17T03:52:31.020972+00:00",
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-17T03:52:34.488353+00:00",
+              "error_code": "HOST_CONTROL_PROOF_MISSING",
+              "terminal_state": "failed"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-17T03:52:34.488353+00:00",
+            "event_seq": 801,
+            "reason": "worker_completion",
+            "state": "failed"
+          },
+          "stage": "independent_qualitative_verifier",
+          "work_order_ref": "work:mission-document-research-3c7f5e7295e4f2d0aef62094f68ff429"
+        }
+      ],
+      "original_report_p0_3": false,
+      "recovery_links": [],
+      "scheduler_authority": "runtime_core",
+      "scheduler_db": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core/core.sqlite",
+      "selection_classification": "unresolved_or_failed_model_stage",
+      "ticket_ref": "mission-document-research:2c5eefe0f59b1488126ca25a"
+    },
+    {
+      "admission_ref": "mission-document-research-admission:a9e588b02de9c7a713167cdafec2d9f1",
+      "controlled_recovery_authorizations": [],
+      "environment": "legacy",
+      "exact_recovery_disposition": {
+        "classification": "no_existing_exact_recovery_link",
+        "epoch_rebind_eligible_under_exact_link_rule": false,
+        "reason": "No RecoveryLink exists to transfer; formal failure codes alone do not prove no-send or authorize fresh Work."
+      },
+      "model_stage_works": [
+        {
+          "attempt_event_count": 3,
+          "attempt_event_states": [
+            "ready",
+            "leased",
+            "failed"
+          ],
+          "created_at": "2026-09-14T13:58:33.227293+00:00",
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-14T13:58:35.256805+00:00",
+              "error_code": "MODEL_ADAPTER_REJECTED",
+              "terminal_state": "failed"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-14T13:58:35.256805+00:00",
+            "event_seq": 725,
+            "reason": "worker_completion",
+            "state": "failed"
+          },
+          "stage": "qualitative_model_draft",
+          "work_order_ref": "work:mission-document-research-bbc99ecbbf9f61e28a13d31e14cafb05"
+        }
+      ],
+      "original_report_p0_3": true,
+      "recovery_links": [],
+      "scheduler_authority": "runtime_core",
+      "scheduler_db": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core/core.sqlite",
+      "selection_classification": "unresolved_or_failed_model_stage",
+      "ticket_ref": "mission-document-research:c614cf762c7601c537dc02f9"
+    },
+    {
+      "admission_ref": "mission-document-research-admission:bca93fcbeca301720289fab14728086f",
+      "controlled_recovery_authorizations": [],
+      "environment": "legacy",
+      "exact_recovery_disposition": {
+        "classification": "no_existing_exact_recovery_link",
+        "epoch_rebind_eligible_under_exact_link_rule": false,
+        "reason": "No RecoveryLink exists to transfer; formal failure codes alone do not prove no-send or authorize fresh Work."
+      },
+      "model_stage_works": [
+        {
+          "attempt_event_count": 3,
+          "attempt_event_states": [
+            "ready",
+            "leased",
+            "succeeded"
+          ],
+          "created_at": "2026-09-12T01:14:30.904127+00:00",
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-12T01:14:58.124492+00:00",
+              "error_code": null,
+              "terminal_state": "succeeded"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-12T01:14:58.124492+00:00",
+            "event_seq": 659,
+            "reason": "worker_completion",
+            "state": "succeeded"
+          },
+          "stage": "qualitative_model_draft",
+          "work_order_ref": "work:mission-document-research-796416c12698a3119128aea7c2dd79a7"
+        },
+        {
+          "attempt_event_count": 3,
+          "attempt_event_states": [
+            "ready",
+            "leased",
+            "failed"
+          ],
+          "created_at": "2026-09-12T01:14:58.327641+00:00",
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-12T01:14:59.737271+00:00",
+              "error_code": "REQUIRED_CONTROLS_UNAVAILABLE",
+              "terminal_state": "failed"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-12T01:14:59.737271+00:00",
+            "event_seq": 662,
+            "reason": "worker_completion",
+            "state": "failed"
+          },
+          "stage": "independent_qualitative_verifier",
+          "work_order_ref": "work:mission-document-research-ab8e61db72c758ee97651f26c59e1f08"
+        }
+      ],
+      "original_report_p0_3": true,
+      "recovery_links": [],
+      "scheduler_authority": "runtime_core",
+      "scheduler_db": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core/core.sqlite",
+      "selection_classification": "unresolved_or_failed_model_stage",
+      "ticket_ref": "mission-document-research:6facc30e3ed5d1d915515998"
+    },
+    {
+      "admission_ref": "mission-document-research-admission:ca9bac39454f3ee9bcfd3f0508f342e3",
+      "controlled_recovery_authorizations": [],
+      "environment": "legacy",
+      "exact_recovery_disposition": {
+        "classification": "authorized_recovery_already_succeeded",
+        "epoch_rebind_eligible_under_exact_link_rule": false,
+        "reason": "Reuse the successful authorized recovery result; no new model Work is justified."
+      },
+      "model_stage_works": [
+        {
+          "attempt_event_count": 3,
+          "attempt_event_states": [
+            "ready",
+            "leased",
+            "failed"
+          ],
+          "created_at": "2026-09-11T20:35:11.676613+00:00",
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-11T20:35:12.704127+00:00",
+              "error_code": "MODEL_ADAPTER_REJECTED",
+              "terminal_state": "failed"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-11T20:35:12.704127+00:00",
+            "event_seq": 560,
+            "reason": "worker_completion",
+            "state": "failed"
+          },
+          "stage": "qualitative_model_draft",
+          "work_order_ref": "work:mission-document-research-ddb1725ad66dcec35e0f22b94c43b24a"
+        },
+        {
+          "attempt_event_count": 3,
+          "attempt_event_states": [
+            "ready",
+            "leased",
+            "succeeded"
+          ],
+          "created_at": "2026-09-12T00:14:36.776501+00:00",
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-12T00:14:55.217751+00:00",
+              "error_code": null,
+              "terminal_state": "succeeded"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-12T00:14:55.217751+00:00",
+            "event_seq": 581,
+            "reason": "worker_completion",
+            "state": "succeeded"
+          },
+          "stage": "qualitative_model_draft",
+          "work_order_ref": "work:mission-document-recovery-9ff5ddc6051c9341529233b01ba2d9e0"
+        }
+      ],
+      "original_report_p0_3": true,
+      "recovery_links": [
+        {
+          "authorization_ref": null,
+          "created_at": "2026-09-12T00:00:00.000000+00:00",
+          "failed_work_order_ref": "work:mission-document-research-ddb1725ad66dcec35e0f22b94c43b24a",
+          "failure_classification": "atomic_day_budget_refusal",
+          "paid_contract_classification": null,
+          "recovery_link_ref": "mission-document-research-recovery-link:9ff5ddc6051c9341529233b01ba2d9e0",
+          "recovery_number": 1,
+          "recovery_work_execution": {
+            "classification": "attempted_or_terminal",
+            "event_count": 3,
+            "event_states": [
+              "ready",
+              "leased",
+              "succeeded"
+            ],
+            "formal_results": [
+              {
+                "attempt_number": 1,
+                "created_at": "2026-09-12T00:14:55.217751+00:00",
+                "error_code": null,
+                "terminal_state": "succeeded"
+              }
+            ],
+            "latest_event": {
+              "attempt_number": 1,
+              "created_at": "2026-09-12T00:14:55.217751+00:00",
+              "event_seq": 581,
+              "reason": "worker_completion",
+              "state": "succeeded"
+            },
+            "work_present": true
+          },
+          "recovery_work_order_ref": "work:mission-document-recovery-9ff5ddc6051c9341529233b01ba2d9e0",
+          "refusal_day": "2026-09-11",
+          "stage_ordinal": 2
+        }
+      ],
+      "scheduler_authority": "runtime_core",
+      "scheduler_db": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core/core.sqlite",
+      "selection_classification": "unresolved_or_failed_model_stage",
+      "ticket_ref": "mission-document-research:88c43f96e7d3c537ea991e68"
+    },
+    {
+      "admission_ref": "mission-document-research-admission:e83cce990352f095ec10cf101b2542ca",
+      "controlled_recovery_authorizations": [],
+      "environment": "legacy",
+      "exact_recovery_disposition": {
+        "classification": "no_existing_exact_recovery_link",
+        "epoch_rebind_eligible_under_exact_link_rule": false,
+        "reason": "No RecoveryLink exists to transfer; formal failure codes alone do not prove no-send or authorize fresh Work."
+      },
+      "model_stage_works": [
+        {
+          "attempt_event_count": 4,
+          "attempt_event_states": [
+            "ready",
+            "leased",
+            "expired",
+            "ready"
+          ],
+          "created_at": "2026-09-17T03:05:13.805484+00:00",
+          "formal_results": [],
+          "latest_attempt_event": {
+            "attempt_number": 2,
+            "created_at": "2026-09-17T03:46:59.128230+00:00",
+            "event_seq": 784,
+            "reason": "retry_after_attempt_1",
+            "state": "ready"
+          },
+          "stage": "qualitative_model_draft",
+          "work_order_ref": "work:mission-document-research-5f5fef2f3b47d3e4f6a098cca8151da4"
+        }
+      ],
+      "original_report_p0_3": false,
+      "recovery_links": [],
+      "scheduler_authority": "runtime_core",
+      "scheduler_db": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core/core.sqlite",
+      "selection_classification": "unresolved_or_failed_model_stage",
+      "ticket_ref": "mission-document-research:499e8ac9a6cd5d72d7d9e4bd"
+    },
+    {
+      "admission_ref": "mission-document-research-admission:f806824e8fa1a67d310d77d37b22aa42",
+      "controlled_recovery_authorizations": [],
+      "environment": "legacy",
+      "exact_recovery_disposition": {
+        "classification": "no_existing_exact_recovery_link",
+        "epoch_rebind_eligible_under_exact_link_rule": false,
+        "reason": "No RecoveryLink exists to transfer; formal failure codes alone do not prove no-send or authorize fresh Work."
+      },
+      "model_stage_works": [
+        {
+          "attempt_event_count": 3,
+          "attempt_event_states": [
+            "ready",
+            "leased",
+            "failed"
+          ],
+          "created_at": "2026-09-14T13:53:54.366951+00:00",
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-14T13:54:15.084777+00:00",
+              "error_code": "MODEL_ADAPTER_REJECTED",
+              "terminal_state": "failed"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-14T13:54:15.084777+00:00",
+            "event_seq": 719,
+            "reason": "worker_completion",
+            "state": "failed"
+          },
+          "stage": "qualitative_model_draft",
+          "work_order_ref": "work:mission-document-research-e82584e0d5b7a3a98fbf428a084481df"
+        }
+      ],
+      "original_report_p0_3": true,
+      "recovery_links": [],
+      "scheduler_authority": "runtime_core",
+      "scheduler_db": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core/core.sqlite",
+      "selection_classification": "unresolved_or_failed_model_stage",
+      "ticket_ref": "mission-document-research:8aa205cf87ec1a16adf9a63b"
+    },
+    {
+      "admission_ref": "mission-document-research-admission:256f7569b79b8f72ba2fa3fa4bc6e408",
+      "controlled_recovery_authorizations": [],
+      "environment": "hyperscaler",
+      "exact_recovery_disposition": {
+        "classification": "no_existing_exact_recovery_link",
+        "epoch_rebind_eligible_under_exact_link_rule": false,
+        "reason": "No RecoveryLink exists to transfer; formal failure codes alone do not prove no-send or authorize fresh Work."
+      },
+      "model_stage_works": [
+        {
+          "attempt_event_count": 4,
+          "attempt_event_states": [
+            "ready",
+            "leased",
+            "expired",
+            "ready"
+          ],
+          "created_at": "2026-09-18T09:51:41.951266+00:00",
+          "formal_results": [],
+          "latest_attempt_event": {
+            "attempt_number": 2,
+            "created_at": "2026-09-18T10:37:24.620080+00:00",
+            "event_seq": 125,
+            "reason": "retry_after_attempt_1",
+            "state": "ready"
+          },
+          "stage": "qualitative_model_draft",
+          "work_order_ref": "work:mission-document-research-05f88fad96439c22540e6b621ec66c29"
+        }
+      ],
+      "original_report_p0_3": false,
+      "recovery_links": [],
+      "scheduler_authority": "runtime_core",
+      "scheduler_db": "/Volumes/EveSSD/Dalton/workspaces/ws-7d894366d1132e2930475a60/state/dalton-core/core.sqlite",
+      "selection_classification": "unresolved_or_failed_model_stage",
+      "ticket_ref": "mission-document-research:2efd9a13c69e1ab50026c6d0"
+    },
+    {
+      "admission_ref": "mission-document-research-admission:29bf4a59c1232b1022effcd21159e9b0",
+      "controlled_recovery_authorizations": [
+        {
+          "actor_ref": "automation:document-research-contract-retry",
+          "authorization_ref": "mission-document-automatic-contract-retry-authorization:d3213a552c127474f614424d33937cbb",
+          "authorized_at": "2026-09-18T10:28:00.952489+00:00",
+          "created_at": "2026-09-18T10:28:00.952489+00:00",
+          "daily_cap": 20,
+          "day": "2026-09-18",
+          "failed_work_order_ref": "work:mission-document-research-e31335c2697cd37e147e52275022ec28",
+          "kind": "automation_bounded_contract_retry",
+          "max_cost_usd": 1.0,
+          "max_fresh_work_orders": 1,
+          "stage_ordinal": 3
+        }
+      ],
+      "environment": "hyperscaler",
+      "exact_recovery_disposition": {
+        "classification": "authorized_recovery_already_succeeded",
+        "epoch_rebind_eligible_under_exact_link_rule": false,
+        "reason": "Reuse the successful authorized recovery result; no new model Work is justified."
+      },
+      "model_stage_works": [
+        {
+          "attempt_event_count": 6,
+          "attempt_event_states": [
+            "ready",
+            "leased",
+            "retryable",
+            "ready",
+            "leased",
+            "succeeded"
+          ],
+          "created_at": "2026-09-18T10:27:19.895209+00:00",
+          "formal_results": [
+            {
+              "attempt_number": 2,
+              "created_at": "2026-09-18T10:27:28.745442+00:00",
+              "error_code": null,
+              "terminal_state": "succeeded"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 2,
+            "created_at": "2026-09-18T10:27:28.745442+00:00",
+            "event_seq": 104,
+            "reason": "worker_completion",
+            "state": "succeeded"
+          },
+          "stage": "qualitative_model_draft",
+          "work_order_ref": "work:mission-document-research-c61c0243e528cc6f90c8ac710d739024"
+        },
+        {
+          "attempt_event_count": 12,
+          "attempt_event_states": [
+            "ready",
+            "leased",
+            "retryable",
+            "ready",
+            "leased",
+            "retryable",
+            "ready",
+            "leased",
+            "retryable",
+            "ready",
+            "leased",
+            "failed"
+          ],
+          "created_at": "2026-09-18T10:27:29.618283+00:00",
+          "formal_results": [
+            {
+              "attempt_number": 4,
+              "created_at": "2026-09-18T10:28:00.023781+00:00",
+              "error_code": "MODEL_OUTPUT_CONTRACT_REJECTED",
+              "terminal_state": "failed"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 4,
+            "created_at": "2026-09-18T10:28:00.023781+00:00",
+            "event_seq": 116,
+            "reason": "worker_completion",
+            "state": "failed"
+          },
+          "stage": "independent_qualitative_verifier",
+          "work_order_ref": "work:mission-document-research-e31335c2697cd37e147e52275022ec28"
+        },
+        {
+          "attempt_event_count": 3,
+          "attempt_event_states": [
+            "ready",
+            "leased",
+            "succeeded"
+          ],
+          "created_at": "2026-09-18T10:28:00.978269+00:00",
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-18T10:28:07.490901+00:00",
+              "error_code": null,
+              "terminal_state": "succeeded"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-18T10:28:07.490901+00:00",
+            "event_seq": 119,
+            "reason": "worker_completion",
+            "state": "succeeded"
+          },
+          "stage": "independent_qualitative_verifier",
+          "work_order_ref": "work:mission-document-recovery-237cafb22b0249c4424f38e429a62f91"
+        }
+      ],
+      "original_report_p0_3": false,
+      "recovery_links": [
+        {
+          "authorization_ref": "mission-document-automatic-contract-retry-authorization:d3213a552c127474f614424d33937cbb",
+          "created_at": "2026-09-18T10:28:00.952489+00:00",
+          "failed_work_order_ref": "work:mission-document-research-e31335c2697cd37e147e52275022ec28",
+          "failure_classification": "automation_bounded_contract_retry",
+          "paid_contract_classification": "proved_paid_output_contract_failure",
+          "recovery_link_ref": "mission-document-research-recovery-link:237cafb22b0249c4424f38e429a62f91",
+          "recovery_number": 1,
+          "recovery_work_execution": {
+            "classification": "attempted_or_terminal",
+            "event_count": 3,
+            "event_states": [
+              "ready",
+              "leased",
+              "succeeded"
+            ],
+            "formal_results": [
+              {
+                "attempt_number": 1,
+                "created_at": "2026-09-18T10:28:07.490901+00:00",
+                "error_code": null,
+                "terminal_state": "succeeded"
+              }
+            ],
+            "latest_event": {
+              "attempt_number": 1,
+              "created_at": "2026-09-18T10:28:07.490901+00:00",
+              "event_seq": 119,
+              "reason": "worker_completion",
+              "state": "succeeded"
+            },
+            "work_present": true
+          },
+          "recovery_work_order_ref": "work:mission-document-recovery-237cafb22b0249c4424f38e429a62f91",
+          "refusal_day": null,
+          "stage_ordinal": 3
+        }
+      ],
+      "scheduler_authority": "runtime_core",
+      "scheduler_db": "/Volumes/EveSSD/Dalton/workspaces/ws-7d894366d1132e2930475a60/state/dalton-core/core.sqlite",
+      "selection_classification": "unresolved_or_failed_model_stage",
+      "ticket_ref": "mission-document-research:9032f3155fa395e675bad648"
+    },
+    {
+      "admission_ref": "mission-document-research-admission:c65e97e7fba75b2012c5331de5967f6d",
+      "controlled_recovery_authorizations": [
+        {
+          "actor_ref": "automation:document-research-contract-retry",
+          "authorization_ref": "mission-document-automatic-contract-retry-authorization:a568730136a7e00a476e119414dae822",
+          "authorized_at": "2026-09-18T07:39:04.107226+00:00",
+          "created_at": "2026-09-18T07:39:04.107226+00:00",
+          "daily_cap": 20,
+          "day": "2026-09-18",
+          "failed_work_order_ref": "work:mission-document-research-5f9d6ccc95045180c1eded83aea67c7c",
+          "kind": "automation_bounded_contract_retry",
+          "max_cost_usd": 1.0,
+          "max_fresh_work_orders": 1,
+          "stage_ordinal": 2
+        }
+      ],
+      "environment": "hyperscaler",
+      "exact_recovery_disposition": {
+        "classification": "authorized_recovery_already_succeeded",
+        "epoch_rebind_eligible_under_exact_link_rule": false,
+        "reason": "Reuse the successful authorized recovery result; no new model Work is justified."
+      },
+      "model_stage_works": [
+        {
+          "attempt_event_count": 12,
+          "attempt_event_states": [
+            "ready",
+            "leased",
+            "retryable",
+            "ready",
+            "leased",
+            "retryable",
+            "ready",
+            "leased",
+            "retryable",
+            "ready",
+            "leased",
+            "failed"
+          ],
+          "created_at": "2026-09-18T07:38:45.945088+00:00",
+          "formal_results": [
+            {
+              "attempt_number": 4,
+              "created_at": "2026-09-18T07:39:04.081716+00:00",
+              "error_code": "MODEL_OUTPUT_CONTRACT_REJECTED",
+              "terminal_state": "failed"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 4,
+            "created_at": "2026-09-18T07:39:04.081716+00:00",
+            "event_seq": 51,
+            "reason": "worker_completion",
+            "state": "failed"
+          },
+          "stage": "qualitative_model_draft",
+          "work_order_ref": "work:mission-document-research-5f9d6ccc95045180c1eded83aea67c7c"
+        },
+        {
+          "attempt_event_count": 9,
+          "attempt_event_states": [
+            "ready",
+            "leased",
+            "retryable",
+            "ready",
+            "leased",
+            "retryable",
+            "ready",
+            "leased",
+            "succeeded"
+          ],
+          "created_at": "2026-09-18T07:39:04.117767+00:00",
+          "formal_results": [
+            {
+              "attempt_number": 3,
+              "created_at": "2026-09-18T07:39:15.961319+00:00",
+              "error_code": null,
+              "terminal_state": "succeeded"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 3,
+            "created_at": "2026-09-18T07:39:15.961319+00:00",
+            "event_seq": 60,
+            "reason": "worker_completion",
+            "state": "succeeded"
+          },
+          "stage": "qualitative_model_draft",
+          "work_order_ref": "work:mission-document-recovery-bf859873dfde4f4d15aee5a1370b3ecb"
+        }
+      ],
+      "original_report_p0_3": false,
+      "recovery_links": [
+        {
+          "authorization_ref": "mission-document-automatic-contract-retry-authorization:a568730136a7e00a476e119414dae822",
+          "created_at": "2026-09-18T07:39:04.107226+00:00",
+          "failed_work_order_ref": "work:mission-document-research-5f9d6ccc95045180c1eded83aea67c7c",
+          "failure_classification": "automation_bounded_contract_retry",
+          "paid_contract_classification": "proved_paid_output_contract_failure",
+          "recovery_link_ref": "mission-document-research-recovery-link:bf859873dfde4f4d15aee5a1370b3ecb",
+          "recovery_number": 1,
+          "recovery_work_execution": {
+            "classification": "attempted_or_terminal",
+            "event_count": 9,
+            "event_states": [
+              "ready",
+              "leased",
+              "retryable",
+              "ready",
+              "leased",
+              "retryable",
+              "ready",
+              "leased",
+              "succeeded"
+            ],
+            "formal_results": [
+              {
+                "attempt_number": 3,
+                "created_at": "2026-09-18T07:39:15.961319+00:00",
+                "error_code": null,
+                "terminal_state": "succeeded"
+              }
+            ],
+            "latest_event": {
+              "attempt_number": 3,
+              "created_at": "2026-09-18T07:39:15.961319+00:00",
+              "event_seq": 60,
+              "reason": "worker_completion",
+              "state": "succeeded"
+            },
+            "work_present": true
+          },
+          "recovery_work_order_ref": "work:mission-document-recovery-bf859873dfde4f4d15aee5a1370b3ecb",
+          "refusal_day": null,
+          "stage_ordinal": 2
+        }
+      ],
+      "scheduler_authority": "runtime_core",
+      "scheduler_db": "/Volumes/EveSSD/Dalton/workspaces/ws-7d894366d1132e2930475a60/state/dalton-core/core.sqlite",
+      "selection_classification": "unresolved_or_failed_model_stage",
+      "ticket_ref": null
+    }
+  ],
+  "content_hash": "56c508388d97f52e45e4d3203c2e7ea68c1e67e76d627c2237e821f0836af751",
+  "generated_at": "2026-09-22T13:46:05.254816+00:00",
+  "mode": "read_only_live_runtime_core_inventory",
+  "schema_version": "0.1",
+  "scope": {
+    "databases": [
+      "/Volumes/EveSSD/Dalton/legacy-state/dalton-core/core.sqlite",
+      "/Volumes/EveSSD/Dalton/workspaces/ws-7d894366d1132e2930475a60/state/dalton-core/core.sqlite"
+    ],
+    "eligibility_rule": "Eligible only when an existing exact RecoveryLink names a present recovery Work with exactly one ready event and no formal result.",
+    "read_guards": [
+      "SQLite URI mode=ro",
+      "PRAGMA query_only=ON",
+      "explicit read transaction rolled back"
+    ],
+    "sanitization": "Includes identifiers, stage/state/reason/error codes, and bounded recovery controls; excludes prompt/output text, response bodies, secrets, and full result metadata.",
+    "scheduler_authority": "scheduler_work_orders, scheduler_attempt_events, and scheduler_formal_results in each environment state/core.sqlite.",
+    "selection": "The 16 admissions classified unresolved_or_failed_model_stage by the corrected runtime-Core policy-hold receipt."
+  },
+  "source_receipt": "/tmp/dalton-triage-20260922/policy-hold-impact.json",
+  "source_receipt_content_hash": "b9d3eab6fe5241587d2745c9f6df2a9a37cdff2f5c7321214ae4ebab0ed52b04",
+  "summary": {
+    "admissions": 16,
+    "admissions_by_environment": {
+      "hyperscaler": 3,
+      "legacy": 13
+    },
+    "admissions_with_recovery_links": 4,
+    "authorized_recovery_terminal_failed": 1,
+    "authorized_recovery_terminal_succeeded": 3,
+    "controlled_recovery_authorizations": 2,
+    "controlled_retry_terminal_failed": 0,
+    "dispositions": {
+      "authorized_recovery_already_succeeded": 3,
+      "authorized_recovery_attempted_and_failed": 1,
+      "no_existing_exact_recovery_link": 12
+    },
+    "exact_rebind_eligible_existing_untouched_ready": 0,
+    "finding": "No selected admission has an existing exact RecoveryLink whose authorized recovery Work is still a single untouched ready event. Four have links; all four recovery Works were attempted, three succeeded and one failed. The other twelve have no exact RecoveryLink and cannot be declared no-send eligible from a formal error code alone.",
+    "formal_error_codes": {
+      "HOST_CONTROL_PROOF_MISSING": 1,
+      "MODEL_ADAPTER_REJECTED": 5,
+      "MODEL_OUTPUT_CONTRACT_REJECTED": 6,
+      "REQUIRED_CONTROLS_UNAVAILABLE": 3
+    },
+    "recovery_links": 4,
+    "recovery_work_execution_classifications": {
+      "attempted_or_terminal": 4
+    }
+  }
+}
