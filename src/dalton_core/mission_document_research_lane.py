@@ -10,6 +10,7 @@ retry and only escalates to a person when that retry fails as well.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
@@ -38,6 +39,9 @@ ESCAPES_FILE = "recovery-escapes.json"
 # had already rebound this admission onto a new ticket identity by itself.
 # Automatic once, then a person -- the same rule the two retry doors follow.
 REENTRY_ESCALATED_REASON = "reentry_failed_after_automatic_rebind"
+MODEL_AUTHORITY_PREEXECUTION_ERROR = (
+    "MissionDocumentResearchError: mission document admission is no longer executable"
+)
 
 # How long every admission may be held, with none startable, before the lane
 # reopens the oldest one that provably never sent anything.  Live on
@@ -702,6 +706,93 @@ class MissionDocumentResearchCoordinator:
         }
         _write_holds(self.holds_path, holds)
 
+    def _preexecution_model_authority_revalidation(
+        self, admission: Mapping[str, Any], held: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        """Name the one terminal hold that is safe to re-enter without spend.
+
+        This is intentionally narrower than the ordinary deadlock escape.  It
+        recognizes the sealed child failure written when current model
+        authority invalidated an admission before the executor created any
+        model Work.  The existing controlled-reentry claim remains the audit
+        and replay bound; this method grants no paid or unproved-send retry.
+        """
+
+        if (held.get("disposition") != "terminal_hold"
+                or held.get("reason") != "failed"
+                or self._started(admission["id"])):
+            return None
+        ticket_ref = held.get("ticket_ref")
+        if not isinstance(ticket_ref, str):
+            return None
+        try:
+            ticket = self.launcher.status(ticket_ref)
+        except (LookupError, LaneChildRejected):
+            return None
+        summary = ticket.get("summary")
+        if not isinstance(summary, Mapping):
+            return None
+        body = dict(summary)
+        asserted = body.pop("content_hash", None)
+        if (ticket.get("status") != "failed"
+                or ticket.get("admission_ref") != admission["id"]
+                or ticket.get("admission_hash") != admission["content_hash"]
+                or set(summary) != {
+                    "schema_version", "created_at", "admission_ref",
+                    "admission_hash", "status", "outcomes", "error",
+                    "content_hash",
+                }
+                or summary.get("schema_version") != "0.1"
+                or summary.get("admission_ref") != admission["id"]
+                or summary.get("admission_hash") != admission["content_hash"]
+                or summary.get("status") != "failed"
+                or summary.get("outcomes") != []
+                or summary.get("error") != MODEL_AUTHORITY_PREEXECUTION_ERROR
+                or asserted != content_hash(body)):
+            return None
+        try:
+            model_work = self.store.connection.execute(
+                "SELECT 1 FROM scheduler_work_orders "
+                "WHERE json_extract(work_order_json, "
+                "'$.metadata.mission_document_research_admission_ref')=? "
+                "AND json_extract(work_order_json, '$.metadata.stage') IN (?,?) "
+                "LIMIT 1",
+                (admission["id"], "qualitative_model_draft",
+                 "independent_qualitative_verifier"),
+            ).fetchone()
+        except sqlite3.Error:
+            return None
+        if model_work is not None:
+            return None
+        summary_path = (
+            self.launcher.tickets_dir / ticket_ref.split(":", 1)[1] / "summary.json"
+        )
+        try:
+            if summary_path.is_symlink():
+                return None
+            summary_bytes = summary_path.read_bytes()
+            if json.loads(summary_bytes) != summary:
+                return None
+        except (OSError, ValueError, TypeError):
+            return None
+        recovery = {
+            "action": "resume",
+            "reason": "infrastructure_model_authority_revalidation",
+            "work_order_ref": None,
+            "expected_summary_sha256": hashlib.sha256(summary_bytes).hexdigest(),
+        }
+        consumed = getattr(self.launcher, "controlled_reentry_consumed", None)
+        if consumed is not None:
+            try:
+                if consumed(
+                    ticket_ref,
+                    self._reentry_authorization(admission, ticket_ref, recovery),
+                ):
+                    return None
+            except Exception:  # noqa: BLE001 - unreadable audit fails closed
+                return None
+        return recovery
+
     def _effective_work_hints(
         self, admission: Mapping[str, Any],
     ) -> list[str]:
@@ -1255,6 +1346,7 @@ class MissionDocumentResearchCoordinator:
             admission_hash=admission["content_hash"],
             prior_ticket_ref=ticket_ref,
             authorization=authorization,
+            expected_summary_sha256=recovery.get("expected_summary_sha256"),
         )
         pointer = {
             "ticket_ref": resumed["id"],
@@ -1401,6 +1493,43 @@ class MissionDocumentResearchCoordinator:
                     )
 
         now = self.clock().astimezone(timezone.utc)
+        # A model-policy/profile outage can fail the child before it writes a
+        # start or any model Work.  Re-enter at most one exact sealed failure
+        # per tick through the launcher's existing one-shot claim ledger.  No
+        # paid recovery authority is created, and every broader terminal hold
+        # continues through the ordinary hold path below.
+        for admission in admissions:
+            held = holds.get(admission["id"])
+            if held is None:
+                continue
+            if held["admission_hash"] != admission["content_hash"]:
+                raise MissionDocumentResearchLaneError(
+                    "document research hold admission hash drifted"
+                )
+            recovery = self._preexecution_model_authority_revalidation(
+                admission, held
+            )
+            if recovery is None:
+                continue
+            try:
+                result = self._resume(
+                    admission, ticket_ref=held["ticket_ref"],
+                    recovery=recovery, settled=settled,
+                )
+            except LaneChildConflict as exc:
+                return {"status": "busy", "reason": str(exc), "last": settled}
+            except LaneChildRejected as exc:
+                self._hold(
+                    holds, admission,
+                    reason=self._reentry_hold_reason(
+                        admission, held["ticket_ref"], recovery, exc),
+                    ticket_ref=held["ticket_ref"], disposition="terminal_hold",
+                )
+                continue
+            holds.pop(admission["id"], None)
+            _write_holds(self.holds_path, holds)
+            return result
+
         for admission in admissions:
             held = holds.get(admission["id"])
             legacy_day_hold = (

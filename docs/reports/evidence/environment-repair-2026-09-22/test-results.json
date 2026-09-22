@@ -1,0 +1,28 @@
+{
+  "source_commit": "81bbc849cd73c651b37d51b37a7492f2d310d621",
+  "full_suite": {
+    "tests": 9683,
+    "seconds": 786.246,
+    "skipped": 4,
+    "failures": 0,
+    "errors": 0
+  },
+  "release_python_3_14_smoke": {
+    "tests": 56,
+    "failures": 0,
+    "errors": 0
+  },
+  "hermetic_replay": {
+    "tests": 1,
+    "model_calls": 0,
+    "network_calls": 0,
+    "status": "passed"
+  },
+  "terminal_reentry_followup": {
+    "focused_tests": 159,
+    "seconds": 76,
+    "independent_tests": 51,
+    "failures": 0,
+    "errors": 0
+  }
+}

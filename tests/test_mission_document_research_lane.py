@@ -46,6 +46,11 @@ class _Store:
             );
             """
         )
+        Scheduler(
+            connection=self.connection, max_attempts=2,
+            default_lease_seconds=30, max_lease_seconds=60,
+            max_total_lease_seconds=120,
+        )
 
     def active_policy(self) -> dict:
         return {
@@ -197,6 +202,122 @@ class MissionDocumentResearchLaneTests(unittest.TestCase):
         self.lane = MissionDocumentResearchCoordinator(
             store=self.store, launcher=self.launcher,
         )
+
+    def _model_authority_terminal_hold(self, admission: dict, *, error: str | None = None):
+        from dalton_core.mission_document_research_lane import (
+            MODEL_AUTHORITY_PREEXECUTION_ERROR,
+        )
+
+        ticket_ref = (
+            "mission-document-research:" + content_hash(admission["id"])[:24]
+        )
+        body = {
+            "schema_version": "0.1",
+            "created_at": "2026-09-22T12:00:00.000000+00:00",
+            "admission_ref": admission["id"],
+            "admission_hash": admission["content_hash"],
+            "status": "failed",
+            "outcomes": [],
+            "error": error or MODEL_AUTHORITY_PREEXECUTION_ERROR,
+        }
+        summary = {**body, "content_hash": content_hash(body)}
+        self.launcher.tickets[ticket_ref] = {
+            "id": ticket_ref,
+            "status": "failed",
+            "admission_ref": admission["id"],
+            "admission_hash": admission["content_hash"],
+            "summary": summary,
+        }
+        ticket_dir = self.launcher.tickets_dir / ticket_ref.split(":", 1)[1]
+        ticket_dir.mkdir(parents=True, exist_ok=True)
+        (ticket_dir / "summary.json").write_text(
+            canonical_json(summary) + "\n", encoding="utf-8"
+        )
+        from dalton_core.mission_document_research_lane import _read_holds
+        holds = (
+            _read_holds(self.lane.holds_path)
+            if self.lane.holds_path.is_file() else {}
+        )
+        self.lane._hold(
+            holds, admission, reason="failed", ticket_ref=ticket_ref,
+            disposition="terminal_hold",
+        )
+        return ticket_ref
+
+    def test_never_started_model_authority_failure_reenters_through_audited_ticket(self):
+        admission = self.store.add(1)
+        ticket_ref = self._model_authority_terminal_hold(admission)
+
+        result = self.lane.dispatch_once()
+
+        self.assertEqual(result["status"], "resumed")
+        self.assertEqual(len(self.launcher.resumed), 1)
+        replay = self.launcher.resumed[0]
+        self.assertEqual(replay["prior_ticket_ref"], ticket_ref)
+        authorization = json.loads(replay["authorization"])
+        self.assertEqual(
+            authorization["reason"],
+            "infrastructure_model_authority_revalidation",
+        )
+        self.assertIsNone(authorization["work_order_ref"])
+        self.assertNotIn(
+            admission["id"],
+            json.loads(self.lane.holds_path.read_text(encoding="utf-8"))["holds"],
+        )
+        self.launcher.claims.add((ticket_ref, replay["authorization"]))
+        self.assertEqual(self.lane.dispatch_once()["status"], "idle")
+        self.assertEqual(len(self.launcher.resumed), 1)
+        held = json.loads(
+            self.lane.holds_path.read_text(encoding="utf-8")
+        )["holds"][admission["id"]]
+        self.assertEqual(held["disposition"], "terminal_hold")
+
+    def test_model_authority_terminal_reentry_refuses_started_or_model_work(self):
+        started = self.store.add(1)
+        self._model_authority_terminal_hold(started)
+        self.store.started(started["id"])
+        self.assertIn(
+            self.lane.dispatch_once()["status"], {"idle", "recovery_required"}
+        )
+        self.assertEqual(self.launcher.resumed, [])
+
+        unstarted = self.store.add(2)
+        self._model_authority_terminal_hold(unstarted)
+        self._scheduler_work(unstarted, stage="qualitative_model_draft")
+        self.assertIn(
+            self.lane.dispatch_once()["status"], {"idle", "recovery_required"}
+        )
+        self.assertEqual(self.launcher.resumed, [])
+
+    def test_model_authority_terminal_reentry_requires_exact_sealed_failure(self):
+        admission = self.store.add(1)
+        ticket_ref = self._model_authority_terminal_hold(
+            admission, error="MissionDocumentResearchError: unrelated failure",
+        )
+        self.assertEqual(self.lane.dispatch_once()["status"], "idle")
+        self.assertEqual(self.launcher.resumed, [])
+        self.launcher.tickets[ticket_ref]["summary"]["error"] = (
+            "MissionDocumentResearchError: mission document admission is no longer executable"
+        )
+        # The hash still covers the prior error, so the otherwise exact words
+        # cannot turn a tampered summary into re-entry authority.
+        self.assertEqual(self.lane.dispatch_once()["status"], "idle")
+        self.assertEqual(self.launcher.resumed, [])
+
+    def test_model_authority_terminal_reentry_starts_at_most_one_per_tick(self):
+        first = self.store.add(1)
+        second = self.store.add(2)
+        self._model_authority_terminal_hold(first)
+        self._model_authority_terminal_hold(second)
+
+        result = self.lane.dispatch_once()
+
+        self.assertEqual(result["status"], "resumed")
+        self.assertEqual(len(self.launcher.resumed), 1)
+        remaining = json.loads(
+            self.lane.holds_path.read_text(encoding="utf-8")
+        )["holds"]
+        self.assertEqual(set(remaining), {second["id"]})
 
     def test_fresh_admission_launches_only_by_exact_ref_and_hash(self) -> None:
         admission = self.store.add(1)
@@ -661,7 +782,9 @@ class MissionDocumentResearchLaneTests(unittest.TestCase):
         with self.assertRaisesRegex(MissionDocumentResearchLaneError, "hash drifted"):
             self.lane.dispatch_once()
 
-    def _scheduler_work(self, admission: dict) -> tuple[Scheduler, dict]:
+    def _scheduler_work(
+        self, admission: dict, *, stage: str = "registered_source_retrieval",
+    ) -> tuple[Scheduler, dict]:
         scheduler = Scheduler(
             connection=self.store.connection, max_attempts=2,
             default_lease_seconds=30, max_lease_seconds=60,
@@ -684,7 +807,7 @@ class MissionDocumentResearchLaneTests(unittest.TestCase):
             "metadata": {
                 "mission_document_research_admission_ref": admission["id"],
                 "mission_document_research_admission_hash": admission["content_hash"],
-                "stage": "registered_source_retrieval",
+                "stage": stage,
             },
         }
         scheduler.enqueue(work)

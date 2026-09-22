@@ -540,10 +540,15 @@ class LaneChildLauncher:
         finally:
             os.close(descriptor)
 
-    def claim_controlled_reentry(self, ticket_id: str, authorization: str) -> None:
+    def claim_controlled_reentry(
+        self, ticket_id: str, authorization: str,
+        expected_summary_sha256: str | None = None,
+    ) -> None:
         """Persist a claim without spawning (test/operator compatibility)."""
         with self._lock:
-            self._claim_controlled_reentry_locked(ticket_id, authorization)
+            self._claim_controlled_reentry_locked(
+                ticket_id, authorization, expected_summary_sha256
+            )
 
     def spawn(self, *, digest: str, record: Mapping[str, Any],
               _controlled_reentry: tuple[str, str] | tuple[str, str, str] | None = None,

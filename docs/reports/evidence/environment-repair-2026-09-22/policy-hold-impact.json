@@ -1,0 +1,3057 @@
+{
+  "content_hash": "b9d3eab6fe5241587d2745c9f6df2a9a37cdff2f5c7321214ae4ebab0ed52b04",
+  "correction": {
+    "reason": "document research runtime constructs Scheduler on Core store connection; core.sqlite scheduler tables are authoritative; external scheduler.sqlite is planner-only",
+    "status": "supersedes_wrong_scheduler_receipt",
+    "superseded_content_hash": "88712b99b2b97c6653cdcb6b187fcc53562edf0b76c53c3bd5b054043ab903e0"
+  },
+  "generated_at": "2026-09-22T13:21:05+00:00",
+  "holds": [
+    {
+      "admission_created_at": "2026-09-17T04:01:59.247941+00:00",
+      "admission_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:49",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:52"
+      },
+      "admission_ref": "mission-document-research-admission:02fcf3c6c6390f29a8979efc7b0789ea",
+      "current_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:53",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:56"
+      },
+      "disposition": "recovery_required",
+      "environment": "legacy",
+      "hold_reason": "reentry_failed_after_automatic_rebind:controlled reentry was already attempted",
+      "model_stage_work_count": 2,
+      "model_stage_works": [
+        {
+          "attempt_event_count": 3,
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-17T04:22:15.459380+00:00",
+              "terminal_state": "succeeded",
+              "work_order_id": "work:mission-document-research-8c7a51a42508c48b825c8e59a074ba62"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-17T04:22:15.459380+00:00",
+            "event_seq": 840,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "succeeded",
+            "work_order_id": "work:mission-document-research-8c7a51a42508c48b825c8e59a074ba62"
+          },
+          "stage": "qualitative_model_draft",
+          "work_created_at": "2026-09-17T04:22:09.283598+00:00",
+          "work_order_id": "work:mission-document-research-8c7a51a42508c48b825c8e59a074ba62"
+        },
+        {
+          "attempt_event_count": 12,
+          "formal_results": [
+            {
+              "attempt_number": 4,
+              "created_at": "2026-09-17T04:22:44.117667+00:00",
+              "terminal_state": "failed",
+              "work_order_id": "work:mission-document-research-d6ee13d30db161c679399b3114cfb795"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 4,
+            "created_at": "2026-09-17T04:22:44.117667+00:00",
+            "event_seq": 852,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "failed",
+            "work_order_id": "work:mission-document-research-d6ee13d30db161c679399b3114cfb795"
+          },
+          "stage": "independent_qualitative_verifier",
+          "work_created_at": "2026-09-17T04:22:17.323585+00:00",
+          "work_order_id": "work:mission-document-research-d6ee13d30db161c679399b3114cfb795"
+        }
+      ],
+      "original_report_p0_3": false,
+      "planner_external_scheduler_model_stage_work_count": 0,
+      "planner_external_scheduler_model_stage_works": [],
+      "reentry_plan": {
+        "apply": false,
+        "command": null,
+        "eligibility": "excluded: runtime Core Scheduler already contains model-stage Work",
+        "kind": "no_reentry_planned",
+        "new_model_budget_grant": false,
+        "operation": null,
+        "required_next_authority": "explicit audited execution-epoch rebind; ordinary reentry is insufficient"
+      },
+      "runtime_core_scheduler_model_stage_work_count": 2,
+      "runtime_core_scheduler_model_stage_works": [
+        {
+          "attempt_event_count": 3,
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-17T04:22:15.459380+00:00",
+              "terminal_state": "succeeded",
+              "work_order_id": "work:mission-document-research-8c7a51a42508c48b825c8e59a074ba62"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-17T04:22:15.459380+00:00",
+            "event_seq": 840,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "succeeded",
+            "work_order_id": "work:mission-document-research-8c7a51a42508c48b825c8e59a074ba62"
+          },
+          "stage": "qualitative_model_draft",
+          "work_created_at": "2026-09-17T04:22:09.283598+00:00",
+          "work_order_id": "work:mission-document-research-8c7a51a42508c48b825c8e59a074ba62"
+        },
+        {
+          "attempt_event_count": 12,
+          "formal_results": [
+            {
+              "attempt_number": 4,
+              "created_at": "2026-09-17T04:22:44.117667+00:00",
+              "terminal_state": "failed",
+              "work_order_id": "work:mission-document-research-d6ee13d30db161c679399b3114cfb795"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 4,
+            "created_at": "2026-09-17T04:22:44.117667+00:00",
+            "event_seq": 852,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "failed",
+            "work_order_id": "work:mission-document-research-d6ee13d30db161c679399b3114cfb795"
+          },
+          "stage": "independent_qualitative_verifier",
+          "work_created_at": "2026-09-17T04:22:17.323585+00:00",
+          "work_order_id": "work:mission-document-research-d6ee13d30db161c679399b3114cfb795"
+        }
+      ],
+      "runtime_core_stage_classification": "unresolved_or_failed_model_stage",
+      "scheduler_authority": "runtime_core",
+      "scheduler_db": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core/core.sqlite",
+      "started": true,
+      "state_dir": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core",
+      "ticket_ref": "mission-document-research:68c5028a99e04e7865c40765",
+      "ticket_summary_error": "MissionDocumentModelAuthorityError: installed mission document draft budget policy is unavailable: OperationalError: read_only WAL requires existing WAL/SHM; no sidecars were created",
+      "ticket_summary_status": "failed",
+      "zero_model_stage_work": false
+    },
+    {
+      "admission_created_at": "2026-09-12T01:20:00.706095+00:00",
+      "admission_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:12",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:12"
+      },
+      "admission_ref": "mission-document-research-admission:03c4103b1eee94421bacce23ae719c2f",
+      "current_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:53",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:56"
+      },
+      "disposition": "recovery_required",
+      "environment": "legacy",
+      "hold_reason": "reentry_failed_after_automatic_rebind:controlled reentry was already attempted",
+      "model_stage_work_count": 1,
+      "model_stage_works": [
+        {
+          "attempt_event_count": 12,
+          "formal_results": [
+            {
+              "attempt_number": 4,
+              "created_at": "2026-09-12T01:26:03.085466+00:00",
+              "terminal_state": "failed",
+              "work_order_id": "work:mission-document-research-10cb1cda86e1794d7150c581a21c5a12"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 4,
+            "created_at": "2026-09-12T01:26:03.085466+00:00",
+            "event_seq": 683,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "failed",
+            "work_order_id": "work:mission-document-research-10cb1cda86e1794d7150c581a21c5a12"
+          },
+          "stage": "qualitative_model_draft",
+          "work_created_at": "2026-09-12T01:24:53.096709+00:00",
+          "work_order_id": "work:mission-document-research-10cb1cda86e1794d7150c581a21c5a12"
+        }
+      ],
+      "original_report_p0_3": true,
+      "planner_external_scheduler_model_stage_work_count": 0,
+      "planner_external_scheduler_model_stage_works": [],
+      "reentry_plan": {
+        "apply": false,
+        "command": null,
+        "eligibility": "excluded: runtime Core Scheduler already contains model-stage Work",
+        "kind": "no_reentry_planned",
+        "new_model_budget_grant": false,
+        "operation": null,
+        "required_next_authority": "explicit audited execution-epoch rebind; ordinary reentry is insufficient"
+      },
+      "runtime_core_scheduler_model_stage_work_count": 1,
+      "runtime_core_scheduler_model_stage_works": [
+        {
+          "attempt_event_count": 12,
+          "formal_results": [
+            {
+              "attempt_number": 4,
+              "created_at": "2026-09-12T01:26:03.085466+00:00",
+              "terminal_state": "failed",
+              "work_order_id": "work:mission-document-research-10cb1cda86e1794d7150c581a21c5a12"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 4,
+            "created_at": "2026-09-12T01:26:03.085466+00:00",
+            "event_seq": 683,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "failed",
+            "work_order_id": "work:mission-document-research-10cb1cda86e1794d7150c581a21c5a12"
+          },
+          "stage": "qualitative_model_draft",
+          "work_created_at": "2026-09-12T01:24:53.096709+00:00",
+          "work_order_id": "work:mission-document-research-10cb1cda86e1794d7150c581a21c5a12"
+        }
+      ],
+      "runtime_core_stage_classification": "unresolved_or_failed_model_stage",
+      "scheduler_authority": "runtime_core",
+      "scheduler_db": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core/core.sqlite",
+      "started": true,
+      "state_dir": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core",
+      "ticket_ref": "mission-document-research:9cbb196a784ab29c18f15687",
+      "ticket_summary_error": "MissionDocumentResearchError: mission document admission is no longer executable",
+      "ticket_summary_status": "failed",
+      "zero_model_stage_work": false
+    },
+    {
+      "admission_created_at": "2026-09-17T03:05:11.797639+00:00",
+      "admission_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:48",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:51"
+      },
+      "admission_ref": "mission-document-research-admission:16a7a1374b3ca802e87bc59c9d1e865e",
+      "current_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:53",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:56"
+      },
+      "disposition": "recovery_required",
+      "environment": "legacy",
+      "hold_reason": "reentry_failed_after_automatic_rebind:controlled reentry was already attempted",
+      "model_stage_work_count": 2,
+      "model_stage_works": [
+        {
+          "attempt_event_count": 3,
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-17T03:17:14.098785+00:00",
+              "terminal_state": "succeeded",
+              "work_order_id": "work:mission-document-research-879fc689ef12efc8eb71486d2f8da82a"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-17T03:17:14.098785+00:00",
+            "event_seq": 760,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "succeeded",
+            "work_order_id": "work:mission-document-research-879fc689ef12efc8eb71486d2f8da82a"
+          },
+          "stage": "qualitative_model_draft",
+          "work_created_at": "2026-09-17T03:17:06.009751+00:00",
+          "work_order_id": "work:mission-document-research-879fc689ef12efc8eb71486d2f8da82a"
+        },
+        {
+          "attempt_event_count": 3,
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-17T03:17:20.536222+00:00",
+              "terminal_state": "succeeded",
+              "work_order_id": "work:mission-document-research-708234555c11df2609f7b373e6277139"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-17T03:17:20.536222+00:00",
+            "event_seq": 763,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "succeeded",
+            "work_order_id": "work:mission-document-research-708234555c11df2609f7b373e6277139"
+          },
+          "stage": "independent_qualitative_verifier",
+          "work_created_at": "2026-09-17T03:17:15.220402+00:00",
+          "work_order_id": "work:mission-document-research-708234555c11df2609f7b373e6277139"
+        }
+      ],
+      "original_report_p0_3": false,
+      "planner_external_scheduler_model_stage_work_count": 0,
+      "planner_external_scheduler_model_stage_works": [],
+      "reentry_plan": {
+        "apply": false,
+        "command": null,
+        "eligibility": "excluded: runtime Core Scheduler already contains model-stage Work",
+        "kind": "no_reentry_planned",
+        "new_model_budget_grant": false,
+        "operation": null,
+        "required_next_authority": "reuse exact succeeded results under frozen patch"
+      },
+      "runtime_core_scheduler_model_stage_work_count": 2,
+      "runtime_core_scheduler_model_stage_works": [
+        {
+          "attempt_event_count": 3,
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-17T03:17:14.098785+00:00",
+              "terminal_state": "succeeded",
+              "work_order_id": "work:mission-document-research-879fc689ef12efc8eb71486d2f8da82a"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-17T03:17:14.098785+00:00",
+            "event_seq": 760,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "succeeded",
+            "work_order_id": "work:mission-document-research-879fc689ef12efc8eb71486d2f8da82a"
+          },
+          "stage": "qualitative_model_draft",
+          "work_created_at": "2026-09-17T03:17:06.009751+00:00",
+          "work_order_id": "work:mission-document-research-879fc689ef12efc8eb71486d2f8da82a"
+        },
+        {
+          "attempt_event_count": 3,
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-17T03:17:20.536222+00:00",
+              "terminal_state": "succeeded",
+              "work_order_id": "work:mission-document-research-708234555c11df2609f7b373e6277139"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-17T03:17:20.536222+00:00",
+            "event_seq": 763,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "succeeded",
+            "work_order_id": "work:mission-document-research-708234555c11df2609f7b373e6277139"
+          },
+          "stage": "independent_qualitative_verifier",
+          "work_created_at": "2026-09-17T03:17:15.220402+00:00",
+          "work_order_id": "work:mission-document-research-708234555c11df2609f7b373e6277139"
+        }
+      ],
+      "runtime_core_stage_classification": "only_succeeded_model_stages",
+      "scheduler_authority": "runtime_core",
+      "scheduler_db": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core/core.sqlite",
+      "started": true,
+      "state_dir": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core",
+      "ticket_ref": "mission-document-research:5ab6228e7859e8089a6c4cbc",
+      "ticket_summary_error": "ResearchAutoCommitRejected: document qualitative rule admits no numeric statement",
+      "ticket_summary_status": "failed",
+      "zero_model_stage_work": false
+    },
+    {
+      "admission_created_at": "2026-09-17T03:52:11.744601+00:00",
+      "admission_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:49",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:52"
+      },
+      "admission_ref": "mission-document-research-admission:28632c70eea0d8209b89ec6353e0a51b",
+      "current_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:53",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:56"
+      },
+      "disposition": "recovery_required",
+      "environment": "legacy",
+      "hold_reason": "reentry_failed_after_automatic_rebind:controlled reentry was already attempted",
+      "model_stage_work_count": 2,
+      "model_stage_works": [
+        {
+          "attempt_event_count": 3,
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-17T04:07:35.289003+00:00",
+              "terminal_state": "succeeded",
+              "work_order_id": "work:mission-document-research-b8d10079302822f3239654be04264efe"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-17T04:07:35.289003+00:00",
+            "event_seq": 822,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "succeeded",
+            "work_order_id": "work:mission-document-research-b8d10079302822f3239654be04264efe"
+          },
+          "stage": "qualitative_model_draft",
+          "work_created_at": "2026-09-17T04:07:28.368764+00:00",
+          "work_order_id": "work:mission-document-research-b8d10079302822f3239654be04264efe"
+        },
+        {
+          "attempt_event_count": 3,
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-17T04:07:42.445102+00:00",
+              "terminal_state": "succeeded",
+              "work_order_id": "work:mission-document-research-1b27e18b707a85ef0e2ced230d810e9c"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-17T04:07:42.445102+00:00",
+            "event_seq": 825,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "succeeded",
+            "work_order_id": "work:mission-document-research-1b27e18b707a85ef0e2ced230d810e9c"
+          },
+          "stage": "independent_qualitative_verifier",
+          "work_created_at": "2026-09-17T04:07:36.535897+00:00",
+          "work_order_id": "work:mission-document-research-1b27e18b707a85ef0e2ced230d810e9c"
+        }
+      ],
+      "original_report_p0_3": false,
+      "planner_external_scheduler_model_stage_work_count": 0,
+      "planner_external_scheduler_model_stage_works": [],
+      "reentry_plan": {
+        "apply": false,
+        "command": null,
+        "eligibility": "excluded: runtime Core Scheduler already contains model-stage Work",
+        "kind": "no_reentry_planned",
+        "new_model_budget_grant": false,
+        "operation": null,
+        "required_next_authority": "reuse exact succeeded results under frozen patch"
+      },
+      "runtime_core_scheduler_model_stage_work_count": 2,
+      "runtime_core_scheduler_model_stage_works": [
+        {
+          "attempt_event_count": 3,
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-17T04:07:35.289003+00:00",
+              "terminal_state": "succeeded",
+              "work_order_id": "work:mission-document-research-b8d10079302822f3239654be04264efe"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-17T04:07:35.289003+00:00",
+            "event_seq": 822,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "succeeded",
+            "work_order_id": "work:mission-document-research-b8d10079302822f3239654be04264efe"
+          },
+          "stage": "qualitative_model_draft",
+          "work_created_at": "2026-09-17T04:07:28.368764+00:00",
+          "work_order_id": "work:mission-document-research-b8d10079302822f3239654be04264efe"
+        },
+        {
+          "attempt_event_count": 3,
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-17T04:07:42.445102+00:00",
+              "terminal_state": "succeeded",
+              "work_order_id": "work:mission-document-research-1b27e18b707a85ef0e2ced230d810e9c"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-17T04:07:42.445102+00:00",
+            "event_seq": 825,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "succeeded",
+            "work_order_id": "work:mission-document-research-1b27e18b707a85ef0e2ced230d810e9c"
+          },
+          "stage": "independent_qualitative_verifier",
+          "work_created_at": "2026-09-17T04:07:36.535897+00:00",
+          "work_order_id": "work:mission-document-research-1b27e18b707a85ef0e2ced230d810e9c"
+        }
+      ],
+      "runtime_core_stage_classification": "only_succeeded_model_stages",
+      "scheduler_authority": "runtime_core",
+      "scheduler_db": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core/core.sqlite",
+      "started": true,
+      "state_dir": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core",
+      "ticket_ref": "mission-document-research:d3d6f0c3e07a1a7ced5348d6",
+      "ticket_summary_error": "ResearchAutoCommitRejected: document qualitative rule admits no numeric statement",
+      "ticket_summary_status": "failed",
+      "zero_model_stage_work": false
+    },
+    {
+      "admission_created_at": "2026-09-11T19:57:46.826947+00:00",
+      "admission_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:12",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:12"
+      },
+      "admission_ref": "mission-document-research-admission:3953fd12844107bafdcf2eb7729d82fa",
+      "current_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:53",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:56"
+      },
+      "disposition": "recovery_required",
+      "environment": "legacy",
+      "hold_reason": "reentry_failed_after_automatic_rebind:controlled reentry was already attempted",
+      "model_stage_work_count": 2,
+      "model_stage_works": [
+        {
+          "attempt_event_count": 3,
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-11T20:01:19.314808+00:00",
+              "terminal_state": "succeeded",
+              "work_order_id": "work:mission-document-research-61bfdaf77712d98a63691dad06f9330d"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-11T20:01:19.314808+00:00",
+            "event_seq": 551,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "succeeded",
+            "work_order_id": "work:mission-document-research-61bfdaf77712d98a63691dad06f9330d"
+          },
+          "stage": "qualitative_model_draft",
+          "work_created_at": "2026-09-11T20:01:01.976578+00:00",
+          "work_order_id": "work:mission-document-research-61bfdaf77712d98a63691dad06f9330d"
+        },
+        {
+          "attempt_event_count": 3,
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-11T20:01:20.184663+00:00",
+              "terminal_state": "failed",
+              "work_order_id": "work:mission-document-research-1af3282a5ecbbcbbe1e64d453652efc6"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-11T20:01:20.184663+00:00",
+            "event_seq": 554,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "failed",
+            "work_order_id": "work:mission-document-research-1af3282a5ecbbcbbe1e64d453652efc6"
+          },
+          "stage": "independent_qualitative_verifier",
+          "work_created_at": "2026-09-11T20:01:19.533151+00:00",
+          "work_order_id": "work:mission-document-research-1af3282a5ecbbcbbe1e64d453652efc6"
+        }
+      ],
+      "original_report_p0_3": true,
+      "planner_external_scheduler_model_stage_work_count": 0,
+      "planner_external_scheduler_model_stage_works": [],
+      "reentry_plan": {
+        "apply": false,
+        "command": null,
+        "eligibility": "excluded: runtime Core Scheduler already contains model-stage Work",
+        "kind": "no_reentry_planned",
+        "new_model_budget_grant": false,
+        "operation": null,
+        "required_next_authority": "explicit audited execution-epoch rebind; ordinary reentry is insufficient"
+      },
+      "runtime_core_scheduler_model_stage_work_count": 2,
+      "runtime_core_scheduler_model_stage_works": [
+        {
+          "attempt_event_count": 3,
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-11T20:01:19.314808+00:00",
+              "terminal_state": "succeeded",
+              "work_order_id": "work:mission-document-research-61bfdaf77712d98a63691dad06f9330d"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-11T20:01:19.314808+00:00",
+            "event_seq": 551,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "succeeded",
+            "work_order_id": "work:mission-document-research-61bfdaf77712d98a63691dad06f9330d"
+          },
+          "stage": "qualitative_model_draft",
+          "work_created_at": "2026-09-11T20:01:01.976578+00:00",
+          "work_order_id": "work:mission-document-research-61bfdaf77712d98a63691dad06f9330d"
+        },
+        {
+          "attempt_event_count": 3,
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-11T20:01:20.184663+00:00",
+              "terminal_state": "failed",
+              "work_order_id": "work:mission-document-research-1af3282a5ecbbcbbe1e64d453652efc6"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-11T20:01:20.184663+00:00",
+            "event_seq": 554,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "failed",
+            "work_order_id": "work:mission-document-research-1af3282a5ecbbcbbe1e64d453652efc6"
+          },
+          "stage": "independent_qualitative_verifier",
+          "work_created_at": "2026-09-11T20:01:19.533151+00:00",
+          "work_order_id": "work:mission-document-research-1af3282a5ecbbcbbe1e64d453652efc6"
+        }
+      ],
+      "runtime_core_stage_classification": "unresolved_or_failed_model_stage",
+      "scheduler_authority": "runtime_core",
+      "scheduler_db": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core/core.sqlite",
+      "started": true,
+      "state_dir": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core",
+      "ticket_ref": "mission-document-research:8ba1b0c33995fb0cb2dff68e",
+      "ticket_summary_error": "MissionDocumentResearchError: mission document admission is no longer executable",
+      "ticket_summary_status": "failed",
+      "zero_model_stage_work": false
+    },
+    {
+      "admission_created_at": "2026-09-12T00:24:07.727764+00:00",
+      "admission_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:12",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:12"
+      },
+      "admission_ref": "mission-document-research-admission:49d92fa70b8ef1b2e3163f5d8dbd8449",
+      "current_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:53",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:56"
+      },
+      "disposition": "recovery_required",
+      "environment": "legacy",
+      "hold_reason": "reentry_failed_after_automatic_rebind:controlled reentry was already attempted",
+      "model_stage_work_count": 2,
+      "model_stage_works": [
+        {
+          "attempt_event_count": 3,
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-12T00:29:23.200322+00:00",
+              "terminal_state": "succeeded",
+              "work_order_id": "work:mission-document-research-d6ec590783f4c1219fb04ac32dc80566"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-12T00:29:23.200322+00:00",
+            "event_seq": 593,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "succeeded",
+            "work_order_id": "work:mission-document-research-d6ec590783f4c1219fb04ac32dc80566"
+          },
+          "stage": "qualitative_model_draft",
+          "work_created_at": "2026-09-12T00:29:10.579658+00:00",
+          "work_order_id": "work:mission-document-research-d6ec590783f4c1219fb04ac32dc80566"
+        },
+        {
+          "attempt_event_count": 3,
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-12T00:29:28.406447+00:00",
+              "terminal_state": "failed",
+              "work_order_id": "work:mission-document-research-570d1df4e2f8373d9409dfec8528b001"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-12T00:29:28.406447+00:00",
+            "event_seq": 596,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "failed",
+            "work_order_id": "work:mission-document-research-570d1df4e2f8373d9409dfec8528b001"
+          },
+          "stage": "independent_qualitative_verifier",
+          "work_created_at": "2026-09-12T00:29:23.576619+00:00",
+          "work_order_id": "work:mission-document-research-570d1df4e2f8373d9409dfec8528b001"
+        }
+      ],
+      "original_report_p0_3": true,
+      "planner_external_scheduler_model_stage_work_count": 0,
+      "planner_external_scheduler_model_stage_works": [],
+      "reentry_plan": {
+        "apply": false,
+        "command": null,
+        "eligibility": "excluded: runtime Core Scheduler already contains model-stage Work",
+        "kind": "no_reentry_planned",
+        "new_model_budget_grant": false,
+        "operation": null,
+        "required_next_authority": "explicit audited execution-epoch rebind; ordinary reentry is insufficient"
+      },
+      "runtime_core_scheduler_model_stage_work_count": 2,
+      "runtime_core_scheduler_model_stage_works": [
+        {
+          "attempt_event_count": 3,
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-12T00:29:23.200322+00:00",
+              "terminal_state": "succeeded",
+              "work_order_id": "work:mission-document-research-d6ec590783f4c1219fb04ac32dc80566"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-12T00:29:23.200322+00:00",
+            "event_seq": 593,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "succeeded",
+            "work_order_id": "work:mission-document-research-d6ec590783f4c1219fb04ac32dc80566"
+          },
+          "stage": "qualitative_model_draft",
+          "work_created_at": "2026-09-12T00:29:10.579658+00:00",
+          "work_order_id": "work:mission-document-research-d6ec590783f4c1219fb04ac32dc80566"
+        },
+        {
+          "attempt_event_count": 3,
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-12T00:29:28.406447+00:00",
+              "terminal_state": "failed",
+              "work_order_id": "work:mission-document-research-570d1df4e2f8373d9409dfec8528b001"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-12T00:29:28.406447+00:00",
+            "event_seq": 596,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "failed",
+            "work_order_id": "work:mission-document-research-570d1df4e2f8373d9409dfec8528b001"
+          },
+          "stage": "independent_qualitative_verifier",
+          "work_created_at": "2026-09-12T00:29:23.576619+00:00",
+          "work_order_id": "work:mission-document-research-570d1df4e2f8373d9409dfec8528b001"
+        }
+      ],
+      "runtime_core_stage_classification": "unresolved_or_failed_model_stage",
+      "scheduler_authority": "runtime_core",
+      "scheduler_db": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core/core.sqlite",
+      "started": true,
+      "state_dir": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core",
+      "ticket_ref": "mission-document-research:ca982475ff31e5a51c6b1c44",
+      "ticket_summary_error": "MissionDocumentResearchError: mission document admission is no longer executable",
+      "ticket_summary_status": "failed",
+      "zero_model_stage_work": false
+    },
+    {
+      "admission_created_at": "2026-09-17T03:26:31.901908+00:00",
+      "admission_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:48",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:51"
+      },
+      "admission_ref": "mission-document-research-admission:54bbe3fd82702735aa639dcc37f44ce3",
+      "current_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:53",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:56"
+      },
+      "disposition": "terminal_hold",
+      "environment": "legacy",
+      "hold_reason": "failed",
+      "model_stage_work_count": 0,
+      "model_stage_works": [],
+      "original_report_p0_3": false,
+      "planner_external_scheduler_model_stage_work_count": 0,
+      "planner_external_scheduler_model_stage_works": [],
+      "reentry_plan": null,
+      "runtime_core_scheduler_model_stage_work_count": 0,
+      "runtime_core_scheduler_model_stage_works": [],
+      "runtime_core_stage_classification": "never_enqueued_model_stage",
+      "scheduler_authority": "runtime_core",
+      "scheduler_db": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core/core.sqlite",
+      "started": false,
+      "state_dir": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core",
+      "ticket_ref": "mission-document-research:edcf6fbcb8e26b3e847b1ce7",
+      "ticket_summary_error": "MissionDocumentResearchError: directed document research requires the active mission",
+      "ticket_summary_status": "failed",
+      "zero_model_stage_work": true
+    },
+    {
+      "admission_created_at": "2026-09-17T03:21:29.657116+00:00",
+      "admission_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:48",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:51"
+      },
+      "admission_ref": "mission-document-research-admission:5bbcf776cca6e4cde589b3940d60dddc",
+      "current_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:53",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:56"
+      },
+      "disposition": "recovery_required",
+      "environment": "legacy",
+      "hold_reason": "reentry_failed_after_automatic_rebind:controlled reentry was already attempted",
+      "model_stage_work_count": 2,
+      "model_stage_works": [
+        {
+          "attempt_event_count": 3,
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-17T03:31:46.681082+00:00",
+              "terminal_state": "succeeded",
+              "work_order_id": "work:mission-document-research-4940f811d70e30387bc14135080af3e8"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-17T03:31:46.681082+00:00",
+            "event_seq": 775,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "succeeded",
+            "work_order_id": "work:mission-document-research-4940f811d70e30387bc14135080af3e8"
+          },
+          "stage": "qualitative_model_draft",
+          "work_created_at": "2026-09-17T03:31:40.135841+00:00",
+          "work_order_id": "work:mission-document-research-4940f811d70e30387bc14135080af3e8"
+        },
+        {
+          "attempt_event_count": 3,
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-17T03:31:54.275539+00:00",
+              "terminal_state": "succeeded",
+              "work_order_id": "work:mission-document-research-1f5a8c3f9e1ad51ffec138ae1be231c1"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-17T03:31:54.275539+00:00",
+            "event_seq": 778,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "succeeded",
+            "work_order_id": "work:mission-document-research-1f5a8c3f9e1ad51ffec138ae1be231c1"
+          },
+          "stage": "independent_qualitative_verifier",
+          "work_created_at": "2026-09-17T03:31:48.491409+00:00",
+          "work_order_id": "work:mission-document-research-1f5a8c3f9e1ad51ffec138ae1be231c1"
+        }
+      ],
+      "original_report_p0_3": true,
+      "planner_external_scheduler_model_stage_work_count": 0,
+      "planner_external_scheduler_model_stage_works": [],
+      "reentry_plan": {
+        "apply": false,
+        "command": null,
+        "eligibility": "excluded: runtime Core Scheduler already contains model-stage Work",
+        "kind": "no_reentry_planned",
+        "new_model_budget_grant": false,
+        "operation": null,
+        "required_next_authority": "reuse exact succeeded results under frozen patch"
+      },
+      "runtime_core_scheduler_model_stage_work_count": 2,
+      "runtime_core_scheduler_model_stage_works": [
+        {
+          "attempt_event_count": 3,
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-17T03:31:46.681082+00:00",
+              "terminal_state": "succeeded",
+              "work_order_id": "work:mission-document-research-4940f811d70e30387bc14135080af3e8"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-17T03:31:46.681082+00:00",
+            "event_seq": 775,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "succeeded",
+            "work_order_id": "work:mission-document-research-4940f811d70e30387bc14135080af3e8"
+          },
+          "stage": "qualitative_model_draft",
+          "work_created_at": "2026-09-17T03:31:40.135841+00:00",
+          "work_order_id": "work:mission-document-research-4940f811d70e30387bc14135080af3e8"
+        },
+        {
+          "attempt_event_count": 3,
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-17T03:31:54.275539+00:00",
+              "terminal_state": "succeeded",
+              "work_order_id": "work:mission-document-research-1f5a8c3f9e1ad51ffec138ae1be231c1"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-17T03:31:54.275539+00:00",
+            "event_seq": 778,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "succeeded",
+            "work_order_id": "work:mission-document-research-1f5a8c3f9e1ad51ffec138ae1be231c1"
+          },
+          "stage": "independent_qualitative_verifier",
+          "work_created_at": "2026-09-17T03:31:48.491409+00:00",
+          "work_order_id": "work:mission-document-research-1f5a8c3f9e1ad51ffec138ae1be231c1"
+        }
+      ],
+      "runtime_core_stage_classification": "only_succeeded_model_stages",
+      "scheduler_authority": "runtime_core",
+      "scheduler_db": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core/core.sqlite",
+      "started": true,
+      "state_dir": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core",
+      "ticket_ref": "mission-document-research:ef49f3c18bfd0bf2bddbbd15",
+      "ticket_summary_error": "MissionDocumentResearchError: mission document admission is no longer executable",
+      "ticket_summary_status": "failed",
+      "zero_model_stage_work": false
+    },
+    {
+      "admission_created_at": "2026-09-11T20:35:11.620658+00:00",
+      "admission_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:12",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:12"
+      },
+      "admission_ref": "mission-document-research-admission:6a2bcd446237e1bd9732690b4b542b3a",
+      "current_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:53",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:56"
+      },
+      "disposition": "recovery_required",
+      "environment": "legacy",
+      "hold_reason": "reentry_failed_after_automatic_rebind:controlled reentry was already attempted",
+      "model_stage_work_count": 2,
+      "model_stage_works": [
+        {
+          "attempt_event_count": 3,
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-11T20:40:19.891910+00:00",
+              "terminal_state": "failed",
+              "work_order_id": "work:mission-document-research-efc0a7b0e1617f9d62c367f04bcce06e"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-11T20:40:19.891910+00:00",
+            "event_seq": 566,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "failed",
+            "work_order_id": "work:mission-document-research-efc0a7b0e1617f9d62c367f04bcce06e"
+          },
+          "stage": "qualitative_model_draft",
+          "work_created_at": "2026-09-11T20:40:17.974266+00:00",
+          "work_order_id": "work:mission-document-research-efc0a7b0e1617f9d62c367f04bcce06e"
+        },
+        {
+          "attempt_event_count": 12,
+          "formal_results": [
+            {
+              "attempt_number": 4,
+              "created_at": "2026-09-12T00:13:13.395430+00:00",
+              "terminal_state": "failed",
+              "work_order_id": "work:mission-document-recovery-b73845dd8f28d08826401a9c2272dbfb"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 4,
+            "created_at": "2026-09-12T00:13:13.395430+00:00",
+            "event_seq": 578,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "failed",
+            "work_order_id": "work:mission-document-recovery-b73845dd8f28d08826401a9c2272dbfb"
+          },
+          "stage": "qualitative_model_draft",
+          "work_created_at": "2026-09-12T00:11:12.814391+00:00",
+          "work_order_id": "work:mission-document-recovery-b73845dd8f28d08826401a9c2272dbfb"
+        }
+      ],
+      "original_report_p0_3": true,
+      "planner_external_scheduler_model_stage_work_count": 0,
+      "planner_external_scheduler_model_stage_works": [],
+      "reentry_plan": {
+        "apply": false,
+        "command": null,
+        "eligibility": "excluded: runtime Core Scheduler already contains model-stage Work",
+        "kind": "no_reentry_planned",
+        "new_model_budget_grant": false,
+        "operation": null,
+        "required_next_authority": "explicit audited execution-epoch rebind; ordinary reentry is insufficient"
+      },
+      "runtime_core_scheduler_model_stage_work_count": 2,
+      "runtime_core_scheduler_model_stage_works": [
+        {
+          "attempt_event_count": 3,
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-11T20:40:19.891910+00:00",
+              "terminal_state": "failed",
+              "work_order_id": "work:mission-document-research-efc0a7b0e1617f9d62c367f04bcce06e"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-11T20:40:19.891910+00:00",
+            "event_seq": 566,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "failed",
+            "work_order_id": "work:mission-document-research-efc0a7b0e1617f9d62c367f04bcce06e"
+          },
+          "stage": "qualitative_model_draft",
+          "work_created_at": "2026-09-11T20:40:17.974266+00:00",
+          "work_order_id": "work:mission-document-research-efc0a7b0e1617f9d62c367f04bcce06e"
+        },
+        {
+          "attempt_event_count": 12,
+          "formal_results": [
+            {
+              "attempt_number": 4,
+              "created_at": "2026-09-12T00:13:13.395430+00:00",
+              "terminal_state": "failed",
+              "work_order_id": "work:mission-document-recovery-b73845dd8f28d08826401a9c2272dbfb"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 4,
+            "created_at": "2026-09-12T00:13:13.395430+00:00",
+            "event_seq": 578,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "failed",
+            "work_order_id": "work:mission-document-recovery-b73845dd8f28d08826401a9c2272dbfb"
+          },
+          "stage": "qualitative_model_draft",
+          "work_created_at": "2026-09-12T00:11:12.814391+00:00",
+          "work_order_id": "work:mission-document-recovery-b73845dd8f28d08826401a9c2272dbfb"
+        }
+      ],
+      "runtime_core_stage_classification": "unresolved_or_failed_model_stage",
+      "scheduler_authority": "runtime_core",
+      "scheduler_db": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core/core.sqlite",
+      "started": true,
+      "state_dir": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core",
+      "ticket_ref": "mission-document-research:08872f07df8b734a2ae1e53d",
+      "ticket_summary_error": "MissionDocumentResearchError: mission document admission is no longer executable",
+      "ticket_summary_status": "failed",
+      "zero_model_stage_work": false
+    },
+    {
+      "admission_created_at": "2026-09-14T13:44:20.255521+00:00",
+      "admission_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:12",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:15"
+      },
+      "admission_ref": "mission-document-research-admission:867a9e566947d00cfd17d1a1662e5c6f",
+      "current_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:53",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:56"
+      },
+      "disposition": "recovery_required",
+      "environment": "legacy",
+      "hold_reason": "reentry_failed_after_automatic_rebind:controlled reentry was already attempted",
+      "model_stage_work_count": 1,
+      "model_stage_works": [
+        {
+          "attempt_event_count": 3,
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-14T13:49:03.158241+00:00",
+              "terminal_state": "failed",
+              "work_order_id": "work:mission-document-research-65aa62ea9626b8de9ccfa0f3b18359b2"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-14T13:49:03.158241+00:00",
+            "event_seq": 713,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "failed",
+            "work_order_id": "work:mission-document-research-65aa62ea9626b8de9ccfa0f3b18359b2"
+          },
+          "stage": "qualitative_model_draft",
+          "work_created_at": "2026-09-14T13:48:58.537267+00:00",
+          "work_order_id": "work:mission-document-research-65aa62ea9626b8de9ccfa0f3b18359b2"
+        }
+      ],
+      "original_report_p0_3": true,
+      "planner_external_scheduler_model_stage_work_count": 0,
+      "planner_external_scheduler_model_stage_works": [],
+      "reentry_plan": {
+        "apply": false,
+        "command": null,
+        "eligibility": "excluded: runtime Core Scheduler already contains model-stage Work",
+        "kind": "no_reentry_planned",
+        "new_model_budget_grant": false,
+        "operation": null,
+        "required_next_authority": "explicit audited execution-epoch rebind; ordinary reentry is insufficient"
+      },
+      "runtime_core_scheduler_model_stage_work_count": 1,
+      "runtime_core_scheduler_model_stage_works": [
+        {
+          "attempt_event_count": 3,
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-14T13:49:03.158241+00:00",
+              "terminal_state": "failed",
+              "work_order_id": "work:mission-document-research-65aa62ea9626b8de9ccfa0f3b18359b2"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-14T13:49:03.158241+00:00",
+            "event_seq": 713,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "failed",
+            "work_order_id": "work:mission-document-research-65aa62ea9626b8de9ccfa0f3b18359b2"
+          },
+          "stage": "qualitative_model_draft",
+          "work_created_at": "2026-09-14T13:48:58.537267+00:00",
+          "work_order_id": "work:mission-document-research-65aa62ea9626b8de9ccfa0f3b18359b2"
+        }
+      ],
+      "runtime_core_stage_classification": "unresolved_or_failed_model_stage",
+      "scheduler_authority": "runtime_core",
+      "scheduler_db": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core/core.sqlite",
+      "started": true,
+      "state_dir": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core",
+      "ticket_ref": "mission-document-research:4dd1d762f64bd11b399f7093",
+      "ticket_summary_error": "MissionDocumentResearchError: mission document admission is no longer executable",
+      "ticket_summary_status": "failed",
+      "zero_model_stage_work": false
+    },
+    {
+      "admission_created_at": "2026-09-12T01:04:27.534798+00:00",
+      "admission_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:12",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:12"
+      },
+      "admission_ref": "mission-document-research-admission:918307dc4626f6a8d549501eb7e193a9",
+      "current_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:53",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:56"
+      },
+      "disposition": "recovery_required",
+      "environment": "legacy",
+      "hold_reason": "reentry_failed_after_automatic_rebind:controlled reentry was already attempted",
+      "model_stage_work_count": 1,
+      "model_stage_works": [
+        {
+          "attempt_event_count": 12,
+          "formal_results": [
+            {
+              "attempt_number": 4,
+              "created_at": "2026-09-12T01:11:04.868117+00:00",
+              "terminal_state": "failed",
+              "work_order_id": "work:mission-document-research-b4280b9b853c3a801dc5c8fb7f2c72bc"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 4,
+            "created_at": "2026-09-12T01:11:04.868117+00:00",
+            "event_seq": 653,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "failed",
+            "work_order_id": "work:mission-document-research-b4280b9b853c3a801dc5c8fb7f2c72bc"
+          },
+          "stage": "qualitative_model_draft",
+          "work_created_at": "2026-09-12T01:09:29.181802+00:00",
+          "work_order_id": "work:mission-document-research-b4280b9b853c3a801dc5c8fb7f2c72bc"
+        }
+      ],
+      "original_report_p0_3": true,
+      "planner_external_scheduler_model_stage_work_count": 0,
+      "planner_external_scheduler_model_stage_works": [],
+      "reentry_plan": {
+        "apply": false,
+        "command": null,
+        "eligibility": "excluded: runtime Core Scheduler already contains model-stage Work",
+        "kind": "no_reentry_planned",
+        "new_model_budget_grant": false,
+        "operation": null,
+        "required_next_authority": "explicit audited execution-epoch rebind; ordinary reentry is insufficient"
+      },
+      "runtime_core_scheduler_model_stage_work_count": 1,
+      "runtime_core_scheduler_model_stage_works": [
+        {
+          "attempt_event_count": 12,
+          "formal_results": [
+            {
+              "attempt_number": 4,
+              "created_at": "2026-09-12T01:11:04.868117+00:00",
+              "terminal_state": "failed",
+              "work_order_id": "work:mission-document-research-b4280b9b853c3a801dc5c8fb7f2c72bc"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 4,
+            "created_at": "2026-09-12T01:11:04.868117+00:00",
+            "event_seq": 653,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "failed",
+            "work_order_id": "work:mission-document-research-b4280b9b853c3a801dc5c8fb7f2c72bc"
+          },
+          "stage": "qualitative_model_draft",
+          "work_created_at": "2026-09-12T01:09:29.181802+00:00",
+          "work_order_id": "work:mission-document-research-b4280b9b853c3a801dc5c8fb7f2c72bc"
+        }
+      ],
+      "runtime_core_stage_classification": "unresolved_or_failed_model_stage",
+      "scheduler_authority": "runtime_core",
+      "scheduler_db": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core/core.sqlite",
+      "started": true,
+      "state_dir": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core",
+      "ticket_ref": "mission-document-research:8035494500260b634d5b5108",
+      "ticket_summary_error": "MissionDocumentResearchError: mission document admission is no longer executable",
+      "ticket_summary_status": "failed",
+      "zero_model_stage_work": false
+    },
+    {
+      "admission_created_at": "2026-09-18T11:26:45.898041+00:00",
+      "admission_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:52",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:55"
+      },
+      "admission_ref": "mission-document-research-admission:a261bace319e15c2d90ebf5ee7722e54",
+      "current_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:53",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:56"
+      },
+      "disposition": "recovery_required",
+      "environment": "legacy",
+      "hold_reason": "reentry_failed_after_automatic_rebind:controlled reentry was already attempted",
+      "model_stage_work_count": 0,
+      "model_stage_works": [],
+      "original_report_p0_3": false,
+      "planner_external_scheduler_model_stage_work_count": 0,
+      "planner_external_scheduler_model_stage_works": [],
+      "reentry_plan": {
+        "apply": false,
+        "command": ".venv/bin/python -m dalton_core.document_recovery_cli authorize-reentry --state-dir \"/Volumes/EveSSD/Dalton/legacy-state/dalton-core\" --admission-ref mission-document-research-admission:a261bace319e15c2d90ebf5ee7722e54",
+        "dry_run_exit_code": 0,
+        "dry_run_result": {
+          "applied": false,
+          "escalated": true,
+          "lane_door_for_this_reason": "authorize_mission_document_reentry",
+          "max_cost_usd": null,
+          "operation": "authorize_mission_document_reentry"
+        },
+        "dry_run_validated_at": "2026-09-22T13:22:09+00:00",
+        "eligibility": "runtime Core Scheduler proves zero draft/verifier Work",
+        "kind": "audited_reentry_dry_run",
+        "new_model_budget_grant": false,
+        "operation": "authorize_mission_document_reentry"
+      },
+      "runtime_core_scheduler_model_stage_work_count": 0,
+      "runtime_core_scheduler_model_stage_works": [],
+      "runtime_core_stage_classification": "never_enqueued_model_stage",
+      "scheduler_authority": "runtime_core",
+      "scheduler_db": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core/core.sqlite",
+      "started": true,
+      "state_dir": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core",
+      "ticket_ref": "mission-document-research:66c981165956180514afc2a8",
+      "ticket_summary_error": "SchedulerConflict: ResultEnvelope id already identifies another accepted completion",
+      "ticket_summary_status": "failed",
+      "zero_model_stage_work": true
+    },
+    {
+      "admission_created_at": "2026-09-17T03:41:48.395016+00:00",
+      "admission_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:49",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:52"
+      },
+      "admission_ref": "mission-document-research-admission:a2d4854ebf0cb7d90c7fe055af4b5eb1",
+      "current_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:53",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:56"
+      },
+      "disposition": "recovery_required",
+      "environment": "legacy",
+      "hold_reason": "reentry_failed_after_automatic_rebind:controlled reentry was already attempted",
+      "model_stage_work_count": 2,
+      "model_stage_works": [
+        {
+          "attempt_event_count": 6,
+          "formal_results": [
+            {
+              "attempt_number": 2,
+              "created_at": "2026-09-17T03:52:29.266385+00:00",
+              "terminal_state": "succeeded",
+              "work_order_id": "work:mission-document-research-37c4622cfe20e3640b60aba476d4d7d0"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 2,
+            "created_at": "2026-09-17T03:52:29.266385+00:00",
+            "event_seq": 798,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "succeeded",
+            "work_order_id": "work:mission-document-research-37c4622cfe20e3640b60aba476d4d7d0"
+          },
+          "stage": "qualitative_model_draft",
+          "work_created_at": "2026-09-17T03:52:14.217676+00:00",
+          "work_order_id": "work:mission-document-research-37c4622cfe20e3640b60aba476d4d7d0"
+        },
+        {
+          "attempt_event_count": 3,
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-17T03:52:34.488353+00:00",
+              "terminal_state": "failed",
+              "work_order_id": "work:mission-document-research-3c7f5e7295e4f2d0aef62094f68ff429"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-17T03:52:34.488353+00:00",
+            "event_seq": 801,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "failed",
+            "work_order_id": "work:mission-document-research-3c7f5e7295e4f2d0aef62094f68ff429"
+          },
+          "stage": "independent_qualitative_verifier",
+          "work_created_at": "2026-09-17T03:52:31.020972+00:00",
+          "work_order_id": "work:mission-document-research-3c7f5e7295e4f2d0aef62094f68ff429"
+        }
+      ],
+      "original_report_p0_3": false,
+      "planner_external_scheduler_model_stage_work_count": 0,
+      "planner_external_scheduler_model_stage_works": [],
+      "reentry_plan": {
+        "apply": false,
+        "command": null,
+        "eligibility": "excluded: runtime Core Scheduler already contains model-stage Work",
+        "kind": "no_reentry_planned",
+        "new_model_budget_grant": false,
+        "operation": null,
+        "required_next_authority": "explicit audited execution-epoch rebind; ordinary reentry is insufficient"
+      },
+      "runtime_core_scheduler_model_stage_work_count": 2,
+      "runtime_core_scheduler_model_stage_works": [
+        {
+          "attempt_event_count": 6,
+          "formal_results": [
+            {
+              "attempt_number": 2,
+              "created_at": "2026-09-17T03:52:29.266385+00:00",
+              "terminal_state": "succeeded",
+              "work_order_id": "work:mission-document-research-37c4622cfe20e3640b60aba476d4d7d0"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 2,
+            "created_at": "2026-09-17T03:52:29.266385+00:00",
+            "event_seq": 798,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "succeeded",
+            "work_order_id": "work:mission-document-research-37c4622cfe20e3640b60aba476d4d7d0"
+          },
+          "stage": "qualitative_model_draft",
+          "work_created_at": "2026-09-17T03:52:14.217676+00:00",
+          "work_order_id": "work:mission-document-research-37c4622cfe20e3640b60aba476d4d7d0"
+        },
+        {
+          "attempt_event_count": 3,
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-17T03:52:34.488353+00:00",
+              "terminal_state": "failed",
+              "work_order_id": "work:mission-document-research-3c7f5e7295e4f2d0aef62094f68ff429"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-17T03:52:34.488353+00:00",
+            "event_seq": 801,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "failed",
+            "work_order_id": "work:mission-document-research-3c7f5e7295e4f2d0aef62094f68ff429"
+          },
+          "stage": "independent_qualitative_verifier",
+          "work_created_at": "2026-09-17T03:52:31.020972+00:00",
+          "work_order_id": "work:mission-document-research-3c7f5e7295e4f2d0aef62094f68ff429"
+        }
+      ],
+      "runtime_core_stage_classification": "unresolved_or_failed_model_stage",
+      "scheduler_authority": "runtime_core",
+      "scheduler_db": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core/core.sqlite",
+      "started": true,
+      "state_dir": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core",
+      "ticket_ref": "mission-document-research:2c5eefe0f59b1488126ca25a",
+      "ticket_summary_error": "MissionDocumentModelAuthorityError: installed mission document draft budget policy is unavailable: OperationalError: read_only WAL requires existing WAL/SHM; no sidecars were created",
+      "ticket_summary_status": "failed",
+      "zero_model_stage_work": false
+    },
+    {
+      "admission_created_at": "2026-09-17T03:46:57.000827+00:00",
+      "admission_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:49",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:52"
+      },
+      "admission_ref": "mission-document-research-admission:a680e6427271b195d6874d57ea7c6c01",
+      "current_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:53",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:56"
+      },
+      "disposition": "recovery_required",
+      "environment": "legacy",
+      "hold_reason": "reentry_failed_after_automatic_rebind:controlled reentry was already attempted",
+      "model_stage_work_count": 2,
+      "model_stage_works": [
+        {
+          "attempt_event_count": 3,
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-17T03:57:12.655134+00:00",
+              "terminal_state": "succeeded",
+              "work_order_id": "work:mission-document-research-95dfcf2cbad257bac963e6dbd9f1b8f1"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-17T03:57:12.655134+00:00",
+            "event_seq": 807,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "succeeded",
+            "work_order_id": "work:mission-document-research-95dfcf2cbad257bac963e6dbd9f1b8f1"
+          },
+          "stage": "qualitative_model_draft",
+          "work_created_at": "2026-09-17T03:57:04.182494+00:00",
+          "work_order_id": "work:mission-document-research-95dfcf2cbad257bac963e6dbd9f1b8f1"
+        },
+        {
+          "attempt_event_count": 6,
+          "formal_results": [
+            {
+              "attempt_number": 2,
+              "created_at": "2026-09-17T03:57:27.453889+00:00",
+              "terminal_state": "succeeded",
+              "work_order_id": "work:mission-document-research-24680132be7714ee7bfb5ae6449f47f3"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 2,
+            "created_at": "2026-09-17T03:57:27.453889+00:00",
+            "event_seq": 813,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "succeeded",
+            "work_order_id": "work:mission-document-research-24680132be7714ee7bfb5ae6449f47f3"
+          },
+          "stage": "independent_qualitative_verifier",
+          "work_created_at": "2026-09-17T03:57:14.466116+00:00",
+          "work_order_id": "work:mission-document-research-24680132be7714ee7bfb5ae6449f47f3"
+        }
+      ],
+      "original_report_p0_3": false,
+      "planner_external_scheduler_model_stage_work_count": 0,
+      "planner_external_scheduler_model_stage_works": [],
+      "reentry_plan": {
+        "apply": false,
+        "command": null,
+        "eligibility": "excluded: runtime Core Scheduler already contains model-stage Work",
+        "kind": "no_reentry_planned",
+        "new_model_budget_grant": false,
+        "operation": null,
+        "required_next_authority": "reuse exact succeeded results under frozen patch"
+      },
+      "runtime_core_scheduler_model_stage_work_count": 2,
+      "runtime_core_scheduler_model_stage_works": [
+        {
+          "attempt_event_count": 3,
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-17T03:57:12.655134+00:00",
+              "terminal_state": "succeeded",
+              "work_order_id": "work:mission-document-research-95dfcf2cbad257bac963e6dbd9f1b8f1"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-17T03:57:12.655134+00:00",
+            "event_seq": 807,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "succeeded",
+            "work_order_id": "work:mission-document-research-95dfcf2cbad257bac963e6dbd9f1b8f1"
+          },
+          "stage": "qualitative_model_draft",
+          "work_created_at": "2026-09-17T03:57:04.182494+00:00",
+          "work_order_id": "work:mission-document-research-95dfcf2cbad257bac963e6dbd9f1b8f1"
+        },
+        {
+          "attempt_event_count": 6,
+          "formal_results": [
+            {
+              "attempt_number": 2,
+              "created_at": "2026-09-17T03:57:27.453889+00:00",
+              "terminal_state": "succeeded",
+              "work_order_id": "work:mission-document-research-24680132be7714ee7bfb5ae6449f47f3"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 2,
+            "created_at": "2026-09-17T03:57:27.453889+00:00",
+            "event_seq": 813,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "succeeded",
+            "work_order_id": "work:mission-document-research-24680132be7714ee7bfb5ae6449f47f3"
+          },
+          "stage": "independent_qualitative_verifier",
+          "work_created_at": "2026-09-17T03:57:14.466116+00:00",
+          "work_order_id": "work:mission-document-research-24680132be7714ee7bfb5ae6449f47f3"
+        }
+      ],
+      "runtime_core_stage_classification": "only_succeeded_model_stages",
+      "scheduler_authority": "runtime_core",
+      "scheduler_db": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core/core.sqlite",
+      "started": true,
+      "state_dir": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core",
+      "ticket_ref": "mission-document-research:205f816922b1752ce2662322",
+      "ticket_summary_error": "ResearchAutoCommitRejected: document qualitative rule admits no numeric statement",
+      "ticket_summary_status": "failed",
+      "zero_model_stage_work": false
+    },
+    {
+      "admission_created_at": "2026-09-14T13:53:53.765468+00:00",
+      "admission_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:12",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:15"
+      },
+      "admission_ref": "mission-document-research-admission:a9e588b02de9c7a713167cdafec2d9f1",
+      "current_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:53",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:56"
+      },
+      "disposition": "recovery_required",
+      "environment": "legacy",
+      "hold_reason": "reentry_failed_after_automatic_rebind:controlled reentry was already attempted",
+      "model_stage_work_count": 1,
+      "model_stage_works": [
+        {
+          "attempt_event_count": 3,
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-14T13:58:35.256805+00:00",
+              "terminal_state": "failed",
+              "work_order_id": "work:mission-document-research-bbc99ecbbf9f61e28a13d31e14cafb05"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-14T13:58:35.256805+00:00",
+            "event_seq": 725,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "failed",
+            "work_order_id": "work:mission-document-research-bbc99ecbbf9f61e28a13d31e14cafb05"
+          },
+          "stage": "qualitative_model_draft",
+          "work_created_at": "2026-09-14T13:58:33.227293+00:00",
+          "work_order_id": "work:mission-document-research-bbc99ecbbf9f61e28a13d31e14cafb05"
+        }
+      ],
+      "original_report_p0_3": true,
+      "planner_external_scheduler_model_stage_work_count": 0,
+      "planner_external_scheduler_model_stage_works": [],
+      "reentry_plan": {
+        "apply": false,
+        "command": null,
+        "eligibility": "excluded: runtime Core Scheduler already contains model-stage Work",
+        "kind": "no_reentry_planned",
+        "new_model_budget_grant": false,
+        "operation": null,
+        "required_next_authority": "explicit audited execution-epoch rebind; ordinary reentry is insufficient"
+      },
+      "runtime_core_scheduler_model_stage_work_count": 1,
+      "runtime_core_scheduler_model_stage_works": [
+        {
+          "attempt_event_count": 3,
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-14T13:58:35.256805+00:00",
+              "terminal_state": "failed",
+              "work_order_id": "work:mission-document-research-bbc99ecbbf9f61e28a13d31e14cafb05"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-14T13:58:35.256805+00:00",
+            "event_seq": 725,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "failed",
+            "work_order_id": "work:mission-document-research-bbc99ecbbf9f61e28a13d31e14cafb05"
+          },
+          "stage": "qualitative_model_draft",
+          "work_created_at": "2026-09-14T13:58:33.227293+00:00",
+          "work_order_id": "work:mission-document-research-bbc99ecbbf9f61e28a13d31e14cafb05"
+        }
+      ],
+      "runtime_core_stage_classification": "unresolved_or_failed_model_stage",
+      "scheduler_authority": "runtime_core",
+      "scheduler_db": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core/core.sqlite",
+      "started": true,
+      "state_dir": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core",
+      "ticket_ref": "mission-document-research:c614cf762c7601c537dc02f9",
+      "ticket_summary_error": "MissionDocumentResearchError: mission document admission is no longer executable",
+      "ticket_summary_status": "failed",
+      "zero_model_stage_work": false
+    },
+    {
+      "admission_created_at": "2026-09-18T11:21:35.946138+00:00",
+      "admission_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:52",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:55"
+      },
+      "admission_ref": "mission-document-research-admission:b092f1f03ec3e11a2d3084d18d2ff51c",
+      "current_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:53",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:56"
+      },
+      "disposition": "recovery_required",
+      "environment": "legacy",
+      "hold_reason": "reentry_failed_after_automatic_rebind:controlled reentry was already attempted",
+      "model_stage_work_count": 0,
+      "model_stage_works": [],
+      "original_report_p0_3": false,
+      "planner_external_scheduler_model_stage_work_count": 0,
+      "planner_external_scheduler_model_stage_works": [],
+      "reentry_plan": {
+        "apply": false,
+        "command": ".venv/bin/python -m dalton_core.document_recovery_cli authorize-reentry --state-dir \"/Volumes/EveSSD/Dalton/legacy-state/dalton-core\" --admission-ref mission-document-research-admission:b092f1f03ec3e11a2d3084d18d2ff51c",
+        "dry_run_exit_code": 0,
+        "dry_run_result": {
+          "applied": false,
+          "escalated": true,
+          "lane_door_for_this_reason": "authorize_mission_document_reentry",
+          "max_cost_usd": null,
+          "operation": "authorize_mission_document_reentry"
+        },
+        "dry_run_validated_at": "2026-09-22T13:22:09+00:00",
+        "eligibility": "runtime Core Scheduler proves zero draft/verifier Work",
+        "kind": "audited_reentry_dry_run",
+        "new_model_budget_grant": false,
+        "operation": "authorize_mission_document_reentry"
+      },
+      "runtime_core_scheduler_model_stage_work_count": 0,
+      "runtime_core_scheduler_model_stage_works": [],
+      "runtime_core_stage_classification": "never_enqueued_model_stage",
+      "scheduler_authority": "runtime_core",
+      "scheduler_db": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core/core.sqlite",
+      "started": true,
+      "state_dir": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core",
+      "ticket_ref": "mission-document-research:3d367de142c8a4a4ad8f3e20",
+      "ticket_summary_error": "SchedulerConflict: ResultEnvelope id already identifies another accepted completion",
+      "ticket_summary_status": "failed",
+      "zero_model_stage_work": true
+    },
+    {
+      "admission_created_at": "2026-09-17T03:31:37.182413+00:00",
+      "admission_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:48",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:51"
+      },
+      "admission_ref": "mission-document-research-admission:b244891a85150a760150c8f69d456eb3",
+      "current_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:53",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:56"
+      },
+      "disposition": "terminal_hold",
+      "environment": "legacy",
+      "hold_reason": "failed",
+      "model_stage_work_count": 0,
+      "model_stage_works": [],
+      "original_report_p0_3": false,
+      "planner_external_scheduler_model_stage_work_count": 0,
+      "planner_external_scheduler_model_stage_works": [],
+      "reentry_plan": null,
+      "runtime_core_scheduler_model_stage_work_count": 0,
+      "runtime_core_scheduler_model_stage_works": [],
+      "runtime_core_stage_classification": "never_enqueued_model_stage",
+      "scheduler_authority": "runtime_core",
+      "scheduler_db": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core/core.sqlite",
+      "started": false,
+      "state_dir": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core",
+      "ticket_ref": "mission-document-research:7d5480bdb56f08f7cf6563a3",
+      "ticket_summary_error": "MissionDocumentModelAuthorityError: installed mission document draft budget policy is unavailable",
+      "ticket_summary_status": "failed",
+      "zero_model_stage_work": true
+    },
+    {
+      "admission_created_at": "2026-09-12T01:09:29.000618+00:00",
+      "admission_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:12",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:12"
+      },
+      "admission_ref": "mission-document-research-admission:bca93fcbeca301720289fab14728086f",
+      "current_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:53",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:56"
+      },
+      "disposition": "recovery_required",
+      "environment": "legacy",
+      "hold_reason": "reentry_failed_after_automatic_rebind:controlled reentry was already attempted",
+      "model_stage_work_count": 2,
+      "model_stage_works": [
+        {
+          "attempt_event_count": 3,
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-12T01:14:58.124492+00:00",
+              "terminal_state": "succeeded",
+              "work_order_id": "work:mission-document-research-796416c12698a3119128aea7c2dd79a7"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-12T01:14:58.124492+00:00",
+            "event_seq": 659,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "succeeded",
+            "work_order_id": "work:mission-document-research-796416c12698a3119128aea7c2dd79a7"
+          },
+          "stage": "qualitative_model_draft",
+          "work_created_at": "2026-09-12T01:14:30.904127+00:00",
+          "work_order_id": "work:mission-document-research-796416c12698a3119128aea7c2dd79a7"
+        },
+        {
+          "attempt_event_count": 3,
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-12T01:14:59.737271+00:00",
+              "terminal_state": "failed",
+              "work_order_id": "work:mission-document-research-ab8e61db72c758ee97651f26c59e1f08"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-12T01:14:59.737271+00:00",
+            "event_seq": 662,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "failed",
+            "work_order_id": "work:mission-document-research-ab8e61db72c758ee97651f26c59e1f08"
+          },
+          "stage": "independent_qualitative_verifier",
+          "work_created_at": "2026-09-12T01:14:58.327641+00:00",
+          "work_order_id": "work:mission-document-research-ab8e61db72c758ee97651f26c59e1f08"
+        }
+      ],
+      "original_report_p0_3": true,
+      "planner_external_scheduler_model_stage_work_count": 0,
+      "planner_external_scheduler_model_stage_works": [],
+      "reentry_plan": {
+        "apply": false,
+        "command": null,
+        "eligibility": "excluded: runtime Core Scheduler already contains model-stage Work",
+        "kind": "no_reentry_planned",
+        "new_model_budget_grant": false,
+        "operation": null,
+        "required_next_authority": "explicit audited execution-epoch rebind; ordinary reentry is insufficient"
+      },
+      "runtime_core_scheduler_model_stage_work_count": 2,
+      "runtime_core_scheduler_model_stage_works": [
+        {
+          "attempt_event_count": 3,
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-12T01:14:58.124492+00:00",
+              "terminal_state": "succeeded",
+              "work_order_id": "work:mission-document-research-796416c12698a3119128aea7c2dd79a7"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-12T01:14:58.124492+00:00",
+            "event_seq": 659,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "succeeded",
+            "work_order_id": "work:mission-document-research-796416c12698a3119128aea7c2dd79a7"
+          },
+          "stage": "qualitative_model_draft",
+          "work_created_at": "2026-09-12T01:14:30.904127+00:00",
+          "work_order_id": "work:mission-document-research-796416c12698a3119128aea7c2dd79a7"
+        },
+        {
+          "attempt_event_count": 3,
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-12T01:14:59.737271+00:00",
+              "terminal_state": "failed",
+              "work_order_id": "work:mission-document-research-ab8e61db72c758ee97651f26c59e1f08"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-12T01:14:59.737271+00:00",
+            "event_seq": 662,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "failed",
+            "work_order_id": "work:mission-document-research-ab8e61db72c758ee97651f26c59e1f08"
+          },
+          "stage": "independent_qualitative_verifier",
+          "work_created_at": "2026-09-12T01:14:58.327641+00:00",
+          "work_order_id": "work:mission-document-research-ab8e61db72c758ee97651f26c59e1f08"
+        }
+      ],
+      "runtime_core_stage_classification": "unresolved_or_failed_model_stage",
+      "scheduler_authority": "runtime_core",
+      "scheduler_db": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core/core.sqlite",
+      "started": true,
+      "state_dir": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core",
+      "ticket_ref": "mission-document-research:6facc30e3ed5d1d915515998",
+      "ticket_summary_error": "MissionDocumentResearchError: mission document admission is no longer executable",
+      "ticket_summary_status": "failed",
+      "zero_model_stage_work": false
+    },
+    {
+      "admission_created_at": "2026-09-17T10:22:35.390172+00:00",
+      "admission_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:50",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:53"
+      },
+      "admission_ref": "mission-document-research-admission:c141b6637483ecf1270b4f22218c2520",
+      "current_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:53",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:56"
+      },
+      "disposition": "terminal_hold",
+      "environment": "legacy",
+      "hold_reason": "failed",
+      "model_stage_work_count": 0,
+      "model_stage_works": [],
+      "original_report_p0_3": true,
+      "planner_external_scheduler_model_stage_work_count": 0,
+      "planner_external_scheduler_model_stage_works": [],
+      "reentry_plan": null,
+      "runtime_core_scheduler_model_stage_work_count": 0,
+      "runtime_core_scheduler_model_stage_works": [],
+      "runtime_core_stage_classification": "never_enqueued_model_stage",
+      "scheduler_authority": "runtime_core",
+      "scheduler_db": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core/core.sqlite",
+      "started": false,
+      "state_dir": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core",
+      "ticket_ref": "mission-document-research:d4e0bdd32a8ade62e2200314",
+      "ticket_summary_error": "MissionDocumentResearchError: mission document admission is no longer executable",
+      "ticket_summary_status": "failed",
+      "zero_model_stage_work": true
+    },
+    {
+      "admission_created_at": "2026-09-11T20:30:27.459923+00:00",
+      "admission_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:12",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:12"
+      },
+      "admission_ref": "mission-document-research-admission:ca9bac39454f3ee9bcfd3f0508f342e3",
+      "current_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:53",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:56"
+      },
+      "disposition": "recovery_required",
+      "environment": "legacy",
+      "hold_reason": "reentry_failed_after_automatic_rebind:controlled reentry was already attempted",
+      "model_stage_work_count": 2,
+      "model_stage_works": [
+        {
+          "attempt_event_count": 3,
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-11T20:35:12.704127+00:00",
+              "terminal_state": "failed",
+              "work_order_id": "work:mission-document-research-ddb1725ad66dcec35e0f22b94c43b24a"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-11T20:35:12.704127+00:00",
+            "event_seq": 560,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "failed",
+            "work_order_id": "work:mission-document-research-ddb1725ad66dcec35e0f22b94c43b24a"
+          },
+          "stage": "qualitative_model_draft",
+          "work_created_at": "2026-09-11T20:35:11.676613+00:00",
+          "work_order_id": "work:mission-document-research-ddb1725ad66dcec35e0f22b94c43b24a"
+        },
+        {
+          "attempt_event_count": 3,
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-12T00:14:55.217751+00:00",
+              "terminal_state": "succeeded",
+              "work_order_id": "work:mission-document-recovery-9ff5ddc6051c9341529233b01ba2d9e0"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-12T00:14:55.217751+00:00",
+            "event_seq": 581,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "succeeded",
+            "work_order_id": "work:mission-document-recovery-9ff5ddc6051c9341529233b01ba2d9e0"
+          },
+          "stage": "qualitative_model_draft",
+          "work_created_at": "2026-09-12T00:14:36.776501+00:00",
+          "work_order_id": "work:mission-document-recovery-9ff5ddc6051c9341529233b01ba2d9e0"
+        }
+      ],
+      "original_report_p0_3": true,
+      "planner_external_scheduler_model_stage_work_count": 0,
+      "planner_external_scheduler_model_stage_works": [],
+      "reentry_plan": {
+        "apply": false,
+        "command": null,
+        "eligibility": "excluded: runtime Core Scheduler already contains model-stage Work",
+        "kind": "no_reentry_planned",
+        "new_model_budget_grant": false,
+        "operation": null,
+        "required_next_authority": "explicit audited execution-epoch rebind; ordinary reentry is insufficient"
+      },
+      "runtime_core_scheduler_model_stage_work_count": 2,
+      "runtime_core_scheduler_model_stage_works": [
+        {
+          "attempt_event_count": 3,
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-11T20:35:12.704127+00:00",
+              "terminal_state": "failed",
+              "work_order_id": "work:mission-document-research-ddb1725ad66dcec35e0f22b94c43b24a"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-11T20:35:12.704127+00:00",
+            "event_seq": 560,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "failed",
+            "work_order_id": "work:mission-document-research-ddb1725ad66dcec35e0f22b94c43b24a"
+          },
+          "stage": "qualitative_model_draft",
+          "work_created_at": "2026-09-11T20:35:11.676613+00:00",
+          "work_order_id": "work:mission-document-research-ddb1725ad66dcec35e0f22b94c43b24a"
+        },
+        {
+          "attempt_event_count": 3,
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-12T00:14:55.217751+00:00",
+              "terminal_state": "succeeded",
+              "work_order_id": "work:mission-document-recovery-9ff5ddc6051c9341529233b01ba2d9e0"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-12T00:14:55.217751+00:00",
+            "event_seq": 581,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "succeeded",
+            "work_order_id": "work:mission-document-recovery-9ff5ddc6051c9341529233b01ba2d9e0"
+          },
+          "stage": "qualitative_model_draft",
+          "work_created_at": "2026-09-12T00:14:36.776501+00:00",
+          "work_order_id": "work:mission-document-recovery-9ff5ddc6051c9341529233b01ba2d9e0"
+        }
+      ],
+      "runtime_core_stage_classification": "unresolved_or_failed_model_stage",
+      "scheduler_authority": "runtime_core",
+      "scheduler_db": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core/core.sqlite",
+      "started": true,
+      "state_dir": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core",
+      "ticket_ref": "mission-document-research:88c43f96e7d3c537ea991e68",
+      "ticket_summary_error": "MissionDocumentResearchError: mission document admission is no longer executable",
+      "ticket_summary_status": "failed",
+      "zero_model_stage_work": false
+    },
+    {
+      "admission_created_at": "2026-09-18T05:14:14.387662+00:00",
+      "admission_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:51",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:54"
+      },
+      "admission_ref": "mission-document-research-admission:d7d1267c56ed91c0fa52a267e3e000af",
+      "current_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:53",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:56"
+      },
+      "disposition": "recovery_required",
+      "environment": "legacy",
+      "hold_reason": "reentry_failed_after_automatic_rebind:controlled reentry was already attempted",
+      "model_stage_work_count": 0,
+      "model_stage_works": [],
+      "original_report_p0_3": false,
+      "planner_external_scheduler_model_stage_work_count": 0,
+      "planner_external_scheduler_model_stage_works": [],
+      "reentry_plan": {
+        "apply": false,
+        "command": ".venv/bin/python -m dalton_core.document_recovery_cli authorize-reentry --state-dir \"/Volumes/EveSSD/Dalton/legacy-state/dalton-core\" --admission-ref mission-document-research-admission:d7d1267c56ed91c0fa52a267e3e000af",
+        "dry_run_exit_code": 0,
+        "dry_run_result": {
+          "applied": false,
+          "escalated": true,
+          "lane_door_for_this_reason": "authorize_mission_document_reentry",
+          "max_cost_usd": null,
+          "operation": "authorize_mission_document_reentry"
+        },
+        "dry_run_validated_at": "2026-09-22T13:22:09+00:00",
+        "eligibility": "runtime Core Scheduler proves zero draft/verifier Work",
+        "kind": "audited_reentry_dry_run",
+        "new_model_budget_grant": false,
+        "operation": "authorize_mission_document_reentry"
+      },
+      "runtime_core_scheduler_model_stage_work_count": 0,
+      "runtime_core_scheduler_model_stage_works": [],
+      "runtime_core_stage_classification": "never_enqueued_model_stage",
+      "scheduler_authority": "runtime_core",
+      "scheduler_db": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core/core.sqlite",
+      "started": true,
+      "state_dir": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core",
+      "ticket_ref": "mission-document-research:3d0f86ec6d9799eba25ef0b0",
+      "ticket_summary_error": "SchedulerConflict: ResultEnvelope id already identifies another accepted completion",
+      "ticket_summary_status": "failed",
+      "zero_model_stage_work": true
+    },
+    {
+      "admission_created_at": "2026-09-17T03:00:04.940234+00:00",
+      "admission_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:48",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:51"
+      },
+      "admission_ref": "mission-document-research-admission:e83cce990352f095ec10cf101b2542ca",
+      "current_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:53",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:56"
+      },
+      "disposition": "recovery_required",
+      "environment": "legacy",
+      "hold_reason": "controlled_reentry_unavailable:controlled reentry summary is unavailable",
+      "model_stage_work_count": 1,
+      "model_stage_works": [
+        {
+          "attempt_event_count": 4,
+          "formal_results": [],
+          "latest_attempt_event": {
+            "attempt_number": 2,
+            "created_at": "2026-09-17T03:46:59.128230+00:00",
+            "event_seq": 784,
+            "not_before": null,
+            "reason": "retry_after_attempt_1",
+            "state": "ready",
+            "work_order_id": "work:mission-document-research-5f5fef2f3b47d3e4f6a098cca8151da4"
+          },
+          "stage": "qualitative_model_draft",
+          "work_created_at": "2026-09-17T03:05:13.805484+00:00",
+          "work_order_id": "work:mission-document-research-5f5fef2f3b47d3e4f6a098cca8151da4"
+        }
+      ],
+      "original_report_p0_3": false,
+      "planner_external_scheduler_model_stage_work_count": 0,
+      "planner_external_scheduler_model_stage_works": [],
+      "reentry_plan": {
+        "apply": false,
+        "command": null,
+        "eligibility": "excluded: runtime Core Scheduler already contains model-stage Work",
+        "kind": "no_reentry_planned",
+        "new_model_budget_grant": false,
+        "operation": null,
+        "required_next_authority": "explicit audited execution-epoch rebind; ordinary reentry is insufficient"
+      },
+      "runtime_core_scheduler_model_stage_work_count": 1,
+      "runtime_core_scheduler_model_stage_works": [
+        {
+          "attempt_event_count": 4,
+          "formal_results": [],
+          "latest_attempt_event": {
+            "attempt_number": 2,
+            "created_at": "2026-09-17T03:46:59.128230+00:00",
+            "event_seq": 784,
+            "not_before": null,
+            "reason": "retry_after_attempt_1",
+            "state": "ready",
+            "work_order_id": "work:mission-document-research-5f5fef2f3b47d3e4f6a098cca8151da4"
+          },
+          "stage": "qualitative_model_draft",
+          "work_created_at": "2026-09-17T03:05:13.805484+00:00",
+          "work_order_id": "work:mission-document-research-5f5fef2f3b47d3e4f6a098cca8151da4"
+        }
+      ],
+      "runtime_core_stage_classification": "unresolved_or_failed_model_stage",
+      "scheduler_authority": "runtime_core",
+      "scheduler_db": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core/core.sqlite",
+      "started": true,
+      "state_dir": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core",
+      "ticket_ref": "mission-document-research:499e8ac9a6cd5d72d7d9e4bd",
+      "ticket_summary_error": null,
+      "ticket_summary_status": null,
+      "zero_model_stage_work": false
+    },
+    {
+      "admission_created_at": "2026-09-14T13:48:57.653222+00:00",
+      "admission_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:12",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:15"
+      },
+      "admission_ref": "mission-document-research-admission:f806824e8fa1a67d310d77d37b22aa42",
+      "current_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:53",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:56"
+      },
+      "disposition": "recovery_required",
+      "environment": "legacy",
+      "hold_reason": "reentry_failed_after_automatic_rebind:controlled reentry was already attempted",
+      "model_stage_work_count": 1,
+      "model_stage_works": [
+        {
+          "attempt_event_count": 3,
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-14T13:54:15.084777+00:00",
+              "terminal_state": "failed",
+              "work_order_id": "work:mission-document-research-e82584e0d5b7a3a98fbf428a084481df"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-14T13:54:15.084777+00:00",
+            "event_seq": 719,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "failed",
+            "work_order_id": "work:mission-document-research-e82584e0d5b7a3a98fbf428a084481df"
+          },
+          "stage": "qualitative_model_draft",
+          "work_created_at": "2026-09-14T13:53:54.366951+00:00",
+          "work_order_id": "work:mission-document-research-e82584e0d5b7a3a98fbf428a084481df"
+        }
+      ],
+      "original_report_p0_3": true,
+      "planner_external_scheduler_model_stage_work_count": 0,
+      "planner_external_scheduler_model_stage_works": [],
+      "reentry_plan": {
+        "apply": false,
+        "command": null,
+        "eligibility": "excluded: runtime Core Scheduler already contains model-stage Work",
+        "kind": "no_reentry_planned",
+        "new_model_budget_grant": false,
+        "operation": null,
+        "required_next_authority": "explicit audited execution-epoch rebind; ordinary reentry is insufficient"
+      },
+      "runtime_core_scheduler_model_stage_work_count": 1,
+      "runtime_core_scheduler_model_stage_works": [
+        {
+          "attempt_event_count": 3,
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-14T13:54:15.084777+00:00",
+              "terminal_state": "failed",
+              "work_order_id": "work:mission-document-research-e82584e0d5b7a3a98fbf428a084481df"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-14T13:54:15.084777+00:00",
+            "event_seq": 719,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "failed",
+            "work_order_id": "work:mission-document-research-e82584e0d5b7a3a98fbf428a084481df"
+          },
+          "stage": "qualitative_model_draft",
+          "work_created_at": "2026-09-14T13:53:54.366951+00:00",
+          "work_order_id": "work:mission-document-research-e82584e0d5b7a3a98fbf428a084481df"
+        }
+      ],
+      "runtime_core_stage_classification": "unresolved_or_failed_model_stage",
+      "scheduler_authority": "runtime_core",
+      "scheduler_db": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core/core.sqlite",
+      "started": true,
+      "state_dir": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core",
+      "ticket_ref": "mission-document-research:8aa205cf87ec1a16adf9a63b",
+      "ticket_summary_error": "MissionDocumentResearchError: mission document admission is no longer executable",
+      "ticket_summary_status": "failed",
+      "zero_model_stage_work": false
+    },
+    {
+      "admission_created_at": "2026-09-18T05:19:17.550901+00:00",
+      "admission_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:51",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:54"
+      },
+      "admission_ref": "mission-document-research-admission:fbea2f0e32bc4fb60d115be23285c953",
+      "current_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:53",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:56"
+      },
+      "disposition": "recovery_required",
+      "environment": "legacy",
+      "hold_reason": "reentry_failed_after_automatic_rebind:controlled reentry was already attempted",
+      "model_stage_work_count": 0,
+      "model_stage_works": [],
+      "original_report_p0_3": false,
+      "planner_external_scheduler_model_stage_work_count": 0,
+      "planner_external_scheduler_model_stage_works": [],
+      "reentry_plan": {
+        "apply": false,
+        "command": ".venv/bin/python -m dalton_core.document_recovery_cli authorize-reentry --state-dir \"/Volumes/EveSSD/Dalton/legacy-state/dalton-core\" --admission-ref mission-document-research-admission:fbea2f0e32bc4fb60d115be23285c953",
+        "dry_run_exit_code": 0,
+        "dry_run_result": {
+          "applied": false,
+          "escalated": true,
+          "lane_door_for_this_reason": "authorize_mission_document_reentry",
+          "max_cost_usd": null,
+          "operation": "authorize_mission_document_reentry"
+        },
+        "dry_run_validated_at": "2026-09-22T13:22:09+00:00",
+        "eligibility": "runtime Core Scheduler proves zero draft/verifier Work",
+        "kind": "audited_reentry_dry_run",
+        "new_model_budget_grant": false,
+        "operation": "authorize_mission_document_reentry"
+      },
+      "runtime_core_scheduler_model_stage_work_count": 0,
+      "runtime_core_scheduler_model_stage_works": [],
+      "runtime_core_stage_classification": "never_enqueued_model_stage",
+      "scheduler_authority": "runtime_core",
+      "scheduler_db": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core/core.sqlite",
+      "started": true,
+      "state_dir": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core",
+      "ticket_ref": "mission-document-research:03779dcd3a40478e4360d92f",
+      "ticket_summary_error": "SchedulerConflict: ResultEnvelope id already identifies another accepted completion",
+      "ticket_summary_status": "failed",
+      "zero_model_stage_work": true
+    },
+    {
+      "admission_created_at": "2026-09-18T09:49:38.046217+00:00",
+      "admission_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:35",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:38"
+      },
+      "admission_ref": "mission-document-research-admission:256f7569b79b8f72ba2fa3fa4bc6e408",
+      "current_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:54",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:57"
+      },
+      "disposition": "recovery_required",
+      "environment": "hyperscaler",
+      "hold_reason": "controlled_reentry_unavailable:controlled reentry summary is unavailable",
+      "model_stage_work_count": 1,
+      "model_stage_works": [
+        {
+          "attempt_event_count": 4,
+          "formal_results": [],
+          "latest_attempt_event": {
+            "attempt_number": 2,
+            "created_at": "2026-09-18T10:37:24.620080+00:00",
+            "event_seq": 125,
+            "not_before": null,
+            "reason": "retry_after_attempt_1",
+            "state": "ready",
+            "work_order_id": "work:mission-document-research-05f88fad96439c22540e6b621ec66c29"
+          },
+          "stage": "qualitative_model_draft",
+          "work_created_at": "2026-09-18T09:51:41.951266+00:00",
+          "work_order_id": "work:mission-document-research-05f88fad96439c22540e6b621ec66c29"
+        }
+      ],
+      "original_report_p0_3": false,
+      "planner_external_scheduler_model_stage_work_count": 0,
+      "planner_external_scheduler_model_stage_works": [],
+      "reentry_plan": {
+        "apply": false,
+        "command": null,
+        "eligibility": "excluded: runtime Core Scheduler already contains model-stage Work",
+        "kind": "no_reentry_planned",
+        "new_model_budget_grant": false,
+        "operation": null,
+        "required_next_authority": "explicit audited execution-epoch rebind; ordinary reentry is insufficient"
+      },
+      "runtime_core_scheduler_model_stage_work_count": 1,
+      "runtime_core_scheduler_model_stage_works": [
+        {
+          "attempt_event_count": 4,
+          "formal_results": [],
+          "latest_attempt_event": {
+            "attempt_number": 2,
+            "created_at": "2026-09-18T10:37:24.620080+00:00",
+            "event_seq": 125,
+            "not_before": null,
+            "reason": "retry_after_attempt_1",
+            "state": "ready",
+            "work_order_id": "work:mission-document-research-05f88fad96439c22540e6b621ec66c29"
+          },
+          "stage": "qualitative_model_draft",
+          "work_created_at": "2026-09-18T09:51:41.951266+00:00",
+          "work_order_id": "work:mission-document-research-05f88fad96439c22540e6b621ec66c29"
+        }
+      ],
+      "runtime_core_stage_classification": "unresolved_or_failed_model_stage",
+      "scheduler_authority": "runtime_core",
+      "scheduler_db": "/Volumes/EveSSD/Dalton/workspaces/ws-7d894366d1132e2930475a60/state/dalton-core/core.sqlite",
+      "started": true,
+      "state_dir": "/Volumes/EveSSD/Dalton/workspaces/ws-7d894366d1132e2930475a60/state/dalton-core",
+      "ticket_ref": "mission-document-research:2efd9a13c69e1ab50026c6d0",
+      "ticket_summary_error": null,
+      "ticket_summary_status": null,
+      "zero_model_stage_work": false
+    },
+    {
+      "admission_created_at": "2026-09-18T09:51:41.358371+00:00",
+      "admission_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:35",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:38"
+      },
+      "admission_ref": "mission-document-research-admission:27dcac6c151d921bfaa1ee15af5d3f7f",
+      "current_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:54",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:57"
+      },
+      "disposition": "terminal_hold",
+      "environment": "hyperscaler",
+      "hold_reason": "failed",
+      "model_stage_work_count": 0,
+      "model_stage_works": [],
+      "original_report_p0_3": true,
+      "planner_external_scheduler_model_stage_work_count": 0,
+      "planner_external_scheduler_model_stage_works": [],
+      "reentry_plan": null,
+      "runtime_core_scheduler_model_stage_work_count": 0,
+      "runtime_core_scheduler_model_stage_works": [],
+      "runtime_core_stage_classification": "never_enqueued_model_stage",
+      "scheduler_authority": "runtime_core",
+      "scheduler_db": "/Volumes/EveSSD/Dalton/workspaces/ws-7d894366d1132e2930475a60/state/dalton-core/core.sqlite",
+      "started": false,
+      "state_dir": "/Volumes/EveSSD/Dalton/workspaces/ws-7d894366d1132e2930475a60/state/dalton-core",
+      "ticket_ref": "mission-document-research:89385a85a1fda104164969b2",
+      "ticket_summary_error": "MissionDocumentResearchError: mission document admission is no longer executable",
+      "ticket_summary_status": "failed",
+      "zero_model_stage_work": true
+    },
+    {
+      "admission_created_at": "2026-09-18T10:17:16.254867+00:00",
+      "admission_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:51",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:54"
+      },
+      "admission_ref": "mission-document-research-admission:29bf4a59c1232b1022effcd21159e9b0",
+      "current_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:54",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:57"
+      },
+      "disposition": "recovery_required",
+      "environment": "hyperscaler",
+      "hold_reason": "reentry_failed_after_automatic_rebind:controlled reentry was already attempted",
+      "model_stage_work_count": 3,
+      "model_stage_works": [
+        {
+          "attempt_event_count": 6,
+          "formal_results": [
+            {
+              "attempt_number": 2,
+              "created_at": "2026-09-18T10:27:28.745442+00:00",
+              "terminal_state": "succeeded",
+              "work_order_id": "work:mission-document-research-c61c0243e528cc6f90c8ac710d739024"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 2,
+            "created_at": "2026-09-18T10:27:28.745442+00:00",
+            "event_seq": 104,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "succeeded",
+            "work_order_id": "work:mission-document-research-c61c0243e528cc6f90c8ac710d739024"
+          },
+          "stage": "qualitative_model_draft",
+          "work_created_at": "2026-09-18T10:27:19.895209+00:00",
+          "work_order_id": "work:mission-document-research-c61c0243e528cc6f90c8ac710d739024"
+        },
+        {
+          "attempt_event_count": 12,
+          "formal_results": [
+            {
+              "attempt_number": 4,
+              "created_at": "2026-09-18T10:28:00.023781+00:00",
+              "terminal_state": "failed",
+              "work_order_id": "work:mission-document-research-e31335c2697cd37e147e52275022ec28"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 4,
+            "created_at": "2026-09-18T10:28:00.023781+00:00",
+            "event_seq": 116,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "failed",
+            "work_order_id": "work:mission-document-research-e31335c2697cd37e147e52275022ec28"
+          },
+          "stage": "independent_qualitative_verifier",
+          "work_created_at": "2026-09-18T10:27:29.618283+00:00",
+          "work_order_id": "work:mission-document-research-e31335c2697cd37e147e52275022ec28"
+        },
+        {
+          "attempt_event_count": 3,
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-18T10:28:07.490901+00:00",
+              "terminal_state": "succeeded",
+              "work_order_id": "work:mission-document-recovery-237cafb22b0249c4424f38e429a62f91"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-18T10:28:07.490901+00:00",
+            "event_seq": 119,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "succeeded",
+            "work_order_id": "work:mission-document-recovery-237cafb22b0249c4424f38e429a62f91"
+          },
+          "stage": "independent_qualitative_verifier",
+          "work_created_at": "2026-09-18T10:28:00.978269+00:00",
+          "work_order_id": "work:mission-document-recovery-237cafb22b0249c4424f38e429a62f91"
+        }
+      ],
+      "original_report_p0_3": false,
+      "planner_external_scheduler_model_stage_work_count": 0,
+      "planner_external_scheduler_model_stage_works": [],
+      "reentry_plan": {
+        "apply": false,
+        "command": null,
+        "eligibility": "excluded: runtime Core Scheduler already contains model-stage Work",
+        "kind": "no_reentry_planned",
+        "new_model_budget_grant": false,
+        "operation": null,
+        "required_next_authority": "explicit audited execution-epoch rebind; ordinary reentry is insufficient"
+      },
+      "runtime_core_scheduler_model_stage_work_count": 3,
+      "runtime_core_scheduler_model_stage_works": [
+        {
+          "attempt_event_count": 6,
+          "formal_results": [
+            {
+              "attempt_number": 2,
+              "created_at": "2026-09-18T10:27:28.745442+00:00",
+              "terminal_state": "succeeded",
+              "work_order_id": "work:mission-document-research-c61c0243e528cc6f90c8ac710d739024"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 2,
+            "created_at": "2026-09-18T10:27:28.745442+00:00",
+            "event_seq": 104,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "succeeded",
+            "work_order_id": "work:mission-document-research-c61c0243e528cc6f90c8ac710d739024"
+          },
+          "stage": "qualitative_model_draft",
+          "work_created_at": "2026-09-18T10:27:19.895209+00:00",
+          "work_order_id": "work:mission-document-research-c61c0243e528cc6f90c8ac710d739024"
+        },
+        {
+          "attempt_event_count": 12,
+          "formal_results": [
+            {
+              "attempt_number": 4,
+              "created_at": "2026-09-18T10:28:00.023781+00:00",
+              "terminal_state": "failed",
+              "work_order_id": "work:mission-document-research-e31335c2697cd37e147e52275022ec28"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 4,
+            "created_at": "2026-09-18T10:28:00.023781+00:00",
+            "event_seq": 116,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "failed",
+            "work_order_id": "work:mission-document-research-e31335c2697cd37e147e52275022ec28"
+          },
+          "stage": "independent_qualitative_verifier",
+          "work_created_at": "2026-09-18T10:27:29.618283+00:00",
+          "work_order_id": "work:mission-document-research-e31335c2697cd37e147e52275022ec28"
+        },
+        {
+          "attempt_event_count": 3,
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-18T10:28:07.490901+00:00",
+              "terminal_state": "succeeded",
+              "work_order_id": "work:mission-document-recovery-237cafb22b0249c4424f38e429a62f91"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-18T10:28:07.490901+00:00",
+            "event_seq": 119,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "succeeded",
+            "work_order_id": "work:mission-document-recovery-237cafb22b0249c4424f38e429a62f91"
+          },
+          "stage": "independent_qualitative_verifier",
+          "work_created_at": "2026-09-18T10:28:00.978269+00:00",
+          "work_order_id": "work:mission-document-recovery-237cafb22b0249c4424f38e429a62f91"
+        }
+      ],
+      "runtime_core_stage_classification": "unresolved_or_failed_model_stage",
+      "scheduler_authority": "runtime_core",
+      "scheduler_db": "/Volumes/EveSSD/Dalton/workspaces/ws-7d894366d1132e2930475a60/state/dalton-core/core.sqlite",
+      "started": true,
+      "state_dir": "/Volumes/EveSSD/Dalton/workspaces/ws-7d894366d1132e2930475a60/state/dalton-core",
+      "ticket_ref": "mission-document-research:9032f3155fa395e675bad648",
+      "ticket_summary_error": "ResearchAutoCommitRejected: document qualitative rule admits no numeric statement",
+      "ticket_summary_status": "failed",
+      "zero_model_stage_work": false
+    },
+    {
+      "admission_created_at": "2026-09-18T10:12:10.036055+00:00",
+      "admission_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:51",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:54"
+      },
+      "admission_ref": "mission-document-research-admission:42459ee5ed0988599d9266139ff0c05d",
+      "current_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:54",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:57"
+      },
+      "disposition": "recovery_required",
+      "environment": "hyperscaler",
+      "hold_reason": "reentry_failed_after_automatic_rebind:controlled reentry was already attempted",
+      "model_stage_work_count": 2,
+      "model_stage_works": [
+        {
+          "attempt_event_count": 3,
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-18T10:17:21.528618+00:00",
+              "terminal_state": "succeeded",
+              "work_order_id": "work:mission-document-research-76295e8c06b2b8e66522f7365413ee81"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-18T10:17:21.528618+00:00",
+            "event_seq": 89,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "succeeded",
+            "work_order_id": "work:mission-document-research-76295e8c06b2b8e66522f7365413ee81"
+          },
+          "stage": "qualitative_model_draft",
+          "work_created_at": "2026-09-18T10:17:16.827258+00:00",
+          "work_order_id": "work:mission-document-research-76295e8c06b2b8e66522f7365413ee81"
+        },
+        {
+          "attempt_event_count": 3,
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-18T10:17:27.131361+00:00",
+              "terminal_state": "succeeded",
+              "work_order_id": "work:mission-document-research-3824f2048da4d0b5a7fa6ca354f2ca42"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-18T10:17:27.131361+00:00",
+            "event_seq": 92,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "succeeded",
+            "work_order_id": "work:mission-document-research-3824f2048da4d0b5a7fa6ca354f2ca42"
+          },
+          "stage": "independent_qualitative_verifier",
+          "work_created_at": "2026-09-18T10:17:22.219048+00:00",
+          "work_order_id": "work:mission-document-research-3824f2048da4d0b5a7fa6ca354f2ca42"
+        }
+      ],
+      "original_report_p0_3": false,
+      "planner_external_scheduler_model_stage_work_count": 0,
+      "planner_external_scheduler_model_stage_works": [],
+      "reentry_plan": {
+        "apply": false,
+        "command": null,
+        "eligibility": "excluded: runtime Core Scheduler already contains model-stage Work",
+        "kind": "no_reentry_planned",
+        "new_model_budget_grant": false,
+        "operation": null,
+        "required_next_authority": "reuse exact succeeded results under frozen patch"
+      },
+      "runtime_core_scheduler_model_stage_work_count": 2,
+      "runtime_core_scheduler_model_stage_works": [
+        {
+          "attempt_event_count": 3,
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-18T10:17:21.528618+00:00",
+              "terminal_state": "succeeded",
+              "work_order_id": "work:mission-document-research-76295e8c06b2b8e66522f7365413ee81"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-18T10:17:21.528618+00:00",
+            "event_seq": 89,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "succeeded",
+            "work_order_id": "work:mission-document-research-76295e8c06b2b8e66522f7365413ee81"
+          },
+          "stage": "qualitative_model_draft",
+          "work_created_at": "2026-09-18T10:17:16.827258+00:00",
+          "work_order_id": "work:mission-document-research-76295e8c06b2b8e66522f7365413ee81"
+        },
+        {
+          "attempt_event_count": 3,
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-18T10:17:27.131361+00:00",
+              "terminal_state": "succeeded",
+              "work_order_id": "work:mission-document-research-3824f2048da4d0b5a7fa6ca354f2ca42"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-18T10:17:27.131361+00:00",
+            "event_seq": 92,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "succeeded",
+            "work_order_id": "work:mission-document-research-3824f2048da4d0b5a7fa6ca354f2ca42"
+          },
+          "stage": "independent_qualitative_verifier",
+          "work_created_at": "2026-09-18T10:17:22.219048+00:00",
+          "work_order_id": "work:mission-document-research-3824f2048da4d0b5a7fa6ca354f2ca42"
+        }
+      ],
+      "runtime_core_stage_classification": "only_succeeded_model_stages",
+      "scheduler_authority": "runtime_core",
+      "scheduler_db": "/Volumes/EveSSD/Dalton/workspaces/ws-7d894366d1132e2930475a60/state/dalton-core/core.sqlite",
+      "started": true,
+      "state_dir": "/Volumes/EveSSD/Dalton/workspaces/ws-7d894366d1132e2930475a60/state/dalton-core",
+      "ticket_ref": "mission-document-research:35ca626766cd03b48b9dfbcd",
+      "ticket_summary_error": "ResearchAutoCommitRejected: document qualitative rule admits no numeric statement",
+      "ticket_summary_status": "failed",
+      "zero_model_stage_work": false
+    },
+    {
+      "admission_created_at": "2026-09-18T11:10:15.184084+00:00",
+      "admission_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:51",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:54"
+      },
+      "admission_ref": "mission-document-research-admission:6c67385f2f8d9d0cf357ce59590f63e3",
+      "current_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:54",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:57"
+      },
+      "disposition": "terminal_hold",
+      "environment": "hyperscaler",
+      "hold_reason": "failed",
+      "model_stage_work_count": 0,
+      "model_stage_works": [],
+      "original_report_p0_3": true,
+      "planner_external_scheduler_model_stage_work_count": 0,
+      "planner_external_scheduler_model_stage_works": [],
+      "reentry_plan": null,
+      "runtime_core_scheduler_model_stage_work_count": 0,
+      "runtime_core_scheduler_model_stage_works": [],
+      "runtime_core_stage_classification": "never_enqueued_model_stage",
+      "scheduler_authority": "runtime_core",
+      "scheduler_db": "/Volumes/EveSSD/Dalton/workspaces/ws-7d894366d1132e2930475a60/state/dalton-core/core.sqlite",
+      "started": false,
+      "state_dir": "/Volumes/EveSSD/Dalton/workspaces/ws-7d894366d1132e2930475a60/state/dalton-core",
+      "ticket_ref": "mission-document-research:e4bb693fe2bd233483aee750",
+      "ticket_summary_error": "MissionDocumentResearchError: mission document admission is no longer executable",
+      "ticket_summary_status": "failed",
+      "zero_model_stage_work": true
+    },
+    {
+      "admission_created_at": "2026-09-18T07:33:44.583006+00:00",
+      "admission_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:35",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:38"
+      },
+      "admission_ref": "mission-document-research-admission:c65e97e7fba75b2012c5331de5967f6d",
+      "current_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:54",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:57"
+      },
+      "disposition": "recovery_required",
+      "environment": "hyperscaler",
+      "hold_reason": "reentry_failed_after_automatic_rebind:controlled reentry was already attempted",
+      "model_stage_work_count": 2,
+      "model_stage_works": [
+        {
+          "attempt_event_count": 12,
+          "formal_results": [
+            {
+              "attempt_number": 4,
+              "created_at": "2026-09-18T07:39:04.081716+00:00",
+              "terminal_state": "failed",
+              "work_order_id": "work:mission-document-research-5f9d6ccc95045180c1eded83aea67c7c"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 4,
+            "created_at": "2026-09-18T07:39:04.081716+00:00",
+            "event_seq": 51,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "failed",
+            "work_order_id": "work:mission-document-research-5f9d6ccc95045180c1eded83aea67c7c"
+          },
+          "stage": "qualitative_model_draft",
+          "work_created_at": "2026-09-18T07:38:45.945088+00:00",
+          "work_order_id": "work:mission-document-research-5f9d6ccc95045180c1eded83aea67c7c"
+        },
+        {
+          "attempt_event_count": 9,
+          "formal_results": [
+            {
+              "attempt_number": 3,
+              "created_at": "2026-09-18T07:39:15.961319+00:00",
+              "terminal_state": "succeeded",
+              "work_order_id": "work:mission-document-recovery-bf859873dfde4f4d15aee5a1370b3ecb"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 3,
+            "created_at": "2026-09-18T07:39:15.961319+00:00",
+            "event_seq": 60,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "succeeded",
+            "work_order_id": "work:mission-document-recovery-bf859873dfde4f4d15aee5a1370b3ecb"
+          },
+          "stage": "qualitative_model_draft",
+          "work_created_at": "2026-09-18T07:39:04.117767+00:00",
+          "work_order_id": "work:mission-document-recovery-bf859873dfde4f4d15aee5a1370b3ecb"
+        }
+      ],
+      "original_report_p0_3": false,
+      "planner_external_scheduler_model_stage_work_count": 0,
+      "planner_external_scheduler_model_stage_works": [],
+      "reentry_plan": {
+        "apply": false,
+        "command": null,
+        "eligibility": "excluded: runtime Core Scheduler already contains model-stage Work",
+        "kind": "no_reentry_planned",
+        "new_model_budget_grant": false,
+        "operation": null,
+        "required_next_authority": "explicit audited execution-epoch rebind; ordinary reentry is insufficient"
+      },
+      "runtime_core_scheduler_model_stage_work_count": 2,
+      "runtime_core_scheduler_model_stage_works": [
+        {
+          "attempt_event_count": 12,
+          "formal_results": [
+            {
+              "attempt_number": 4,
+              "created_at": "2026-09-18T07:39:04.081716+00:00",
+              "terminal_state": "failed",
+              "work_order_id": "work:mission-document-research-5f9d6ccc95045180c1eded83aea67c7c"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 4,
+            "created_at": "2026-09-18T07:39:04.081716+00:00",
+            "event_seq": 51,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "failed",
+            "work_order_id": "work:mission-document-research-5f9d6ccc95045180c1eded83aea67c7c"
+          },
+          "stage": "qualitative_model_draft",
+          "work_created_at": "2026-09-18T07:38:45.945088+00:00",
+          "work_order_id": "work:mission-document-research-5f9d6ccc95045180c1eded83aea67c7c"
+        },
+        {
+          "attempt_event_count": 9,
+          "formal_results": [
+            {
+              "attempt_number": 3,
+              "created_at": "2026-09-18T07:39:15.961319+00:00",
+              "terminal_state": "succeeded",
+              "work_order_id": "work:mission-document-recovery-bf859873dfde4f4d15aee5a1370b3ecb"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 3,
+            "created_at": "2026-09-18T07:39:15.961319+00:00",
+            "event_seq": 60,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "succeeded",
+            "work_order_id": "work:mission-document-recovery-bf859873dfde4f4d15aee5a1370b3ecb"
+          },
+          "stage": "qualitative_model_draft",
+          "work_created_at": "2026-09-18T07:39:04.117767+00:00",
+          "work_order_id": "work:mission-document-recovery-bf859873dfde4f4d15aee5a1370b3ecb"
+        }
+      ],
+      "runtime_core_stage_classification": "unresolved_or_failed_model_stage",
+      "scheduler_authority": "runtime_core",
+      "scheduler_db": "/Volumes/EveSSD/Dalton/workspaces/ws-7d894366d1132e2930475a60/state/dalton-core/core.sqlite",
+      "started": true,
+      "state_dir": "/Volumes/EveSSD/Dalton/workspaces/ws-7d894366d1132e2930475a60/state/dalton-core",
+      "ticket_ref": null,
+      "ticket_summary_error": null,
+      "ticket_summary_status": null,
+      "zero_model_stage_work": false
+    },
+    {
+      "admission_created_at": "2026-09-18T10:47:27.792907+00:00",
+      "admission_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:51",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:54"
+      },
+      "admission_ref": "mission-document-research-admission:d02eaa60abfaf68042fccfda18a28ec5",
+      "current_policy_refs": {
+        "draft": "model-routing-policy-version:dalton-openclaw-company-dossier:54",
+        "verifier": "model-routing-policy-version:dalton-openclaw-dossier-verifier:57"
+      },
+      "disposition": "recovery_required",
+      "environment": "hyperscaler",
+      "hold_reason": "reentry_failed_after_automatic_rebind:controlled reentry was already attempted",
+      "model_stage_work_count": 2,
+      "model_stage_works": [
+        {
+          "attempt_event_count": 3,
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-18T10:50:29.758008+00:00",
+              "terminal_state": "succeeded",
+              "work_order_id": "work:mission-document-research-7108f2ccec80d73e58c6a29031b07ee2"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-18T10:50:29.758008+00:00",
+            "event_seq": 148,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "succeeded",
+            "work_order_id": "work:mission-document-research-7108f2ccec80d73e58c6a29031b07ee2"
+          },
+          "stage": "qualitative_model_draft",
+          "work_created_at": "2026-09-18T10:50:22.284178+00:00",
+          "work_order_id": "work:mission-document-research-7108f2ccec80d73e58c6a29031b07ee2"
+        },
+        {
+          "attempt_event_count": 3,
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-18T10:50:37.020773+00:00",
+              "terminal_state": "succeeded",
+              "work_order_id": "work:mission-document-research-3cc453f3f0becf6798308e752f2975dc"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-18T10:50:37.020773+00:00",
+            "event_seq": 151,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "succeeded",
+            "work_order_id": "work:mission-document-research-3cc453f3f0becf6798308e752f2975dc"
+          },
+          "stage": "independent_qualitative_verifier",
+          "work_created_at": "2026-09-18T10:50:30.462610+00:00",
+          "work_order_id": "work:mission-document-research-3cc453f3f0becf6798308e752f2975dc"
+        }
+      ],
+      "original_report_p0_3": false,
+      "planner_external_scheduler_model_stage_work_count": 0,
+      "planner_external_scheduler_model_stage_works": [],
+      "reentry_plan": {
+        "apply": false,
+        "command": null,
+        "eligibility": "excluded: runtime Core Scheduler already contains model-stage Work",
+        "kind": "no_reentry_planned",
+        "new_model_budget_grant": false,
+        "operation": null,
+        "required_next_authority": "reuse exact succeeded results under frozen patch"
+      },
+      "runtime_core_scheduler_model_stage_work_count": 2,
+      "runtime_core_scheduler_model_stage_works": [
+        {
+          "attempt_event_count": 3,
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-18T10:50:29.758008+00:00",
+              "terminal_state": "succeeded",
+              "work_order_id": "work:mission-document-research-7108f2ccec80d73e58c6a29031b07ee2"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-18T10:50:29.758008+00:00",
+            "event_seq": 148,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "succeeded",
+            "work_order_id": "work:mission-document-research-7108f2ccec80d73e58c6a29031b07ee2"
+          },
+          "stage": "qualitative_model_draft",
+          "work_created_at": "2026-09-18T10:50:22.284178+00:00",
+          "work_order_id": "work:mission-document-research-7108f2ccec80d73e58c6a29031b07ee2"
+        },
+        {
+          "attempt_event_count": 3,
+          "formal_results": [
+            {
+              "attempt_number": 1,
+              "created_at": "2026-09-18T10:50:37.020773+00:00",
+              "terminal_state": "succeeded",
+              "work_order_id": "work:mission-document-research-3cc453f3f0becf6798308e752f2975dc"
+            }
+          ],
+          "latest_attempt_event": {
+            "attempt_number": 1,
+            "created_at": "2026-09-18T10:50:37.020773+00:00",
+            "event_seq": 151,
+            "not_before": null,
+            "reason": "worker_completion",
+            "state": "succeeded",
+            "work_order_id": "work:mission-document-research-3cc453f3f0becf6798308e752f2975dc"
+          },
+          "stage": "independent_qualitative_verifier",
+          "work_created_at": "2026-09-18T10:50:30.462610+00:00",
+          "work_order_id": "work:mission-document-research-3cc453f3f0becf6798308e752f2975dc"
+        }
+      ],
+      "runtime_core_stage_classification": "only_succeeded_model_stages",
+      "scheduler_authority": "runtime_core",
+      "scheduler_db": "/Volumes/EveSSD/Dalton/workspaces/ws-7d894366d1132e2930475a60/state/dalton-core/core.sqlite",
+      "started": true,
+      "state_dir": "/Volumes/EveSSD/Dalton/workspaces/ws-7d894366d1132e2930475a60/state/dalton-core",
+      "ticket_ref": "mission-document-research:773e7c2cc7d5ededfea8b77b",
+      "ticket_summary_error": "ResearchAutoCommitRejected: document qualitative rule admits no numeric statement",
+      "ticket_summary_status": "failed",
+      "zero_model_stage_work": false
+    }
+  ],
+  "mode": "read_only_live_impact_receipt_corrected_runtime_core_scheduler",
+  "safety": {
+    "applied_reentry_grants": false,
+    "mutated_live_state": false,
+    "ordinary_reentry_excluded_for_existing_failed_or_unresolved_work": true,
+    "performed_research_or_model_calls": false,
+    "reentry_plan_scope": "only started admissions for which runtime Core Scheduler proves zero draft/verifier Work"
+  },
+  "schema_version": "0.1",
+  "scope": {
+    "authoritative_scheduler_db_by_environment": {
+      "hyperscaler": "/Volumes/EveSSD/Dalton/workspaces/ws-7d894366d1132e2930475a60/state/dalton-core/core.sqlite",
+      "legacy": "/Volumes/EveSSD/Dalton/legacy-state/dalton-core/core.sqlite"
+    },
+    "environments": [
+      "legacy",
+      "hyperscaler"
+    ],
+    "scheduler_authority": "runtime document executor uses scheduler tables in core.sqlite; external scheduler.sqlite is planner-only and is included solely as a non-authoritative cross-check",
+    "scheduler_stage_filter": [
+      "qualitative_model_draft",
+      "independent_qualitative_verifier"
+    ],
+    "selection": "current holds whose admitted draft/verifier routing policy refs differ from current model configs"
+  },
+  "summary": {
+    "eligible_started_zero_work_reentry_dry_runs": 4,
+    "never_started_terminal_hold": 5,
+    "new_model_budget_grants": 0,
+    "original_report_p0_3_admissions": 14,
+    "original_report_runtime_core_stage_classification": {
+      "never_enqueued_model_stage": 3,
+      "only_succeeded_model_stages": 1,
+      "unresolved_or_failed_model_stage": 10
+    },
+    "policy_mismatched_holds": 31,
+    "runtime_core_stage_classification": {
+      "never_enqueued_model_stage": 9,
+      "only_succeeded_model_stages": 6,
+      "unresolved_or_failed_model_stage": 16
+    },
+    "started_holds": 26,
+    "started_runtime_core_stage_classification": {
+      "never_enqueued_model_stage": 4,
+      "only_succeeded_model_stages": 6,
+      "unresolved_or_failed_model_stage": 16
+    },
+    "validated_reentry_dry_runs": 4,
+    "zero_runtime_core_model_stage_work": 9
+  }
+}

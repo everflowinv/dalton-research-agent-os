@@ -156,6 +156,7 @@ class MissionDocumentResearchLauncher(LaneChildLauncher):
         admission_hash: str,
         prior_ticket_ref: str,
         authorization: str,
+        expected_summary_sha256: str | None = None,
     ) -> dict[str, Any]:
         self._validate_admission(admission_ref, admission_hash)
         configuration = self.configuration()
@@ -207,7 +208,9 @@ class MissionDocumentResearchLauncher(LaneChildLauncher):
             # summary and log stays where the prior run is -- and then start
             # the new identity as a fresh run.
             if reentry is not None:
-                self.claim_controlled_reentry(rebound_from, authorization)
+                self.claim_controlled_reentry(
+                    rebound_from, authorization, expected_summary_sha256
+                )
             ticket = self.spawn(
                 digest=digest,
                 record={**record, "rebound_from_ticket_ref": rebound_from},
@@ -232,7 +235,11 @@ class MissionDocumentResearchLauncher(LaneChildLauncher):
             record=record if rebound_from is None else {
                 **record, "rebound_from_ticket_ref": rebound_from},
             _controlled_reentry=(
-                None if reentry is None else (prior_ticket_ref, authorization)),
+                None if reentry is None else (
+                    prior_ticket_ref, authorization, expected_summary_sha256,
+                ) if expected_summary_sha256 is not None else (
+                    prior_ticket_ref, authorization,
+                )),
             admission_ref=admission_ref,
             admission_hash=admission_hash,
             configuration=configuration,
