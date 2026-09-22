@@ -193,6 +193,7 @@ class WorkspaceServiceSetupTest(unittest.TestCase):
                          str(workspace.state_dir / "research-planner-model-config.json"))
         sync = json.loads((workspace.state_dir / "model-catalog-sync.json").read_text())
         self.assertEqual(sync["model_router_db"], str(workspace.state_dir / "model-router.sqlite"))
+        self.assertIs(sync["follow_provider_catalog"], True)
         ServiceConfig.from_file(workspace.config_path)
         self.assertIn("research-review-control",
                       load_principals(workspace.state_dir / "writer-tokens.json"))

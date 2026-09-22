@@ -1234,6 +1234,70 @@ class CatalogLaneTests(unittest.TestCase):
         fragment = argv_fragment(LaunchAgentContext(state=self.root))
         self.assertEqual(fragment[0], "--model-catalog-config")
 
+    def test_missing_follow_flag_preserves_legacy_broker_declared_mode(self) -> None:
+        from dalton_core.mission_model_catalog_lane import load_lane_config
+
+        self.assertIs(load_lane_config(self.switch)["follow_provider_catalog"], False)
+        raw = json.loads(self.switch.read_text(encoding="utf-8"))
+        raw["follow_provider_catalog"] = "yes"
+        self.switch.write_text(json.dumps(raw), encoding="utf-8")
+        with self.assertRaisesRegex(Exception, "must be boolean"):
+            load_lane_config(self.switch)
+
+    def test_follow_mode_hashes_allowed_models_and_the_mode(self) -> None:
+        from dalton_core.mission_model_catalog_lane import _source_hash
+
+        before = _allowing_config()
+        after = json.loads(json.dumps(before))
+        after["plugins"]["entries"]["dalton-openclaw-model-broker"]["llm"][
+            "allowedModels"
+        ].append("openai/held-back-only")
+        self.assertEqual(
+            _source_hash(before, follow_provider_catalog=False),
+            _source_hash(after, follow_provider_catalog=False),
+        )
+        self.assertNotEqual(
+            _source_hash(before, follow_provider_catalog=True),
+            _source_hash(after, follow_provider_catalog=True),
+        )
+        self.assertNotEqual(
+            _source_hash(before, follow_provider_catalog=False),
+            _source_hash(before, follow_provider_catalog=True),
+        )
+
+    def test_follow_mode_reloads_landed_broker_catalog_before_router_sync(self) -> None:
+        raw_switch = json.loads(self.switch.read_text(encoding="utf-8"))
+        raw_switch["follow_provider_catalog"] = True
+        self.switch.write_text(json.dumps(raw_switch), encoding="utf-8")
+        config = _allowing_config()
+        model_ref = "fixture-provider/new-route"
+        config["models"]["providers"]["fixture-provider"] = {
+            "models": [{
+                "id": "new-route", "contextWindow": 120_000,
+                "maxTokens": 8_000, "cost": {"input": 1, "output": 2},
+            }],
+        }
+        self.openclaw.write_text(json.dumps(config), encoding="utf-8")
+
+        first = self.coordinator().run()
+        self.assertTrue(first["follow_provider_catalog"])
+        self.assertEqual(first["broker_reconcile"]["mode"],
+                         "follow_provider_catalog")
+        self.assertTrue(first["broker_reconcile"]["changed"])
+        self.assertEqual(first["broker_reconcile"]["added_profile_count"], 1)
+        landed = json.loads(self.openclaw.read_text(encoding="utf-8"))
+        entry = landed["plugins"]["entries"]["dalton-openclaw-model-broker"]
+        self.assertIn(model_ref, entry["llm"]["allowedModels"])
+        auto = next(row for row in entry["config"]["profiles"]
+                    if row["model"] == model_ref)
+        with ModelRouter(self.router_db) as router:
+            current = {row["id"]: row for row in router.latest_profiles()}
+        self.assertEqual(current[auto["id"]]["model"], "new-route")
+
+        second = self.coordinator().run()
+        self.assertEqual(second["status"], "current")
+        self.assertFalse(second["broker_reconcile"]["changed"])
+
     def test_one_run_registers_the_catalog_and_the_second_writes_nothing(self) -> None:
         first = self.coordinator().run()
         self.assertEqual(first["status"], "changed")

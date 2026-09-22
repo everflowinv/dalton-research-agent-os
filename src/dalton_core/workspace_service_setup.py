@@ -306,6 +306,7 @@ def install_service_template(workspace_manifest: str | Path,
     _write(state / "model-catalog-sync.json", {
         "openclaw_config_path": broker["openclaw_config_path"],
         "model_router_db": str(state / "model-router.sqlite"),
+        "follow_provider_catalog": True,
     })
     # These switches contain no mission, company or source data.  Their
     # presence makes the admission-driven lanes available; each lane still

@@ -174,8 +174,8 @@ function validateConfig(input) {
   if (typeof socketName !== "string" || !/^[A-Za-z0-9._-]+\.sock$/.test(socketName)) {
     throw new ProtocolError("INVALID_CONFIG", "socketName must be a safe .sock basename");
   }
-  if (!Array.isArray(config.profiles) || config.profiles.length === 0) {
-    throw new ProtocolError("INVALID_CONFIG", "profiles must be a non-empty array");
+  if (!Array.isArray(config.profiles)) {
+    throw new ProtocolError("INVALID_CONFIG", "profiles must be an array");
   }
   const profiles = new Map();
   for (const raw of config.profiles) {

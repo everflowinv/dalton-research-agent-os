@@ -10,9 +10,9 @@ because there are three gates, not one:
 ``in_openclaw_not_allowed``
     the provider catalog offers it and the broker plugin does not list it in
     ``llm.allowedModels``.  Dalton cannot reach it; the gateway could.  This is
-    the set the cockpit's 「放行」 button acts on, and letting one through is a
-    write to the OpenClaw configuration and therefore the owner's decision,
-    never a lane's.
+    the set the cockpit's 「放行」 button acts on in legacy mode. With the
+    owner's ``follow_provider_catalog`` switch enabled, it is a temporary
+    synchronization gap: the catalog lane maintains the broker declaration.
 
 ``allowed_not_in_dalton``
     the broker allows it and this Core holds no live profile for it.  Normally

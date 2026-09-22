@@ -6305,6 +6305,7 @@ class CockpitPlane:
             "antigravity-cli-gateway": "Antigravity",
             "deepseek": "DeepSeek", "zai": "智谱",
             "claude-cli-gateway": "Claude 网关", "qwen": "Qwen",
+            "muse-cli-gateway": "Muse 网关",
             "xai": "xAI", "openrouter": "OpenRouter",
         }.get(provider, "已登记渠道" if provider else "")
         # Classification metadata belongs in model details, not its name.
@@ -6869,6 +6870,9 @@ class CockpitPlane:
             for choice in choices:
                 if not choice["verifier_eligible"] and choice["note"] in _VERIFIER_NOTES:
                     choice["note"] = None
+        catalog_settings = _load_json(self.config.state_dir / "model-catalog-sync.json")
+        follows_providers = (isinstance(catalog_settings, Mapping)
+                             and catalog_settings.get("follow_provider_catalog") is True)
         return {
             "available": True,
             "as_of": _iso(self.clock()),
@@ -6881,7 +6885,10 @@ class CockpitPlane:
                        "label": MODEL_SELECTION_MODE_LABELS.get(mode, mode)}
                       for mode in SELECTION_MODES],
             "choices": choices,
-            "catalog": self._model_catalog(discovery, broker is not None),
+            "catalog": self._model_catalog(
+                discovery, broker is not None,
+                follow_provider_catalog=follows_providers,
+            ),
             "notices": [{
                 "ref": notice["id"], "at": notice["created_at"],
                 "message": notice["message"],
@@ -6892,7 +6899,8 @@ class CockpitPlane:
         }
 
     @staticmethod
-    def _model_catalog(discovery: Mapping[str, Any], configured: bool) -> dict[str, Any]:
+    def _model_catalog(discovery: Mapping[str, Any], configured: bool, *,
+                       follow_provider_catalog: bool = False) -> dict[str, Any]:
         """The three diff sets, named in the owner's words."""
 
         if not configured or not discovery:
@@ -6900,10 +6908,22 @@ class CockpitPlane:
                     "reason": "尚未配置模型网关文件位置，暂时无法读取模型目录"}
         return {
             "available": True,
-            "in_sync": bool(discovery.get("in_sync")),
+            "follow_provider_catalog": follow_provider_catalog,
+            "in_sync": bool(discovery.get("in_sync")) and not (
+                follow_provider_catalog and (
+                    discovery.get("in_openclaw_not_allowed")
+                    or discovery.get("allowed_without_broker_profile")
+                )
+            ),
+            "sync_note": (
+                "自动跟随 OpenClaw 的完整模型目录；新增、删除和参数更新会自动同步。"
+                if follow_provider_catalog else None
+            ),
             "in_openclaw_not_allowed": list(discovery["in_openclaw_not_allowed"]),
             "in_openclaw_not_allowed_note":
-                "模型网关已提供，但 Dalton 尚未获准使用；可通过「允许使用」提交授权操作",
+                ("新模型正在等待自动同步，无需另行允许使用。"
+                 if follow_provider_catalog else
+                 "模型网关已提供，但 Dalton 尚未获准使用；可通过「允许使用」提交授权操作"),
             "allowed_not_in_dalton": list(discovery["allowed_not_in_dalton"]),
             "allowed_not_in_dalton_note":
                 "Dalton 已获授权，但本机尚未登记模型档案；同步任务会按计划自动登记",

@@ -424,6 +424,19 @@ test("replay-only reads durable completion and never calls host on miss", async 
   assert.equal(inFlightCalls, 1);
 });
 
+test("an empty provider catalog starts but rejects every model without a host call", async () => {
+  let calls = 0;
+  const broker = new ModelBroker(fakeRuntime(async () => {
+    calls += 1;
+    return result();
+  }), config({ profiles: [] }));
+  assert.equal(broker.config.profiles.size, 0);
+  const response = await broker.handle(request());
+  assert.equal(response.ok, false);
+  assert.equal(response.error.code, "MODEL_NOT_ALLOWED");
+  assert.equal(calls, 0);
+});
+
 test("profile, model, token, and timeout bounds fail closed", async () => {
   let calls = 0;
   const broker = new ModelBroker(fakeRuntime(async () => {

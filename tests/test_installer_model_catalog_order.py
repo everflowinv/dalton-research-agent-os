@@ -37,6 +37,9 @@ class InstallerModelCatalogOrderTests(unittest.TestCase):
             fake_python.write_text(
                 "#!/bin/sh\n"
                 "case \"$1\" in\n"
+                "  -) cat >/dev/null; echo sync >> \"$CALL_LOG\"; "
+                ": > \"$CATALOG_READY\"; "
+                "[ \"${FAIL_SYNC:-0}\" = 1 ] && exit 17; exit 0;;\n"
                 "  */sync_openclaw_model_catalog.py)\n"
                 "    echo sync >> \"$CALL_LOG\"\n"
                 "    [ \"${FAIL_SYNC:-0}\" = 1 ] && exit 17\n"
@@ -81,6 +84,15 @@ class InstallerModelCatalogOrderTests(unittest.TestCase):
         completed, calls = self._run_fragment(with_openclaw=False)
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual(calls, ["extraction"])
+
+    def test_installer_enables_follow_before_the_initial_router_sync(self) -> None:
+        code = INSTALL.read_text(encoding="utf-8")
+        follow = code.index('value.setdefault("follow_provider_catalog", True)')
+        reconcile = code.index("receipt = apply_openclaw_provider_catalog_sync(")
+        router_sync = code.index("catalog = sync_openclaw_model_catalog(")
+        self.assertLess(follow, reconcile)
+        self.assertLess(reconcile, router_sync)
+        self.assertIn('if value["follow_provider_catalog"]:', code)
 
 
 if __name__ == "__main__":

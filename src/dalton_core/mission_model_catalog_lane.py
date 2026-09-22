@@ -17,15 +17,15 @@ router's catalog agree with what the broker offers:
   existing catalog sync appends a version saying so, so a route decision from
   June still resolves its profile and the version chain still reads end to end.
 
-Three things it deliberately does not do.  It never writes the OpenClaw
-configuration: letting a model through is a change to a host configuration
-file and therefore the owner's decision, taken in the cockpit through a
-governance operation.  It
-never calls a model: registering a profile is bookkeeping, and a lane that
+It never calls a model: registering a profile is bookkeeping, and a lane that
 smoke-tested every new model would spend money on the owner's behalf every time
-the gateway grew one.  And it holds no discretion about *which* models to
-register -- the broker's allow-list is the decision, and this lane's whole job
-is to stop that decision from having to be repeated here.
+the gateway grew one.  When the explicit ``follow_provider_catalog`` switch is
+enabled, it first makes the broker's public allow-list and profile inventory
+follow ``models.providers``.  Existing route variants and their controls remain
+byte-for-byte declarations; only missing automatic routes are added and routes
+the provider directory removed are removed.  The ordinary append-only Router
+sync then records the resulting current broker catalog.  Older switch files
+without that flag retain the historical broker-declared behavior.
 
 Costs nothing when nothing has changed: the sync's three moves are each
 conditioned on a difference, so the second run of an hour writes nothing.
@@ -69,7 +69,7 @@ def load_lane_config(path: str | Path) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError) as exc:
         raise ModelCatalogLaneError(f"{target} cannot be read: {exc}") from exc
     if not isinstance(raw, Mapping) or set(raw) - {
-        "openclaw_config_path", "model_router_db"
+        "openclaw_config_path", "model_router_db", "follow_provider_catalog"
     } or not {"openclaw_config_path", "model_router_db"} <= set(raw):
         raise ModelCatalogLaneError(
             f"{target} must name openclaw_config_path and model_router_db"
@@ -80,7 +80,37 @@ def load_lane_config(path: str | Path) -> dict[str, Any]:
         if not isinstance(value, str) or not Path(value).expanduser().is_absolute():
             raise ModelCatalogLaneError(f"{key} must be an absolute path")
         values[key] = str(Path(value).expanduser())
+    follow = raw.get("follow_provider_catalog", False)
+    if not isinstance(follow, bool):
+        raise ModelCatalogLaneError("follow_provider_catalog must be boolean")
+    values["follow_provider_catalog"] = follow
     return values
+
+
+def _source_hash(config: Mapping[str, Any], *, follow_provider_catalog: bool) -> str:
+    """Hash everything that can make this lane act before its hourly pass."""
+
+    from .model_router import canonical_hash
+    from .openclaw_catalog_reconcile import catalog_source_hash
+
+    plugins = config.get("plugins") if isinstance(config, Mapping) else None
+    entries = plugins.get("entries") if isinstance(plugins, Mapping) else None
+    broker = (entries or {}).get("dalton-openclaw-model-broker") \
+        if isinstance(entries, Mapping) else None
+    llm = broker.get("llm") if isinstance(broker, Mapping) else None
+    allowed_declaration = llm.get("allowedModels") \
+        if isinstance(llm, Mapping) else None
+
+    return canonical_hash({
+        "catalog": catalog_source_hash(config),
+        # The legacy Router projection does not use allowedModels.  Following
+        # providers does, so an owner edit to only this list must wake the lane
+        # on the next controller tick rather than waiting for the next hour.
+        "allowed_model_refs": (
+            allowed_declaration if follow_provider_catalog else None
+        ),
+        "follow_provider_catalog": follow_provider_catalog,
+    })
 
 
 def _names(values: Any) -> list[str]:
@@ -126,9 +156,7 @@ class ModelCatalogSyncCoordinator:
             record_retirement_notices,
         )
         from .openclaw_catalog_reconcile import (
-            catalog_source_hash,
-            load_openclaw_config,
-            sync_openclaw_model_catalog,
+            load_openclaw_config, sync_openclaw_model_catalog,
         )
         from .openclaw_model_discovery import discover_models, summarise
 
@@ -142,7 +170,36 @@ class ModelCatalogSyncCoordinator:
             return {"status": "unavailable",
                     "reason": f"no model router database at {router_db}"}
         config = load_openclaw_config(openclaw_path)
-        source_hash = catalog_source_hash(config)
+        follow = settings["follow_provider_catalog"]
+        broker_reconcile: dict[str, Any] = {
+            "mode": "broker_declared",
+            "changed": False,
+            "added_profile_count": 0,
+            "removed_profile_count": 0,
+            "updated_profile_count": 0,
+        }
+        if follow:
+            from .openclaw_provider_catalog_sync import (
+                apply_openclaw_provider_catalog_sync,
+            )
+
+            receipt = apply_openclaw_provider_catalog_sync(openclaw_path)
+            # The helper locks, compares and atomically replaces a host-owned
+            # file.  Never sync the Router from the stale pre-lock object.
+            config = load_openclaw_config(openclaw_path)
+            broker_reconcile = {
+                "mode": "follow_provider_catalog",
+                "changed": bool(receipt["changed"]),
+                "provider_model_count": int(receipt["provider_model_count"]),
+                "allowed_model_count": int(receipt["allowed_model_count"]),
+                "profile_count": int(receipt["profile_count"]),
+                "added_profile_count": len(receipt["added_profile_ids"]),
+                "removed_profile_count": len(receipt["removed_profile_ids"]),
+                "updated_profile_count": len(receipt["updated_profile_ids"]),
+            }
+        source_hash = _source_hash(
+            config, follow_provider_catalog=follow,
+        )
         checked_at = self.clock()
         with ModelRouter(str(router_db)) as router:
             sync = sync_openclaw_model_catalog(
@@ -175,10 +232,15 @@ class ModelCatalogSyncCoordinator:
             "notices_open": len(open_notices),
             "fallback_messages": notices["messages"][:MAX_NAMES_IN_SUMMARY],
             "purposes_fallen_back": _names(notices["affected_purposes"]),
-            "status": "changed" if sync["changed"] else "current",
+            "status": (
+                "changed" if sync["changed"] or broker_reconcile["changed"]
+                else "current"
+            ),
             "catalog_in_sync": sync["catalog_in_sync"],
             "broker_catalog_hash": sync["broker_catalog_hash"],
             "catalog_source_hash": source_hash,
+            "follow_provider_catalog": follow,
+            "broker_reconcile": broker_reconcile,
             "registered": _names(sync["added_profile_ids"]),
             "retired": _names(sync["retired_profile_ids_this_run"]),
             "revived": _names(sync["revived_profile_ids"]),
@@ -219,17 +281,17 @@ class ModelCatalogSyncCoordinator:
             # next controller tick instead of continuing to route the prior
             # model until the next hour.
             if window == self._last_window:
-                from .openclaw_catalog_reconcile import (
-                    catalog_source_hash,
-                    load_openclaw_config,
-                )
+                from .openclaw_catalog_reconcile import load_openclaw_config
 
                 settings = load_lane_config(self.config_path)
                 source = Path(settings["openclaw_config_path"])
                 if not source.is_file():
                     return {"status": "unavailable",
                             "reason": f"no OpenClaw configuration at {source}"}
-                current_hash = catalog_source_hash(load_openclaw_config(source))
+                current_hash = _source_hash(
+                    load_openclaw_config(source),
+                    follow_provider_catalog=settings["follow_provider_catalog"],
+                )
                 if current_hash == self._last_source_hash:
                     return {"status": "idle",
                             "reason": "the catalog has already been read this hour"}

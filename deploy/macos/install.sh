@@ -695,27 +695,77 @@ fi
 # no drift writes nothing.  Skipped without an OpenClaw config, because a Core
 # installed without the gateway has no catalog to agree with.
 if [[ -f "$HOME/.openclaw/openclaw.json" ]]; then
-  if ! PYTHONPATH="$repo_root/src" "$venv_dir/bin/python" \
-      "$repo_root/scripts/sync_openclaw_model_catalog.py" \
-      --openclaw-config "$HOME/.openclaw/openclaw.json" \
-      --model-router-db "$state_dir/model-router.sqlite"; then
+  # New environments follow the provider directory automatically. Existing
+  # switch files gain the flag only when it is absent; an explicit false is a
+  # compatibility decision and is preserved together with both named paths.
+  model_catalog_file="$state_dir/model-catalog-sync.json"
+  if ! PYTHONPATH="$repo_root/src" "$venv_dir/bin/python" - \
+      "$model_catalog_file" "$state_dir/model-router.sqlite" \
+      "$HOME/.openclaw/openclaw.json" <<'PYMODELCATALOG'
+import json, os, sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+from dalton_core.model_router import ModelRouter
+from dalton_core.openclaw_catalog_reconcile import (
+    load_openclaw_config,
+    sync_openclaw_model_catalog,
+)
+from dalton_core.openclaw_provider_catalog_sync import (
+    apply_openclaw_provider_catalog_sync,
+)
+
+switch, router, openclaw = map(Path, sys.argv[1:])
+if switch.exists():
+    value = json.loads(switch.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise SystemExit("model catalog switch must be an object")
+else:
+    value = {
+        "model_router_db": str(router),
+        "openclaw_config_path": str(openclaw),
+    }
+changed = "follow_provider_catalog" not in value
+value.setdefault("follow_provider_catalog", True)
+if not isinstance(value["follow_provider_catalog"], bool):
+    raise SystemExit("follow_provider_catalog must be boolean")
+for key in ("model_router_db", "openclaw_config_path"):
+    if not isinstance(value.get(key), str) or not Path(value[key]).is_absolute():
+        raise SystemExit(f"{key} must remain an absolute path")
+if changed or not switch.exists():
+    temporary = switch.with_name("." + switch.name + ".tmp")
+    temporary.write_text(
+        json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, switch)
+if value["follow_provider_catalog"]:
+    receipt = apply_openclaw_provider_catalog_sync(
+        Path(value["openclaw_config_path"]))
+    print(json.dumps({
+        "mode": "follow_provider_catalog",
+        "changed": receipt["changed"],
+        "added_profile_count": len(receipt["added_profile_ids"]),
+        "removed_profile_count": len(receipt["removed_profile_ids"]),
+    }, sort_keys=True))
+else:
+    print(json.dumps({"mode": "broker_declared", "changed": False}, sort_keys=True))
+with ModelRouter(value["model_router_db"]) as model_router:
+    catalog = sync_openclaw_model_catalog(
+        model_router,
+        load_openclaw_config(value["openclaw_config_path"]),
+        checked_at=datetime.now(timezone.utc),
+    )
+print(json.dumps({
+    "catalog_in_sync": catalog["catalog_in_sync"],
+    "router_changed": catalog["changed"],
+}, sort_keys=True))
+PYMODELCATALOG
+  then
     echo "model catalog sync failed; the router and the broker still disagree." >&2
     echo "Fix the OpenClaw config or the router, then re-run install.sh." >&2
     exit 1
-  fi
-  # P14-M2: the hourly catalog lane's switch, and its whole configuration. It
-  # is one file for the same reason the tracking policy is: all-or-nothing is
-  # then automatic, and a Core installed without the gateway has nothing to
-  # follow and gets no lane. Both paths are named rather than derived, because
-  # a Dalton process must not go looking for the host's OpenClaw configuration
-  # on its own. Idempotent: an existing file is left exactly as it is, so an
-  # owner who repointed it at another gateway config keeps their edit.
-  model_catalog_file="$state_dir/model-catalog-sync.json"
-  if [[ ! -f "$model_catalog_file" ]]; then
-    printf '{\n  "model_router_db": "%s",\n  "openclaw_config_path": "%s"\n}\n' \
-      "$state_dir/model-router.sqlite" "$HOME/.openclaw/openclaw.json" \
-      > "$model_catalog_file"
-    chmod 600 "$model_catalog_file"
   fi
 fi
 # ADR-0005 / P9d-17a: the writer needs an approved extraction model

@@ -1296,6 +1296,7 @@ function renderModels(sheet,r,overview){sheet.replaceChildren(readerClose(),node
   sheet.append(avail);
   const cat=r.catalog,box=node("section");box.append(node("h3","模型网关目录"));
   if(!cat.available){box.append(node("div",cat.reason,"empty"));sheet.append(box);return}
+  if(cat.sync_note)box.append(node("div",cat.sync_note,"meta"));
   box.append(node("div",cat.in_sync?"本地模型配置与网关一致。":"本地模型配置与网关存在差异，明细如下。","meta"));
   const col=(title,names,note,allow)=>{const d=node("div",null,"lane");d.append(node("span",null,"st"+(names.length?" wait":" on")));
     const c=node("div");c.append(node("b",`${title}（${names.length}）`));c.append(node("small",note));
@@ -1307,7 +1308,7 @@ function renderModels(sheet,r,overview){sheet.replaceChildren(readerClose(),node
         catch(e){b.disabled=false;toast(readableError(e,"授权模型").message)}};line.append(b)}
       c.append(line)});
     d.append(c);box.append(d)};
-  col("模型网关已提供、Dalton 尚未获授权",cat.in_openclaw_not_allowed,cat.in_openclaw_not_allowed_note,true);
+  col(cat.follow_provider_catalog?"网关新增模型，等待自动同步":"模型网关已提供、Dalton 尚未获授权",cat.in_openclaw_not_allowed,cat.in_openclaw_not_allowed_note,!cat.follow_provider_catalog);
   col("Dalton 已获授权、本机尚未登记",cat.allowed_not_in_dalton,cat.allowed_not_in_dalton_note,false);
   col("本机仍有登记、模型网关已下线",cat.dalton_not_in_openclaw,cat.dalton_not_in_openclaw_note,false);
   sheet.append(box)}
