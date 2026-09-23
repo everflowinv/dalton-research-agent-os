@@ -112,6 +112,7 @@ from .document_extraction import DocumentExtractionService, validate_model_confi
 from .transcript_candidate_staging import (
     stage_transcript_qualitative_candidate, TranscriptCoreAuthorityResolver,
 )
+from .service_config_location import service_config_path
 from .store import content_hash
 from .agenda import (
     AgendaConflict,
@@ -1595,7 +1596,7 @@ def planner_runtime_model_config(
 
     directory = Path(state_dir).expanduser().resolve()
     result = None if fallback is None else dict(fallback)
-    service_path = directory.parents[1] / "config" / "service.json"
+    service_path = service_config_path(state_dir)
     service_controls_call_budget = False
     if service_path.is_file():
         from .bounded_planner_driver import (
@@ -2078,9 +2079,19 @@ class WriterServer:
 
     @property
     def state_dir(self) -> Path:
-        """The live state directory: where lanes write tickets and artifacts."""
+        """The live state directory: where lanes write tickets and artifacts.
 
-        return Path(self.db_path).expanduser().resolve().parent
+        Absolute but deliberately **not** symlink-resolved.  The legacy
+        installation keeps its state on an external volume behind
+        ``<root>/state -> /Volumes/.../legacy-state``, and resolving here threw
+        away the only thing that says which installation this Core is: every
+        caller that goes on to ask for ``<root>/config/service.json`` would be
+        sent to the volume rather than to the installation, and would find
+        nothing there.  Nothing downstream needs the physical path -- the
+        symlink leads to the same files -- so the named one is kept.
+        """
+
+        return Path(os.path.abspath(os.path.expanduser(str(self.db_path)))).parent
 
     def lane_launcher(self, init_kwarg: str) -> Any | None:
         """This lane's launcher, or ``None`` when the lane is not installed."""

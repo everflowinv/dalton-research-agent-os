@@ -83,8 +83,8 @@ def default_planner_cost_usd(state_dir: str | Path | None = None) -> Decimal:
     )
     if state_dir is not None:
         import json
-        directory = Path(state_dir).expanduser().resolve()
-        config_path = directory.parents[1] / "config" / "service.json"
+        from .service_config_location import service_config_path
+        config_path = service_config_path(state_dir)
         if config_path.exists():
             try:
                 raw = json.loads(config_path.read_text())

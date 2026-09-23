@@ -1,5 +1,17 @@
 # Dalton 项目进度
 
+## 2026-09-23 14:45 UTC：state 是符号链接，于是整台 legacy 读不到自己的 service.json（源码，待部署）
+
+**一、错的不是路径，是问题问反了。** 九处代码都用同一句话推服务配置：`Path(state_dir).expanduser().resolve().parents[1] / "config" / "service.json"`。`resolve()` 回答的是"这个目录的字节存在哪"，而版面要问的是"这个目录属于哪一套安装"。legacy 把 state 搬到了外置卷（`~/Library/Application Support/Dalton/state -> /Volumes/EveSSD/Dalton/legacy-state`），config、LaunchAgent、owner 的 `service.json` 都留在原处，两个问题从此不是同一个答案：推出来的 `/Volumes/EveSSD/Dalton/config/service.json` 从来没存在过。Hyperscaler 的 state 不是链接，所以两个环境对不上，而谁都不明显是错的。
+
+**二、规则改成"先按调用方说的名字，再按解析后的路径"。** 新增 `service_config_location.service_config_path()`：字面路径（只展开 `~` 和相对路径，不跟符号链接）优先，解析后的路径次之——后者是为了已经自己 `resolve()` 过的调用方不丢答案；两条都不存在时返回字面那条，**真的缺文件仍然读作缺**，不会把缺失粉饰成已配置。`model_selection`（2 处）、`model_budget_configuration`（3 处）、`day_budget_configuration`、`research_task`、`research_planner_cli`、`thesis_impact_production`、`workspace_host_scheme`、`writer_server` 全部改走这一处。另外两处顺带修掉：`model_budget_configuration` 原先把 resolve 过的目录当 `state_dir` 往下传，`WriterServer.state_dir` 从 `core_db` 推导时也 resolve——信息在这两道关口就被丢掉了，改成字面绝对化，指向的仍是同一批文件。
+
+**三、legacy 四个环节全部认回来了，Hyperscaler 一个字节没变。** legacy：`plan` 由 `dalton-openclaw-planner-decisions:62`（本地文件兜底，并不是常驻 planner 真正在用的钉）纠正为 `dalton-openclaw-planner:9`；`agenda_planning` 未配置 → `dalton-openclaw:11`；`thesis_impact_assessment` 未配置 → `dalton-openclaw-assessment:9`；`thesis_impact_verifier` 未配置 → `dalton-openclaw-verifier:4`（09-23 那条待办可以销掉了）。两个 Hyperscaler workspace 的四个环节前后逐字相同。`human_intent` 在三个环境仍读未配置——legacy 的 `service.json` 里确实没有 `intent_composer`，这是真话。
+
+**四、`quality_verifier` 查清了：不是漏配，是刻意没开，而且一次都没少干活。** 唯一会写 `quality-verifier-model-config.json` 的是 `deploy/macos/install.sh:986`，只在设了 `DALTON_QUALITY_VERIFIER_MODEL_TIER/PROFILE` 时才写；`docs/reports/quality-verifier-runtime-wiring-2026-09-11.md` 写明"装了也不会新增排程或触发调用"。质量评分只有 `dalton-research-quality score` 这一个人工入口，`--verifier-model-config` 可选且依赖 `--model-config`；没有它照样跑确定性/评审层并如实报 `verified: false`，**没有任何交付闸门读这个字段**。两个环境的 `research_quality_score_versions` 都是 **0 行**——这个环节从没跑过，也就没有被悄悄跳过的工作。**不猜模型**：要开需要 owner 定两件事——(1) 是像 install.sh 那样新建 `dalton-openclaw-quality-verifier` 策略，还是像 mission-document / annual-report / localization 三个兄弟核验那样复用 `dalton-openclaw-dossier-verifier:58`；(2) `purpose_call_budgets.quality_verifier` 的花费上限。另外记一笔：`workspace_model_setup.EXPECTED_CONFIG_NAMES` 是写死的 21 个名字且按**集合相等**校验，legacy 一旦真的绑上这个文件，`export_runtime_template` 会直接报"必须正好 21 个"，所以开通时得同步把这份名单改成 22 并重导运行时模板。
+
+**测试**：新增 `tests/test_service_config_location.py` 13 条——符号链接下四个服务钉全部读出、`plan` 的文件兜底不再盖住常驻钉、常驻车道开关读到的是同一个文件、真的没有 `service.json` 时四个环节仍读未配置且不会去借别人的、相对路径与根目录边界。全量 unittest 通过。
+
 ## 2026-09-23 14:20 UTC：模型页十秒是一个没有上限的字段，"受控核验部分不可用"是把"没配"读成了"不合规"（源码，待部署）
 
 **一、十秒花在哪，先量了再改。** legacy `/v1/cockpit/models` 11.3s / 537 KB，Hyperscaler 1.1s / 202 KB；`tiers` 一个字段就占 412 KB，其中单层的 `skipped_since_last_served` 是 295 KB。用 cProfile 对着同一份线上库（只读）跑 `models()`：2.96s 里 **2.82s（95%）在 `routing_overview`、2.45s 在 `chain_links`**，`json.loads` 被调用 **459,026 次**——页面按每个策略钉分别建一次 overview（legacy 13 次），每次都把 35,080 条链路记录、22 MB JSON 整表读出来重解一遍。而 `skipped_since_last_served` 名为"上一次服务之后跳过的"，实际返回的是这一层**有史以来**被跳过的全部链路（legacy 2,482 条），前端根本没有渲染它。

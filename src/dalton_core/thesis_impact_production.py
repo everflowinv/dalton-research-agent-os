@@ -25,6 +25,7 @@ from .model_transport import (
 from .observability import ObservabilityStore
 from .openclaw_model_adapter import OpenClawModelAdapter
 from .scheduler import Scheduler
+from .service_config_location import service_config_path
 from .store import content_hash
 from .thesis_impact_budget import ThesisImpactBudgetStore
 from .thesis_impact_control import POLICY_SUPERSEDED_STATUS
@@ -282,7 +283,7 @@ def thesis_impact_execution_bindings(
 def thesis_impact_runtime_config(
     state_dir: str | Path,
 ) -> ThesisImpactProductionConfig | None:
-    path = Path(state_dir).expanduser().resolve().parents[1] / "config" / "service.json"
+    path = service_config_path(state_dir)
     if not path.is_file():
         return None
     try:

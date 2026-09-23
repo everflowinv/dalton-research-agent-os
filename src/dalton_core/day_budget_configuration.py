@@ -9,6 +9,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from .service_config_location import service_config_path as derive_service_config_path
 from .store import content_hash
 from .thesis_impact_budget import ThesisImpactBudgetStore
 
@@ -69,7 +70,7 @@ def synchronize_day_budget_policy(state_dir: str | Path,
     db = next(iter(databases))
     refs = {value["budget_policy_ref"] for value in models.values()}
     if service_config_path is None:
-        candidate = state.parent.parent / "config" / "service.json"
+        candidate = derive_service_config_path(state_dir)
         service_config_path = candidate if candidate.is_file() else None
     if service_config_path is not None and Path(service_config_path).is_symlink():
         raise ValueError("service configuration cannot be a symlink")

@@ -56,6 +56,7 @@ from .model_routing_sync import (
     agreed_selections,
     host_environments,
 )
+from .service_config_location import service_config_path
 
 SCHEMA_VERSION = "dalton-workspace-host-scheme-0.1"
 #: The two keys a model configuration or a service section names its broker
@@ -68,16 +69,11 @@ ROUTER_FILENAME = "model-router.sqlite"
 # Finding the environment a new one copies from.
 
 
-def service_config_path(state_dir: str | Path) -> Path:
-    """Where the service configuration of a state directory's environment is.
-
-    Derived exactly as ``model_selection._runtime_policy_config`` derives it,
-    so "the service.json of this environment" has one answer: every
-    installation, legacy or workspace, lays out ``<root>/state/dalton-core``
-    beside ``<root>/config/service.json``.
-    """
-
-    return Path(state_dir).expanduser().resolve().parents[1] / "config" / "service.json"
+# ``service_config_path`` is imported above and re-exported here, so "the
+# service.json of this environment" keeps having exactly one answer.  The
+# derivation moved to :mod:`dalton_core.service_config_location` because a
+# state directory reached through a symlink belongs to the installation the
+# caller named, not to the one whose volume happens to store its bytes.
 
 
 def source_environment(

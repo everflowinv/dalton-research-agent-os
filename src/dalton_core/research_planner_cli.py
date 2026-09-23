@@ -52,6 +52,7 @@ from .research_planner import (
     prompt_size_report,
 )
 from .research_state import build_research_state, state_digest
+from .service_config_location import service_config_path
 from .store import DaltonStore, canonical_json
 
 SUMMARY_SCHEMA_VERSION = "0.1"
@@ -138,7 +139,7 @@ def effective_planner_model_config(
     if not isinstance(config, Mapping):
         raise ValueError("planner model configuration must be an object")
     result = dict(config)
-    service_path = state_dir.expanduser().resolve().parents[1] / "config" / "service.json"
+    service_path = service_config_path(state_dir)
     if not service_path.is_file():
         return result
     service = json.loads(service_path.read_text(encoding="utf-8"))

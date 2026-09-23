@@ -57,6 +57,7 @@ from .model_router import (
     policy_chain,
     resolve_chain,
 )
+from .service_config_location import service_config_path
 from .store import content_hash
 
 SELECTION_MODES: tuple[str, ...] = ("tier", "explicit")
@@ -238,7 +239,7 @@ def purpose_policy_bindings(
     for purpose, names in PURPOSE_MODEL_CONFIGS.items():
         file_binding(purpose, tuple(directory / name for name in names))
 
-    service_path = directory.parents[1] / "config" / "service.json"
+    service_path = service_config_path(state_dir)
     service = _load_model_json(service_path) if service_path.is_file() else None
     for purpose, (section, field, router_field) in _SERVICE_PURPOSE_PINS.items():
         block = service.get(section) if isinstance(service, Mapping) else None
@@ -385,7 +386,7 @@ def model_configs(state_dir: str | Path) -> list[dict[str, Any]]:
 def _runtime_policy_config(state_dir: str | Path, purpose: str) -> dict[str, Any] | None:
     """One resident service pin not represented by a lane model-config file."""
 
-    path = Path(state_dir).expanduser().resolve().parents[1] / "config" / "service.json"
+    path = service_config_path(state_dir)
     if not path.is_file():
         return None
     service = json.loads(path.read_text(encoding="utf-8"))

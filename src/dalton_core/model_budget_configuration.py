@@ -13,6 +13,7 @@ from typing import Any, Mapping
 from .call_budget import (CallBudgetError, default_call_budget, resolve_call_budget,
                          resolve_run_budget, validate_budget_overrides, validate_run_budget_overrides)
 from .model_selection import ModelSelectionError, _write_configs_atomically, purpose_policy_bindings
+from .service_config_location import service_config_path
 
 
 class BudgetConfigurationConflict(ModelSelectionError):
@@ -32,12 +33,13 @@ def _consumer_call_defaults(purpose: str) -> dict[str, Any] | None:
     return dict(LEGACY_CALL_BUDGET)
 
 
-def _service_budget_view(directory: Path, purpose: str, binding: Mapping[str, Any], kind: str):
+def _service_budget_view(state_dir: str | Path, directory: Path, purpose: str,
+                         binding: Mapping[str, Any], kind: str):
     if kind != "call":
         return {"editable": False, "reason": "此服务的周期预算由治理政策配置"}
     if purpose == "plan":
         from .bounded_planner_driver import BoundedPlannerDriverConfig
-        path = directory.parents[1] / "config" / "service.json"
+        path = service_config_path(state_dir)
         data = path.read_bytes()
         config = json.loads(data)
         nested = config["bounded_planner"]["config"]
@@ -58,7 +60,7 @@ def _service_budget_view(directory: Path, purpose: str, binding: Mapping[str, An
         path = directory / "thesis-impact-budget-config.json"
         data = path.read_bytes() if path.exists() else b""
         config = json.loads(data) if data else {}
-        service_path = directory.parents[1] / "config" / "service.json"
+        service_path = service_config_path(state_dir)
         service = json.loads(service_path.read_text())
         thesis = service["thesis_impact"]["config"]
         shared = None
@@ -84,9 +86,9 @@ def _service_budget_view(directory: Path, purpose: str, binding: Mapping[str, An
             "reason": "该环节的预算在已版本化的 Agenda policy 中配置"}
 
 
-def _bindings(state_dir: Path, cockpit_model_config_path: str | Path | None = None):
+def _bindings(state_dir: str | Path, cockpit_model_config_path: str | Path | None = None):
     if cockpit_model_config_path is None:
-        service_path = state_dir.parents[1] / "config" / "service.json"
+        service_path = service_config_path(state_dir)
         if service_path.is_file():
             service = json.loads(service_path.read_text())
             cockpit_model_config_path = (((service.get("control") or {}).get("config") or {})
@@ -100,10 +102,10 @@ def _call_budget_view(state_dir: str | Path, purpose: str, *,
     if kind not in {"call", "run"}:
         raise CallBudgetError("budget kind must be call or run")
     directory = Path(state_dir).expanduser().resolve()
-    binding = binding or _bindings(directory, cockpit_model_config_path).get(purpose, {})
+    binding = binding or _bindings(state_dir, cockpit_model_config_path).get(purpose, {})
     source = binding.get("source", "")
     if binding.get("status") == "configured" and "#" in source:
-        return _service_budget_view(directory, purpose, binding, kind)
+        return _service_budget_view(state_dir, directory, purpose, binding, kind)
     if (binding.get("status") != "configured" or not binding.get("editable")
             or "#" in source or not source):
         return {"editable": False, "source": source,
@@ -166,7 +168,7 @@ def _set_model_call_budget_locked(state_dir: str | Path, *, purpose: str,
         raise CallBudgetError("budget kind must be call or run")
     checked = (validate_budget_overrides if kind == "call" else validate_run_budget_overrides)(budget)
     directory = Path(state_dir).expanduser().resolve()
-    view = call_budget_view(directory, purpose, kind=kind)
+    view = call_budget_view(state_dir, purpose, kind=kind)
     if not view["editable"]:
         raise ModelSelectionError(view["reason"])
     if kind == "run" and set(checked) - set(view["fields"]):
@@ -246,7 +248,7 @@ def _set_model_call_budget_locked(state_dir: str | Path, *, purpose: str,
         receipt_path.unlink()
         raise
     return {"status": "updated", "purpose": purpose, "revision": revision,
-            **call_budget_view(directory, purpose, kind=kind)}
+            **call_budget_view(state_dir, purpose, kind=kind)}
 
 
 def set_model_call_budget(state_dir: str | Path, **values: Any) -> dict[str, Any]:
@@ -262,6 +264,6 @@ def set_model_call_budget(state_dir: str | Path, **values: Any) -> dict[str, Any
     with os.fdopen(fd, "a+") as handle:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         try:
-            return _set_model_call_budget_locked(directory, **values)
+            return _set_model_call_budget_locked(state_dir, **values)
         finally:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
