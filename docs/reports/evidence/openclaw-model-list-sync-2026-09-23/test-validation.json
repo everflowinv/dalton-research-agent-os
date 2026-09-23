@@ -1,0 +1,26 @@
+{
+  "full_suite": {
+    "source_commit": "51420b679a9591d517fdecc6a0b1223af9e80cfa",
+    "tests": 9733,
+    "test_seconds": 774.638,
+    "returncode": 1,
+    "errors": 1,
+    "skipped": 4,
+    "error": "TemporaryDirectory cleanup raced with SEC launcher supervisor threads in one test"
+  },
+  "fix_scope": "tests/test_sec_lane_launcher.py only; production source unchanged",
+  "verification": {
+    "original_failing_test_repeats": 50,
+    "repeats_passed": 50,
+    "sec_lane_launcher_tests": 10,
+    "passed": 10
+  },
+  "runtime_candidate_smoke": {
+    "tests": 145,
+    "passed": 145
+  },
+  "broker_tests": {
+    "tests": 35,
+    "passed": 35
+  }
+}

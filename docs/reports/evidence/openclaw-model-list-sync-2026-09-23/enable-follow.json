@@ -1,0 +1,29 @@
+{
+  "legacy": {
+    "settings": {
+      "model_router_db": "/Users/everflow/Library/Application Support/Dalton/state/dalton-core/model-router.sqlite",
+      "openclaw_config_path": "/Users/everflow/.openclaw/openclaw.json",
+      "follow_provider_catalog": true
+    },
+    "before_sha256": "4926d2957eb2c60e2d1b06b37cdc7dddcac4c0b08d6a7c47528301d8adbf2f26",
+    "after_sha256": "4de1ca2084dc6f7024add729ff9c541e141f88abff4243dbe80c190520806214"
+  },
+  "ws-e399ececd5aa7a3762b1a0a4": {
+    "settings": {
+      "model_router_db": "/Users/everflow/.dalton/workspaces/ws-e399ececd5aa7a3762b1a0a4/state/dalton-core/model-router.sqlite",
+      "openclaw_config_path": "/Users/everflow/.openclaw/openclaw.json",
+      "follow_provider_catalog": true
+    },
+    "before_sha256": "872c6d57e6ed315472290eb24fa665bc8890076707f150d87648a817b498c10f",
+    "after_sha256": "6ea86ae8d4b9050a410851f5a64898e4125662d259cd02023bc3b330837b2956"
+  },
+  "ws-7d894366d1132e2930475a60": {
+    "settings": {
+      "model_router_db": "/Users/everflow/.dalton/workspaces/ws-7d894366d1132e2930475a60/state/dalton-core/model-router.sqlite",
+      "openclaw_config_path": "/Users/everflow/.openclaw/openclaw.json",
+      "follow_provider_catalog": true
+    },
+    "before_sha256": "a3cd42a6c2ee71882f8c6522852bd7ff2cb31951387a4d169e54d164b2a1a542",
+    "after_sha256": "a24c308c6cea758fd102e649411efe5af8ae2095bba829c10773524b46b86206"
+  }
+}

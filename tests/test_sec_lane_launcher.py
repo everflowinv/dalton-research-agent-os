@@ -529,6 +529,10 @@ class SecLaneLauncherTests(unittest.TestCase):
                 (root / "state" / "sec-lane-runs" / ticket["id"].split(":", 1)[1] / "argv.json").read_text()
             )
             self.assertEqual(argv[-1], "--allow-network")
+            # ``addCleanup`` runs after this TemporaryDirectory context exits.
+            # Stop the ticket supervisor here so its atomic status write cannot
+            # race the directory removal under a loaded full-suite process.
+            launcher.close()
             # Without an injected loader the launcher goes through the generic
             # governance module; an unreadable record is a rejection, never a crash.
             state = root / "state"
@@ -539,6 +543,7 @@ class SecLaneLauncherTests(unittest.TestCase):
             self.addCleanup(default.close)
             with self.assertRaises(LaneLaunchRejected):
                 default.start(issuers=["ACN"], filed_from="2026-06-01", filed_to="2026-08-26", actor_ref=OWNER)
+            default.close()
             self.assertEqual(os.listdir(state / "sec-lane-runs"), [ticket["id"].split(":", 1)[1]])
 
 

@@ -1,0 +1,243 @@
+{
+  "checked_at": "2026-09-23T12:51:46.127000+00:00",
+  "release": "1528e626411606cb134c44f71d2a6516703e28b6ad98113c20a81d5fea75c215",
+  "source_commit": "51420b679a9591d517fdecc6a0b1223af9e80cfa",
+  "unmanaged_config_unchanged": true,
+  "existing_profiles_unchanged": true,
+  "added_profiles": [
+    {
+      "id": "profile:auto-antigravity-cli-gateway-gemini-3-1-pro-e5bd948a788a",
+      "model": "antigravity-cli-gateway/gemini-3.1-pro",
+      "maxTokens": 65536,
+      "timeoutMs": 600000
+    },
+    {
+      "id": "profile:auto-muse-cli-gateway-muse-spark-1-3-27804db256e4",
+      "model": "muse-cli-gateway/muse-spark-1.3",
+      "maxTokens": 128000,
+      "timeoutMs": 600000
+    },
+    {
+      "id": "profile:auto-muse-cli-gateway-muse-spark-1-3-contributor-f91fd8808c9f",
+      "model": "muse-cli-gateway/muse-spark-1.3-contributor",
+      "maxTokens": 128000,
+      "timeoutMs": 600000
+    }
+  ],
+  "model_calls": 0,
+  "environments": {
+    "legacy": {
+      "follow_provider_catalog": true,
+      "started_at": "2026-09-23T12:48:47.177274+00:00",
+      "last_tick_at": "2026-09-23T12:51:42.069053+00:00",
+      "last_error": null,
+      "catalog_lane_last": {
+        "allowed_not_in_dalton": [],
+        "broker_catalog_hash": "1e70aabf4469a2cf26964efa864e0b18cfe6ea31abc43c03fe28b120dde2b852",
+        "broker_reconcile": {
+          "added_profile_count": 0,
+          "allowed_model_count": 21,
+          "changed": false,
+          "mode": "follow_provider_catalog",
+          "profile_count": 22,
+          "provider_model_count": 21,
+          "removed_profile_count": 0,
+          "updated_profile_count": 0
+        },
+        "catalog_in_sync": true,
+        "catalog_source_hash": "240676dabe6118fd78aa281f8bd943f00af9ada619446422e1ae638c645e9383",
+        "counts": {
+          "allowed_not_in_dalton": 0,
+          "allowed_without_broker_profile": 0,
+          "dalton_not_in_openclaw": 0,
+          "in_openclaw_not_allowed": 0,
+          "unpriced_model_refs": 0
+        },
+        "dalton_not_in_openclaw": [],
+        "fallback_messages": [],
+        "follow_provider_catalog": true,
+        "in_openclaw_not_allowed": [],
+        "notices_open": 3,
+        "notices_written": [],
+        "notification_channel": "cockpit",
+        "provider_control_capability_lost": [],
+        "provider_control_expired": [],
+        "provider_control_expiring": [],
+        "provider_control_invalid": [],
+        "provider_control_valid": [
+          "profile:gemini-3-1-pro-preview",
+          "profile:gemini-3-8-flash"
+        ],
+        "purposes_fallen_back": [
+          "debate_map",
+          "dossier",
+          "model_spec",
+          "debate_map",
+          "dossier",
+          "model_spec",
+          "debate_map",
+          "dossier"
+        ],
+        "registered": [
+          "profile:auto-antigravity-cli-gateway-gemini-3-1-pro-e5bd948a788a",
+          "profile:auto-muse-cli-gateway-muse-spark-1-3-27804db256e4",
+          "profile:auto-muse-cli-gateway-muse-spark-1-3-contributor-f91fd8808c9f"
+        ],
+        "retired": [],
+        "revived": [],
+        "status": "changed",
+        "unpriced_profile_ids": []
+      },
+      "catalog_in_sync": true,
+      "gaps": {
+        "in_openclaw_not_allowed": [],
+        "allowed_without_broker_profile": [],
+        "allowed_not_in_dalton": [],
+        "dalton_not_in_openclaw": []
+      },
+      "broker_profiles": 22
+    },
+    "ws-e399ececd5aa7a3762b1a0a4": {
+      "follow_provider_catalog": true,
+      "started_at": "2026-09-23T12:48:47.408884+00:00",
+      "last_tick_at": "2026-09-23T12:51:44.848844+00:00",
+      "last_error": null,
+      "catalog_lane_last": {
+        "allowed_not_in_dalton": [],
+        "broker_catalog_hash": "1e70aabf4469a2cf26964efa864e0b18cfe6ea31abc43c03fe28b120dde2b852",
+        "broker_reconcile": {
+          "added_profile_count": 3,
+          "allowed_model_count": 21,
+          "changed": true,
+          "mode": "follow_provider_catalog",
+          "profile_count": 22,
+          "provider_model_count": 21,
+          "removed_profile_count": 0,
+          "updated_profile_count": 0
+        },
+        "catalog_in_sync": true,
+        "catalog_source_hash": "240676dabe6118fd78aa281f8bd943f00af9ada619446422e1ae638c645e9383",
+        "counts": {
+          "allowed_not_in_dalton": 0,
+          "allowed_without_broker_profile": 0,
+          "dalton_not_in_openclaw": 0,
+          "in_openclaw_not_allowed": 0,
+          "unpriced_model_refs": 0
+        },
+        "dalton_not_in_openclaw": [],
+        "fallback_messages": [],
+        "follow_provider_catalog": true,
+        "in_openclaw_not_allowed": [],
+        "notices_open": 3,
+        "notices_written": [],
+        "notification_channel": "cockpit",
+        "provider_control_capability_lost": [],
+        "provider_control_expired": [],
+        "provider_control_expiring": [],
+        "provider_control_invalid": [],
+        "provider_control_valid": [
+          "profile:gemini-3-1-pro-preview",
+          "profile:gemini-3-8-flash"
+        ],
+        "purposes_fallen_back": [
+          "debate_map",
+          "dossier",
+          "model_spec",
+          "debate_map",
+          "dossier",
+          "model_spec",
+          "debate_map",
+          "dossier"
+        ],
+        "registered": [
+          "profile:auto-antigravity-cli-gateway-gemini-3-1-pro-e5bd948a788a",
+          "profile:auto-muse-cli-gateway-muse-spark-1-3-27804db256e4",
+          "profile:auto-muse-cli-gateway-muse-spark-1-3-contributor-f91fd8808c9f"
+        ],
+        "retired": [],
+        "revived": [],
+        "status": "changed",
+        "unpriced_profile_ids": []
+      },
+      "catalog_in_sync": true,
+      "gaps": {
+        "in_openclaw_not_allowed": [],
+        "allowed_without_broker_profile": [],
+        "allowed_not_in_dalton": [],
+        "dalton_not_in_openclaw": []
+      },
+      "broker_profiles": 22
+    },
+    "ws-7d894366d1132e2930475a60": {
+      "follow_provider_catalog": true,
+      "started_at": "2026-09-23T12:48:47.343264+00:00",
+      "last_tick_at": "2026-09-23T12:51:44.665109+00:00",
+      "last_error": null,
+      "catalog_lane_last": {
+        "allowed_not_in_dalton": [],
+        "broker_catalog_hash": "1e70aabf4469a2cf26964efa864e0b18cfe6ea31abc43c03fe28b120dde2b852",
+        "broker_reconcile": {
+          "added_profile_count": 0,
+          "allowed_model_count": 21,
+          "changed": false,
+          "mode": "follow_provider_catalog",
+          "profile_count": 22,
+          "provider_model_count": 21,
+          "removed_profile_count": 0,
+          "updated_profile_count": 0
+        },
+        "catalog_in_sync": true,
+        "catalog_source_hash": "240676dabe6118fd78aa281f8bd943f00af9ada619446422e1ae638c645e9383",
+        "counts": {
+          "allowed_not_in_dalton": 0,
+          "allowed_without_broker_profile": 0,
+          "dalton_not_in_openclaw": 0,
+          "in_openclaw_not_allowed": 0,
+          "unpriced_model_refs": 0
+        },
+        "dalton_not_in_openclaw": [],
+        "fallback_messages": [],
+        "follow_provider_catalog": true,
+        "in_openclaw_not_allowed": [],
+        "notices_open": 3,
+        "notices_written": [],
+        "notification_channel": "cockpit",
+        "provider_control_capability_lost": [],
+        "provider_control_expired": [],
+        "provider_control_expiring": [],
+        "provider_control_invalid": [],
+        "provider_control_valid": [
+          "profile:gemini-3-1-pro-preview",
+          "profile:gemini-3-8-flash"
+        ],
+        "purposes_fallen_back": [
+          "debate_map",
+          "dossier",
+          "model_spec",
+          "debate_map",
+          "dossier",
+          "model_spec",
+          "debate_map",
+          "dossier"
+        ],
+        "registered": [
+          "profile:auto-antigravity-cli-gateway-gemini-3-1-pro-e5bd948a788a",
+          "profile:auto-muse-cli-gateway-muse-spark-1-3-27804db256e4",
+          "profile:auto-muse-cli-gateway-muse-spark-1-3-contributor-f91fd8808c9f"
+        ],
+        "retired": [],
+        "revived": [],
+        "status": "changed",
+        "unpriced_profile_ids": []
+      },
+      "catalog_in_sync": true,
+      "gaps": {
+        "in_openclaw_not_allowed": [],
+        "allowed_without_broker_profile": [],
+        "allowed_not_in_dalton": [],
+        "dalton_not_in_openclaw": []
+      },
+      "broker_profiles": 22
+    }
+  }
+}

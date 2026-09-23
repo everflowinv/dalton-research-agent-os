@@ -1,0 +1,38 @@
+{
+  "legacy": {
+    "available": true,
+    "choices": 24,
+    "new_choices": [
+      "gemini-3.1-pro",
+      "muse-spark-1.3",
+      "muse-spark-1.3-contributor"
+    ],
+    "selection_unchanged": true,
+    "catalog_in_sync": true,
+    "follow_provider_catalog": true
+  },
+  "hyperscaler": {
+    "available": true,
+    "choices": 22,
+    "new_choices": [
+      "gemini-3.1-pro",
+      "muse-spark-1.3",
+      "muse-spark-1.3-contributor"
+    ],
+    "selection_unchanged": true,
+    "catalog_in_sync": null,
+    "follow_provider_catalog": null
+  },
+  "new": {
+    "available": true,
+    "choices": 22,
+    "new_choices": [
+      "gemini-3.1-pro",
+      "muse-spark-1.3",
+      "muse-spark-1.3-contributor"
+    ],
+    "selection_unchanged": true,
+    "catalog_in_sync": null,
+    "follow_provider_catalog": null
+  }
+}

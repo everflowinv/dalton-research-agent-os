@@ -1,0 +1,51 @@
+{
+  "at": "2026-09-23T12:46:57.838461+00:00",
+  "config_sha256": "89aa9cc8f9bfc533cea165445c0e179714200099e14c3cdb98f48dabcd6f5deb",
+  "plan": {
+    "schema_version": "openclaw-provider-catalog-sync-0.1",
+    "changed": true,
+    "provider_model_count": 21,
+    "allowed_model_count": 21,
+    "profile_count": 22,
+    "added_model_refs": [
+      "muse-cli-gateway/muse-spark-1.3",
+      "muse-cli-gateway/muse-spark-1.3-contributor"
+    ],
+    "removed_model_refs": [],
+    "added_profile_ids": [
+      "profile:auto-antigravity-cli-gateway-gemini-3-1-pro-e5bd948a788a",
+      "profile:auto-muse-cli-gateway-muse-spark-1-3-27804db256e4",
+      "profile:auto-muse-cli-gateway-muse-spark-1-3-contributor-f91fd8808c9f"
+    ],
+    "removed_profile_ids": [],
+    "updated_profile_ids": [],
+    "preserved_profile_ids": [
+      "profile:deepseek-v4-flash",
+      "profile:gpt-5-6-sol",
+      "profile:gpt-5-6-terra",
+      "profile:gpt-5-6-luna",
+      "profile:claude-fable-5",
+      "profile:claude-fable-5-1",
+      "profile:claude-opus-5",
+      "profile:claude-sonnet-5",
+      "profile:gemini-3-8-flash",
+      "profile:gemini-3-1-pro-preview",
+      "profile:gemini-3-5-flash-lite",
+      "profile:zai-glm-5-3",
+      "profile:zai-glm-5-3-flash",
+      "profile:grok-4-7",
+      "profile:grok-build-0-1",
+      "profile:grok-4-3",
+      "profile:gpt-6-astra",
+      "profile:gemini-3-8-flash-antigravity",
+      "profile:gemini-3-8-flash-antigravity-high"
+    ],
+    "before_config_sha256": "2241ca570d315f6b30946d55706b88e11e28309ffc002a6db118579149ff17a8",
+    "after_config_sha256": "6536ece26b3bbba70ee20f69f72ec9e3ce468fe0a45f76498459e281c93a5b14"
+  },
+  "plugin_load_paths": [
+    "/Users/everflow/Projects/openclaw-cli-gateway-stack/antigravity-cli-gateway/openclaw-plugin",
+    "/Users/everflow/.openclaw/managed-plugins/openclaw-model-broker-3855c1e3c20e8d731f256e256d0fe833cca3ac65",
+    "/Users/everflow/.openclaw/managed-plugins/openclaw-web-search-broker-e22fdf617474dd82705a83a08be8c8a31bad17f8"
+  ]
+}

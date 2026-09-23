@@ -1,0 +1,26 @@
+[
+  {
+    "at": "2026-09-23T08:48:08.405-04:00",
+    "message": "config change detected; evaluating reload (plugins.load.paths)"
+  },
+  {
+    "at": "2026-09-23T08:48:08.442-04:00",
+    "message": "config change requires gateway restart (plugins.load.paths) \u2014 deferring until 2 operation(s), 1 reply(ies), 1 embedded run(s), 1 gateway request(s), 1 background task run(s) complete"
+  },
+  {
+    "at": "2026-09-23T08:48:50.483-04:00",
+    "message": "config change detected; evaluating reload (plugins.entries.dalton-openclaw-model-broker.config.profiles, plugins.entries.dalton-openclaw-model-broker.llm.allowedModels)"
+  },
+  {
+    "at": "2026-09-23T08:48:50.541-04:00",
+    "message": "config change requires channel reload (discord, feishu, openclaw-weixin) \u2014 deferring until 2 operation(s), 1 reply(ies), 1 embedded run(s), 1 gateway request(s), 1 background task run(s) complete"
+  },
+  {
+    "at": "2026-09-23T08:48:51.413-04:00",
+    "message": "config change detected; evaluating reload (plugins.entries.dalton-openclaw-model-broker.config.profiles, plugins.entries.dalton-openclaw-model-broker.llm.allowedModels)"
+  },
+  {
+    "at": "2026-09-23T08:48:51.495-04:00",
+    "message": "config change requires channel reload (discord, feishu, openclaw-weixin) \u2014 deferring until 2 operation(s), 1 reply(ies), 1 embedded run(s), 1 gateway request(s), 1 background task run(s) complete"
+  }
+]

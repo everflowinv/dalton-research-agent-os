@@ -1,0 +1,66 @@
+{
+  "agents": [
+    {
+      "label": "com.dalton.log-rotate",
+      "on_target": true,
+      "release": "1528e626411606cb134c44f71d2a6516703e28b6ad98113c20a81d5fea75c215"
+    },
+    {
+      "label": "com.dalton.research-publication-worker",
+      "on_target": true,
+      "release": "1528e626411606cb134c44f71d2a6516703e28b6ad98113c20a81d5fea75c215"
+    },
+    {
+      "label": "space.lumos.dalton.control",
+      "on_target": true,
+      "release": "1528e626411606cb134c44f71d2a6516703e28b6ad98113c20a81d5fea75c215"
+    },
+    {
+      "label": "space.lumos.dalton.controller",
+      "on_target": true,
+      "release": "1528e626411606cb134c44f71d2a6516703e28b6ad98113c20a81d5fea75c215"
+    },
+    {
+      "label": "space.lumos.dalton.workspace.ws-7d894366d1132e2930475a60.control",
+      "on_target": true,
+      "release": "1528e626411606cb134c44f71d2a6516703e28b6ad98113c20a81d5fea75c215"
+    },
+    {
+      "label": "space.lumos.dalton.workspace.ws-7d894366d1132e2930475a60.controller",
+      "on_target": true,
+      "release": "1528e626411606cb134c44f71d2a6516703e28b6ad98113c20a81d5fea75c215"
+    },
+    {
+      "label": "space.lumos.dalton.workspace.ws-7d894366d1132e2930475a60.writer",
+      "on_target": true,
+      "release": "1528e626411606cb134c44f71d2a6516703e28b6ad98113c20a81d5fea75c215"
+    },
+    {
+      "label": "space.lumos.dalton.workspace.ws-e399ececd5aa7a3762b1a0a4.control",
+      "on_target": true,
+      "release": "1528e626411606cb134c44f71d2a6516703e28b6ad98113c20a81d5fea75c215"
+    },
+    {
+      "label": "space.lumos.dalton.workspace.ws-e399ececd5aa7a3762b1a0a4.controller",
+      "on_target": true,
+      "release": "1528e626411606cb134c44f71d2a6516703e28b6ad98113c20a81d5fea75c215"
+    },
+    {
+      "label": "space.lumos.dalton.workspace.ws-e399ececd5aa7a3762b1a0a4.writer",
+      "on_target": true,
+      "release": "1528e626411606cb134c44f71d2a6516703e28b6ad98113c20a81d5fea75c215"
+    },
+    {
+      "label": "space.lumos.dalton.writer",
+      "on_target": true,
+      "release": "1528e626411606cb134c44f71d2a6516703e28b6ad98113c20a81d5fea75c215"
+    }
+  ],
+  "controller_heartbeat_advanced": null,
+  "every_agent_on_target": true,
+  "heartbeat_after": null,
+  "heartbeat_before": null,
+  "manager_matches": true,
+  "ok": true,
+  "writer_socket_readable": true
+}
