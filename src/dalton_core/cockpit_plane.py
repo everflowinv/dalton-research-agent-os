@@ -1564,6 +1564,24 @@ SKIP_REASON_LABELS = {
     "unknown_send": "发送状态未知，已保守跳过",
     "verify_not_independent": "与产出方同家族，不能复核",
 }
+# Why routing passed a link over, in the owner's words. Every value the chain
+# ledger actually writes, so the 跳过 line on the model page never degrades to
+# "未能确认跳过原因" for a reason the system itself named.
+CHAIN_SKIP_REASON_LABELS = {
+    "budget_refused": "本次请求超出适用额度",
+    "provider_failure": "供应商未成功返回",
+    "provider_cooldown": "该模型正在冷却，暂不派发",
+    "transport_failure": "连接未成功",
+    "content_refusal": "模型未返回可用内容",
+    "contract_violation": "返回内容不符合约定格式",
+    "model_unavailable": "网关当前不提供该模型",
+    "capacity_busy": "供应商容量繁忙",
+    "input_bound_exceeded": "输入超出该模型的上限",
+    "verifier_not_independent": "不满足独立复核要求",
+    "verify_not_independent": "不满足独立复核要求",
+    "unclassified_failure": "未能确认跳过原因",
+    "unclassified": "未能确认跳过原因",
+}
 BUDGET_REASON_LABELS = {
     "owner_budget_exceeded": "当日总预算已用完",
     "mission_budget_exceeded": "任务当日额度已用完",
@@ -6557,14 +6575,30 @@ class CockpitPlane:
         from .cockpit_model_display import (
             chain_link_note, cooldown_index, purpose_cooldown_note,
         )
-        from .model_fallback_chain import FallbackChainError, routing_overview
+        from .model_fallback_chain import (
+            SKIPPED_LINKS_PER_TIER, FallbackChainError, routing_overview,
+        )
         from .model_router import ModelRouter, ModelRouterError
         from .openclaw_model_discovery import discover_models
+
+        # 2026-09-23: one read of the link ledger per router database, not one
+        # per policy pin.  This page builds an overview for every distinct pin
+        # a stage is bound to -- thirteen of them on the environment with the
+        # longest history -- and each one used to load and parse all 35k chain
+        # links, which was 95% of a ten-second page.
+        link_digests: dict[str, dict[str, Any]] = {}
+
+        def digest_for(router: Any, key: str) -> dict[str, Any]:
+            if key not in link_digests:
+                link_digests[key] = router.chain_link_digest(
+                    skipped_limit=SKIPPED_LINKS_PER_TIER)
+            return link_digests[key]
 
         try:
             with closing(ModelRouter(path, read_only=True)) as router:
                 overview = routing_overview(
-                    router, openclaw_config=broker, checked_at=self.clock())
+                    router, openclaw_config=broker, checked_at=self.clock(),
+                    link_digest=digest_for(router, str(Path(path).resolve())))
                 discovery = (
                     {} if broker is None
                     else discover_models(broker, router=router,
@@ -6597,7 +6631,8 @@ class CockpitPlane:
                             bound_policy = bound_router.get_policy(policy_ref)
                             bound_overview = routing_overview(
                                 bound_router, openclaw_config=broker,
-                                checked_at=self.clock(), policy_version_ref=policy_ref)
+                                checked_at=self.clock(), policy_version_ref=policy_ref,
+                                link_digest=digest_for(bound_router, key[0]))
                             bound_catalog = {
                                 profile["id"]: profile
                                 for profile in bound_router.latest_profiles()
@@ -6796,9 +6831,7 @@ class CockpitPlane:
             if not card["chain"] and row["mode"] == "tier":
                 card["chain"] = list(row["chain"])
             card.setdefault("_pinned", []).append(list(row["chain"]))
-            card.setdefault("_coverage_chains", []).append(
-                (row["purpose"], list(row["chain"]))
-            )
+            card.setdefault("_coverage_chains", []).append(row)
         # A tier none of whose stages follows the tier -- every member still
         # carrying a per-stage pin, which is what the deliverable tier looks
         # like until scripts/split_deliverable_tier.py has run -- would open an
@@ -6819,41 +6852,85 @@ class CockpitPlane:
                     "status": "not_required", "required": [], "covered_by": [],
                 }
                 continue
-            chains = card.pop("_coverage_chains", [])
+            rows = card.pop("_coverage_chains", [])
             covered_purposes: list[str] = []
-            missing_purposes: list[str] = []
+            # 2026-09-23: three outcomes, not two.  A stage whose chain has no
+            # controlled verifier really would be rejected before the call, and
+            # the owner has to be able to see which models it is pinned to.  A
+            # stage with *no chain at all* -- no model configuration bound in
+            # this environment -- is a different thing entirely: it is not
+            # routing to an ineligible model, it is not routing.  Counting the
+            # second as the first is what made this tier read 受控核验部分不可用
+            # in both environments while every bound verifier chain was in fact
+            # covered, and it pointed the owner at a gateway capability problem
+            # that did not exist.
+            uncovered: list[dict[str, Any]] = []
+            unbound: list[dict[str, Any]] = []
             controlled: set[str] = set()
-            for purpose, chain in chains:
+            for row in rows:
+                chain = row["chain"]
                 links = [
                     link["model"] for link in chain
                     if "provider-controlled-verify" in
                     (link.get("capabilities") or [])
                 ]
                 if links:
-                    covered_purposes.append(purpose)
+                    covered_purposes.append(row["purpose"])
                     controlled.update(links)
-                else:
-                    missing_purposes.append(purpose)
+                elif chain:
+                    uncovered.append({
+                        "purpose": row["purpose"], "label": row["label"],
+                        "models": [link["model"] for link in chain],
+                        "display_names": [link["display_name"] for link in chain],
+                    })
+                elif row["mode"] != "deterministic":
+                    unbound.append({
+                        "purpose": row["purpose"], "label": row["label"],
+                        "configuration_status": row["configuration_status"],
+                        "configuration_source": row["configuration_source"],
+                    })
             status = (
-                "missing" if not covered_purposes else
-                "partial" if missing_purposes else "covered"
+                ("missing" if not covered_purposes else "partial") if uncovered
+                else "covered" if covered_purposes
+                else "unbound"
+            )
+            unbound_note = (
+                None if not unbound else
+                "以下环节在本环境还没有绑定模型配置，因此不会发起调用（绑定后按本层调用链执行）："
+                + "、".join(f"{item['label']}（{item['configuration_source']}）"
+                            for item in unbound)
+            )
+            # Named, always: "有环节的调用链缺少……" left the owner with a
+            # sentence and nothing to act on. Which stage, and which models it
+            # would have reached, is the whole of the fix.
+            named = "；".join(
+                f"{item['label']}：{'、'.join(item['display_names'])}"
+                for item in uncovered)
+            note = (
+                "受控核验可用：调用链中有仍有效的供应商验证控件。"
+                if status == "covered" else
+                f"受控核验部分不可用：以下环节的调用链缺少仍有效的供应商验证控件，会在调用前被拒绝——{named}"
+                if status == "partial" else
+                "受控核验不可用：当前调用链没有仍有效的供应商验证控件；"
+                "所有 provider-controlled-verify 工单都会在调用前被拒绝。"
+                "请先在模型网关更新有依据且未过期的 providerControls 声明。"
+                f"受影响的环节——{named}"
+                if status == "missing" else
+                "本环境还没有任何受控核验环节绑定模型配置。"
             )
             card["capability_coverage"] = {
                 "status": status,
                 "required": ["provider-controlled-verify"],
                 "covered_by": sorted(controlled),
                 "covered_purposes": covered_purposes,
-                "missing_purposes": missing_purposes,
-                "note": (
-                    "受控核验可用：调用链中有仍有效的供应商验证控件。"
-                    if status == "covered" else
-                    "受控核验部分不可用：有环节的调用链缺少仍有效的供应商验证控件；"
-                    "这些环节会在调用前被拒绝。"
-                    if status == "partial" else
-                    "受控核验不可用：当前调用链没有仍有效的供应商验证控件；"
-                    "所有 provider-controlled-verify 工单都会在调用前被拒绝。"
-                    "请先在模型网关更新有依据且未过期的 providerControls 声明。"
-                ),
+                # Kept as the list of stages whose *chain* cannot satisfy the
+                # capability. Stages with no chain are reported separately
+                # rather than folded in here.
+                "missing_purposes": [item["purpose"] for item in uncovered],
+                "uncovered_chains": uncovered,
+                "unbound_purposes": unbound,
+                "unbound_note": unbound_note,
+                "note": note,
             }
         from .model_fallback_chain import CHAIN_ELIGIBILITY_ENFORCED
         # 2026-09-16: the picker's verifier column keeps the honest contract
@@ -7003,15 +7080,30 @@ class CockpitPlane:
                      "display_name": self._model_display_name(
                          link["profile_id"], catalogue),
                      "reason": link["skip_reason"],
-                     "reason_label": {
-                         "transport_failure": "连接未成功",
-                         "content_refusal": "模型未返回可用内容",
-                         "budget_refused": "本次请求超出适用额度",
-                         "verifier_not_independent": "不满足独立复核要求",
-                         "unclassified": "未能确认跳过原因",
-                     }.get(link["skip_reason"], "未能确认跳过原因")}
+                     "reason_label": CHAIN_SKIP_REASON_LABELS.get(
+                         link["skip_reason"], "未能确认跳过原因")}
                     for link in entry["skipped_since_last_served"][-4:]
                 ],
+                # The list above is the newest few; this is every skip this
+                # tier has ever recorded, counted by reason. Bounding the list
+                # made the page loadable, and the counts are what keep "why do
+                # models get skipped here" answerable from the same card.
+                "skipped_total": entry.get("skipped_total", 0),
+                "skipped_by_reason": [
+                    {"reason": item["skip_reason"],
+                     "reason_label": CHAIN_SKIP_REASON_LABELS.get(
+                         item["skip_reason"], "未能确认跳过原因"),
+                     "count": item["count"], "latest": item.get("latest")}
+                    for item in entry.get("skipped_by_reason") or []
+                ],
+                "skipped_note": (
+                    None if not entry.get("skipped_total") else
+                    "这一层累计跳过 %d 次：%s" % (
+                        entry["skipped_total"],
+                        "、".join(
+                            f"{CHAIN_SKIP_REASON_LABELS.get(item['skip_reason'], '未能确认跳过原因')} {item['count']} 次"
+                            for item in (entry.get("skipped_by_reason") or [])[:5]))
+                ),
             })
         catalog = overview["catalog"]
         return {

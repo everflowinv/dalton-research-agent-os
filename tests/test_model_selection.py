@@ -35,6 +35,7 @@ from unittest.mock import patch
 
 from dalton_core import model_fallback_chain as fallback_chain
 from dalton_core.model_fallback_chain import (
+    SKIPPED_LINKS_PER_TIER,
     FallbackChainError,
     TIERS,
     effective_chain,
@@ -2154,18 +2155,155 @@ class CockpitModelPageTests(unittest.TestCase):
         self.assertIsInstance(view["choices"][0]["capabilities"], list)
         verifier = next(card for card in view["tier_cards"]
                         if card["tier"] == "verifier")
-        self.assertEqual(verifier["capability_coverage"]["status"], "missing")
-        self.assertIn("provider-controlled-verify",
-                      verifier["capability_coverage"]["required"])
-        self.assertIn("调用前被拒绝",
-                      verifier["capability_coverage"]["note"])
+        coverage = verifier["capability_coverage"]
+        # 2026-09-23: this fixture binds no verifier stage at all, so no
+        # verifier chain exists to lack the capability. That is "nothing is
+        # wired here", not "the gateway controls are gone", and the card says
+        # which one it is.
+        self.assertEqual(coverage["status"], "unbound")
+        self.assertEqual(coverage["missing_purposes"], [])
+        self.assertTrue(coverage["unbound_purposes"])
+        self.assertIn("还没有绑定模型配置", coverage["unbound_note"])
+        self.assertIn("provider-controlled-verify", coverage["required"])
         self.assertIn('coverage.status==="missing"?"err"', page)
+        self.assertIn("coverage.unbound_note", page)
         catalog = view["catalog"]
         self.assertTrue(catalog["available"])
         for key in ("in_openclaw_not_allowed", "allowed_not_in_dalton",
                     "dalton_not_in_openclaw"):
             self.assertIsInstance(catalog[key], list)
             self.assertTrue(catalog[f"{key}_note"])
+
+    def install_verifier_stage(self, chain: list[str]) -> str:
+        """Bind 评估研究产出质量的复核 to a policy that pins ``chain``.
+
+        The verifier tier's coverage line is about the chains its stages
+        actually reach, so a test of it has to bind at least one stage to one.
+        """
+
+        controlled = copy.deepcopy(_allowing_config())
+        profiles = controlled["plugins"]["entries"][
+            "dalton-openclaw-model-broker"]["config"]["profiles"]
+        for profile in profiles:
+            if profile["id"] in {"profile:gemini-3-8-flash",
+                                 "profile:gemini-3-1-pro-preview"}:
+                profile["providerControls"] = _controls(
+                    profile["model"], expires_at="2027-01-01T00:00:00Z")
+        self.openclaw.write_text(
+            json.dumps(controlled, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8")
+        with ModelRouter(self.router_db) as router:
+            sync_openclaw_model_catalog(router, controlled, checked_at=NOW,
+                                        availability_ttl=timedelta(days=3650))
+            policy = ensure_planner_policy(
+                router, tier="verifier", now=NOW,
+                policy_id="model-routing-policy:p14m2-verifier",
+            )["policy_version_ref"]
+            policy = publish_selection(
+                router, policy_version_ref=policy, purpose="quality_verifier",
+                mode="explicit", chain=chain, now=NOW,
+            )["policy_version_ref"]
+            slots = credential_slots_for(router, chain)
+        (self.root / "quality-verifier-model-config.json").write_text(
+            json.dumps({
+                "routing_policy_ref": policy, "credential_slot_refs": slots,
+                "model_router_db": str(self.router_db),
+                "broker_socket": str(self.root / "b.sock"),
+                "broker_auth_key": str(self.root / "b.key"),
+                "broker_client_id": "client:dalton-core",
+                "expected_agent_id": "dalton-model-broker",
+            }), encoding="utf-8")
+        return policy
+
+    def test_the_model_page_reads_the_link_ledger_once_per_database(self) -> None:
+        # 2026-09-23. This page builds one routing overview per policy pin --
+        # thirteen of them on the environment with the longest history -- and
+        # each one loaded and JSON-parsed every chain link ever recorded. That
+        # was 35k links, 22 MB of JSON, thirteen times in one request, and 95%
+        # of a page that took ten seconds. One digest per database, read off
+        # the ledger's own indexes, is all the page ever needed.
+        self.install()
+        self.install_verifier_stage(["profile:gemini-3-8-flash"])
+        digests: list[str] = []
+        real = ModelRouter.chain_link_digest
+
+        def counting(router, **kwargs):
+            digests.append(router.path)
+            return real(router, **kwargs)
+
+        def refused(router, **kwargs):
+            raise AssertionError("the model page must not replay every link")
+
+        with mock.patch.object(ModelRouter, "chain_link_digest", counting), \
+                mock.patch.object(ModelRouter, "chain_links", refused):
+            view = self.plane(with_model_config=True).models()
+        self.assertTrue(view["available"])
+        self.assertEqual(len(digests), 1)
+        self.assertEqual(len(set(digests)), 1)
+        for tier in view["tiers"].values():
+            self.assertLessEqual(len(tier["skipped_since_last_served"]),
+                                 SKIPPED_LINKS_PER_TIER)
+
+    def test_a_bound_verifier_chain_with_controls_reads_covered(self) -> None:
+        # 2026-09-23. The owner read 受控核验部分不可用 on both environments
+        # while every *bound* verifier chain carried provider-controlled-verify
+        # and the router had served 265 such calls in a day. The stages the
+        # card was blaming had no model configuration in the environment at
+        # all: they were not being rejected, they were not calling. A stage
+        # with no chain must not read as a capability failure.
+        self.install()
+        self.install_verifier_stage(["profile:gemini-3-8-flash"])
+        view = self.plane(with_model_config=True).models()
+        card = next(item for item in view["tier_cards"]
+                    if item["tier"] == "verifier")
+        coverage = card["capability_coverage"]
+        self.assertEqual(coverage["status"], "covered")
+        self.assertIn("quality_verifier", coverage["covered_purposes"])
+        self.assertEqual(coverage["missing_purposes"], [])
+        self.assertIn("profile:gemini-3-8-flash", coverage["covered_by"])
+        self.assertIn("受控核验可用", coverage["note"])
+        self.assertNotIn("调用前被拒绝", coverage["note"])
+        # The stages with no configuration here are still named, because that
+        # is a real and fixable thing -- just not this one.
+        self.assertTrue(coverage["unbound_purposes"])
+        self.assertNotIn("quality_verifier",
+                         [item["purpose"] for item in coverage["unbound_purposes"]])
+        self.assertTrue(all(item["configuration_source"]
+                            for item in coverage["unbound_purposes"]))
+
+    def test_a_bound_verifier_chain_without_controls_is_named_with_its_models(
+            self) -> None:
+        # The other half of the same rule: a stage whose bound chain really
+        # cannot satisfy the capability *is* rejected before the call, and the
+        # card has to say which stage and which models rather than leaving the
+        # owner a note with no object in it. The requirement is not weakened.
+        #
+        # The chain is saved while the gateway still declares the controls --
+        # the selector refuses to save one that never could -- and then the
+        # gateway drops them, which is what happened to the Google rate cards
+        # on 2026-09-22.
+        self.install()
+        self.install_verifier_stage(["profile:gemini-3-8-flash"])
+        self.openclaw.write_text(
+            json.dumps(_allowing_config(), ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8")
+        with ModelRouter(self.router_db) as router:
+            sync_openclaw_model_catalog(
+                router, _allowing_config(), checked_at=NOW,
+                availability_ttl=timedelta(days=3650))
+        view = self.plane(with_model_config=True).models()
+        card = next(item for item in view["tier_cards"]
+                    if item["tier"] == "verifier")
+        coverage = card["capability_coverage"]
+        self.assertEqual(coverage["status"], "missing")
+        self.assertEqual(coverage["missing_purposes"], ["quality_verifier"])
+        self.assertEqual(coverage["uncovered_chains"][0]["models"],
+                         ["profile:gemini-3-8-flash"])
+        self.assertIn("调用前被拒绝", coverage["note"])
+        # The stage and the models it would have reached, by name.
+        self.assertIn(coverage["uncovered_chains"][0]["label"], coverage["note"])
+        self.assertIn(coverage["uncovered_chains"][0]["display_names"][0],
+                      coverage["note"])
 
     def test_the_model_page_offers_a_fourth_chain_for_the_deliverable_tier(
             self) -> None:

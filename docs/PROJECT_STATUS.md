@@ -1,5 +1,27 @@
 # Dalton 项目进度
 
+## 2026-09-23 14:20 UTC：模型页十秒是一个没有上限的字段，"受控核验部分不可用"是把"没配"读成了"不合规"（源码，待部署）
+
+**一、十秒花在哪，先量了再改。** legacy `/v1/cockpit/models` 11.3s / 537 KB，Hyperscaler 1.1s / 202 KB；`tiers` 一个字段就占 412 KB，其中单层的 `skipped_since_last_served` 是 295 KB。用 cProfile 对着同一份线上库（只读）跑 `models()`：2.96s 里 **2.82s（95%）在 `routing_overview`、2.45s 在 `chain_links`**，`json.loads` 被调用 **459,026 次**——页面按每个策略钉分别建一次 overview（legacy 13 次），每次都把 35,080 条链路记录、22 MB JSON 整表读出来重解一遍。而 `skipped_since_last_served` 名为"上一次服务之后跳过的"，实际返回的是这一层**有史以来**被跳过的全部链路（legacy 2,482 条），前端根本没有渲染它。
+
+**二、两处都改：一次库读，加有上限的字段。** 新增 `ModelRouter.chain_link_digest()`，用表上已有的列（tier / purpose / served / skip_reason）直接问三个小问题——每层最后服务的那条、每个环节最后服务的那条、被跳过的最近若干条——只对真正上页面的那几条做 JSON 解析；跳过清单按层封顶 `SKIPPED_LINKS_PER_TIER = 12` 条。**信息没有丢**：同时给出 `skipped_total` 与按原因汇总的 `skipped_by_reason`（含各自最近一次时间），来源页的每层卡片现在多一行"这一层累计跳过 1805 次：供应商未成功返回 986 次、本次请求超出适用额度 651 次……"，比原来那串只显示最近 4 条的名单更能回答"为什么老是跳"。`models()` 按路由库缓存 digest，13 次 overview 只读一次账本。对着同一份线上库复测：legacy **1.41s → 0.14s（冷启 1.47s）、566 KB → 167 KB**（`tiers` 412 KB → 12.7 KB），Hyperscaler **0.09s → 0.03s、164 KB**（`tiers` 8.0 KB）。线上进程仍跑旧发布（本次不部署），端点实测仍为 10.1s / 537 KB。
+
+**三、"受控核验部分不可用"不是能力缺口，是两个环节根本没绑配置。** 先按报告核实历史：legacy `provider-controlled-verify` 24 小时内 265 次 selected / 121 次 rejected，但**全部拒绝都在 09-22**，最后一次 12:57:43Z（费率卡 12:47 续期后的尾巴），13:04:55Z 起 265 次全部 selected，最新成功 09-23T13:11Z；Hyperscaler 同理只有 1 条 09-22 的拒绝。**能力本身是好的**。真正的原因是 `capability_coverage` 把"调用链里没有带 `provider-controlled-verify` 的模型"和"这个环节在本环境压根没有绑定模型配置、链是空的"算成了同一件事：`quality_verifier`（两个环境都缺 `quality-verifier-model-config.json`）和 legacy 的 `thesis_impact_verifier`（legacy 的 `state` 是指向 `/Volumes/EveSSD/Dalton/legacy-state` 的符号链接，`purpose_policy_bindings` 由此推出的 `/Volumes/EveSSD/Dalton/config/service.json` 并不存在，于是 `service.json#thesis_impact.config.verifier_routing_policy_ref` 读不到）——这两个环节的链是**空的**，不是钉在了缺能力的模型上；14 个真正绑定的核验环节全部走 `profile:gemini-3-8-flash` → `profile:gemini-3-1-pro-preview`，两者都带 `provider-controlled-verify`。
+
+**四、按三种结果分开报，不放宽任何要求。** 现在分成：链里有受控核验模型 → covered；**链存在但缺能力 → 仍然按 partial / missing 报，并且点名是哪个环节、会调到哪几个模型**（原来只有一句没有主语的话）；**链为空（未绑定配置）→ 单列 `unbound_purposes`，写明环节名与该去哪个文件/字段绑定**，不再计入能力缺口。没有伪造任何档案的能力，没有改写 owner 的钉定，也没有降低 `provider-controlled-verify` 的要求。复测：两个环境的独立复核层现在都读 **covered**，同时把"核验产出评分（…/quality-verifier-model-config.json）"、legacy 再加"核验论点影响评估（…service.json#thesis_impact…）"作为可执行的待办列出来。
+
+**测试**：新增"页面每个路由库只读一次账本且绝不整表重放"（同时断言 `chain_links` 一次都不被调用）、"跳过清单封顶且计数不丢"、"绑定了带控件的核验链读 covered、未绑定环节单独列出"、"绑定的链失去网关控件时按名点出环节与模型"；改写了原先断言空链等于 missing 的那条用例。全量 unittest 通过。
+
+## 2026-09-23 13:25 UTC：一条读不懂的恢复链不再让整条文档研究车道停摆；配置的落盘上限现在真的到得了每一个进程（源码，待部署）
+
+**一、文档研究车道整条下线的真因。** legacy 近两小时 143 次 tick 全部 `unavailable`，writer 日志里 97 次同一行 `MissionDocumentResearchLaneError: document research recovery hint drifted`。查线上账本：7 条 `mission_document_research_recovery_links` 的内容哈希、admission 绑定、链序号全部自洽，只有 2 条（`…48164107`、`…088c1542`，都是 stage 3）的 `failed_work_order_ref` 对不上车道自己重算的身份。原因是执行器 `_blueprints` 在模型授权刷新（`model_authority_refresh`）发生后，会把刷新哈希掺进 stage 2..4 的 WorkOrder 身份里——而这个刷新是运行时输入，**不在不可变 admission 记录里**，车道根本无法重算。于是 `_effective_work_hints` 把「我猜不出来」当成「记录漂移了」，并且直接从 `dispatch_once` 抛穿：一条 admission 的账，让整条车道对**所有** admission 都不干活，15 条 controlled_recovery 永远排不掉。Hyperscaler 的 2 条链都能重算，日志里 0 次该错误，未受影响。
+
+**二、修法：链根改为从已持久化的 Scheduler 权威核验，漂移只挂它自己那一条。** 链根（`recovery_number == 1`）允许 `failed_work_order_ref` 不等于重算值，但必须是**这条 admission 自己的、这个阶段的、且内容哈希正好等于链记录自己声明的那个** WorkOrder（`_sealed_stage_work`，与执行读走的是同一套绑定），所以审计强度没有换掉任何一条；链中段（`recovery_number > 1`）仍旧必须逐字节接上上一环。真的核验不过时抛 `MissionDocumentResearchHintDrift`，`dispatch_once` 在两个调用点各自接住，把**那一条** admission 记成 `recovery_required / recovery_hint_unverifiable`（带 `recovery_link_ref`，owner 名单里给出该查哪条链的原话），同一轮 tick 继续派发其余 admission。线上 4 条带链的 admission 用新代码只读重放，全部解析成功、不再报错。
+
+**三、legacy 落盘上限「没生效」其实是只有 launchd 起的进程才生效。** 两个环境的 `service.json` 与三份 LaunchAgent plist 都写着 4 GB，三个 writer / controller / control 进程的实际环境变量也都是 `DALTON_RAW_SPOOL_MAX_TOTAL_BYTES=4000000000`——所以 1,118,704,611 字节的用量**没有挡住任何抓取**，三条 feed 车道照常 dispatched。报出 `max_total_bytes: 1000000000`、`111%` 的是 needs-human 探针自己：它只读环境变量，在任何不是 launchd 拉起的进程里（owner 手跑 CLI、维护命令、这次巡检）就退回硬编码的 1 GB。而这正是真缺陷：约 20 个 `RawSpool(...)` 调用点都把 1 GB 写死，配置只能靠 launchd 注入的环境变量传递。现在把配置写到落盘目录旁边的 `capacity.json`（服务启动时按 `raw_spool` 配置发布，connector-spool 与 transcript-spool 各一份），`RawSpool` 与 needs-human 共用同一条解析顺序：环境变量 > 已配置策略 > 内置默认；策略文件损坏就报错，绝不静悄悄退回 1 GB。owner 名单在用量已经超上限时改说「已超过上限 N 字节」并写明**被拒的只有需要新写入原始对象的抓取**，已落盘对象的读取和不落盘的工作照常，动作里给的是真实可复制的 `raw_spool_maintenance archive --spool-dir …` 命令。
+
+**测试**：车道 3 项新增（刷新身份的链根被读为提示、链根必须是本 admission 本阶段且哈希吻合、读不懂的链只挂自己而同轮另一条 admission 仍被 launched 且 owner 拿到该做什么）；落盘 2 项（无环境变量时已配置上限照样卡住写入、环境变量仍可覆盖；策略损坏报错）；needs-human 2 项（已配置上限即是 owner 看到的上限、超上限如实播报）；service 1 项（启动即把配置的上限发布到落盘目录旁）。触及模块 169 项通过，全量通过。
+
 ## 2026-09-23：完整 OpenClaw 模型目录自动跟随（已上线）
 
 源码 `51420b67` / 发布 `1528e626` 已在三个环境启用自动跟随：当前 21 个 provider model ref、22 个 broker profile，无目录差集。Muse Spark 1.3、Contributor、Antigravity Gemini 3.1 Pro 已由常驻任务自动登记并出现在三个模型列表中，梯队顺序未变；11 个服务与发布指针一致、三个心跳正常。昨日系统访问阻塞已解除，无需用户再改权限。发布包 145 项、broker 35 项通过；全量 9,733 项中的唯一测试清理竞态已作测试侧修复，失败用例重复 50 次及模块 10 项通过。见 [自动同步报告](reports/openclaw-model-list-sync-2026-09-22.md)。

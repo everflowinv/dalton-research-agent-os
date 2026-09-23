@@ -1320,6 +1320,101 @@ class ModelRouter:
             ).fetchall()
         return [json.loads(row["link_json"]) for row in rows]
 
+    def chain_link_digest(
+        self, *, work_order_id: str | None = None, skipped_limit: int = 12
+    ) -> dict[str, Any]:
+        """What a routing *view* needs from the link ledger, without reading it all.
+
+        ``chain_links()`` is the replay reader: every link, oldest first, parsed.
+        The cockpit's model page asks three much smaller questions -- which link
+        last served each tier, which link last served each calling stage, and
+        what has been skipped -- and answering them by loading and parsing the
+        whole append-only ledger is what made that page take ten seconds on the
+        environment with the longest history (35k links, 22 MB of JSON, read
+        thirteen times in one request).
+
+        Every question here is a column the table already indexes by, so only
+        the handful of links that actually reach the page are parsed.  The skip
+        counts are aggregated in SQL rather than dropped, so bounding the list
+        does not lose the record of *why* a model was passed over.
+        """
+
+        limit = max(0, int(skipped_limit))
+        clause = ""
+        scope: tuple[Any, ...] = ()
+        if work_order_id is not None:
+            clause = " AND work_order_id=?"
+            scope = (_string(work_order_id, "work_order_id"),)
+
+        def sequences(column: str) -> dict[str, int]:
+            return {
+                str(row[0]): int(row[1])
+                for row in self.connection.execute(
+                    f"SELECT {column}, MAX(link_sequence) FROM model_route_chain_links "
+                    f"WHERE served=1{clause} GROUP BY {column}",
+                    scope,
+                ).fetchall()
+            }
+
+        by_tier = sequences("tier")
+        by_purpose = sequences("purpose")
+        wanted = sorted(set(by_tier.values()) | set(by_purpose.values()))
+        loaded: dict[int, dict[str, Any]] = {}
+        for start in range(0, len(wanted), 400):
+            batch = wanted[start:start + 400]
+            marks = ",".join("?" * len(batch))
+            loaded.update({
+                int(row["link_sequence"]): json.loads(row["link_json"])
+                for row in self.connection.execute(
+                    "SELECT link_sequence, link_json FROM model_route_chain_links "
+                    f"WHERE link_sequence IN ({marks})",
+                    tuple(batch),
+                ).fetchall()
+            })
+        tiers = [
+            str(row[0])
+            for row in self.connection.execute(
+                f"SELECT DISTINCT tier FROM model_route_chain_links WHERE 1=1{clause}",
+                scope,
+            ).fetchall()
+        ]
+        skipped: dict[str, dict[str, Any]] = {}
+        for tier in tiers:
+            rows = self.connection.execute(
+                "SELECT link_json FROM model_route_chain_links "
+                f"WHERE served=0 AND tier=?{clause} ORDER BY link_sequence DESC LIMIT ?",
+                (tier, *scope, limit),
+            ).fetchall()
+            counts = self.connection.execute(
+                "SELECT skip_reason, COUNT(*), MAX(created_at) FROM "
+                f"model_route_chain_links WHERE served=0 AND tier=?{clause} "
+                "GROUP BY skip_reason ORDER BY COUNT(*) DESC, skip_reason",
+                (tier, *scope),
+            ).fetchall()
+            skipped[tier] = {
+                # Oldest first inside the window, so a reader that wants the
+                # newest few can keep taking them off the end as before.
+                "links": [json.loads(row["link_json"]) for row in reversed(rows)],
+                "total": sum(int(row[1]) for row in counts),
+                "by_reason": [
+                    {"skip_reason": row[0] or "unclassified",
+                     "count": int(row[1]), "latest": row[2]}
+                    for row in counts
+                ],
+                "limit": limit,
+            }
+        return {
+            "served_by_tier": {
+                tier: loaded[sequence]
+                for tier, sequence in by_tier.items() if sequence in loaded
+            },
+            "served_by_purpose": {
+                purpose: loaded[sequence]
+                for purpose, sequence in by_purpose.items() if sequence in loaded
+            },
+            "skipped_by_tier": skipped,
+        }
+
     # ------------------------------------------------------------------
     # WP-A/A2: provider health and cooldown.
     #

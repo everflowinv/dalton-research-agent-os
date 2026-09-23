@@ -17,6 +17,7 @@ from dalton_core.model_fallback_chain import (
     HALTING_FAILURES,
     TIERS,
     TIER_DELIVERABLE,
+    SKIPPED_LINKS_PER_TIER,
     FallbackChainError,
     effective_chain,
     execute_chain,
@@ -787,8 +788,57 @@ class ChainExecutionTests(unittest.TestCase):
             [item["skip_reason"] for item in brain["skipped_since_last_served"]],
             ["provider_failure"],
         )
+        self.assertEqual(brain["skipped_total"], 1)
+        self.assertEqual(
+            [(item["skip_reason"], item["count"])
+             for item in brain["skipped_by_reason"]],
+            [("provider_failure", 1)],
+        )
         self.assertTrue(overview["catalog"]["catalog_in_sync"])
         self.assertEqual(overview["catalog"]["not_in_broker_profile_ids"], [])
+
+    def test_the_overview_bounds_the_skip_list_and_keeps_the_counts(self) -> None:
+        # 2026-09-23. This field used to be every link the tier had ever
+        # passed over: 2482 of them on the environment with the longest
+        # history, 295 KB in one field of a page that took ten seconds to
+        # load. It is bounded now -- and the counts stay, because "why does
+        # this tier keep skipping models" is the question it exists to answer.
+        broker = FakeBroker({
+            "profile:gpt-6-astra": {
+                "outcome": "failed", "failure_class": "provider_failure"
+            }
+        })
+        for index in range(SKIPPED_LINKS_PER_TIER + 3):
+            self._run("brain", broker, work_id=f"work:p14m-bound-{index}")
+        overview = routing_overview(self.router, checked_at=NOW)
+        brain = overview["tiers"]["brain"]
+        self.assertEqual(len(brain["skipped_since_last_served"]),
+                         SKIPPED_LINKS_PER_TIER)
+        self.assertEqual(brain["skipped_total"], SKIPPED_LINKS_PER_TIER + 3)
+        # Nothing is lost by bounding the list: every skip is still counted,
+        # under the reason routing recorded for it.
+        self.assertEqual(
+            sum(item["count"] for item in brain["skipped_by_reason"]),
+            brain["skipped_total"],
+        )
+        self.assertIn("provider_failure",
+                      [item["skip_reason"] for item in brain["skipped_by_reason"]])
+        self.assertTrue(all(item["latest"] for item in brain["skipped_by_reason"]))
+        # Oldest first inside the window, so a reader taking the newest few off
+        # the end still gets the newest few.
+        digest = self.router.chain_link_digest(
+            skipped_limit=SKIPPED_LINKS_PER_TIER)
+        window = digest["skipped_by_tier"]["brain"]["links"]
+        self.assertEqual([link["work_order_ref"] for link in window][-1],
+                         f"work:p14m-bound-{SKIPPED_LINKS_PER_TIER + 2}")
+        self.assertEqual(
+            digest["served_by_tier"]["brain"]["profile_id"],
+            "profile:claude-fable-5-1",
+        )
+        self.assertEqual(
+            digest["served_by_purpose"]["plan"]["profile_id"],
+            "profile:claude-fable-5-1",
+        )
 
     def test_replaying_a_chain_returns_the_links_it_already_recorded(self) -> None:
         # The blocker: the link id used to be hashed over the clock, so a replay

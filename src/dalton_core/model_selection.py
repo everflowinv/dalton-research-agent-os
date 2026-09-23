@@ -1161,7 +1161,8 @@ def current_selection(
         except Exception:  # noqa: BLE001 - an unreadable pin is an empty column
             policy = None
         rows = purpose_selection(
-            router, policy=policy, links=router.chain_links()
+            router, policy=policy,
+            last_served=router.chain_link_digest()["served_by_purpose"],
         )
     return {
         "available": True,

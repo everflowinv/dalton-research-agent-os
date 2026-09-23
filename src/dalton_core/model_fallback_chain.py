@@ -106,6 +106,13 @@ TIER_DELIVERABLE = "deliverable"
 # in the code and come back the day this flag is turned on again.
 CHAIN_ELIGIBILITY_ENFORCED = False
 
+# 2026-09-23: how many skipped links a routing view carries per tier.  The
+# ledger is append-only and a busy environment passes over thousands of links;
+# the page renders the newest few and the reader needs the rest as counts, not
+# as rows.  Twelve is three full chain attempts -- enough to see a pattern
+# without the field becoming the response.
+SKIPPED_LINKS_PER_TIER = 12
+
 
 _TIER_CHAINS: dict[str, tuple[str, ...]] = {
     TIER_BRAIN: (
@@ -1189,6 +1196,7 @@ def purpose_selection(
     *,
     policy: Mapping[str, Any] | None = None,
     links: Sequence[Mapping[str, Any]] = (),
+    last_served: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """P14-M2: one row per calling stage -- tier, effective chain, last served.
 
@@ -1197,10 +1205,18 @@ def purpose_selection(
     models it will actually reach and in what order (the effective chain, which
     is the tier's unless the owner has said otherwise), and what happened last
     time, including which link answered and what that link cost.
+
+    ``last_served`` is the same "which link served this stage last" map read
+    straight out of the ledger's indexes by
+    :meth:`ModelRouter.chain_link_digest`; ``links`` remains accepted so a
+    caller that already holds a replay of the whole ledger need not read it
+    twice.
     """
 
     held = profile_families(router)
-    served_by_purpose: dict[str, Mapping[str, Any]] = {}
+    served_by_purpose: dict[str, Mapping[str, Any]] = (
+        {} if last_served is None else dict(last_served)
+    )
     for link in links:
         if link.get("served"):
             served_by_purpose[str(link["purpose"])] = link
@@ -1253,23 +1269,31 @@ def routing_overview(
     checked_at: datetime | None = None,
     work_order_id: str | None = None,
     policy_version_ref: str | None = None,
+    link_digest: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """What the cockpit or a report shows: tiers, chains, last served, sync.
 
     One reader rather than four, because the four questions are one question --
     "is the model side of this system wired the way it says it is" -- and they
     were previously answerable only by opening the router database by hand.
+
+    ``link_digest`` lets a caller that builds several overviews against one
+    router database -- the model page builds thirteen, one per policy pin --
+    read the link ledger once instead of once per overview.
     """
 
     latest = {profile["id"]: profile for profile in router.latest_profiles()}
-    links = router.chain_links(work_order_id=work_order_id)
-    served_by_tier: dict[str, dict[str, Any]] = {}
-    for link in links:
-        if link["served"]:
-            served_by_tier[link["tier"]] = link
+    digest = (
+        router.chain_link_digest(
+            work_order_id=work_order_id, skipped_limit=SKIPPED_LINKS_PER_TIER)
+        if link_digest is None else link_digest
+    )
+    served_by_tier = dict(digest.get("served_by_tier") or {})
+    skipped_by_tier = dict(digest.get("skipped_by_tier") or {})
     tiers: dict[str, Any] = {}
     for tier, chain in _TIER_CHAINS.items():
         served = served_by_tier.get(tier)
+        skipped = skipped_by_tier.get(tier) or {}
         tiers[tier] = {
             "chain": [
                 {
@@ -1292,6 +1316,13 @@ def routing_overview(
                     "created_at": served["created_at"],
                 }
             ),
+            # WP-A/A2 + 2026-09-23: the most recent skips, oldest first, and
+            # never more than SKIPPED_LINKS_PER_TIER of them.  This list used
+            # to be every link this tier had ever passed over -- 2482 of them
+            # on the environment with the longest history, 295 KB in one field
+            # of one page.  Bounding it without counting would have thrown away
+            # the only record of *why* models get skipped, so the counts below
+            # keep the whole history, by reason, in a few dozen bytes.
             "skipped_since_last_served": [
                 {
                     "profile_id": link["profile_id"],
@@ -1299,9 +1330,12 @@ def routing_overview(
                     "skip_reason": link["skip_reason"],
                     "decision_id": link["decision_id"],
                 }
-                for link in links
-                if link["tier"] == tier and not link["served"]
+                for link in (skipped.get("links") or [])
             ],
+            "skipped_total": int(skipped.get("total") or 0),
+            "skipped_shown_limit": int(
+                skipped.get("limit", SKIPPED_LINKS_PER_TIER) or 0),
+            "skipped_by_reason": list(skipped.get("by_reason") or []),
         }
     policy: dict[str, Any] | None = None
     if policy_version_ref is not None:
@@ -1319,7 +1353,9 @@ def routing_overview(
         # reader can tell "the owner chose this" from "this is the tier".
         "policy_version_ref": policy_version_ref,
         "purpose_overrides": dict((policy or {}).get("purpose_overrides") or {}),
-        "purposes": purpose_selection(router, policy=policy, links=links),
+        "purposes": purpose_selection(
+            router, policy=policy,
+            last_served=digest.get("served_by_purpose") or {}),
         # WP-A/A2. Two lists, because they answer two questions: which models
         # routing is refusing to offer *right now*, and what the recent history
         # of that is. Without the first, a chain quietly running on its second
@@ -1380,6 +1416,7 @@ __all__ = [
     "classify_model_failure",
     "reserved_micros",
     "routing_overview",
+    "SKIPPED_LINKS_PER_TIER",
     "served_family",
     "tier_chain",
     "tier_for",
