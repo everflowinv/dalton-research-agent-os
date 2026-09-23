@@ -666,6 +666,36 @@ class DaltonService:
             "last_retention": None, "last_error": None,
         }
         self._restore_backup_cadence()
+        self._publish_raw_spool_capacity()
+
+    def _publish_raw_spool_capacity(self) -> None:
+        """Write the configured spool ceiling where every opener can read it.
+
+        ``raw_spool.max_total_bytes`` used to reach the spool only as a
+        LaunchAgent environment variable, so raising it changed the services
+        launchd starts and changed nothing for a CLI, a maintenance run, or
+        the owner's own list -- which on 2026-09-23 reported a 1 GB ceiling and
+        "111%" while every running writer was bounded at the configured 4 GB.
+        """
+
+        if self.config.raw_spool_max_total_bytes is None:
+            return
+        from .raw_spool import RawSpoolError, publish_capacity_policy
+
+        state_dir = Path(self.config.core_db).parent
+        # Both spools of this environment, because the environment variable
+        # this replaces bounded both.
+        for name in ("connector-spool", "transcript-spool"):
+            try:
+                publish_capacity_policy(
+                    state_dir / name,
+                    max_total_bytes=self.config.raw_spool_max_total_bytes,
+                    archive_after_seconds=self.config.raw_spool_archive_after_seconds,
+                )
+            except (OSError, RawSpoolError) as exc:
+                # Never a reason to refuse to start: the environment variable
+                # and the built-in default still bound every write.
+                self._last_error = f"raw spool capacity policy not published: {exc}"
 
     def _restore_backup_cadence(self) -> None:
         """Anchor the monotonic interval to the newest verified snapshot."""

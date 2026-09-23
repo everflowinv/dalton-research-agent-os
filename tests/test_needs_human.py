@@ -22,6 +22,7 @@ something they did last week is a list they stop opening.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import tempfile
 import unittest
@@ -82,6 +83,78 @@ class ShapeTests(unittest.TestCase):
                        if item["kind"] == "raw_spool_capacity")
         self.assertEqual(warning["detail"]["used_bytes"], 91)
         self.assertEqual(warning["detail"]["percent"], 91)
+        self.assertFalse(warning["detail"]["over_ceiling"])
+        self.assertEqual(warning["detail"]["ceiling_source"], "environment")
+
+    def test_a_configured_ceiling_is_the_one_the_owner_is_shown(self):
+        """The 2026-09-23 regression: the item quoted a ceiling nothing used.
+
+        The configured ceiling is written beside the spool, so a process that
+        launchd did not start -- an owner running a CLI, this probe -- reports
+        the same bound a write would be held to instead of the built-in 1 GB.
+        """
+
+        from dalton_core.raw_spool import publish_capacity_policy
+
+        with tempfile.TemporaryDirectory() as name:
+            state = Path(name)
+            spool = RawSpool(
+                state / "connector-spool", max_total_bytes=100,
+                archive_after_seconds=60,
+            )
+            sink = spool.open_sink("raw-sink:" + "a" * 64, max_response_bytes=91)
+            sink.write(b"x" * 91)
+            sink.finalize()
+            publish_capacity_policy(
+                state / "connector-spool", max_total_bytes=10_000,
+                archive_after_seconds=604_800,
+            )
+            with patch.dict("os.environ", {}, clear=False):
+                os.environ.pop("DALTON_RAW_SPOOL_MAX_TOTAL_BYTES", None)
+                os.environ.pop("DALTON_RAW_SPOOL_ARCHIVE_AFTER_SECONDS", None)
+                # Well under the configured ceiling: no errand at all.
+                self.assertEqual(
+                    [item for item in collect(state_dir=state, clock=clock)["items"]
+                     if item["kind"] == "raw_spool_capacity"], [],
+                )
+                publish_capacity_policy(
+                    state / "connector-spool", max_total_bytes=50,
+                    archive_after_seconds=604_800,
+                )
+                result = collect(state_dir=state, clock=clock)
+        warning = next(item for item in result["items"]
+                       if item["kind"] == "raw_spool_capacity")
+        # Above the ceiling is said as such, with the overflow, not as "182%".
+        self.assertTrue(warning["detail"]["over_ceiling"])
+        self.assertEqual(warning["detail"]["max_total_bytes"], 50)
+        self.assertEqual(warning["detail"]["overflow_bytes"], 41)
+        self.assertEqual(warning["detail"]["ceiling_source"], "configured")
+        self.assertIn("超过上限", warning["title"])
+        # And it says what is refused and what is not.
+        self.assertIn("已经落盘对象的读取", warning["why_blocked"])
+
+    def test_a_configured_ceiling_bounds_a_writer_without_the_environment(self):
+        from dalton_core.raw_spool import RawSpoolCapacityError, publish_capacity_policy
+
+        with tempfile.TemporaryDirectory() as name:
+            spool_dir = Path(name) / "connector-spool"
+            publish_capacity_policy(spool_dir, max_total_bytes=64)
+            with patch.dict("os.environ", {}, clear=False):
+                os.environ.pop("DALTON_RAW_SPOOL_MAX_TOTAL_BYTES", None)
+                os.environ.pop("DALTON_RAW_SPOOL_ARCHIVE_AFTER_SECONDS", None)
+                # The caller still passes the historical built-in default; the
+                # configured ceiling is the one actually enforced.
+                spool = RawSpool(spool_dir, max_total_bytes=1_000_000_000)
+                with self.assertRaises(RawSpoolCapacityError):
+                    spool.open_sink("raw-sink:" + "b" * 64, max_response_bytes=65)
+                # An explicit environment override still wins over both.
+                os.environ["DALTON_RAW_SPOOL_MAX_TOTAL_BYTES"] = "4000"
+                relaxed = RawSpool(spool_dir, max_total_bytes=1_000_000_000)
+                sink = relaxed.open_sink(
+                    "raw-sink:" + "c" * 64, max_response_bytes=65
+                )
+                sink.write(b"y" * 65)
+                sink.finalize()
 
 
 class GovernanceTests(unittest.TestCase):

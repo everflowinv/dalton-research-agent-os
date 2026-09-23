@@ -769,6 +769,34 @@ class LegacyAgendaPlaneRetirementTests(unittest.TestCase):
             self.assertIsNone(heartbeat["agenda"]["last_started_at"])
             self.assertEqual("running", heartbeat["state"])
 
+    def test_a_configured_spool_ceiling_is_published_beside_the_spool(self) -> None:
+        """The configured ceiling must not depend on how a process was started.
+
+        Before 2026-09-23 ``raw_spool.max_total_bytes`` only ever became a
+        LaunchAgent environment variable, so every non-launchd opener of the
+        same spool silently used the built-in 1 GB default.
+        """
+
+        from dalton_core.raw_spool import effective_capacity
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with DaltonStore(root / "core.sqlite") as store:
+                ObservabilityStore(store)
+            raw = self.raw(root)
+            raw["raw_spool"] = {
+                "max_total_bytes": 4_000_000_000, "archive_after_seconds": 604_800,
+            }
+            service = DaltonService(ServiceConfig.from_mapping(raw))
+            try:
+                with mock.patch.dict("os.environ", {}, clear=True):
+                    capacity = effective_capacity(root / "connector-spool")
+            finally:
+                service.close()
+            self.assertEqual(capacity.max_total_bytes, 4_000_000_000)
+            self.assertEqual(capacity.archive_after_seconds, 604_800)
+            self.assertEqual(capacity.source, "configured")
+
     def test_the_named_opt_in_restores_the_plane_unchanged(self) -> None:
         # Reversible by one key: with the opt-in the coordinator is built from
         # the same block, on the same interval, with its own single-thread

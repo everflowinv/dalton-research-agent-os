@@ -198,33 +198,88 @@ def raw_spool_capacity(state_dir: Path | None, *, now: datetime) -> list[dict[st
 
     if state_dir is None:
         return []
-    from .raw_spool import RawSpoolError, RawSpoolReader
+    from .raw_spool import RawSpoolError, RawSpoolReader, effective_capacity
 
+    spool_dir = state_dir / "connector-spool"
     try:
-        reader = RawSpoolReader(state_dir / "connector-spool")
+        reader = RawSpoolReader(spool_dir)
         used = reader.total_bytes()
     except (OSError, RawSpoolError):
         return []
-    configured = os.environ.get("DALTON_RAW_SPOOL_MAX_TOTAL_BYTES")
+    # The same resolution a write is held to -- environment, then the ceiling
+    # configured beside the spool, then the built-in default.  Reading only the
+    # environment here is how, on 2026-09-23, this item quoted 1 GB and "111%"
+    # while every running service was actually bounded at the configured 4 GB.
     try:
-        limit = int(configured) if configured is not None else RAW_SPOOL_DEFAULT_MAX_TOTAL_BYTES
-    except ValueError:
+        capacity = effective_capacity(
+            spool_dir, default_max_total_bytes=RAW_SPOOL_DEFAULT_MAX_TOTAL_BYTES
+        )
+        limit = capacity.max_total_bytes
+        source = capacity.source
+        archive_after_seconds = capacity.archive_after_seconds
+    except (OSError, RawSpoolError):
         limit = RAW_SPOOL_DEFAULT_MAX_TOTAL_BYTES
-    if limit < 1 or used / limit < RAW_SPOOL_WARNING_RATIO:
+        source = "unreadable_policy"
+        archive_after_seconds = None
+    if limit < 1:
+        return []
+    over_ceiling = used >= limit
+    if not over_ceiling and used / limit < RAW_SPOOL_WARNING_RATIO:
         return []
     percent = used * 100 // limit
+    overflow = max(0, used - limit)
+    archiving = (
+        f"；超过上限时会先自动归档 {archive_after_seconds} 秒以前的旧对象，"
+        "只有归档也腾不出空间才会拒绝"
+        if archive_after_seconds is not None
+        else "；这个进程没有配置自动归档（DALTON_RAW_SPOOL_ARCHIVE_AFTER_SECONDS "
+             "或 raw_spool.archive_after_seconds），因此超过上限会直接拒绝"
+    )
+    if over_ceiling:
+        title = f"连接器原始落盘已超过上限 {overflow} 字节（{used}/{limit}）"
+        why = (
+            f"原始落盘已使用 {used} 字节，超过当前生效上限 {limit} 字节 "
+            f"{overflow} 字节（上限来源：{source}）。"
+            "被拒绝的只有「需要新写入一个原始对象」的抓取——连接器取回的响应写不进落盘，"
+            "那一次抓取失败；已经落盘对象的读取、以及不落盘的工作照常进行，"
+            "所以其它车道仍然会显示 dispatched" + archiving + "。"
+        )
+    else:
+        title = f"连接器原始落盘已用到上限的 {percent}%"
+        why = (
+            f"原始落盘已使用 {used} / {limit} 字节（上限来源：{source}）；"
+            "到达上限之后，需要新写入原始对象的抓取会被拒绝，"
+            "已落盘对象的读取不受影响" + archiving + "。"
+        )
     return [_item(
         "raw_spool_capacity",
         ref="raw-spool:capacity",
         at=_iso(now),
-        title=f"连接器原始落盘已用到上限的 {percent}%",
-        why=(f"原始落盘已使用 {used} / {limit} 字节；达到硬上限后，所有需要保存"
-             "原始响应的来源都会停住。"),
-        action=("先部署支持无损归档的运行时并排空旧进程，再设置 "
-                "DALTON_RAW_SPOOL_MAX_TOTAL_BYTES 或运行 raw_spool_maintenance archive。"),
-        consequence="不处理，下一次超过上限的抓取会失败，并把依赖这些来源的公司停住。",
+        title=title,
+        why=why,
+        action=(
+            "先腾空间：`python -m dalton_core.raw_spool_maintenance archive "
+            f"--spool-dir {spool_dir} --min-age-seconds 604800`；"
+            "要提高上限，就把 raw_spool.max_total_bytes 写进 service.json，"
+            "重新渲染 LaunchAgent 并重启该环境的服务（配置会同时写到落盘目录的 "
+            "capacity.json，非 launchd 启动的命令也就跟着生效）；"
+            "只想给一条命令临时抬高时才用 "
+            "DALTON_RAW_SPOOL_MAX_TOTAL_BYTES=<字节数>。"
+        ),
+        consequence=(
+            "不处理，下一次需要新写入原始对象的抓取会失败，"
+            "依赖这些来源的公司就停在缺原始证据上；其余不落盘的工作不受影响。"
+        ),
         where="运行状态",
-        detail={"used_bytes": used, "max_total_bytes": limit, "percent": percent},
+        detail={
+            "used_bytes": used,
+            "max_total_bytes": limit,
+            "percent": percent,
+            "over_ceiling": over_ceiling,
+            "overflow_bytes": overflow,
+            "ceiling_source": source,
+            "archive_after_seconds": archive_after_seconds,
+        },
     )]
 
 

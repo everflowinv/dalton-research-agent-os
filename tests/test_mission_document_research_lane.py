@@ -784,13 +784,14 @@ class MissionDocumentResearchLaneTests(unittest.TestCase):
 
     def _scheduler_work(
         self, admission: dict, *, stage: str = "registered_source_retrieval",
+        work_ref: str | None = None,
     ) -> tuple[Scheduler, dict]:
         scheduler = Scheduler(
             connection=self.store.connection, max_attempts=2,
             default_lease_seconds=30, max_lease_seconds=60,
             max_total_lease_seconds=120,
         )
-        work_ref = "work:mission-document-research-" + content_hash({
+        work_ref = work_ref or "work:mission-document-research-" + content_hash({
             "admission_identity_hash": admission["identity_hash"], "ordinal": 1,
         })[:32]
         work = {
@@ -865,6 +866,176 @@ class MissionDocumentResearchLaneTests(unittest.TestCase):
         self.assertEqual(
             authorization["reason"], "recovery_classification_not_yet_recorded"
         )
+
+    # ------------------------------------------------------------------
+    # Recovery hints: one unreadable chain is one admission's problem.
+    # ------------------------------------------------------------------
+
+    def _recovery_link(
+        self, admission: dict, *, stage: int, failed_ref: str,
+        failed_hash: str | None = None, number: int = 1,
+    ) -> dict:
+        self.store.connection.execute(
+            "CREATE TABLE IF NOT EXISTS mission_document_research_recovery_links("
+            "recovery_link_id TEXT PRIMARY KEY,admission_ref TEXT NOT NULL,"
+            "stage_ordinal INTEGER NOT NULL,recovery_number INTEGER NOT NULL,"
+            "failed_work_order_ref TEXT NOT NULL,"
+            "recovery_work_order_ref TEXT NOT NULL,record_json TEXT NOT NULL,"
+            "content_hash TEXT NOT NULL,created_at TEXT NOT NULL)"
+        )
+        digest = content_hash({
+            "admission": admission["id"], "stage": stage, "number": number,
+        })
+        body = {
+            "schema_version": "0.1",
+            "id": "mission-document-research-recovery-link:" + digest[:32],
+            "admission_ref": admission["id"],
+            "admission_hash": admission["content_hash"],
+            "stage_ordinal": stage,
+            "recovery_number": number,
+            "failed_work_order_ref": failed_ref,
+            "failed_work_order_hash": failed_hash or content_hash(failed_ref),
+            "recovery_work_order_ref": "work:mission-document-recovery-" + digest[:32],
+            "created_at": "2026-09-22T15:19:34.675988+00:00",
+        }
+        wire = {**body, "content_hash": content_hash(body)}
+        self.store.connection.execute(
+            "INSERT INTO mission_document_research_recovery_links "
+            "VALUES(?,?,?,?,?,?,?,?,?)",
+            (wire["id"], wire["admission_ref"], wire["stage_ordinal"],
+             wire["recovery_number"], wire["failed_work_order_ref"],
+             wire["recovery_work_order_ref"], canonical_json(wire),
+             wire["content_hash"], wire["created_at"]),
+        )
+        self.store.connection.commit()
+        return wire
+
+    def _refreshed_stage_work(self, admission: dict, *, stage: int) -> tuple[str, str]:
+        """A stage Work whose identity this lane cannot re-derive.
+
+        The executor mixes a model-authority refresh hash into stages 2..4, so
+        the live identity is not ``content_hash({identity_hash, ordinal})``.
+        """
+
+        work_ref = "work:mission-document-research-" + content_hash({
+            "admission_identity_hash": admission["identity_hash"],
+            "ordinal": stage,
+            "model_authority_refresh_hash": content_hash({"verifier": "refreshed"}),
+        })[:32]
+        stage_name = {
+            2: "qualitative_model_draft", 3: "independent_qualitative_verifier",
+        }[stage]
+        self._scheduler_work(admission, stage=stage_name, work_ref=work_ref)
+        work_hash = self.store.connection.execute(
+            "SELECT work_order_hash FROM scheduler_work_orders WHERE work_order_id=?",
+            (work_ref,),
+        ).fetchone()["work_order_hash"]
+        return work_ref, work_hash
+
+    def test_recovery_chain_rooted_at_refreshed_stage_work_is_read(self) -> None:
+        """The live 2026-09-23 outage: a chain root the lane cannot re-derive.
+
+        The recovery link is authentic -- sealed, bound to this admission, and
+        rooted at this admission's own verifier Work -- so it must be read as
+        a hint rather than taking the lane down.
+        """
+
+        admission = self.store.add(1)
+        work_ref, work_hash = self._refreshed_stage_work(admission, stage=3)
+        link = self._recovery_link(
+            admission, stage=3, failed_ref=work_ref, failed_hash=work_hash,
+        )
+
+        hints = self.lane._effective_work_hints(admission)
+
+        self.assertEqual(hints[2], link["recovery_work_order_ref"])
+        self.assertNotIn(work_ref, hints)
+
+    def test_recovery_chain_root_must_be_this_admission_and_stage(self) -> None:
+        from dalton_core.mission_document_research_lane import (
+            MissionDocumentResearchHintDrift,
+        )
+
+        admission = self.store.add(1)
+        other = self.store.add(2)
+        # Sealed, but the named Work belongs to another admission.
+        foreign_ref, foreign_hash = self._refreshed_stage_work(other, stage=3)
+        self._recovery_link(
+            admission, stage=3, failed_ref=foreign_ref, failed_hash=foreign_hash,
+        )
+        with self.assertRaises(MissionDocumentResearchHintDrift):
+            self.lane._effective_work_hints(admission)
+
+        self.store.connection.execute(
+            "DELETE FROM mission_document_research_recovery_links"
+        )
+        # Sealed and this admission's, but it is the draft stage, not stage 3.
+        wrong_stage_ref, wrong_stage_hash = self._refreshed_stage_work(
+            admission, stage=2
+        )
+        self._recovery_link(
+            admission, stage=3, failed_ref=wrong_stage_ref,
+            failed_hash=wrong_stage_hash,
+        )
+        with self.assertRaises(MissionDocumentResearchHintDrift):
+            self.lane._effective_work_hints(admission)
+
+        self.store.connection.execute(
+            "DELETE FROM mission_document_research_recovery_links"
+        )
+        # Named Work exists and binds, but the link asserts a different hash.
+        self._recovery_link(
+            admission, stage=3, failed_ref=wrong_stage_ref,
+            failed_hash=content_hash("not the sealed work"),
+        )
+        with self.assertRaises(MissionDocumentResearchHintDrift):
+            self.lane._effective_work_hints(admission)
+
+    def test_unreadable_recovery_chain_holds_only_its_own_admission(self) -> None:
+        """One bad record must not be a lane-wide outage.
+
+        Live on 2026-09-23 this raised out of ``dispatch_once`` for 143 of 143
+        ticks in two hours, so no admission in the lane could be dispatched.
+        """
+
+        from dalton_core.mission_document_research_lane import (
+            HINT_DRIFT_ESCALATION_NOTE, HINT_DRIFT_HOLD_REASON, _read_holds,
+        )
+
+        drifted = self.store.add(1)
+        healthy = self.store.add(2)
+        self.store.started(drifted["id"])
+        # Neither re-derivable nor a persisted Work of this admission.
+        self._recovery_link(
+            drifted, stage=3,
+            failed_ref="work:mission-document-research-" + "0" * 32,
+        )
+        ticket_ref = "mission-document-research:" + "e" * 24
+        self.launcher.tickets[ticket_ref] = {
+            "id": ticket_ref, "status": "failed",
+            "summary": {"status": "incomplete"},
+        }
+        _write_latest(self.lane.latest_path, drifted, ticket_ref)
+
+        result = self.lane.dispatch_once()
+
+        # The other admission was still dispatched on this very tick.
+        self.assertEqual(result["status"], "launched")
+        self.assertEqual(result["admission_ref"], healthy["id"])
+        self.assertEqual(
+            self.launcher.started, [(healthy["id"], healthy["content_hash"])]
+        )
+        held = _read_holds(self.lane.holds_path)
+        self.assertEqual(set(held), {drifted["id"]})
+        self.assertEqual(held[drifted["id"]]["reason"], HINT_DRIFT_HOLD_REASON)
+        self.assertEqual(held[drifted["id"]]["disposition"], "recovery_required")
+        self.assertEqual(result["last"]["recovery"]["action"], "recovery_required")
+        self.assertIn("recovery_link_ref", result["last"]["recovery"])
+        # And the owner is told what the errand is, not just given a reason.
+        detail = self.lane._hold_detail(held, [drifted, healthy])
+        self.assertEqual(detail[0]["owner_action"], HINT_DRIFT_ESCALATION_NOTE)
+        # A later tick keeps the hold and still never raises.
+        self.assertEqual(self.lane.dispatch_once()["status"], "busy")
 
     def test_lane_is_opt_in_and_registered_once(self) -> None:
         self.assertIs(

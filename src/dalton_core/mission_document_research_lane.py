@@ -42,6 +42,17 @@ REENTRY_ESCALATED_REASON = "reentry_failed_after_automatic_rebind"
 MODEL_AUTHORITY_PREEXECUTION_ERROR = (
     "MissionDocumentResearchError: mission document admission is no longer executable"
 )
+# The executor's own stage WorkOrder identities, and the stage each recovery
+# chain ordinal belongs to.  Only these two stages ever have recovery links.
+STAGE_WORK_ORDER_PREFIX = "work:mission-document-research-"
+STAGE_NAMES = {
+    2: "qualitative_model_draft",
+    3: "independent_qualitative_verifier",
+}
+# The hold reason for an admission whose recovery chain this lane cannot read.
+# It is a person's errand -- nothing automatic may resume a chain it cannot
+# verify -- but it stops with that one admission.
+HINT_DRIFT_HOLD_REASON = "recovery_hint_unverifiable"
 
 # How long every admission may be held, with none startable, before the lane
 # reopens the oldest one that provably never sent anything.  Live on
@@ -87,6 +98,22 @@ UNPROVED_SEND_ESCALATION_NOTE = (
     "max_cost_usd 等于那条失败 WorkOrder 自己的 budget.max_cost_usd。）"
     "（如果那条重试失败的原因是「已证明送达并结算、只是回复不合契约」，"
     "则改用 authorize-paid，车道给出的原因里会写明是哪一种。）"
+)
+# The words for an admission whose persisted recovery chain this lane cannot
+# read back.  Nothing automatic may resume a chain it cannot verify, but the
+# ask has to say that this is one admission's bookkeeping problem and that the
+# rest of the lane keeps running.
+HINT_DRIFT_ESCALATION_NOTE = (
+    "这条 admission 的恢复链（mission_document_research_recovery_links）"
+    "对不上车道能自己重算出来的阶段 WorkOrder 身份，因此车道不敢把它当作重启提示使用——"
+    "无法核验的恢复链一律不自动恢复。"
+    "只有这一条被挂起，同一批其它 admission 的派发不受影响。"
+    "先看是哪一条链记录对不上："
+    "`python -m dalton_core.document_recovery_cli holds --state-dir <state>`，"
+    "车道原因里带有那条 recovery_link_ref；"
+    "确认那条链确实是这条 admission 自己的（admission_ref/admission_hash、"
+    "失败 WorkOrder 的 metadata 指向同一条 admission 与同一个阶段）之后，"
+    "再由 owner 走受控恢复授权重开这一条。"
 )
 # The words for a controlled re-entry that failed again after the lane already
 # rebound the admission onto a new ticket identity by itself.
@@ -145,6 +172,41 @@ def _sha256(value: Any) -> bool:
 
 class MissionDocumentResearchLaneError(RuntimeError):
     pass
+
+
+class MissionDocumentResearchHintDrift(MissionDocumentResearchLaneError):
+    """One admission's recovery chain cannot be read as relaunch hints.
+
+    Deliberately its own class: a chain the lane cannot verify says nothing
+    about the other admissions, and on 2026-09-23 raising the generic lane
+    error for it took the whole document-research lane down for 143 of 143
+    ticks over two hours.  Every caller inside :meth:`dispatch_once` catches
+    this and holds exactly the one admission it names.
+    """
+
+    def __init__(
+        self, message: str, *, admission_ref: str, recovery_link_ref: Any = None,
+    ) -> None:
+        super().__init__(message)
+        self.admission_ref = admission_ref
+        self.recovery_link_ref = (
+            recovery_link_ref if isinstance(recovery_link_ref, str) else None
+        )
+
+
+def _hint_drift_recovery(
+    exc: "MissionDocumentResearchHintDrift",
+) -> dict[str, Any]:
+    """Turn an unreadable recovery chain into one admission's hold reason."""
+
+    recovery: dict[str, Any] = {
+        "action": "recovery_required",
+        "reason": HINT_DRIFT_HOLD_REASON,
+        "detail": str(exc),
+    }
+    if exc.recovery_link_ref is not None:
+        recovery["recovery_link_ref"] = exc.recovery_link_ref
+    return recovery
 
 
 def _read_holds(path: Path) -> dict[str, dict[str, Any]]:
@@ -295,6 +357,7 @@ class MissionDocumentResearchCoordinator:
         escalation_notes = {
             CONTRACT_FAILED_AFTER_AUTOMATIC_RETRY: CONTRACT_ESCALATION_NOTE,
             UNPROVED_SEND_FAILED_AFTER_AUTOMATIC_RETRY: UNPROVED_SEND_ESCALATION_NOTE,
+            HINT_DRIFT_HOLD_REASON: HINT_DRIFT_ESCALATION_NOTE,
         }
 
         order = {admission["id"]: index for index, admission in enumerate(admissions)}
@@ -826,12 +889,27 @@ class MissionDocumentResearchCoordinator:
             try:
                 wire = json.loads(row["record_json"])
             except (TypeError, ValueError, RecursionError) as exc:
-                raise MissionDocumentResearchLaneError(
-                    "document research recovery hint is invalid"
+                raise MissionDocumentResearchHintDrift(
+                    "document research recovery hint is invalid",
+                    admission_ref=admission["id"],
+                    recovery_link_ref=row["recovery_link_id"],
                 ) from exc
             body = dict(wire) if isinstance(wire, Mapping) else {}
             asserted = body.pop("content_hash", None)
             stage = wire.get("stage_ordinal") if isinstance(wire, Mapping) else None
+            sealed_root = (
+                isinstance(wire, Mapping)
+                and stage in {2, 3}
+                and wire.get("recovery_number") == 1
+                and row["recovery_number"] == 1
+                and wire.get("failed_work_order_ref")
+                == row["failed_work_order_ref"]
+                and self._sealed_stage_work(
+                    admission, stage,
+                    work_ref=wire.get("failed_work_order_ref"),
+                    work_hash=wire.get("failed_work_order_hash"),
+                )
+            )
             if (
                 not isinstance(wire, Mapping)
                 or canonical_json(wire) != row["record_json"]
@@ -844,17 +922,78 @@ class MissionDocumentResearchCoordinator:
                 or row["stage_ordinal"] != stage
                 or wire.get("recovery_number") != next_number[stage]
                 or row["recovery_number"] != next_number[stage]
-                or wire.get("failed_work_order_ref") != refs[stage - 1]
-                or row["failed_work_order_ref"] != refs[stage - 1]
+                or (not sealed_root
+                    and (wire.get("failed_work_order_ref") != refs[stage - 1]
+                         or row["failed_work_order_ref"] != refs[stage - 1]))
                 or wire.get("recovery_work_order_ref")
                 != row["recovery_work_order_ref"]
             ):
-                raise MissionDocumentResearchLaneError(
-                    "document research recovery hint drifted"
+                raise MissionDocumentResearchHintDrift(
+                    "document research recovery hint drifted",
+                    admission_ref=admission["id"],
+                    recovery_link_ref=row["recovery_link_id"],
                 )
             refs[stage - 1] = wire["recovery_work_order_ref"]
             next_number[stage] += 1
         return refs
+
+    def _sealed_stage_work(
+        self,
+        admission: Mapping[str, Any],
+        stage_ordinal: int,
+        *,
+        work_ref: Any,
+        work_hash: Any,
+    ) -> bool:
+        """Is this the executor's own Work for this admission at this stage?
+
+        The lane cannot always re-derive a stage WorkOrder identity from the
+        admission alone: the executor mixes a model-authority refresh hash into
+        the identity of stages 2..4 when current model authority differs from
+        the admitted one, and that refresh is a live input rather than a field
+        of the immutable admission.  Re-deriving is therefore only a guess, and
+        a wrong guess used to take the whole lane down.
+
+        The chain root is accepted instead from persisted Scheduler authority:
+        the named Work must exist, be content-sealed to exactly the hash the
+        recovery link itself asserts, and carry this admission's ref and hash
+        with this stage.  That is the same binding the ordinary execution read
+        enforces, so no audited guarantee is traded away for the tolerance.
+        """
+
+        if (not isinstance(work_ref, str)
+                or not work_ref.startswith(STAGE_WORK_ORDER_PREFIX)
+                or not _sha256(work_hash)
+                or stage_ordinal not in STAGE_NAMES):
+            return False
+        try:
+            row = self.store.connection.execute(
+                "SELECT work_order_json,work_order_hash FROM scheduler_work_orders "
+                "WHERE work_order_id=?", (work_ref,),
+            ).fetchone()
+        except sqlite3.Error:
+            return False
+        if row is None or row["work_order_hash"] != work_hash:
+            return False
+        try:
+            work = json.loads(row["work_order_json"])
+        except (TypeError, ValueError, RecursionError):
+            return False
+        if (not isinstance(work, Mapping)
+                or canonical_json(work) != row["work_order_json"]
+                or content_hash(work) != work_hash
+                or work.get("id") != work_ref):
+            return False
+        metadata = work.get("metadata")
+        if not isinstance(metadata, Mapping):
+            return False
+        return (
+            metadata.get("mission_document_research_admission_ref")
+            == admission["id"]
+            and metadata.get("mission_document_research_admission_hash")
+            == admission["content_hash"]
+            and metadata.get("stage") == STAGE_NAMES[stage_ordinal]
+        )
 
     def _typed_recovery_state(
         self, admission: Mapping[str, Any], work_ref: str,
@@ -1442,13 +1581,18 @@ class MissionDocumentResearchCoordinator:
                 "status": child_status or ticket["status"],
             }
             if child_status != "complete":
-                recovery = (
-                    self._execution_state(admission)
-                    if self._started(admission["id"]) else {
-                        "action": "terminal_hold",
-                        "reason": child_status or ticket["status"],
-                    }
-                )
+                try:
+                    recovery = (
+                        self._execution_state(admission)
+                        if self._started(admission["id"]) else {
+                            "action": "terminal_hold",
+                            "reason": child_status or ticket["status"],
+                        }
+                    )
+                except MissionDocumentResearchHintDrift as exc:
+                    # This admission's chain is a person's errand; the tick
+                    # continues for every other admission below.
+                    recovery = _hint_drift_recovery(exc)
                 settled["recovery"] = recovery
                 if recovery["action"] == "waiting":
                     self._hold(
@@ -1556,7 +1700,16 @@ class MissionDocumentResearchCoordinator:
                     ) from exc
                 if now < retry_at:
                     continue
-            recovery = self._execution_state(admission)
+            try:
+                recovery = self._execution_state(admission)
+            except MissionDocumentResearchHintDrift:
+                # Held, not raised: the admissions after this one still get
+                # their tick.
+                self._hold(
+                    holds, admission, reason=HINT_DRIFT_HOLD_REASON,
+                    ticket_ref=held["ticket_ref"], disposition="recovery_required",
+                )
+                continue
             if recovery["action"] == "waiting":
                 self._hold(
                     holds, admission, reason=recovery["reason"],

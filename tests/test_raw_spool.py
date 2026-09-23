@@ -117,6 +117,53 @@ class RawSpoolTests(unittest.TestCase):
         with self.assertRaises(RawSpoolCapacityError):
             spool.open_sink(self.sink_ref("f"), max_response_bytes=5)
 
+    def test_configured_ceiling_binds_a_process_without_the_environment(self) -> None:
+        """A ceiling in the service config has to reach every opener.
+
+        Before 2026-09-23 it reached only the processes launchd started with
+        ``DALTON_RAW_SPOOL_MAX_TOTAL_BYTES`` set; every other entry point
+        silently used the hard-coded 1 GB default.
+        """
+
+        from dalton_core.raw_spool import effective_capacity, publish_capacity_policy
+
+        publish_capacity_policy(
+            self.temp.name, max_total_bytes=4, archive_after_seconds=60,
+        )
+        with patch.dict("os.environ", {}, clear=True):
+            capacity = effective_capacity(self.temp.name)
+            self.assertEqual(capacity.max_total_bytes, 4)
+            self.assertEqual(capacity.archive_after_seconds, 60)
+            self.assertEqual(capacity.source, "configured")
+            spool = RawSpool(self.temp.name, max_total_bytes=1_000_000_000)
+            with self.assertRaises(RawSpoolCapacityError):
+                spool.open_sink(self.sink_ref("e"), max_response_bytes=5)
+        # The environment still wins, so one command can be given a different
+        # bound without rewriting the configuration.
+        with patch.dict("os.environ", {"DALTON_RAW_SPOOL_MAX_TOTAL_BYTES": "4096"}):
+            self.assertEqual(
+                effective_capacity(self.temp.name).source, "environment"
+            )
+            RawSpool(self.temp.name, max_total_bytes=1).open_sink(
+                self.sink_ref("d"), max_response_bytes=5
+            ).abort()
+
+    def test_an_unreadable_capacity_policy_is_loud_rather_than_1gb(self) -> None:
+        from dalton_core.raw_spool import (
+            CAPACITY_POLICY_FILE, RawSpoolError, read_capacity_policy,
+        )
+
+        root = Path(self.temp.name) / "connector-spool"
+        root.mkdir(parents=True, exist_ok=True)
+        self.assertIsNone(read_capacity_policy(self.temp.name))
+        (root / CAPACITY_POLICY_FILE).write_text(
+            '{"schema_version": "0.1", "max_total_bytes": 0}', encoding="utf-8",
+        )
+        with self.assertRaises(RawSpoolError):
+            read_capacity_policy(self.temp.name)
+        with self.assertRaises(RawSpoolError):
+            RawSpool(self.temp.name, max_total_bytes=64)
+
     def test_other_instance_gc_preserves_inflight_download_and_completed_original(self):
         first = RawSpool(self.temp.name, max_total_bytes=4096)
         second = RawSpool(self.temp.name, max_total_bytes=4096)

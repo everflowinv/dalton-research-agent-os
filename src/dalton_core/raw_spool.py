@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import fcntl
 import gzip
+import json
 import os
 import re
 import stat
@@ -22,6 +23,16 @@ _SPOOL_DIRECTORY = "connector-spool"
 _MAX_TOTAL_BYTES_ENV = "DALTON_RAW_SPOOL_MAX_TOTAL_BYTES"
 _ARCHIVE_AFTER_SECONDS_ENV = "DALTON_RAW_SPOOL_ARCHIVE_AFTER_SECONDS"
 _DEFAULT_ARCHIVE_AFTER_SECONDS = 7 * 24 * 60 * 60
+# The ceiling a caller gets when nothing configured one.  Every call site used
+# to spell this literal out, which is why raising the configured ceiling to 4
+# GB on 2026-09-22 changed the running services (launchd injects the
+# environment variable) and changed nothing at all for any other entry point.
+DEFAULT_MAX_TOTAL_BYTES = 1_000_000_000
+# The configured ceiling, written once beside the objects it bounds, so that
+# *every* process opening this spool honours the same number -- not only the
+# ones launchd started with the environment set.
+CAPACITY_POLICY_FILE = "capacity.json"
+CAPACITY_POLICY_SCHEMA = "0.1"
 
 
 class RawSpoolError(Exception):
@@ -47,6 +58,127 @@ def _positive_environment_integer(name: str, default: int) -> int:
     if value < 1:
         raise RawSpoolError(f"{name} must be a positive integer")
     return value
+
+
+@dataclass(frozen=True)
+class RawSpoolCapacity:
+    """The ceiling in force for one spool, and where it came from."""
+
+    max_total_bytes: int
+    archive_after_seconds: int | None
+    source: str  # "environment" | "configured" | "default"
+
+
+def _capacity_policy_path(data_dir: str | Path) -> Path:
+    return _spool_root(data_dir) / CAPACITY_POLICY_FILE
+
+
+def read_capacity_policy(data_dir: str | Path) -> dict | None:
+    """The configured ceiling written beside the spool, or None.
+
+    Fails closed on a policy it cannot read: a corrupt file must be loud,
+    never a silent fall back to the old 1 GB default.
+    """
+
+    path = _capacity_policy_path(data_dir)
+    if path.is_symlink():
+        raise RawSpoolError("raw spool capacity policy must not be a symlink")
+    if not path.is_file():
+        return None
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise RawSpoolError("raw spool capacity policy is invalid") from exc
+    if (not isinstance(record, dict)
+            or set(record) - {"schema_version", "max_total_bytes",
+                              "archive_after_seconds"}
+            or record.get("schema_version") != CAPACITY_POLICY_SCHEMA
+            or "max_total_bytes" not in record):
+        raise RawSpoolError("raw spool capacity policy is invalid")
+    ceiling = record["max_total_bytes"]
+    if isinstance(ceiling, bool) or not isinstance(ceiling, int) or ceiling < 1:
+        raise RawSpoolError(
+            "raw spool capacity policy max_total_bytes must be a positive integer"
+        )
+    archive = record.get("archive_after_seconds")
+    if archive is not None and (
+        isinstance(archive, bool) or not isinstance(archive, int) or archive < 0
+    ):
+        raise RawSpoolError(
+            "raw spool capacity policy archive_after_seconds must be "
+            "a non-negative integer"
+        )
+    return {"max_total_bytes": ceiling, "archive_after_seconds": archive}
+
+
+def publish_capacity_policy(
+    data_dir: str | Path, *, max_total_bytes: int,
+    archive_after_seconds: int | None = None,
+) -> Path:
+    """Record the configured ceiling where every opener of this spool sees it.
+
+    Written by whatever process owns the service configuration; an atomic
+    owner-only replace, so a reader never sees a half-written policy.
+    """
+
+    if isinstance(max_total_bytes, bool) or not isinstance(max_total_bytes, int) \
+            or max_total_bytes < 1:
+        raise RawSpoolError("max_total_bytes must be a positive integer")
+    if archive_after_seconds is not None and (
+        isinstance(archive_after_seconds, bool)
+        or not isinstance(archive_after_seconds, int)
+        or archive_after_seconds < 0
+    ):
+        raise RawSpoolError("archive_after_seconds must be a non-negative integer")
+    root = _spool_root(data_dir)
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path = root / CAPACITY_POLICY_FILE
+    if path.is_symlink():
+        raise RawSpoolError("raw spool capacity policy must not be a symlink")
+    record = {
+        "schema_version": CAPACITY_POLICY_SCHEMA,
+        "max_total_bytes": max_total_bytes,
+        "archive_after_seconds": archive_after_seconds,
+    }
+    temporary = root / f"{CAPACITY_POLICY_FILE}.tmp"
+    descriptor = os.open(
+        temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        | getattr(os, "O_NOFOLLOW", 0), 0o600,
+    )
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        json.dump(record, handle, sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
+    return path
+
+
+def effective_capacity(
+    data_dir: str | Path, *, default_max_total_bytes: int = DEFAULT_MAX_TOTAL_BYTES,
+) -> RawSpoolCapacity:
+    """The ceiling a write to this spool would actually be held to.
+
+    Precedence, highest first: the environment variable (what launchd injects
+    and what an operator can override for one command), the policy written
+    beside the spool from the service configuration, then the caller's
+    built-in default.  Reporting and enforcement read this same function, so
+    the owner's list can never quote a ceiling no writer is using.
+    """
+
+    policy = read_capacity_policy(data_dir)
+    archive = _optional_nonnegative_environment_integer(_ARCHIVE_AFTER_SECONDS_ENV)
+    if archive is None and policy is not None:
+        archive = policy["archive_after_seconds"]
+    raw = os.environ.get(_MAX_TOTAL_BYTES_ENV)
+    if raw is not None:
+        return RawSpoolCapacity(
+            _positive_environment_integer(_MAX_TOTAL_BYTES_ENV, default_max_total_bytes),
+            archive, "environment",
+        )
+    if policy is not None:
+        return RawSpoolCapacity(policy["max_total_bytes"], archive, "configured")
+    return RawSpoolCapacity(default_max_total_bytes, archive, "default")
 
 
 def _optional_nonnegative_environment_integer(name: str) -> int | None:
@@ -282,13 +414,15 @@ class RawSpool:
             raise RawSpoolError("max_total_bytes must be a positive integer")
         if max_total_bytes < 1:
             raise RawSpoolError("max_total_bytes must be a positive integer")
-        max_total_bytes = _positive_environment_integer(
-            _MAX_TOTAL_BYTES_ENV, max_total_bytes
+        # The caller's number is only the built-in default: a ceiling the owner
+        # configured for this spool wins over it whether or not this process
+        # happened to be started with the environment variable set.
+        capacity = effective_capacity(
+            data_dir, default_max_total_bytes=max_total_bytes
         )
+        max_total_bytes = capacity.max_total_bytes
         if archive_after_seconds is None:
-            archive_after_seconds = _optional_nonnegative_environment_integer(
-                _ARCHIVE_AFTER_SECONDS_ENV
-            )
+            archive_after_seconds = capacity.archive_after_seconds
         if (archive_after_seconds is not None
                 and (isinstance(archive_after_seconds, bool)
                      or not isinstance(archive_after_seconds, int)
