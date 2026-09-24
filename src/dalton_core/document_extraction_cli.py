@@ -1492,6 +1492,12 @@ def _admit_complete_reviews(host: ExtractionHost, service: DocumentExtractionSer
         carried = [o for o in outcomes if o["status"] in ("admitted", "duplicate")]
         summary["formal_authority_writes"] += 2 * len(fresh)  # one Evidence and one Claim version each
         rejected = [o for o in outcomes if o["status"] == "rejected"]
+        # 2026-09-24: staged but not committed, because the cited span never
+        # names the company.  The candidate waits for a person; the review is
+        # closed as staged so the window is not drafted (and paid for) again.
+        held = [o for o in outcomes if o["status"] == "held"]
+        summary.setdefault("held_candidates", 0)
+        summary["held_candidates"] += len(held)
         # A refusal is a judgment only when the policy or a validator said no
         # to the suggestion itself.  A conflict or an unexpected error is the
         # system's problem: hold the review open rather than dismiss it.
@@ -1503,12 +1509,13 @@ def _admit_complete_reviews(host: ExtractionHost, service: DocumentExtractionSer
                                                 "reason": conflicts[0]["reason"]})
             continue
         try:
-            if carried:
+            if carried or held:
                 resolution = host.coverage_mission.resolve_document_review(
                     review["review_id"], resolution="extraction_staged", actor_ref=actor,
-                    candidate_claim_version_ref=carried[0]["candidate_claim_ref"],
+                    candidate_claim_version_ref=(carried or held)[0]["candidate_claim_ref"],
                     rationale=(f"ADR-0005 policy admission: {len(carried)} qualitative claim(s) admitted, "
-                               f"{len(rejected)} suggestion(s) refused"),
+                               f"{len(held)} held for human review (cited span does not name the "
+                               f"company), {len(rejected)} suggestion(s) refused"),
                     expected_review_hash=review_hash,
                 )
             elif unstageable is not None:
@@ -1526,7 +1533,7 @@ def _admit_complete_reviews(host: ExtractionHost, service: DocumentExtractionSer
                     expected_review_hash=review_hash,
                 )
             entry = {"review_id": review["review_id"], "status": resolution["state"],
-                     "admitted": len(carried), "rejected": len(rejected)}
+                     "admitted": len(carried), "held": len(held), "rejected": len(rejected)}
             if unstageable is not None:
                 entry["reason"] = unstageable
             summary["resolved_reviews"].append(entry)

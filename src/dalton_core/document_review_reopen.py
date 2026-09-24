@@ -16,7 +16,10 @@ from .document_extraction import TASK_HASH, TASK_REF
 # contract is revised.  Keep the exact hashes of published task contracts here;
 # never accept a merely well-formed digest supplied by a caller.
 LEGACY_TASK_HASH = "e97a9f0db960da000959f02fd41c978c2745dde1c516e87be95c61208987c55e"
-PUBLISHED_TASK_HASHES = frozenset({LEGACY_TASK_HASH, TASK_HASH})
+# The 2026-09-11 contract, superseded on 2026-09-24 by the sentence-aligned,
+# excerpt-narrowed, date-anchored one.
+FOUNDATION_2026_09_11_TASK_HASH = "574236afac47bd312a0b67067f30fde0d2cb901e128cb93e5d6bdd45433f20cf"
+PUBLISHED_TASK_HASHES = frozenset({LEGACY_TASK_HASH, FOUNDATION_2026_09_11_TASK_HASH, TASK_HASH})
 
 
 class FailedDocumentWindowReader:

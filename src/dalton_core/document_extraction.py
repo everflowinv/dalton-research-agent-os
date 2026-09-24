@@ -50,8 +50,22 @@ TASK_REF = "model-task:mission-document-extraction:0.1"
 WORKER_REF = "worker:mission-document-extraction:0.1"
 PRODUCER = "system:document-extraction-suggester"
 WINDOW_CHARS = 12000
+# The *longest* quote.  Since 2026-09-24 a window is cut into quotes at
+# sentence boundaries (``sentence_quote_bounds``), so most quotes are shorter:
+# 3,623 of 3,685 live citation bindings were exactly 1,200 characters, cut
+# mid-sentence, and a statement drawn from the end of one quote and the start
+# of the next was bound to whichever half the model named.
 QUOTE_CHARS = 1200
+QUOTE_SLICING_REF = "sentence-aligned-quotes:v1"
 MAX_DOCUMENT_CHARS = 600000
+# A dated document read this many days after it was written is history, and
+# its statements are labelled as of their date (``normalize_period``).  The
+# live morning digests being read on 2026-09-24 were dated June.  Configurable
+# per installation through the extraction model config ``stale_document_days``.
+STALE_DOCUMENT_DAYS = 30
+# The shortest verbatim excerpt that narrows a citation.  Shorter ones say too
+# little to locate a sentence, and the whole quote is bound instead.
+MIN_EXCERPT_CHARS = 20
 GATE_REASON = "document_extraction_model_config_not_installed"
 from .model_transport import (
     broker_frame_execution_binding,
@@ -117,17 +131,28 @@ OUTPUT_SCHEMA = {
         "schema_version": {"const": "0.1"},
         "suggestions": {"type": "array", "maxItems": 5, "items": {
             "type": "object", "additionalProperties": False,
-            "required": ["quote_id", "normalized_statement", "metric_or_aspect", "period", "basis"],
+            "required": ["quote_id", "normalized_statement", "metric_or_aspect", "period", "basis",
+                         "excerpt"],
             "properties": {name: {"type": "string", "minLength": 1, "maxLength": maximum}
                            for name, maximum in (("quote_id", 100), ("normalized_statement", 2000),
-                                                 ("metric_or_aspect", 200), ("period", 200), ("basis", 200))},
+                                                 ("metric_or_aspect", 200), ("period", 200), ("basis", 200),
+                                                 ("excerpt", 600))},
         }},
     },
 }
-PROMPT_CONTRACT_REF = "document-reading-foundation:2026-09-11"
+#: The fields every suggestion must carry.  ``excerpt`` is asked for by the
+#: current contract but a result produced under the previous one has none, and
+#: a human's edited statement (``stage``) never has one; both are read with the
+#: whole quote as the citation, exactly as before.
+LEGACY_SUGGESTION_FIELDS = frozenset(
+    {"quote_id", "normalized_statement", "metric_or_aspect", "period", "basis"})
+# 2026-09-24: subject relationship, absolute periods against the document
+# date, a verbatim excerpt that narrows the citation, sentence-aligned quotes.
+PROMPT_CONTRACT_REF = "document-reading-foundation:2026-09-24"
 TASK_HASH = content_hash({"task": TASK_REF, "prompt_contract": PROMPT_CONTRACT_REF,
                           "output": OUTPUT_SCHEMA, "window_chars": WINDOW_CHARS,
-                          "quote_chars": QUOTE_CHARS, "authority": "suggestions_only_human_citation_and_accept"})
+                          "quote_chars": QUOTE_CHARS, "quote_slicing": QUOTE_SLICING_REF,
+                          "authority": "suggestions_only_human_citation_and_accept"})
 
 
 def validate_transport_retry(value):
@@ -155,7 +180,8 @@ def validate_model_config(value):
     optional = {"call_budget", "purpose_call_budgets", "run_budget", "purpose_run_budgets",
                 "capacity_retry", "reading_limits", "transport_retry", "provider_retry",
                 "structured_output_repair", "broker_max_frame_bytes",
-                "model_spec_numeric_context", "shared_call_budget_policy_path"}
+                "model_spec_numeric_context", "shared_call_budget_policy_path",
+                "stale_document_days"}
     if not isinstance(value, Mapping):
         raise ResearchVerificationError("invalid document extraction model configuration")
     config = dict(value)
@@ -211,6 +237,10 @@ def validate_model_config(value):
             if (not isinstance(value, int) or isinstance(value, bool)
                     or not minimum <= value <= maximum):
                 raise ResearchVerificationError("invalid capacity retry configuration")
+    if "stale_document_days" in config:
+        stale = config["stale_document_days"]
+        if isinstance(stale, bool) or not isinstance(stale, int) or not 1 <= stale <= 3650:
+            raise ResearchVerificationError("stale_document_days must be an integer 1..3650")
     if "transport_retry" in config:
         validate_transport_retry(config["transport_retry"])
     if "provider_retry" in config:
@@ -547,6 +577,155 @@ def statement_is_boilerplate(statement: str) -> bool:
     return _BOILERPLATE_RE.search(statement) is not None
 
 
+# -- quotes cut at sentences -------------------------------------------------
+
+# A sentence ends at a terminator followed by whitespace, a closing quote or
+# bracket, or at a line break.  "3.5" and "U.S.A" are not ends; a CJK full stop
+# needs no following space.
+_SENTENCE_END_RE = re.compile(
+    r"(?:[.!?;](?=[\s\"'”’)\]]|$)|[。！？；]|\n)[\"'”’)\]]*\s*"
+)
+
+
+def sentence_quote_bounds(text: str, offset: int, end: int, quote_chars: int) -> list[tuple[int, int]]:
+    """Tile ``text[offset:end]`` with quotes of at most ``quote_chars``, cut at sentences.
+
+    Deterministic and gap-free: the quotes still cover exactly the window, so
+    "every character of the window was shown" is as true as it was with fixed
+    slices.  A quote ends at the last sentence end in its second half; failing
+    that at the last whitespace; failing that at the hard bound.  Quotes do not
+    overlap -- overlap would put the same bytes in the prompt twice and raise
+    the cost of every window -- and the verbatim ``excerpt`` is what narrows a
+    citation to the sentence it rests on.
+    """
+
+    bounds: list[tuple[int, int]] = []
+    position = offset
+    while position < end:
+        hard = min(position + quote_chars, end)
+        if hard >= end:
+            bounds.append((position, end))
+            break
+        floor = position + max(1, quote_chars // 2)
+        stop = None
+        for match in _SENTENCE_END_RE.finditer(text, floor, hard):
+            stop = match.end()
+        if stop is None or stop <= position:
+            space = max(text.rfind(" ", floor, hard), text.rfind("\n", floor, hard))
+            stop = space + 1 if space >= floor else hard
+        stop = min(stop, hard)
+        bounds.append((position, stop))
+        position = stop
+    return bounds
+
+
+def _collapsed(text: str) -> tuple[str, list[int]]:
+    """Whitespace runs folded to one space, with each kept char's source index."""
+
+    chars: list[str] = []
+    index: list[int] = []
+    previous_space = False
+    for i, char in enumerate(text):
+        if char.isspace():
+            if previous_space:
+                continue
+            chars.append(" ")
+            index.append(i)
+            previous_space = True
+        else:
+            chars.append(char)
+            index.append(i)
+            previous_space = False
+    return "".join(chars), index
+
+
+def locate_excerpt(quote_text: str, excerpt: str) -> tuple[int, int] | None:
+    """Where a verbatim excerpt sits in the quote, relative to the quote, or None.
+
+    Exact first; then with whitespace runs folded on both sides, because the
+    model re-flows line breaks.  Nothing looser: an excerpt that is not in the
+    quote is not support, however close it looks.
+    """
+
+    candidate = excerpt.strip().strip("\"'“”‘’").strip()
+    # A leading or trailing ellipsis marks an elided edge, not text.
+    candidate = re.sub(r"^(?:\.\.\.|…)\s*|\s*(?:\.\.\.|…)$", "", candidate).strip()
+    if not candidate:
+        return None
+    at = quote_text.find(candidate)
+    if at >= 0:
+        return at, at + len(candidate)
+    folded, index = _collapsed(quote_text)
+    needle, _ = _collapsed(candidate)
+    at = folded.find(needle)
+    if at < 0:
+        return None
+    return index[at], index[at + len(needle) - 1] + 1
+
+
+def expand_to_sentences(quote_text: str, start: int, end: int) -> tuple[int, int]:
+    """Widen ``[start, end)`` to whole sentences, never past the quote."""
+
+    left = 0
+    for match in _SENTENCE_END_RE.finditer(quote_text, 0, start):
+        if match.end() <= start:
+            left = match.end()
+    right = len(quote_text)
+    match = _SENTENCE_END_RE.search(quote_text, max(end - 1, start))
+    if match is not None:
+        right = match.end()
+    # Trailing whitespace is not part of the citation.
+    while right > end and quote_text[right - 1].isspace():
+        right -= 1
+    return left, max(right, end)
+
+
+# -- periods anchored to the document date -----------------------------------
+
+# A period is absolute when it names a year: 2026, FY26, Q2'26, 2Q26, 1H26,
+# 26年.  Anything else ("current", "near-term", "upcoming earnings", "Q3",
+# "当前") only means something relative to when the document was written.
+_ABSOLUTE_PERIOD_RE = re.compile(
+    r"(?:19|20)\d{2}|\bFY\s?'?\d{2}\b|\b[1-4]Q\s?'?\d{2}\b|\bQ[1-4]\s?'?\d{2}\b|"
+    r"\b[12]H\s?'?\d{2}\b|\bH[12]\s?'?\d{2}\b|\d{2}\s?年|\bCY\s?'?\d{2}\b",
+    re.IGNORECASE,
+)
+
+
+def period_is_absolute(period: str) -> bool:
+    return _ABSOLUTE_PERIOD_RE.search(period or "") is not None
+
+
+def normalize_period(period: str, *, document_date: str | None,
+                     date_basis: str | None = None, stale: bool = False) -> str:
+    """The period, anchored to the document's date where it is relative.
+
+    Deterministic and idempotent.  A relative period gets "(as of <date>)";
+    a period from a stale document gets "(historical: document dated <date>)"
+    so a June morning note read in September is never read as the present.
+    A relative period with no date to anchor it is refused: "current" with no
+    date is a claim about no time at all.
+    """
+
+    period = period.strip()
+    if document_date and document_date in period:
+        return period
+    absolute = period_is_absolute(period)
+    if not absolute and not document_date:
+        raise ResearchVerificationError(
+            "relative period without a document date to anchor it: " + period[:80])
+    if not document_date:
+        return period
+    if not absolute:
+        label = "as of retrieval" if date_basis == "retrieved" else "as of"
+        suffix = f" ({label} {document_date}{'; historical' if stale else ''})"
+    elif stale:
+        suffix = f" (historical: document dated {document_date})"
+    else:
+        return period
+    return period[: max(1, 200 - len(suffix))].rstrip() + suffix
+
+
 def unwrap_model_json(text: str) -> str:
     """Strip one surrounding markdown code fence; the persisted text is untouched.
 
@@ -563,8 +742,27 @@ def unwrap_model_json(text: str) -> str:
     return text
 
 
+def _date_instruction(context: Mapping[str, Any]) -> str:
+    """What the model is told about when the document was written."""
+
+    date = context.get("document_date")
+    if not date:
+        return ("The document's date is unknown. Every period must name an absolute year, "
+                "quarter or fiscal period that the quoted text itself states. ")
+    basis = "retrieved on" if context.get("document_date_basis") == "retrieved" else "dated"
+    text = (f"The document is {basis} {date}. Write every period as an absolute date, year, "
+            "quarter or fiscal period resolved against that date (for example 'Q2 FY2026', "
+            f"'2026', 'as of {date}'); never a relative term such as 'current', 'this quarter', "
+            "'near-term', 'upcoming earnings', 'recent', '当前' or '近期'. ")
+    if context.get("document_stale"):
+        text += (f"This document was already {context.get('document_age_days')} days old when it "
+                 "was queued: it is historical. Report what it said as of its date, never as the "
+                 "present state of affairs. ")
+    return text
+
+
 def build_prompt(context: Mapping[str, Any]) -> str:
-    subject = context.get("company_ticker") or context["company_ref"]
+    subject = context.get("company_label") or context.get("company_ticker") or context["company_ref"]
     focus = context.get("mission_focus") or {}
     questions = focus.get("research_questions") or []
     focus_text = ""
@@ -574,8 +772,12 @@ def build_prompt(context: Mapping[str, Any]) -> str:
     if focus.get("objective"):
         focus_text += "Research objective: " + str(focus["objective"]) + ". "
     return (
-        f"The subject company is {subject}. Extract source-grounded qualitative findings about this company, its "
-        "industry, its customers or its named competitors. If this window is about a different "
+        f"The subject company is {subject}. Extract source-grounded qualitative findings about this company. "
+        "A finding about its industry, a customer, a supplier or a competitor is admissible only when the "
+        "quoted text itself states how it bears on the subject company, and the statement must name the "
+        "subject company and say what that relationship is; a fact about another company or the market "
+        "that the text does not connect to the subject company is not a finding about it -- leave it out. "
+        "If this window is about a different "
         "company, or contains only generic disclaimers or publishing boilerplate, return "
         "empty suggestions. Company-specific accounting policies, revenue recognition, "
         "contract terms, business economics, competitive advantages, customer behavior "
@@ -586,6 +788,10 @@ def build_prompt(context: Mapping[str, Any]) -> str:
         "Return raw strict JSON matching OUTPUT_SCHEMA, with no markdown fence and no prose. "
         "Cite only supplied quote_id values, at most five suggestions in total; several suggestions "
         "may cite the same quote_id. Do not calculate hashes or invent quotations. "
+        "For each suggestion, excerpt must be copied verbatim, character for character, from the "
+        "raw_text of the quote it cites: the one to three sentences that support the finding and, "
+        "where the quote names it, the subject company. Never paraphrase or join text from two quotes. "
+        + _date_instruction(context) +
         "Each suggestion is ONE source-supported finding in ONE or TWO sentences, under 300 characters, with "
         "attribution, preserving negation, uncertainty and the subject. Never write a number, "
         "percentage or currency amount in normalized_statement, only direction and qualitative "
@@ -766,9 +972,11 @@ def parse_suggestions(text: str, context: Mapping[str, Any], *, tolerant: bool =
     dropped: list[dict] = []
     for index, item in enumerate(wire["suggestions"]):
         try:
-            if not isinstance(item, dict) or set(item) != set(fields):
+            if (not isinstance(item, dict) or not LEGACY_SUGGESTION_FIELDS <= set(item)
+                    or not set(item) <= set(fields)):
                 raise ResearchVerificationError("suggestion fields are invalid")
-            for key, rule in fields.items():
+            for key in item:
+                rule = fields[key]
                 if not isinstance(item[key], str) or not item[key].strip() or len(item[key]) > rule["maxLength"]:
                     raise ResearchVerificationError("suggestion field exceeds bound")
             if item["quote_id"] not in quotes:
@@ -777,6 +985,29 @@ def parse_suggestions(text: str, context: Mapping[str, Any], *, tolerant: bool =
                 raise ResearchVerificationError("numeric statements require a separate numeric authority")
             if statement_is_boilerplate(item["normalized_statement"]):
                 raise ResearchVerificationError("boilerplate or disclaimer text is not a research statement")
+            item = dict(item)
+            # 2026-09-24: a period is absolute or anchored to the document's
+            # date; "current" with no date is refused.  Only contexts built
+            # under the current contract carry a date; earlier ones are read
+            # exactly as they were.
+            if "document_date" in context:
+                item["period"] = normalize_period(
+                    item["period"], document_date=context.get("document_date"),
+                    date_basis=context.get("document_date_basis"),
+                    stale=bool(context.get("document_stale")))
+            if "excerpt" in item and len(item["excerpt"].strip()) >= MIN_EXCERPT_CHARS:
+                # An excerpt too short to locate a sentence narrows nothing and
+                # the whole quote stays the citation; a real one must be found.
+                quote = quotes[item["quote_id"]]
+                raw = quote.get("raw_text")
+                located = None if not isinstance(raw, str) else locate_excerpt(raw, item["excerpt"])
+                if located is None and isinstance(raw, str):
+                    raise ResearchVerificationError(
+                        "excerpt is not verbatim in the quote it cites")
+                if located is not None:
+                    left, right = expand_to_sentences(raw, *located)
+                    item["citation_span"] = [quote["source_start"] + left,
+                                             quote["source_start"] + right]
         except ResearchVerificationError as exc:
             if not tolerant:
                 raise
@@ -1241,8 +1472,7 @@ class DocumentExtractionService:
             raise ResearchVerificationError("source offset must be a valid bounded window")
         end = min(offset + window_chars, len(text))
         quotes = []
-        for start in range(offset, end, quote_chars):
-            stop = min(start + quote_chars, end)
+        for start, stop in sentence_quote_bounds(text, offset, end, quote_chars):
             quote = text[start:stop]
             quotes.append({"quote_id": f"quote:{start}:{stop}:{_hash_text(quote)[:16]}",
                            "source_start": start, "source_end": stop, "source_sha256": _hash_text(quote),
@@ -1251,6 +1481,7 @@ class DocumentExtractionService:
         # Read from the mission universe the grant already bound.
         mission = writer.coverage_mission.mission(grant["mission_version_ref"])
         member = next((m for m in mission["universe"] if m["company_ref"] == review["company_ref"]), {})
+        dating = self._document_dating(manifest, review, reading_config)
         base = {
             "schema_version": "0.1", "review_id": review_id, "review_hash": expected_review_hash,
             "created_at": review["created_at"], "mission_version_ref": grant["mission_version_ref"],
@@ -1266,11 +1497,83 @@ class DocumentExtractionService:
             "offset": offset, "end": end, "total_chars": len(text),
             "next_offset": end if end < len(text) else None,
             "quotes": quotes, "untrusted_source": True, "coverage": "visible_window_only",
+            # 2026-09-24: who the subject is called, and when the document was
+            # written.  Both are stable facts about the review and the
+            # acquisition, so a window's key does not move from tick to tick.
+            "company_label": self._company_label(mission, member),
+            **dating,
             **web_fields,
         }
         if reading_config is not None and "reading_limits" in reading_config:
             base["reading_limits"] = limits
         return base
+
+    def _company_label(self, mission, member):
+        """How the model is told who the subject is: its names, not a ref."""
+
+        from .claim_subject import writer_feed_plans
+        from .document_subject import subject_label
+        from .mission_company_names import mission_name_table
+
+        cache = getattr(self, "_label_cache", None)
+        if cache is None:
+            cache = self._label_cache = {}
+        ticker = member.get("ticker")
+        key = (mission.get("id"), ticker)
+        if key not in cache:
+            table: dict[str, tuple[str, ...]] = {}
+            for plan in writer_feed_plans(self.writer) or [None]:
+                for name_key, names in mission_name_table(mission["universe"], plan).items():
+                    merged = dict.fromkeys((*table.get(name_key, ()), *names))
+                    table[name_key] = tuple(merged)
+            cache[key] = subject_label(ticker, table) if ticker else None
+        return cache[key]
+
+    def _document_dating(self, manifest, review, reading_config):
+        """When the document was written, how that is known, and whether it is stale.
+
+        Published date from the acquisition manifest (a note's ``doc_date``,
+        a Guidepoint excerpt's ``excerpt_date``) or the provenance row; the
+        retrieval date when nothing says when it was written.  Staleness is
+        measured against the review's own creation, not the wall clock, so the
+        context -- and the paid WorkOrder keyed by it -- is the same on every
+        tick.
+        """
+
+        def day(value):
+            if not isinstance(value, str) or len(value) < 10:
+                return None
+            try:
+                return datetime.fromisoformat(value[:10]).date()
+            except ValueError:
+                return None
+
+        published = None
+        for key in ("doc_date", "excerpt_date", "published_at", "as_of"):
+            published = day((manifest or {}).get(key))
+            if published is not None:
+                break
+        if published is None:
+            try:
+                row = self.writer.store.connection.execute(
+                    "SELECT published_at FROM document_provenance_records WHERE document_ref=?",
+                    (review["document_ref"],),
+                ).fetchone()
+            except sqlite3.Error:
+                row = None
+            if row is not None:
+                published = day(row["published_at"])
+        stale_days = int((reading_config or {}).get("stale_document_days") or STALE_DOCUMENT_DAYS)
+        queued = day(review.get("created_at"))
+        if published is not None:
+            age = None if queued is None else (queued - published).days
+            return {"document_date": published.isoformat(), "document_date_basis": "published",
+                    "document_age_days": age,
+                    "document_stale": age is not None and age > stale_days}
+        retrieved = day((manifest or {}).get("created_at"))
+        return {"document_date": None if retrieved is None else retrieved.isoformat(),
+                "document_date_basis": None if retrieved is None else "retrieved",
+                "document_age_days": None, "document_stale": False}
 
     def context(self, review_id, expected_review_hash, offset, actor_ref,
                 require_open=True):
@@ -1446,10 +1749,21 @@ class DocumentExtractionService:
         quotes = {q["quote_id"]: q for q in context["quotes"]}
         suggestions = []
         for item in wire["suggestions"]:
+            citation = quotes[item["quote_id"]]
+            span = item.get("citation_span")
+            if span is not None:
+                # The sentences the verbatim excerpt sits in, cut out of the
+                # same quote: the citation binds what supports the finding,
+                # not the 1,200 characters around it.
+                left, right = span[0] - citation["source_start"], span[1] - citation["source_start"]
+                raw = citation["raw_text"][left:right]
+                citation = {"quote_id": citation["quote_id"], "source_start": span[0],
+                            "source_end": span[1], "source_sha256": _hash_text(raw),
+                            "raw_text": raw}
             base = {**item, "context_ref": context["id"], "context_hash": context["content_hash"],
                     "document_ref": context["document_ref"], "source_manifest_ref": context["source_manifest_ref"],
                     "source_manifest_hash": context["source_manifest_hash"], "source_content_hash": context["source_content_hash"],
-                    "company_ref": context["company_ref"], "citation": quotes[item["quote_id"]],
+                    "company_ref": context["company_ref"], "citation": citation,
                     "citation_status": "pending_human_citation_admission", "claim_kind": "qualitative",
                     "value": None, "unit": None, "scale": None, "producer_ref": PRODUCER,
                     "work_order_ref": work.id, "result_ref": result.id,
@@ -2142,6 +2456,7 @@ class DocumentExtractionService:
         # exactly the one subject it always did, so every key below is
         # byte-identical for it and a replay is still a duplicate.
         resolve_subjects = self.statement_subjects(context, spec_ref)
+        span_names = self.admission_subject_check(context, spec_ref)
         results = []
         for suggestion in drafted["suggestions"]:
             quote = suggestion["citation"]
@@ -2150,6 +2465,7 @@ class DocumentExtractionService:
             for subject_ref in plan["subjects"]:
                 entry = {"suggestion_ref": suggestion["id"], "source_start": start, "source_end": end,
                          "subject_ref": subject_ref, "subject_basis": plan["basis"]}
+                held_reason = span_names(subject_ref, quote.get("raw_text"))
                 # Only a subject other than the review's own company widens the
                 # identity; the primary one keeps the key it has always had.
                 extra_key = {} if subject_ref == context["company_ref"] else {"subject": subject_ref}
@@ -2192,6 +2508,15 @@ class DocumentExtractionService:
                         candidate_claim_ref=f"candidate-claim:{source_kind}:" + pair_key,
                         source_kind=source_kind, source_envelope_ref=source_envelope_ref,
                         source_manifest=source_manifest, spool=staging_spool)
+                    if held_reason is not None:
+                        # Staged, not committed: the candidate waits in the
+                        # human review queue (``candidate_status`` says
+                        # "staged") instead of entering the Ledger under the
+                        # mission's policy, and instead of being thrown away.
+                        entry.update({"status": "held", "reason": held_reason,
+                                      "candidate_claim_ref": staged["claim"]["id"]})
+                        results.append(entry)
+                        continue
                     bundle = reviewer.candidate_authority_bundle(staged["claim"]["id"])
                     promotion = self.writer.store.commit_policy_candidate(**bundle, idempotency_key="policy-ledger:" + key)
                     entry.update({"status": "duplicate" if promotion.get("status") == "duplicate" else "admitted",
@@ -2203,8 +2528,90 @@ class DocumentExtractionService:
                     entry.update({"status": "rejected", "reason": f"{type(exc).__name__}: {exc}"})
                 results.append(entry)
         status = "admitted" if any(r["status"] in ("admitted", "duplicate") for r in results) else (
-            "rejected" if results else "nothing_to_admit")
+            "held" if any(r["status"] == "held" for r in results) else (
+                "rejected" if results else "nothing_to_admit"))
         return {"status": status, "admitted": results, "suggestion_count": len(results)}
+
+    def admission_subject_check(self, context, spec_ref):
+        """A checker: why a span may not be admitted for a subject, or None.
+
+        2026-09-24.  The extraction prompt used to invite findings about "its
+        industry, its customers or its named competitors" and filed every one
+        under the window's company.  Before a mission-drafted statement enters
+        the Ledger under the document qualitative rule, the exact span it cites
+        must name the subject (a name, the ticker or a known alias: the
+        mission universe, the packaged ``COMPANY_NAMES``, the feed plans'
+        ``names`` and the discovery plans' ``search_terms``).  The subject's own
+        document -- a filing attributed by accession, a transcript or note whose
+        title or head names it -- is exempt: there "we" is the subject.  A
+        statement about an industry subject is not checked; it is about no
+        company.  The answer is a hold, never a drop.
+        """
+
+        from .claim_subject import (
+            document_is_subjects, mission_subject_needles, writer_feed_plans,
+        )
+        from .document_figure_grade import attribution_for
+        from .research_auto_commit import document_qualitative_subject_rejection
+
+        mission = self.writer.coverage_mission.mission(context["mission_version_ref"])
+        plans = list(writer_feed_plans(self.writer))
+        for name in ("_source_discovery", "_web_source_discovery", "_sec_filings_source_discovery"):
+            coordinator = getattr(self.writer, name, None)
+            plan = getattr(coordinator, "plan", None)
+            if isinstance(plan, Mapping):
+                plans.append(plan)
+        table = mission_subject_needles(mission["universe"], plans=plans)
+        own_cache: dict[str, bool] = {}
+
+        def document_is_own(needles):
+            key = "|".join(needles)
+            if key not in own_cache:
+                title = None
+                try:
+                    row = self.writer.store.connection.execute(
+                        "SELECT title FROM document_provenance_records WHERE document_ref=?",
+                        (context["document_ref"],),
+                    ).fetchone()
+                    title = None if row is None else row["title"]
+                except sqlite3.Error:
+                    title = None
+                head = None
+                if not document_is_subjects(title=title, needles=needles,
+                                            issuer_document=attribution_for(spec_ref) is not None):
+                    try:
+                        head = self._document_head(context)
+                    except Exception:  # noqa: BLE001 - unreadable head: not the subject's own
+                        head = None
+                own_cache[key] = document_is_subjects(
+                    title=title, text=head, needles=needles,
+                    issuer_document=attribution_for(spec_ref) is not None)
+            return own_cache[key]
+
+        def check(subject_ref, span):
+            if str(subject_ref).startswith("industry:"):
+                return None
+            needles = table.get(subject_ref, [])
+            return document_qualitative_subject_rejection(
+                subject_ref=subject_ref, cited_span=span, needles=needles,
+                document_is_own=document_is_own(needles))
+
+        return check
+
+    def _document_head(self, context):
+        """The first characters of the whole document, for the title check."""
+
+        from .claim_subject import HEAD_CHARS
+
+        if context.get("offset") == 0 and context.get("quotes"):
+            return "".join(q["raw_text"] for q in context["quotes"])[:HEAD_CHARS]
+        cache = getattr(self, "_head_cache", None)
+        if cache is None:
+            cache = self._head_cache = {}
+        key = context.get("source_content_hash")
+        if key not in cache:
+            cache[key] = self._document_text(context)[:HEAD_CHARS]
+        return cache[key]
 
     def stage(self, *, review_id, expected_review_hash, offset, expected_context_hash,
               suggestion_ref, suggestion_hash, request_id, normalized_statement, metric_or_aspect,

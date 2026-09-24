@@ -22,7 +22,8 @@
           "normalized_statement",
           "metric_or_aspect",
           "period",
-          "basis"
+          "basis",
+          "excerpt"
         ],
         "properties": {
           "quote_id": {
@@ -49,6 +50,11 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 200
+          },
+          "excerpt": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 600
           }
         }
       }
