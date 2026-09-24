@@ -31,6 +31,16 @@ METRIC_COVERAGE_STATUSES = frozenset({
     "observed", "not_found_in_reviewed_sources", "not_comparable", "not_applicable",
 })
 POSITION_STANCES = frozenset({"supports", "against", "qualifies"})
+# The one non-human publisher: the weekly brief's deterministic evidence
+# refresh.  It can only reach the register methods in-process (the writer
+# wire allowlists do not carry ``refresh_authority``) and every version it
+# writes records the exact plan and governance policy that authorized it.
+EVIDENCE_REFRESH_ACTOR = "system:weekly-brief-evidence-refresh"
+_REFRESH_AUTHORITY_FIELDS = frozenset({
+    "rule_ref", "plan_ref", "plan_hash", "policy_version_ref",
+    "policy_version_hash", "cycle_ref", "scheduled_for", "claim_window_days",
+    "template_evidence_pack_version_ref", "template_evidence_pack_version_hash",
+})
 REQUIRED_INDUSTRY_BRIEF_SECTIONS = (
     "boundary and universe",
     "driver scoreboard",
@@ -75,6 +85,30 @@ def _human(value: Any, name: str) -> str:
     if not value.startswith("human:") or value == "human:":
         raise IndustryResearchValidationError(f"{name} must use the human: namespace")
     return value
+
+
+def _publisher(
+    value: Any, name: str, refresh_authority: Mapping[str, Any] | None,
+) -> tuple[str, dict[str, Any] | None]:
+    """A human publishes freely; the refresh lane only with its authority."""
+
+    if refresh_authority is None:
+        return _human(value, name), None
+    if _text(value, name) != EVIDENCE_REFRESH_ACTOR:
+        raise IndustryResearchValidationError(
+            f"{name} must be {EVIDENCE_REFRESH_ACTOR} for a refreshed version"
+        )
+    authority = _closed(refresh_authority, set(_REFRESH_AUTHORITY_FIELDS), "refresh_authority")
+    for field in sorted(_REFRESH_AUTHORITY_FIELDS - {"claim_window_days"}):
+        authority[field] = _text(authority[field], f"refresh_authority.{field}")
+    for field in ("plan_hash", "policy_version_hash", "template_evidence_pack_version_hash"):
+        _hash(authority[field], f"refresh_authority.{field}")
+    window = authority["claim_window_days"]
+    if type(window) is not int or window < 1:
+        raise IndustryResearchValidationError(
+            "refresh_authority.claim_window_days must be a positive integer"
+        )
+    return EVIDENCE_REFRESH_ACTOR, authority
 
 
 def _hash(value: Any, name: str) -> str:
@@ -437,7 +471,9 @@ class IndustryResearchAuthority:
         version_id: str,
         prior_version_ref: str | None,
         idempotency_key: str,
+        refresh_authority: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
+        publisher, authority = _publisher(actor_ref, "actor_ref", refresh_authority)
         request = {
             "evidence_pack_ref": _text(evidence_pack_ref, "evidence_pack_ref"),
             "industry_ref": _text(industry_ref, "industry_ref"),
@@ -451,10 +487,12 @@ class IndustryResearchAuthority:
             "debates": _debates(debates),
             "source_plan": _source_plan(source_plan),
             "report_contract": _report_contract(report_contract),
-            "actor_ref": _human(actor_ref, "actor_ref"),
+            "actor_ref": publisher,
             "version_id": _text(version_id, "version_id"),
             "prior_version_ref": None if prior_version_ref is None else _text(prior_version_ref, "prior_version_ref"),
         }
+        if authority is not None:
+            request["refresh_authority"] = authority
         idempotency_key = _text(idempotency_key, "idempotency_key")
         request_hash = self._request_hash("register_evidence_pack", request)
         with self._transaction() as cur:
@@ -527,6 +565,7 @@ class IndustryResearchAuthority:
                 "source_plan": request["source_plan"],
                 "report_contract": request["report_contract"],
                 "actor_ref": request["actor_ref"],
+                **({} if authority is None else {"refresh_authority": authority}),
             })
             cur.execute(
                 "INSERT INTO industry_evidence_pack_versions"
@@ -568,7 +607,9 @@ class IndustryResearchAuthority:
         version_id: str,
         prior_version_ref: str | None,
         idempotency_key: str,
+        refresh_authority: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
+        publisher, authority = _publisher(actor_ref, "actor_ref", refresh_authority)
         request = {
             "overlay_ref": _text(overlay_ref, "overlay_ref"),
             "company_ref": _text(company_ref, "company_ref"),
@@ -583,10 +624,12 @@ class IndustryResearchAuthority:
             "open_questions": _strings(open_questions, "open_questions", nonempty=True),
             "falsifier_refs": _strings(falsifier_refs, "falsifier_refs", nonempty=True),
             "thesis_candidate_refs": _strings(thesis_candidate_refs, "thesis_candidate_refs"),
-            "actor_ref": _human(actor_ref, "actor_ref"),
+            "actor_ref": publisher,
             "version_id": _text(version_id, "version_id"),
             "prior_version_ref": None if prior_version_ref is None else _text(prior_version_ref, "prior_version_ref"),
         }
+        if authority is not None:
+            request["refresh_authority"] = authority
         idempotency_key = _text(idempotency_key, "idempotency_key")
         request_hash = self._request_hash("register_company_overlay", request)
         with self._transaction() as cur:
@@ -745,6 +788,7 @@ class IndustryResearchAuthority:
                 "falsifier_refs": request["falsifier_refs"],
                 "thesis_candidate_refs": request["thesis_candidate_refs"],
                 "actor_ref": request["actor_ref"],
+                **({} if authority is None else {"refresh_authority": authority}),
             })
             cur.execute(
                 "INSERT INTO company_overlay_versions"

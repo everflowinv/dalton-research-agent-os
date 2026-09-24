@@ -17,6 +17,8 @@ from typing import Any, Mapping
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .agenda import AgendaStore
+from .industry_evidence_refresh import EvidenceRefreshError, refresh_evidence_pack
+from .industry_research import IndustryResearchAuthority, IndustryResearchError
 from .store import DaltonStore, content_hash
 from .weekly_brief import (
     WeeklyBriefAuthority,
@@ -26,6 +28,8 @@ from .writer_client import WriterClient
 
 
 SCHEMA_VERSION = "0.1"
+REFRESH_SCHEMA_VERSION = "0.2"
+MAX_CLAIM_WINDOW_DAYS = 730
 WEEKLY_BRIEF_AUTO_PUBLISH_RULE_REF = (
     "weekly-brief-auto-publish:scheduled-exact-plan:v1"
 )
@@ -69,7 +73,66 @@ def _utc(value: datetime) -> str:
 
 
 @dataclass(frozen=True, slots=True)
+class EvidenceRefreshSpec:
+    """Plan 0.2: rebuild the evidence pack from the Ledger before each issue."""
+
+    evidence_pack_ref: str
+    company_overlay_refs: tuple[str, ...]
+    claim_window_days: int
+
+    @classmethod
+    def from_mapping(cls, raw: Any) -> "EvidenceRefreshSpec":
+        if not isinstance(raw, Mapping) or set(raw) != {
+            "evidence_pack_ref", "company_overlay_refs", "claim_window_days",
+        }:
+            raise WeeklyBriefCoordinatorError(
+                "evidence_refresh has an invalid closed shape"
+            )
+        overlays_raw = raw["company_overlay_refs"]
+        if not isinstance(overlays_raw, list) or not overlays_raw:
+            raise WeeklyBriefCoordinatorError(
+                "evidence_refresh.company_overlay_refs must be a non-empty array"
+            )
+        overlays = tuple(
+            _text(value, "evidence_refresh.company_overlay_refs[]")
+            for value in overlays_raw
+        )
+        if len(overlays) != len(set(overlays)):
+            raise WeeklyBriefCoordinatorError(
+                "evidence_refresh.company_overlay_refs must be unique"
+            )
+        window = raw["claim_window_days"]
+        if isinstance(window, bool) or not isinstance(window, int) or not (
+            1 <= window <= MAX_CLAIM_WINDOW_DAYS
+        ):
+            raise WeeklyBriefCoordinatorError(
+                "evidence_refresh.claim_window_days must be an integer from 1 to "
+                f"{MAX_CLAIM_WINDOW_DAYS}"
+            )
+        return cls(
+            evidence_pack_ref=_text(
+                raw["evidence_pack_ref"], "evidence_refresh.evidence_pack_ref"
+            ),
+            company_overlay_refs=overlays, claim_window_days=window,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "evidence_pack_ref": self.evidence_pack_ref,
+            "company_overlay_refs": list(self.company_overlay_refs),
+            "claim_window_days": self.claim_window_days,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class WeeklyBriefSchedulePlan:
+    """A 0.1 plan pins one exact pack version; a 0.2 plan refreshes it.
+
+    The plan hash is what governance authorizes, so a 0.2 plan keeps one hash
+    across weeks while the pack version it resolves to moves with the Ledger;
+    each cycle admission still freezes the exact version it published.
+    """
+
     plan_ref: str
     brief_ref: str
     timezone: str
@@ -77,20 +140,29 @@ class WeeklyBriefSchedulePlan:
     hour: int
     minute: int
     effective_from: str
-    evidence_pack_version_id: str
+    evidence_pack_version_id: str | None
     company_overlay_version_ids: tuple[str, ...]
     company_thesis_refs: Mapping[str, str]
     destination_ref: str
+    evidence_refresh: EvidenceRefreshSpec | None = None
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> "WeeklyBriefSchedulePlan":
-        expected = {
+        common = {
             "schema_version", "plan_ref", "brief_ref", "timezone", "weekday",
-            "hour", "minute", "effective_from", "evidence_pack_version_id",
-            "company_overlay_version_ids", "company_thesis_refs",
+            "hour", "minute", "effective_from", "company_thesis_refs",
             "destination_ref",
         }
-        if set(raw) != expected or raw.get("schema_version") != SCHEMA_VERSION:
+        version = raw.get("schema_version")
+        if version == SCHEMA_VERSION:
+            expected = common | {
+                "evidence_pack_version_id", "company_overlay_version_ids",
+            }
+        elif version == REFRESH_SCHEMA_VERSION:
+            expected = common | {"evidence_refresh"}
+        else:
+            expected = None
+        if expected is None or set(raw) != expected:
             raise WeeklyBriefCoordinatorError(
                 "weekly brief schedule plan has an invalid closed shape"
             )
@@ -118,17 +190,26 @@ class WeeklyBriefSchedulePlan:
         except ZoneInfoNotFoundError as exc:
             raise WeeklyBriefCoordinatorError("timezone is not an IANA zone") from exc
         effective_from = _utc(_instant(raw["effective_from"], "effective_from"))
-        overlays_raw = raw["company_overlay_version_ids"]
-        if not isinstance(overlays_raw, list) or not overlays_raw:
-            raise WeeklyBriefCoordinatorError(
-                "company_overlay_version_ids must be a non-empty array"
+        refresh = None
+        pack_version_id = None
+        overlays: tuple[str, ...] = ()
+        if version == REFRESH_SCHEMA_VERSION:
+            refresh = EvidenceRefreshSpec.from_mapping(raw["evidence_refresh"])
+        else:
+            overlays_raw = raw["company_overlay_version_ids"]
+            if not isinstance(overlays_raw, list) or not overlays_raw:
+                raise WeeklyBriefCoordinatorError(
+                    "company_overlay_version_ids must be a non-empty array"
+                )
+            overlays = tuple(
+                _text(value, "company_overlay_version_ids[]") for value in overlays_raw
             )
-        overlays = tuple(
-            _text(value, "company_overlay_version_ids[]") for value in overlays_raw
-        )
-        if len(overlays) != len(set(overlays)):
-            raise WeeklyBriefCoordinatorError(
-                "company_overlay_version_ids must be unique"
+            if len(overlays) != len(set(overlays)):
+                raise WeeklyBriefCoordinatorError(
+                    "company_overlay_version_ids must be unique"
+                )
+            pack_version_id = _text(
+                raw["evidence_pack_version_id"], "evidence_pack_version_id"
             )
         theses_raw = raw["company_thesis_refs"]
         if not isinstance(theses_raw, Mapping):
@@ -144,26 +225,34 @@ class WeeklyBriefSchedulePlan:
             brief_ref=_text(raw["brief_ref"], "brief_ref"),
             timezone=timezone_name, weekday=weekday, hour=hour, minute=minute,
             effective_from=effective_from,
-            evidence_pack_version_id=_text(
-                raw["evidence_pack_version_id"], "evidence_pack_version_id"
-            ),
+            evidence_pack_version_id=pack_version_id,
             company_overlay_version_ids=overlays,
             company_thesis_refs=MappingProxyType(theses),
             destination_ref=_text(raw["destination_ref"], "destination_ref"),
+            evidence_refresh=refresh,
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        # A 0.1 plan must serialize exactly as before: its hash is what the
+        # active governance policy and the research constitution bind.
+        wire: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
             "plan_ref": self.plan_ref, "brief_ref": self.brief_ref,
             "timezone": self.timezone, "weekday": self.weekday,
             "hour": self.hour, "minute": self.minute,
             "effective_from": self.effective_from,
-            "evidence_pack_version_id": self.evidence_pack_version_id,
-            "company_overlay_version_ids": list(self.company_overlay_version_ids),
-            "company_thesis_refs": dict(self.company_thesis_refs),
-            "destination_ref": self.destination_ref,
         }
+        if self.evidence_refresh is None:
+            wire["evidence_pack_version_id"] = self.evidence_pack_version_id
+            wire["company_overlay_version_ids"] = list(
+                self.company_overlay_version_ids
+            )
+        else:
+            wire["schema_version"] = REFRESH_SCHEMA_VERSION
+            wire["evidence_refresh"] = self.evidence_refresh.to_dict()
+        wire["company_thesis_refs"] = dict(self.company_thesis_refs)
+        wire["destination_ref"] = self.destination_ref
+        return wire
 
     @property
     def content_hash(self) -> str:
@@ -295,6 +384,87 @@ def _validate_policy(
         )
 
 
+def _resolve_evidence(
+    weekly: WeeklyBriefAuthority,
+    schedule: WeeklyBriefSchedulePlan,
+    *,
+    active: Mapping[str, Any],
+    cycle_id: str,
+    scheduled_for: str,
+) -> tuple[str, list[str], dict[str, Any] | None]:
+    """The exact pack and overlay versions this not-yet-admitted cycle binds.
+
+    A 0.1 plan names them.  A 0.2 plan runs the deterministic Ledger refresh
+    first; if the Ledger cannot support a valid pack the cycle falls back to
+    the current pack pointer and its bound overlays, and says so in the cycle
+    result rather than silently re-sending stale evidence as if it were new.
+    """
+
+    refresh_spec = schedule.evidence_refresh
+    if refresh_spec is None:
+        return (
+            str(schedule.evidence_pack_version_id),
+            list(schedule.company_overlay_version_ids), None,
+        )
+    industry = weekly.industry_research
+    try:
+        result = refresh_evidence_pack(
+            industry,
+            evidence_pack_ref=refresh_spec.evidence_pack_ref,
+            company_overlay_refs=refresh_spec.company_overlay_refs,
+            claim_window_days=refresh_spec.claim_window_days,
+            scheduled_for=scheduled_for,
+            authority={
+                "rule_ref": WEEKLY_BRIEF_AUTO_PUBLISH_RULE_REF,
+                "plan_ref": schedule.plan_ref,
+                "plan_hash": schedule.content_hash,
+                "policy_version_ref": active["policy_version_id"],
+                "policy_version_hash": active["content_hash"],
+                "cycle_ref": cycle_id, "scheduled_for": scheduled_for,
+            },
+        )
+    except (EvidenceRefreshError, IndustryResearchError) as exc:
+        return _fallback_evidence(industry, refresh_spec, str(exc))
+    return (
+        result["evidence_pack_version_ref"],
+        list(result["company_overlay_version_refs"]), result,
+    )
+
+
+def _fallback_evidence(
+    industry: IndustryResearchAuthority, spec: "EvidenceRefreshSpec", reason: str,
+) -> tuple[str, list[str], dict[str, Any]]:
+    connection = industry.connection
+    pointer = connection.execute(
+        "SELECT version_id FROM industry_evidence_pack_pointer WHERE evidence_pack_ref=?",
+        (spec.evidence_pack_ref,),
+    ).fetchone()
+    if pointer is None:
+        raise WeeklyBriefCoordinatorPrecondition(
+            f"evidence refresh failed and {spec.evidence_pack_ref} has no version: {reason}"
+        )
+    pack = industry.evidence_pack(pointer["version_id"])
+    overlays = []
+    for overlay_ref in spec.company_overlay_refs:
+        row = connection.execute(
+            "SELECT version_id FROM company_overlay_versions WHERE overlay_ref=? "
+            "AND evidence_pack_version_ref=? AND evidence_pack_version_hash=? "
+            "ORDER BY version_number DESC LIMIT 1",
+            (overlay_ref, pack["id"], pack["content_hash"]),
+        ).fetchone()
+        if row is not None:
+            overlays.append(row["version_id"])
+    if not overlays:
+        raise WeeklyBriefCoordinatorPrecondition(
+            f"evidence refresh failed and no overlay is bound to {pack['id']}: {reason}"
+        )
+    return pack["id"], overlays, {
+        "status": "fallback", "reason": reason,
+        "evidence_pack_version_ref": pack["id"],
+        "company_overlay_version_refs": overlays,
+    }
+
+
 def run_weekly_brief_cycle(
     store: DaltonStore,
     weekly: WeeklyBriefAuthority,
@@ -326,10 +496,27 @@ def run_weekly_brief_cycle(
     digest = content_hash(identity)[:32]
     cycle_id = f"weekly-brief-cycle:{digest}"
     issue_version_ref = f"weekly-brief-version:{digest}"
+    refresh: dict[str, Any] | None = None
     try:
         admission = weekly.cycle_admission(cycle_id)
         admission_status = "duplicate"
     except WeeklyBriefNotFound:
+        # max_issues_per_week is per brief, not per plan: when a new plan
+        # (say pinned 0.1 -> refreshing 0.2) takes over at a slot the old plan
+        # already issued, the slot is done rather than published twice.
+        issued = store.connection.execute(
+            "SELECT cycle_id,plan_ref,issue_version_ref FROM weekly_brief_cycle_admissions "
+            "WHERE brief_ref=? AND scheduled_for=? LIMIT 1",
+            (schedule.brief_ref, scheduled_for),
+        ).fetchone()
+        if issued is not None:
+            return {
+                "status": "already_issued", "plan_ref": schedule.plan_ref,
+                "plan_hash": schedule.content_hash, "scheduled_for": scheduled_for,
+                "issued_cycle_ref": issued["cycle_id"],
+                "issued_plan_ref": issued["plan_ref"],
+                "issue_version_ref": issued["issue_version_ref"],
+            }
         try:
             active = store.active_policy()
         except Exception as exc:
@@ -343,6 +530,10 @@ def run_weekly_brief_cycle(
             (schedule.brief_ref,),
         ).fetchone()
         prior = None if latest is None else latest["version_id"]
+        pack_version_ref, overlay_refs, refresh = _resolve_evidence(
+            weekly, schedule, active=active, cycle_id=cycle_id,
+            scheduled_for=scheduled_for,
+        )
         admission = weekly.admit_scheduled_cycle(
             cycle_id=cycle_id, plan_ref=schedule.plan_ref,
             plan_hash=schedule.content_hash,
@@ -351,10 +542,8 @@ def run_weekly_brief_cycle(
             scheduled_for=scheduled_for, period_start=period_start,
             period_end=scheduled_for, brief_ref=schedule.brief_ref,
             issue_version_ref=issue_version_ref, prior_version_ref=prior,
-            evidence_pack_version_ref=schedule.evidence_pack_version_id,
-            company_overlay_version_refs=list(
-                schedule.company_overlay_version_ids
-            ),
+            evidence_pack_version_ref=pack_version_ref,
+            company_overlay_version_refs=overlay_refs,
             company_thesis_refs=schedule.company_thesis_refs,
             destination_ref=schedule.destination_ref, actor_ref=actor_ref,
             idempotency_key=f"weekly-brief-admission:{digest}",
@@ -403,10 +592,13 @@ def run_weekly_brief_cycle(
         "issue_version_hash": issue["content_hash"],
         "outbox_status": outbox["status"],
         "outbox_message_ref": outbox["message_id"],
+        "evidence_pack_version_ref": admission["evidence_pack_version_ref"],
+        **({} if refresh is None else {"evidence_refresh": refresh}),
     }
 
 
 __all__ = [
+    "EvidenceRefreshSpec", "REFRESH_SCHEMA_VERSION",
     "WEEKLY_BRIEF_AUTO_PUBLISH_RULE_REF", "WeeklyBriefCoordinator",
     "WeeklyBriefCoordinatorConfig", "WeeklyBriefCoordinatorError",
     "WeeklyBriefCoordinatorPrecondition", "WeeklyBriefSchedulePlan",
