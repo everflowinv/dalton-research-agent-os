@@ -172,7 +172,9 @@ class ModelConfigurationRegistryTests(unittest.TestCase):
 
     def test_cap_raise_remains_compatible_with_historical_seventeen_files(self) -> None:
         from dalton_core.thesis_impact_budget import ThesisImpactBudgetStore
-        from dalton_core.workspace_model_setup import EXPECTED_CONFIG_NAMES
+        from dalton_core.workspace_model_setup import (
+            REQUIRED_CONFIG_NAMES as EXPECTED_CONFIG_NAMES,
+        )
 
         language = {
             "research-language-check-model-config.json",

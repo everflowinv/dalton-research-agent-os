@@ -24,8 +24,7 @@ from .workspace import WorkspacePaths, load_workspace_manifest
 
 SCHEMA_VERSION = "workspace-model-runtime-template-0.1"
 KIND = "dalton-workspace-model-runtime"
-EXPECTED_CONFIG_COUNT = 21
-EXPECTED_CONFIG_NAMES = frozenset({
+REQUIRED_CONFIG_NAMES = frozenset({
     "claim-index-model-config.json", "company-dossier-verifier-model-config.json",
     "discovery-selection-model-config.json", "document-extraction-model-config.json",
     "dossier-model-config.json", "earnings-season-model-config.json",
@@ -39,6 +38,14 @@ EXPECTED_CONFIG_NAMES = frozenset({
     "research-localization-verifier-model-config.json", "research-planner-model-config.json",
     "zero-base-review-model-config.json", "zero-base-review-verifier-model-config.json",
 })
+#: Q3: the quality verifier is derived by the quality scoring lane from the
+#: dossier verifier the first time a writer starts on a release that has it, so
+#: a source exported before that holds the 21 above and one exported after it
+#: holds 22.  Both are exact sets; nothing else is accepted.
+QUALITY_VERIFIER_CONFIG_NAME = "quality-verifier-model-config.json"
+EXPECTED_CONFIG_NAMES = REQUIRED_CONFIG_NAMES | {QUALITY_VERIFIER_CONFIG_NAME}
+EXPECTED_CONFIG_COUNT = len(EXPECTED_CONFIG_NAMES)
+ACCEPTED_CONFIG_SETS = (frozenset(EXPECTED_CONFIG_NAMES), REQUIRED_CONFIG_NAMES)
 _FIELDS = {"schema_version", "kind", "source", "broker", "configs",
            "profiles", "policies", "budget_policies",
            "shared_call_budget_policy_path", "shared_readonly_paths", "content_hash"}
@@ -166,9 +173,11 @@ def export_runtime_template(source_state: str | Path,
     """Export only the immutable model declarations selected by a host."""
     state = Path(source_state).expanduser().resolve()
     files = sorted(state.glob("*model-config.json"))
-    if ({f.name for f in files} != EXPECTED_CONFIG_NAMES
+    if ({f.name for f in files} not in ACCEPTED_CONFIG_SETS
             or any(f.is_symlink() for f in files)):
-        raise WorkspaceModelSetupError("source must contain the exact 21 model configs")
+        raise WorkspaceModelSetupError(
+            "source must contain exactly the 22 model configs "
+            "(or the 21 without the quality verifier)")
     configs = {f.name: validate_model_config(_read_json(f)) for f in files}
     router_paths = {Path(v["model_router_db"]).resolve() for v in configs.values()}
     budget_paths = {Path(v["budget_db"]).resolve() for v in configs.values()}
@@ -273,9 +282,11 @@ def _validate_bundle(value: Mapping[str, Any]) -> dict[str, Any]:
     if shared_policy is not None and (not isinstance(shared_policy, str)
                                       or not Path(shared_policy).is_absolute()):
         raise WorkspaceModelSetupError("shared call budget policy path is invalid")
-    if (not isinstance(configs, Mapping) or set(configs) != EXPECTED_CONFIG_NAMES
-            or value["source"] != {"config_count": EXPECTED_CONFIG_COUNT}):
-        raise WorkspaceModelSetupError("runtime template must contain the exact 21 configs")
+    if (not isinstance(configs, Mapping) or frozenset(configs) not in ACCEPTED_CONFIG_SETS
+            or value["source"] != {"config_count": len(configs)}):
+        raise WorkspaceModelSetupError(
+            "runtime template must contain exactly the 22 configs "
+            "(or the 21 without the quality verifier)")
     broker = value["broker"]
     if (not isinstance(broker, Mapping) or set(broker) != {"socket_path", "auth_key_path", "sharing"}
             or broker["sharing"] != "exact-shared-readonly-reference"):

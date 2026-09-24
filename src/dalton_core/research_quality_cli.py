@@ -12,9 +12,10 @@ correct and the judge is neither.  ``golden run`` runs the deterministic layer
 over the committed golden sets and prints one row per case, which is how you
 find out that a check changed its mind about a document nobody edited.
 
-Not wired to the tick.  Whether re-scoring every new deliverable should be a
-lane is a real question with a real cost, and it belongs in the report rather
-than in a scheduler.
+``score`` is also what the Q3 quality scoring lane
+(``mission_quality_score_lane``) runs as its child, once per Initial Screen
+version and a few times a day at most; ``--summary-dir`` is how it reads the
+outcome back.
 """
 
 from __future__ import annotations
@@ -335,6 +336,9 @@ def build_parser() -> argparse.ArgumentParser:
     score.add_argument("--scheduler-db")
     score.add_argument("--actor-ref", default="automation:coverage-mission")
     score.add_argument("--dry-run", action="store_true", help="score but record nothing")
+    score.add_argument("--summary-dir",
+                       help="also write the result (or the refusal) to summary.json "
+                            "here; how the quality scoring lane reads a child's outcome")
     score.set_defaults(handler=run_score)
 
     journal = subparsers.add_parser("journal", help="PM feedback on an artefact")
@@ -368,6 +372,16 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _write_summary(directory: str | None, value: Any) -> None:
+    """Owner-only ``summary.json`` for a lane child; nothing without a directory."""
+
+    if not directory:
+        return
+    from .lane_child_launcher import write_owner_only
+
+    write_owner_only(Path(directory).expanduser() / "summary.json", value)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -379,12 +393,22 @@ def main(argv: list[str] | None = None) -> int:
     try:
         result = args.handler(args)
     except (ResearchQualityError, AnalystJournalError) as exc:
-        print(json.dumps({"status": "failed", "reason": f"{type(exc).__name__}: {exc}"},
-                         ensure_ascii=False), file=sys.stderr)
+        failure = {"status": "failed", "reason": f"{type(exc).__name__}: {exc}"}
+        print(json.dumps(failure, ensure_ascii=False), file=sys.stderr)
+        if args.command == "score":
+            _write_summary(args.summary_dir, failure)
         return 1
+    except Exception as exc:
+        # Anything else still leaves the lane a reason to read, then fails loudly.
+        if args.command == "score":
+            _write_summary(args.summary_dir, {
+                "status": "failed", "reason": f"{type(exc).__name__}: {exc}"[:2000]})
+        raise
     if args.command == "golden":
         return 1 if result["disagreements"] else 0
     _emit(result)
+    if args.command == "score":
+        _write_summary(args.summary_dir, {"status": "scored", **result})
     if args.command == "score" and not result["deterministic"]["passed"]:
         # A failing deterministic layer is a finding, not an error: the score
         # was produced and recorded. The exit code is what a caller checks.

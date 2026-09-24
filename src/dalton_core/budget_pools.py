@@ -167,6 +167,9 @@ LANE_POOLS: dict[str, str] = {
     # Keeping the shelves tidy.
     "dispatch_claim_review": "maintenance",
     "dispatch_claim_index": "maintenance",
+    # Q3: the system grading its own Initial Screens -- bookkeeping about
+    # output, never coverage, and capped at a few runs a day.
+    "dispatch_quality_scoring": "maintenance",
     # P14-M2: following the gateway's model catalog. Maintenance because it is
     # bookkeeping -- it makes no model call at all -- and because the day a
     # provider outage makes the coverage pool precious is exactly the day this
@@ -191,6 +194,8 @@ PURPOSE_POOLS: dict[str, str] = {
     "model_spec": "coverage",
     "claim_index": "maintenance",
     "quality": "maintenance",
+    # The judge's independent check spends from the same pool as the judge.
+    "quality_verifier": "maintenance",
     # P14a's judgement lane pays for two calls per event and two more per
     # reflection, and books every one of them in its own
     # ``event_response_spend`` table.  Both purposes belong to the same pool,
