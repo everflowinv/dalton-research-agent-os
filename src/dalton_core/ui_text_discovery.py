@@ -23,8 +23,43 @@ from .store import canonical_json, content_hash
 
 
 MANIFEST_SCHEMA = "cockpit-ui-text-batch:0.1"
-RESULT_SCHEMA = "cockpit-ui-text-batch-result:0.1"
+#: 0.1 results are still read; every result written now is 0.2, which adds the
+#: retry generation it belongs to, the draft generation it ran on, and -- for a
+#: routing or model-family failure -- the route fingerprint it failed under.
+LEGACY_RESULT_SCHEMA = "cockpit-ui-text-batch-result:0.1"
+RESULT_SCHEMA = "cockpit-ui-text-batch-result:0.2"
+RETRY_SCHEMA = "cockpit-ui-text-batch-retry:0.1"
 POLL_SCHEMA = "cockpit-ui-text-discovery-poll:0.1"
+_LEGACY_RESULT_FIELDS = {"schema_version", "batch_ref", "manifest_hash", "status",
+                         "result", "attempts", "content_hash"}
+_RESULT_FIELDS = _LEGACY_RESULT_FIELDS | {"generation", "redraft_generation",
+                                          "failure_class", "route_fingerprint"}
+_RETRY_FIELDS = {"schema_version", "batch_ref", "manifest_hash", "generation",
+                 "redraft", "redraft_generation", "trigger", "actor_ref", "reason",
+                 "prior_status", "prior_attempts", "prior_result_hash",
+                 "prior_failure_class", "route_fingerprint", "created_at",
+                 "content_hash"}
+#: Who writes the retry that follows a route/family fix.
+AUTOMATIC_RETRY_ACTOR = "automation:ui-text-discovery"
+RETRY_TRIGGERS = ("owner", "route_fingerprint_changed")
+
+#: 2026-09-24.  Failures that are about *which model served*, not about the
+#: text: the verifier could not be shown independent of the drafting models,
+#: or a route was rejected.  The paid stage cache (``stages/``) keeps the draft
+#: *and the route decision that produced it*, and the scheduler replays a
+#: completed work order by request id, so retrying such a batch reuses the
+#: same draft, the same unclassified family and the same rejected work order:
+#: it can never pass.  These block at once (retrying is pointless), and are
+#: retried from a fresh draft when the route configuration changes.
+FAILURE_CLASS_ROUTE_FAMILY = "route_family"
+ROUTE_FAMILY_FAILURE_MARKERS = (
+    "verifier_not_independent",
+    "MODEL_ROUTE_REJECTED",
+    "PRODUCER_ROUTE_UNRESOLVED",
+    "not independent of both authors",
+    "could not prove its model family",
+    "model family could not be resolved",
+)
 
 # How many batches one scheduled pass may pay for, and how many times a batch
 # may fail before it stops being offered. Without the second bound a batch that
@@ -327,20 +362,127 @@ def _failure_reason(result: Any) -> str:
     return "未记录原因"
 
 
+def _failure_errors(result: Any) -> list[str]:
+    if not isinstance(result, Mapping):
+        return []
+    errors: list[str] = []
+    reason = result.get("reason")
+    if isinstance(reason, str) and reason:
+        errors.append(reason)
+    receipt = result.get("receipt")
+    if isinstance(receipt, Mapping) and isinstance(receipt.get("failures"), list):
+        errors.extend(item["error"] for item in receipt["failures"]
+                      if isinstance(item, Mapping) and isinstance(item.get("error"), str))
+    return errors
+
+
+def failure_class(result: Any) -> str | None:
+    """``route_family`` when a failed prepare failed on routing or model family."""
+
+    for error in _failure_errors(result):
+        if any(marker in error for marker in ROUTE_FAMILY_FAILURE_MARKERS):
+            return FAILURE_CLASS_ROUTE_FAMILY
+    return None
+
+
 def _blocked_reason(result: Mapping[str, Any], max_attempts: int) -> str:
+    if result.get("failure_class") == FAILURE_CLASS_ROUTE_FAMILY:
+        return (f"路由或模型家族问题，重试同一份草稿不会通过（第 {result.get('attempts')} 次）；"
+                f"路由或家族配置变化后会自动丢弃缓存草稿、从头重新起草；最后一次失败原因："
+                f"{_failure_reason(result.get('result'))}")
     return (f"已连续失败 {result.get('attempts')} 次（上限 {max_attempts}），"
             f"停止重试以免继续消耗预算；最后一次失败原因："
             f"{_failure_reason(result.get('result'))}")
+
+
+def _signed(unsigned: Mapping[str, Any]) -> dict[str, Any]:
+    return {**unsigned, "content_hash": _hash(unsigned)}
+
+
+def _result_record(*, batch_ref: str, manifest_hash: str, status: str, attempts: int,
+                   result: Any, generation: int, redraft_generation: int,
+                   route_fingerprint: str | None) -> dict[str, Any]:
+    klass = None if status == "completed" else failure_class(result)
+    return _signed({
+        "schema_version": RESULT_SCHEMA, "batch_ref": batch_ref,
+        "manifest_hash": manifest_hash, "status": status, "attempts": attempts,
+        "result": result, "generation": generation,
+        "redraft_generation": redraft_generation, "failure_class": klass,
+        "route_fingerprint": route_fingerprint if klass else None,
+    })
+
+
+def _read_result(path: Path) -> dict[str, Any]:
+    """A saved result in the current shape, whichever schema wrote it."""
+
+    if path.is_symlink() or not path.is_file():
+        raise ValueError(f"unsafe UI text state: {path.name}")
+    schema = json.loads(path.read_text("utf-8")).get("schema_version")
+    if schema == LEGACY_RESULT_SCHEMA:
+        value = _read_closed(path, LEGACY_RESULT_SCHEMA, _LEGACY_RESULT_FIELDS)
+        klass = None if value["status"] == "completed" else failure_class(value["result"])
+        return {**value, "generation": 0, "redraft_generation": 0,
+                "failure_class": klass, "route_fingerprint": None}
+    return _read_closed(path, RESULT_SCHEMA, _RESULT_FIELDS)
 
 
 def _seal_blocked(result_path: Path, prior: Mapping[str, Any],
                   max_attempts: int) -> None:
     """Record the give-up decision on disk so it survives a restart."""
 
-    unsigned = {"schema_version": RESULT_SCHEMA, "batch_ref": prior["batch_ref"],
-                "manifest_hash": prior["manifest_hash"], "status": "blocked",
-                "attempts": prior["attempts"], "result": prior["result"]}
-    _replace(result_path, {**unsigned, "content_hash": _hash(unsigned)})
+    _replace(result_path, _result_record(
+        batch_ref=prior["batch_ref"], manifest_hash=prior["manifest_hash"],
+        status="blocked", attempts=prior["attempts"], result=prior["result"],
+        generation=prior["generation"], redraft_generation=prior["redraft_generation"],
+        route_fingerprint=prior["route_fingerprint"]))
+
+
+def _digest(batch_ref: str) -> str:
+    return batch_ref.split(":", 1)[1]
+
+
+def latest_retry(root: Path, batch_ref: str) -> dict[str, Any] | None:
+    """The newest retry record for one batch, after checking the whole chain."""
+
+    directory = Path(root) / "retries" / _digest(batch_ref)
+    if directory.is_symlink():
+        raise ValueError("UI text retry directory must not be a symlink")
+    if not directory.is_dir():
+        return None
+    records = [_read_closed(path, RETRY_SCHEMA, _RETRY_FIELDS)
+               for path in sorted(directory.glob("*.json"))]
+    for number, record in enumerate(records, start=1):
+        if (record["batch_ref"] != batch_ref or record["generation"] != number
+                or record["trigger"] not in RETRY_TRIGGERS):
+            raise ValueError("UI text retry chain drifted")
+    return records[-1] if records else None
+
+
+def _write_retry(root: Path, manifest: Mapping[str, Any], prior: Mapping[str, Any], *,
+                 redraft: bool, trigger: str, actor_ref: str, reason: str,
+                 route_fingerprint: str | None, created_at: str) -> dict[str, Any]:
+    generation = int(prior["generation"]) + 1
+    redraft_generation = int(prior["redraft_generation"]) + (1 if redraft else 0)
+    record = _signed({
+        "schema_version": RETRY_SCHEMA, "batch_ref": manifest["batch_ref"],
+        "manifest_hash": manifest["content_hash"], "generation": generation,
+        "redraft": bool(redraft), "redraft_generation": redraft_generation,
+        "trigger": trigger, "actor_ref": actor_ref, "reason": reason,
+        "prior_status": prior["status"], "prior_attempts": prior["attempts"],
+        "prior_result_hash": prior["content_hash"],
+        "prior_failure_class": prior["failure_class"],
+        "route_fingerprint": route_fingerprint, "created_at": created_at,
+    })
+    directory = Path(root) / "retries" / _digest(manifest["batch_ref"])
+    _safe_directory(directory.parent); _safe_directory(directory)
+    _write_exclusive(directory / f"{generation:04d}.json", record)
+    return record
+
+
+def _now() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _chunks(entries: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
@@ -377,7 +519,9 @@ def poll_ui_texts(connection: Any, mission: Mapping[str, Any], *, state_dir: Pat
                   mapping: Mapping[str, str],
                   prepare: Callable[[Mapping[str, Any]], Mapping[str, Any]],
                   batches_per_run: int = DEFAULT_BATCHES_PER_RUN,
-                  max_attempts: int = DEFAULT_MAX_ATTEMPTS) -> dict[str, Any]:
+                  max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+                  route_fingerprint: Callable[[], str | None] | None = None,
+                  ) -> dict[str, Any]:
     """Seal newly discovered strings and prepare a bounded number of batches.
 
     ``prepare`` receives the manifest's stable ``ui_text`` product.  Returning
@@ -385,8 +529,18 @@ def poll_ui_texts(connection: Any, mission: Mapping[str, Any], *, state_dir: Pat
     retryable and is offered again on the next scheduled poll -- but only until
     ``max_attempts``.  At that point the batch becomes ``blocked``: it is no
     longer offered, no longer spends, and carries the last failure reason so an
-    operator can see what has to change before it can be retried.  Deleting the
-    batch's result file is the explicit, owner-only way to retry it.
+    operator can see what has to change before it can be retried.
+
+    2026-09-24: retrying is an append-only record, not a deleted file.  A retry
+    record (``retries/<digest>/<generation>.json``, written by
+    :func:`request_retry` or by this poll) starts a new generation with a fresh
+    attempt count; when it says ``redraft`` the batch is prepared with
+    ``prepare(product, redraft_generation=n)`` so the preparer discards its
+    cached draft and route decisions.  A routing / model-family failure blocks
+    at once and records ``route_fingerprint()``; when that fingerprint later
+    differs, this poll writes the redraft retry itself -- the fix to the route
+    is the only thing that can make such a batch pass, and nobody has to notice
+    that it happened.
     """
     if not isinstance(mapping, Mapping):
         raise TypeError("mapping must be an exact source-to-display mapping")
@@ -429,14 +583,24 @@ def poll_ui_texts(connection: Any, mission: Mapping[str, Any], *, state_dir: Pat
 
         summaries = []
         attempted = 0
+        fingerprint_cache: list[str | None] = []
+
+        def current_fingerprint() -> str | None:
+            if route_fingerprint is None:
+                return None
+            if not fingerprint_cache:
+                try:
+                    fingerprint_cache.append(route_fingerprint())
+                except Exception:  # noqa: BLE001 - unknown routes retry nothing
+                    fingerprint_cache.append(None)
+            return fingerprint_cache[0]
+
         for manifest in existing:
             texts = [entry["text"] for entry in manifest["entries"]]
-            result_path = results / (manifest["batch_ref"].split(":", 1)[1] + ".json")
+            result_path = results / (_digest(manifest["batch_ref"]) + ".json")
             prior = None
             if result_path.exists() or result_path.is_symlink():
-                prior = _read_closed(result_path, RESULT_SCHEMA, {
-                    "schema_version", "batch_ref", "manifest_hash", "status", "result",
-                    "attempts", "content_hash"})
+                prior = _read_result(result_path)
                 if prior["batch_ref"] != manifest["batch_ref"] \
                         or prior["manifest_hash"] != manifest["content_hash"]:
                     raise ValueError("UI text result binding drifted")
@@ -446,8 +610,30 @@ def poll_ui_texts(connection: Any, mission: Mapping[str, Any], *, state_dir: Pat
                                   "status": "mapped"})
                 continue
             attempts = 0 if prior is None else prior["attempts"]
-            if prior is not None and (prior["status"] == "blocked"
-                                      or attempts >= max_attempts):
+            generation = 0 if prior is None else prior["generation"]
+            redraft_generation = 0 if prior is None else prior["redraft_generation"]
+            retry = None if prior is None else latest_retry(root, manifest["batch_ref"])
+            pending_retry = (retry is not None and prior is not None
+                             and retry["generation"] > prior["generation"])
+            if (not pending_retry and prior is not None and prior["status"] != "completed"
+                    and prior["failure_class"] == FAILURE_CLASS_ROUTE_FAMILY):
+                now = current_fingerprint()
+                if now is not None and now != prior["route_fingerprint"]:
+                    retry = _write_retry(
+                        root, manifest, prior, redraft=True,
+                        trigger="route_fingerprint_changed",
+                        actor_ref=AUTOMATIC_RETRY_ACTOR,
+                        reason=("路由或模型家族配置已变化，丢弃缓存草稿和路由决策，从头重新起草；"
+                                f"上次失败：{_failure_reason(prior['result'])}")[:1000],
+                        route_fingerprint=now, created_at=_now())
+            if retry is not None and prior is not None \
+                    and retry["generation"] > prior["generation"]:
+                # A new generation: its own attempt budget, its own draft.
+                attempts = 0
+                generation = retry["generation"]
+                redraft_generation = retry["redraft_generation"]
+            elif prior is not None and (prior["status"] == "blocked"
+                                        or attempts >= max_attempts):
                 summaries.append({
                     "batch_ref": manifest["batch_ref"], "status": "blocked",
                     "attempts": attempts,
@@ -457,7 +643,8 @@ def poll_ui_texts(connection: Any, mission: Mapping[str, Any], *, state_dir: Pat
                     _seal_blocked(result_path, prior, max_attempts)
                 continue
             summaries.append({"batch_ref": manifest["batch_ref"], "status": "eligible",
-                              "attempts": attempts,
+                              "attempts": attempts, "generation": generation,
+                              "redraft_generation": redraft_generation,
                               "manifest": manifest, "result_path": result_path})
 
         eligible = [row for row in summaries if row["status"] == "eligible"]
@@ -475,8 +662,14 @@ def poll_ui_texts(connection: Any, mission: Mapping[str, Any], *, state_dir: Pat
             manifest = row.pop("manifest")
             result_path = row.pop("result_path")
             attempted += 1
+            redraft_generation = row.pop("redraft_generation")
+            generation = row.pop("generation")
             try:
-                outcome = prepare(manifest["product"])
+                if redraft_generation:
+                    outcome = prepare(manifest["product"],
+                                      redraft_generation=redraft_generation)
+                else:
+                    outcome = prepare(manifest["product"])
                 completed = isinstance(outcome, Mapping) and outcome.get("status") == "completed"
                 result_value: Mapping[str, Any] = dict(outcome) if isinstance(outcome, Mapping) \
                     else {"reason": "prepare returned no result"}
@@ -484,18 +677,21 @@ def poll_ui_texts(connection: Any, mission: Mapping[str, Any], *, state_dir: Pat
                 completed = False
                 result_value = {"reason": f"{type(exc).__name__}: {exc}"}
             attempts = row["attempts"] + 1
+            route_family = (not completed and failure_class(result_value)
+                            == FAILURE_CLASS_ROUTE_FAMILY)
             if completed:
                 status = "completed"
-            elif attempts >= max_attempts:
+            elif attempts >= max_attempts or route_family:
+                # A route/family failure cannot pass on a retry of the same
+                # draft; stop now and wait for the route to change.
                 status = "blocked"
             else:
                 status = "pending"
-            unsigned_result = {"schema_version": RESULT_SCHEMA,
-                               "batch_ref": manifest["batch_ref"],
-                               "manifest_hash": manifest["content_hash"],
-                               "status": status,
-                               "attempts": attempts, "result": result_value}
-            saved = {**unsigned_result, "content_hash": _hash(unsigned_result)}
+            saved = _result_record(
+                batch_ref=manifest["batch_ref"], manifest_hash=manifest["content_hash"],
+                status=status, attempts=attempts, result=result_value,
+                generation=generation, redraft_generation=redraft_generation,
+                route_fingerprint=current_fingerprint() if route_family else None)
             _replace(result_path, saved)
             row["status"] = saved["status"]
             row["attempts"] = saved["attempts"]
@@ -503,6 +699,7 @@ def poll_ui_texts(connection: Any, mission: Mapping[str, Any], *, state_dir: Pat
                 row["reason"] = _blocked_reason(saved, max_attempts)
         for row in summaries:
             row.pop("manifest", None); row.pop("result_path", None)
+            row.pop("generation", None); row.pop("redraft_generation", None)
         blocked = [row for row in summaries if row["status"] == "blocked"]
         return {"schema_version": POLL_SCHEMA, "discovered": len(discovered),
                 "translation_needed": len(translatable),
@@ -515,3 +712,135 @@ def poll_ui_texts(connection: Any, mission: Mapping[str, Any], *, state_dir: Pat
                 # "there is more to do" about work it had already given up on.
                 "blocked_reasons": sorted({row["reason"] for row in blocked}),
                 "pending": sum(row["status"] in {"pending", "deferred"} for row in summaries)}
+
+
+# ---------------------------------------------------------------------------
+# the owner's retry entry
+# ---------------------------------------------------------------------------
+
+_HUMAN_ACTOR_RE = re.compile(r"human:[A-Za-z0-9._-]+\Z")
+
+
+def _resolve_batch(manifests: Path, batch: str) -> dict[str, Any]:
+    """One sealed manifest by full ref, digest, or an unambiguous digest prefix."""
+
+    wanted = batch.split(":", 1)[1] if batch.startswith("ui-text-batch:") else batch
+    wanted = wanted.rstrip(".…")
+    if not re.fullmatch(r"[0-9a-f]{8,64}", wanted):
+        raise ValueError("batch must be a ui-text-batch ref or at least 8 hex digits of one")
+    found = sorted(manifests.glob(f"{wanted}*.json"))
+    if len(found) != 1:
+        raise ValueError(f"{batch} matches {len(found)} sealed batches; give more digits")
+    return _validate_manifest(found[0])
+
+
+def request_retry(state_dir: Path, batch: str, *, actor_ref: str, reason: str,
+                  redraft: bool | None = None, apply: bool = False,
+                  route_fingerprint: Callable[[], str | None] | None = None,
+                  ) -> dict[str, Any]:
+    """Open a new retry generation for one pending or blocked batch.
+
+    The formal replacement for deleting ``results/<digest>.json``: nothing is
+    deleted, the prior result stays on disk, and the retry is an append-only
+    record naming who asked, why, and the result it supersedes.  ``redraft``
+    defaults to "yes when the last failure was about routing or model family"
+    -- the only case in which the cached draft is known to be the problem --
+    and can be forced either way.  Without ``apply`` it only reports what it
+    would write.
+    """
+
+    if not isinstance(actor_ref, str) or not _HUMAN_ACTOR_RE.fullmatch(actor_ref):
+        raise ValueError("actor_ref must be a human: principal")
+    if not isinstance(reason, str) or not reason.strip() or len(reason) > 1000:
+        raise ValueError("reason must be 1..1000 characters")
+    root = Path(state_dir)
+    manifests = root / "manifests"; results = root / "results"
+    for path in (root, manifests, results):
+        if path.is_symlink() or not path.is_dir():
+            raise ValueError(f"not a UI text state directory: {path}")
+    lock_path = root / ".discovery.lock"
+    if lock_path.is_symlink():
+        raise ValueError("UI text discovery lock must not be a symlink")
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    with os.fdopen(fd, "a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        manifest = _resolve_batch(manifests, batch)
+        result_path = results / (_digest(manifest["batch_ref"]) + ".json")
+        if not result_path.exists():
+            raise ValueError(f"{manifest['batch_ref']} has never been attempted; "
+                             "the worker will offer it without a retry")
+        prior = _read_result(result_path)
+        if prior["batch_ref"] != manifest["batch_ref"] \
+                or prior["manifest_hash"] != manifest["content_hash"]:
+            raise ValueError("UI text result binding drifted")
+        if prior["status"] == "completed":
+            raise ValueError(f"{manifest['batch_ref']} already completed")
+        retry = latest_retry(root, manifest["batch_ref"])
+        if retry is not None and retry["generation"] > prior["generation"]:
+            return {"status": "already_requested", "batch_ref": manifest["batch_ref"],
+                    "retry": retry}
+        if redraft is None:
+            redraft = prior["failure_class"] == FAILURE_CLASS_ROUTE_FAMILY
+        fingerprint = None
+        if route_fingerprint is not None:
+            try:
+                fingerprint = route_fingerprint()
+            except Exception:  # noqa: BLE001 - recorded as unknown
+                fingerprint = None
+        plan = {"batch_ref": manifest["batch_ref"], "prior_status": prior["status"],
+                "prior_attempts": prior["attempts"],
+                "prior_failure_class": prior["failure_class"],
+                "last_failure": _failure_reason(prior["result"]),
+                "generation": prior["generation"] + 1, "redraft": bool(redraft)}
+        if not apply:
+            return {"status": "dry_run", **plan}
+        record = _write_retry(root, manifest, prior, redraft=bool(redraft),
+                              trigger="owner", actor_ref=actor_ref, reason=reason.strip(),
+                              route_fingerprint=fingerprint, created_at=_now())
+        return {"status": "requested", **plan, "retry": record}
+
+
+def main(argv: list[str] | None = None) -> int:
+    """``retry`` one UI text batch; ``show`` its result and retry chain."""
+
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Inspect or formally retry a sealed Cockpit UI text batch.")
+    sub = parser.add_subparsers(dest="command", required=True)
+    show = sub.add_parser("show", help="print a batch's result and retry records")
+    retry = sub.add_parser("retry", help="open a new retry generation (dry run unless --apply)")
+    for command in (show, retry):
+        command.add_argument("--state-dir", type=Path, required=True,
+                             help="…/research-publication-work/ui-text-products")
+        command.add_argument("--batch", required=True,
+                             help="ui-text-batch:<digest>, the digest, or a unique prefix")
+    retry.add_argument("--actor", required=True, help="human:<owner>")
+    retry.add_argument("--reason", required=True)
+    choice = retry.add_mutually_exclusive_group()
+    choice.add_argument("--redraft", dest="redraft", action="store_true", default=None,
+                        help="discard the cached draft and route decisions")
+    choice.add_argument("--keep-draft", dest="redraft", action="store_false",
+                        help="retry on the cached draft")
+    retry.add_argument("--apply", action="store_true")
+    args = parser.parse_args(argv)
+    if args.command == "show":
+        root = Path(args.state_dir)
+        manifest = _resolve_batch(root / "manifests", args.batch)
+        path = root / "results" / (_digest(manifest["batch_ref"]) + ".json")
+        directory = root / "retries" / _digest(manifest["batch_ref"])
+        latest_retry(root, manifest["batch_ref"])  # validates the chain
+        out = {"batch_ref": manifest["batch_ref"],
+               "result": _read_result(path) if path.exists() else None,
+               "retries": [json.loads(item.read_text("utf-8"))
+                           for item in sorted(directory.glob("*.json"))]
+               if directory.is_dir() else []}
+    else:
+        out = request_retry(args.state_dir, args.batch, actor_ref=args.actor,
+                            reason=args.reason, redraft=args.redraft, apply=args.apply)
+    print(json.dumps(out, ensure_ascii=False, indent=1, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
