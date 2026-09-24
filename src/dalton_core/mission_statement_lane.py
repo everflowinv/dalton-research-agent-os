@@ -18,15 +18,18 @@ Three rules, each of which is a bug this codebase has already paid for:
   other company starves behind it.
 
 How deep to go -- how many filings back -- is a parameter rather than a
-constant on purpose. One quarter is the floor that keeps the lane moving; how
-much history a company actually needs is a judgement the planner makes, and
-this is where that judgement will attach.
+constant on purpose. Eight quarters is the floor for a company with no model
+yet, because a trailing year is what every later stage needs; how much history
+a company actually needs is a judgement the planner makes, and this is where
+that judgement will attach. Depth alone never notices a *new* filing, so each
+form also has a due date, and inside its window the lane polls SEC every few
+days, one company and one child at a time, until the filing lands.
 """
 
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -71,6 +74,23 @@ DEFAULT_FORM = "10-Q"
 DEFAULT_FORMS = ("10-K", "10-Q")
 DEFAULT_FORM_LIMITS = {"10-K": 1}
 DEFAULT_FILING_LIMIT = 1
+# How many 10-Qs a company holds before anyone has decided its model. One was
+# the old floor, and it was a trap: the specification that would have asked
+# for more history cannot be written without four quarters to read, so a new
+# workspace sat at one 10-Q per company -- no trailing year, no valuation, no
+# Initial Screen -- until somebody noticed. Eight is what one child may parse
+# in a run, and it is enough for a trailing year plus its comparative.
+QUARTERLY_HISTORY_FLOOR = MAX_STATEMENT_FILINGS
+# Held depth alone never notices a new quarter: a company holding eight 10-Qs
+# holds eight 10-Qs forever. So each form also has a due date -- the next
+# period end after the newest one held, plus the time a filer takes to file --
+# and between the first and last day it could plausibly land, the lane asks
+# SEC again every few days until it does.
+REFRESH_OPENS_DAYS = 20
+REFRESH_CLOSES_DAYS = {"10-Q": 60, "10-K": 100}
+REFRESH_INTERVAL_DAYS = 3
+# A fiscal-year end reported by a 52/53-week filer drifts by a few days.
+FISCAL_YEAR_END_TOLERANCE_DAYS = 10
 MAX_FAILURE_DETAIL_CHARS = 500
 STATEMENT_LANE_CONFIG = "statement-lane-config.json"
 STATEMENT_LANE_CONFIG_SCHEMA = "0.1"
@@ -130,6 +150,58 @@ def _failure_reason(summary: Any) -> str | None:
     return reason.strip()[:MAX_FAILURE_DETAIL_CHARS]
 
 
+def _parse_day(value: Any) -> date | None:
+    if not isinstance(value, str) or len(value) < 10:
+        return None
+    try:
+        return date.fromisoformat(value[:10])
+    except ValueError:
+        return None
+
+
+def _month_end_after(day: date, months: int) -> date:
+    """The last day of the month ``months`` after ``day``'s month."""
+
+    index = day.year * 12 + day.month - 1 + months
+    year, month = divmod(index, 12)
+    following = date(year + (month + 1) // 12, (month + 1) % 12 + 1, 1)
+    return following - timedelta(days=1)
+
+
+def next_period_due(
+    latest_by_form: Mapping[str, str], form: str,
+) -> tuple[date, date, date] | None:
+    """(next period end, first day to look, last day to look) for ``form``.
+
+    ``None`` when there is nothing to watch for: no filing of any form held
+    yet (the backfill covers that), or -- for a 10-Q -- the next period end is
+    the fiscal year end, which is reported in a 10-K and never in a 10-Q.
+    """
+
+    latest = {key: _parse_day(value) for key, value in latest_by_form.items()}
+    latest = {key: value for key, value in latest.items() if value is not None}
+    if not latest:
+        return None
+    annual = latest.get("10-K")
+    if form == "10-Q":
+        newest = max(latest.values())
+        next_end = _month_end_after(newest, 3)
+        if annual is not None:
+            for years in range(0, 6):
+                fiscal_end = _month_end_after(annual, 12 * years)
+                if abs((next_end - fiscal_end).days) <= FISCAL_YEAR_END_TOLERANCE_DAYS:
+                    return None
+    elif form == "10-K":
+        if annual is None:
+            return None
+        next_end = _month_end_after(annual, 12)
+    else:
+        return None
+    return (next_end,
+            next_end + timedelta(days=REFRESH_OPENS_DAYS),
+            next_end + timedelta(days=REFRESH_CLOSES_DAYS[form]))
+
+
 class MissionStatementLaneCoordinator:
     """Queue, launch and settle the statements lane, one child per tick."""
 
@@ -143,6 +215,7 @@ class MissionStatementLaneCoordinator:
         forms: Sequence[str] | None = None,
         filing_limit: int = DEFAULT_FILING_LIMIT,
         filing_limits: Mapping[str, int] | None = None,
+        quarterly_history_floor: int = QUARTERLY_HISTORY_FLOOR,
         actor_ref: str = "automation:coverage-mission",
         clock: Callable[[], datetime] | None = None,
     ) -> None:
@@ -164,6 +237,11 @@ class MissionStatementLaneCoordinator:
             if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_STATEMENT_FILINGS:
                 raise ValueError(f"filing limit must be 1..{MAX_STATEMENT_FILINGS}")
             self.filing_limits[item] = limit
+        if (isinstance(quarterly_history_floor, bool)
+                or not isinstance(quarterly_history_floor, int)
+                or not 1 <= quarterly_history_floor <= MAX_STATEMENT_FILINGS):
+            raise ValueError(f"quarterly_history_floor must be 1..{MAX_STATEMENT_FILINGS}")
+        self.quarterly_history_floor = quarterly_history_floor
         self.actor_ref = actor_ref
         self.clock = clock or (lambda: datetime.now(timezone.utc))
 
@@ -268,28 +346,66 @@ class MissionStatementLaneCoordinator:
 
         The specification says how many quarters of history it needs; this lane
         bounds that by what one child may parse in a run. A company with no
-        specification yet gets the floor -- enough to decide a specification
-        from, which is what unblocks the rest.
+        specification yet gets the floor -- for 10-Qs, enough quarters to build
+        a trailing year and decide a specification from, which is what
+        unblocks the rest. An owner's explicit per-form limit wins over both.
         """
 
+        if form in self.filing_limits:
+            return self.filing_limits[form]
+        floor = self.filing_limit
+        if form == "10-Q":
+            floor = max(floor, self.quarterly_history_floor)
         try:
             spec = self.missions.latest_company_model_spec(company_ref)
         except Exception:  # noqa: BLE001 - the floor is always safe
-            return self.filing_limits.get(form, self.filing_limit)
+            return floor
         if not spec:
-            return self.filing_limits.get(form, self.filing_limit)
+            return floor
         horizon = spec.get("horizon") or {}
         quarters = horizon.get("historical_quarters")
         if isinstance(quarters, bool) or not isinstance(quarters, int) or quarters < 1:
-            return self.filing_limits.get(form, self.filing_limit)
-        if form in self.filing_limits:
-            return self.filing_limits[form]
+            return floor
         # A 10-K covers a year, so asking for twenty quarters of annual reports
         # would be asking for twenty years. Quarters are quarters; anything
         # else is scaled to what the form actually reports.
         if form == "10-K":
             quarters = max(1, (quarters + 3) // 4)
-        return max(self.filing_limit, min(quarters, MAX_STATEMENT_FILINGS))
+        return max(floor, min(quarters, MAX_STATEMENT_FILINGS))
+
+    def _refresh(self, coverage: Mapping[str, Any], form: str,
+                 wanted: int) -> dict[str, Any] | None:
+        """A poll for the next filing of this form, if one is due now.
+
+        The salt names the period being waited for and which poll this is, so
+        each poll is a new dispatch and a poll already made is not repeated
+        inside its interval. Outside the window nothing is asked: before it
+        the filing cannot exist yet, and after it a filer that has still not
+        filed is not going to be hurried by asking SEC every three days.
+        """
+
+        due = next_period_due(coverage.get("latest_report_date_by_form") or {}, form)
+        if due is None:
+            return None
+        next_end, opens, closes = due
+        today = self.clock().date()
+        if not opens <= today <= closes:
+            return None
+        poll = (today - opens).days // REFRESH_INTERVAL_DAYS
+        latest = max(
+            (_parse_day(value) for value in
+             (coverage.get("latest_report_date_by_form") or {}).values()),
+            key=lambda value: value or date.min, default=None,
+        )
+        # Ask for as many filings as periods could have closed since the newest
+        # one held -- normally one -- so a lane that was down for two quarters
+        # picks both up without re-reading the whole history every poll.
+        months = 12 if form == "10-K" else 3
+        elapsed = 1 if latest is None else max(
+            1, ((today.year - latest.year) * 12 + today.month - latest.month) // months)
+        return {"salt": f"refresh:{form}:{next_end.isoformat()}:{poll}",
+                "limit": max(1, min(wanted, elapsed)),
+                "next_period_end": next_end.isoformat()}
 
     # -- queueing ----------------------------------------------------------
 
@@ -312,27 +428,50 @@ class MissionStatementLaneCoordinator:
                 continue
             if coverage["open_dispatches"]:
                 continue
-            for form in self.forms:
-                outcome = self._queue_company_form(
-                    company_ref=company_ref, ticker=ticker, form=form,
-                    coverage=coverage,
-                )
-                if outcome is not None:
-                    queued.append(outcome)
-                    if outcome["status"] == "queued":
-                        break
+            # History first, then polling: a company still short of its
+            # backfill in one form does not spend its slot watching for the
+            # next filing of another.
+            done = False
+            for phase in ("backfill", "refresh"):
+                for form in self.forms:
+                    outcome = self._queue_company_form(
+                        company_ref=company_ref, ticker=ticker, form=form,
+                        coverage=coverage, phase=phase,
+                    )
+                    if outcome is not None:
+                        queued.append(outcome)
+                        if outcome["status"] == "queued":
+                            done = True
+                            break
+                if done:
+                    break
         return queued
 
     def _queue_company_form(self, *, company_ref: str, ticker: str, form: str,
-                            coverage: Mapping[str, Any]) -> dict[str, Any] | None:
+                            coverage: Mapping[str, Any],
+                            phase: str = "backfill") -> dict[str, Any] | None:
+        """Queue this form's backfill, or in the ``refresh`` phase its next poll.
+
+        Holds are reported once, from the backfill phase; the refresh phase
+        honours them silently.
+        """
+
+        # A success proves whatever failed before it was fixed. Counting every
+        # failure ever made meant a bug fixed months ago -- IBM's four live
+        # adapter failures -- still sat in the budget, one outage away from
+        # holding the company for good.
+        since = (coverage.get("last_success_by_form") or {}).get(form)
         failures = [item for item in (coverage.get("failures") or [])
-                    if item.get("form") == form]
+                    if item.get("form") == form
+                    and (since is None or str(item.get("at") or "") > since)]
         # Only failures for this company and form spend its attempt budget.
         charged = [item for item in failures
                    if not _is_configuration_failure(item.get("reason"))]
         if len(charged) >= MAX_FAILURES_PER_COMPANY:
             return None
         if len(failures) >= MAX_ATTEMPTS_PER_COMPANY:
+            if phase != "backfill":
+                return None
             return {
                 "company_ref": company_ref, "status": "held", "form": form,
                 "reason": f"{len(failures)} {form} runs have failed for this company; "
@@ -342,6 +481,8 @@ class MissionStatementLaneCoordinator:
         if failures and _is_configuration_failure(failures[-1].get("reason")):
             held_for = self._seconds_since(failures[-1].get("at"))
             if held_for is not None and held_for < CONFIGURATION_HOLD_SECONDS:
+                if phase != "backfill":
+                    return None
                 return {
                     "company_ref": company_ref, "status": "held", "form": form,
                     "reason": "this Core's own configuration failed the last "
@@ -349,15 +490,35 @@ class MissionStatementLaneCoordinator:
                 }
             retry_salt = self._retry_salt()
         # Explicit form targets override the specification's historical depth;
-        # without either, the existing one-filing floor still applies.
+        # without either, the per-form floor applies.
         wanted = self._wanted_filings(company_ref, form)
-        if coverage.get("held_by_form", {}).get(form, 0) >= wanted:
+        if phase == "backfill":
+            if coverage.get("held_by_form", {}).get(form, 0) >= wanted:
+                return None
+            # A duplicate means the same backfill already ran: SEC had fewer
+            # filings with XBRL than asked for. The refresh phase still
+            # watches for new ones.
+            return self._queue_dispatch(
+                company_ref=company_ref, form=form, limit=wanted,
+                attempt=len(charged), retry_salt=retry_salt)
+        refresh = self._refresh(coverage, form, wanted)
+        if refresh is None:
             return None
+        salt = refresh["salt"] if retry_salt is None else f"{retry_salt}|{refresh['salt']}"
+        outcome = self._queue_dispatch(
+            company_ref=company_ref, form=form, limit=refresh["limit"],
+            attempt=len(charged), retry_salt=salt)
+        if outcome is not None:
+            outcome["refresh_for"] = refresh["next_period_end"]
+        return outcome
+
+    def _queue_dispatch(self, *, company_ref: str, form: str, limit: int,
+                        attempt: int, retry_salt: str | None) -> dict[str, Any] | None:
         try:
             authorization = self.missions.sec_lane_authorization_for_company(company_ref)
             dispatch = self.missions.queue_statement_dispatch(
                 authorization=authorization, form=form,
-                filing_limit=wanted, attempt=len(charged), retry_salt=retry_salt,
+                filing_limit=limit, attempt=attempt, retry_salt=retry_salt,
             )
         except CoverageMissionError as exc:
             return {"company_ref": company_ref, "form": form, "status": "refused",
@@ -573,6 +734,10 @@ __all__ = [
     "MAX_ATTEMPTS_PER_COMPANY",
     "MAX_FAILURES_PER_COMPANY",
     "MAX_QUEUED_PER_RUN",
+    "QUARTERLY_HISTORY_FLOOR",
+    "REFRESH_CLOSES_DAYS",
+    "REFRESH_INTERVAL_DAYS",
+    "REFRESH_OPENS_DAYS",
     "STATEMENT_LANE_GOVERNANCE",
     "STATEMENT_LANE_CONFIG",
     "STATEMENT_LANE_CONFIG_SCHEMA",
@@ -582,6 +747,7 @@ __all__ = [
     "add_arguments",
     "argv_fragment",
     "load_statement_lane_config",
+    "next_period_due",
     "build_launcher",
     "dispatch",
 ]

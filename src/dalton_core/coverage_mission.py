@@ -4558,6 +4558,16 @@ class CoverageMissionAuthority:
                 "ORDER BY updated_at,dispatch_id", (company_ref,),
             ).fetchall()
         ]
+        # A run that succeeded proves whatever failed before it was fixed, so
+        # the dispatcher counts failures only after the last success per form.
+        last_success_by_form = {
+            str(row["form"]): str(row["at"])
+            for row in self.connection.execute(
+                "SELECT form,MAX(updated_at) AS at FROM coverage_mission_statement_dispatches "
+                "WHERE company_ref=? AND status='succeeded' GROUP BY form", (company_ref,),
+            ).fetchall()
+            if row["at"]
+        }
         return {
             "company_ref": company_ref, "failures": failures,
             "accessions": [item["accession"] for item in held],
@@ -4570,6 +4580,13 @@ class CoverageMissionAuthority:
                 for form in sorted({item["form"] for item in held})
             },
             "latest_report_date": max((item["report_date"] for item in held), default=None),
+            # Which period each form last reported, so the dispatcher can tell
+            # when the next 10-Q or 10-K is due and go and look for it.
+            "latest_report_date_by_form": {
+                form: max(item["report_date"] for item in held if item["form"] == form)
+                for form in sorted({item["form"] for item in held})
+            },
+            "last_success_by_form": last_success_by_form,
             "line_count": sum(int(item["line_count"]) for item in held),
             "dispatches": by_status,
             "open_dispatches": by_status.get("pending", 0) + by_status.get("launched", 0),
