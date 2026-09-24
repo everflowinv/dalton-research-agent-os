@@ -1239,6 +1239,10 @@ CORE_MIGRATIONS: tuple[MigrationSpec, ...] = (
     # ``ClaimReviewDriver`` needs the spool, the missions authority and the
     # challenge authority, none of which a migration should construct.
     MigrationSpec("claim_review_schema.sql", "dalton_core.claim_review", "ClaimReviewDriver", "core_sql"),
+    # 2026-09-24: independent support verdicts, their retry bounds and the
+    # backfill's markers.
+    MigrationSpec("claim_support_schema.sql", "dalton_core.claim_support_verification",
+                  "ClaimSupportVerdictStore", "core"),
     MigrationSpec("company_dossier_schema.sql", "dalton_core.company_dossier", "CompanyDossierAuthority", "core"),
     MigrationSpec("connector_schema.sql", "dalton_core.connector", "ConnectorStore", "core"),
     # P11b: what the street expects, from the vendor daily.

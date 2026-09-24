@@ -12,6 +12,18 @@
       "max_output_tokens": 2000,
       "timeout_seconds": 180
     },
+    "claim_support_backfill": {
+      "max_cost_usd": 1.0,
+      "max_input_tokens": 64000,
+      "max_output_tokens": 1600,
+      "timeout_seconds": 240
+    },
+    "claim_support_verifier": {
+      "max_cost_usd": 1.0,
+      "max_input_tokens": 48000,
+      "max_output_tokens": 800,
+      "timeout_seconds": 180
+    },
     "conviction_call": {
       "max_cost_usd": 1.0,
       "max_input_tokens": 60000,

@@ -2457,80 +2457,165 @@ class DocumentExtractionService:
         # byte-identical for it and a replay is still a duplicate.
         resolve_subjects = self.statement_subjects(context, spec_ref)
         span_names = self.admission_subject_check(context, spec_ref)
-        results = []
+        pairs = []
         for suggestion in drafted["suggestions"]:
-            quote = suggestion["citation"]
-            start, end = quote["source_start"], quote["source_end"]
             plan = resolve_subjects(suggestion["normalized_statement"])
             for subject_ref in plan["subjects"]:
-                entry = {"suggestion_ref": suggestion["id"], "source_start": start, "source_end": end,
-                         "subject_ref": subject_ref, "subject_basis": plan["basis"]}
-                held_reason = span_names(subject_ref, quote.get("raw_text"))
-                # Only a subject other than the review's own company widens the
-                # identity; the primary one keeps the key it has always had.
-                extra_key = {} if subject_ref == context["company_ref"] else {"subject": subject_ref}
-                try:
-                    set_ref = "transcript-correction-set:auto:" + content_hash({
-                        "source_manifest_hash": context["source_manifest_hash"], "start": start, "end": end})[:32]
-                    latest = self.writer.store.connection.execute(
-                        "SELECT version_id,content_hash FROM transcript_correction_set_versions "
-                        "WHERE correction_set_ref=? ORDER BY version_number DESC LIMIT 1", (set_ref,),
-                    ).fetchone()
-                    if latest is None:
-                        correction = authority.publish(
-                            set_ref, source_manifest_ref=context["source_manifest_ref"],
-                            source_manifest_hash=context["source_manifest_hash"],
-                            source_content_hash=context["source_content_hash"],
-                            review_scope="automation_verified_raw_span", corrections=[], actor_ref=actor_ref,
-                            raw_review={"source_start": start, "source_end": end, "source_sha256": quote["source_sha256"],
-                                        "rationale": (f"ADR-0005 mission automation: model draft {suggestion['invocation_ref']} "
-                                                      f"via {suggestion['route_ref']}; suggestion {suggestion['id']}")},
-                        )
-                    else:
-                        correction = authority.resolve(latest["version_id"], latest["content_hash"])["correction_set"]
-                    citation = authority.bind_claim_citation(
-                        correction["id"], correction["content_hash"], source_start=start, source_end=end)
-                    key = "document-admission:" + content_hash(
-                        {"suggestion": suggestion["id"], "context": context["content_hash"], **extra_key})
-                    # Two views on one quote may share aspect, period and basis, so
-                    # the candidate pair is keyed by the suggestion itself; the
-                    # default identity ignores the statement and the second view
-                    # collided ("candidate version chain mismatch", live).
-                    pair_key = content_hash(
-                        {"citation": citation["id"], "suggestion": suggestion["id"], **extra_key})[:32]
-                    staged = stage_transcript_qualitative_candidate(
-                        self.writer.store, staging, correction_set_ref=correction["id"], citation_ref=citation["id"],
-                        subject_ref=subject_ref, metric_or_aspect=suggestion["metric_or_aspect"],
-                        period=suggestion["period"], basis=suggestion["basis"],
-                        normalized_statement=suggestion["normalized_statement"], actor_ref=actor_ref,
-                        idempotency_key=key, artifact_reader=artifact_reader,
-                        candidate_evidence_ref=f"candidate-evidence:{source_kind}:" + pair_key,
-                        candidate_claim_ref=f"candidate-claim:{source_kind}:" + pair_key,
-                        source_kind=source_kind, source_envelope_ref=source_envelope_ref,
-                        source_manifest=source_manifest, spool=staging_spool)
-                    if held_reason is not None:
-                        # Staged, not committed: the candidate waits in the
-                        # human review queue (``candidate_status`` says
-                        # "staged") instead of entering the Ledger under the
-                        # mission's policy, and instead of being thrown away.
-                        entry.update({"status": "held", "reason": held_reason,
-                                      "candidate_claim_ref": staged["claim"]["id"]})
-                        results.append(entry)
-                        continue
-                    bundle = reviewer.candidate_authority_bundle(staged["claim"]["id"])
-                    promotion = self.writer.store.commit_policy_candidate(**bundle, idempotency_key="policy-ledger:" + key)
-                    entry.update({"status": "duplicate" if promotion.get("status") == "duplicate" else "admitted",
-                                  "candidate_claim_ref": staged["claim"]["id"],
-                                  "claim_version_ref": promotion.get("claim_version_ref"),
-                                  "evidence_version_ref": promotion.get("evidence_version_ref"),
-                                  "policy_rule_ref": (promotion.get("authorization") or {}).get("rule_ref")})
-                except Exception as exc:  # one refused suggestion must not block the rest; the reason is the record
-                    entry.update({"status": "rejected", "reason": f"{type(exc).__name__}: {exc}"})
-                results.append(entry)
+                pairs.append((suggestion, subject_ref, plan["basis"],
+                              span_names(subject_ref, suggestion["citation"].get("raw_text"))))
+        # 2026-09-24: the independent support check, one call for the window.
+        # Asked only about what would otherwise be committed, and before any
+        # write: a window that cannot be checked now is not admitted now.
+        support = self.support_verdicts(context, mission, pairs)
+        if support["status"] == "deferred":
+            return {"status": "verification_deferred", "admitted": [],
+                    "reason": "claim_support_verification_deferred: " + str(support.get("reason")),
+                    "support": {k: v for k, v in support.items() if k != "holds"}}
+        results = []
+        for index, (suggestion, subject_ref, basis, held_reason) in enumerate(pairs):
+            quote = suggestion["citation"]
+            start, end = quote["source_start"], quote["source_end"]
+            entry = {"suggestion_ref": suggestion["id"], "source_start": start, "source_end": end,
+                     "subject_ref": subject_ref, "subject_basis": basis}
+            verdict = support["verdicts"].get(index)
+            if verdict is not None:
+                entry["support_verdict"] = verdict
+            held_reason = held_reason or support["holds"].get(index)
+            # Only a subject other than the review's own company widens the
+            # identity; the primary one keeps the key it has always had.
+            extra_key = {} if subject_ref == context["company_ref"] else {"subject": subject_ref}
+            try:
+                set_ref = "transcript-correction-set:auto:" + content_hash({
+                    "source_manifest_hash": context["source_manifest_hash"], "start": start, "end": end})[:32]
+                latest = self.writer.store.connection.execute(
+                    "SELECT version_id,content_hash FROM transcript_correction_set_versions "
+                    "WHERE correction_set_ref=? ORDER BY version_number DESC LIMIT 1", (set_ref,),
+                ).fetchone()
+                if latest is None:
+                    correction = authority.publish(
+                        set_ref, source_manifest_ref=context["source_manifest_ref"],
+                        source_manifest_hash=context["source_manifest_hash"],
+                        source_content_hash=context["source_content_hash"],
+                        review_scope="automation_verified_raw_span", corrections=[], actor_ref=actor_ref,
+                        raw_review={"source_start": start, "source_end": end, "source_sha256": quote["source_sha256"],
+                                    "rationale": (f"ADR-0005 mission automation: model draft {suggestion['invocation_ref']} "
+                                                  f"via {suggestion['route_ref']}; suggestion {suggestion['id']}")},
+                    )
+                else:
+                    correction = authority.resolve(latest["version_id"], latest["content_hash"])["correction_set"]
+                citation = authority.bind_claim_citation(
+                    correction["id"], correction["content_hash"], source_start=start, source_end=end)
+                key = "document-admission:" + content_hash(
+                    {"suggestion": suggestion["id"], "context": context["content_hash"], **extra_key})
+                # Two views on one quote may share aspect, period and basis, so
+                # the candidate pair is keyed by the suggestion itself; the
+                # default identity ignores the statement and the second view
+                # collided ("candidate version chain mismatch", live).
+                pair_key = content_hash(
+                    {"citation": citation["id"], "suggestion": suggestion["id"], **extra_key})[:32]
+                staged = stage_transcript_qualitative_candidate(
+                    self.writer.store, staging, correction_set_ref=correction["id"], citation_ref=citation["id"],
+                    subject_ref=subject_ref, metric_or_aspect=suggestion["metric_or_aspect"],
+                    period=suggestion["period"], basis=suggestion["basis"],
+                    normalized_statement=suggestion["normalized_statement"], actor_ref=actor_ref,
+                    idempotency_key=key, artifact_reader=artifact_reader,
+                    candidate_evidence_ref=f"candidate-evidence:{source_kind}:" + pair_key,
+                    candidate_claim_ref=f"candidate-claim:{source_kind}:" + pair_key,
+                    source_kind=source_kind, source_envelope_ref=source_envelope_ref,
+                    source_manifest=source_manifest, spool=staging_spool)
+                if held_reason is not None:
+                    # Staged, not committed: the candidate waits in the
+                    # human review queue (``candidate_status`` says
+                    # "staged") instead of entering the Ledger under the
+                    # mission's policy, and instead of being thrown away.
+                    entry.update({"status": "held", "reason": held_reason,
+                                  "candidate_claim_ref": staged["claim"]["id"]})
+                    results.append(entry)
+                    continue
+                bundle = reviewer.candidate_authority_bundle(staged["claim"]["id"])
+                promotion = self.writer.store.commit_policy_candidate(**bundle, idempotency_key="policy-ledger:" + key)
+                entry.update({"status": "duplicate" if promotion.get("status") == "duplicate" else "admitted",
+                              "candidate_claim_ref": staged["claim"]["id"],
+                              "claim_version_ref": promotion.get("claim_version_ref"),
+                              "evidence_version_ref": promotion.get("evidence_version_ref"),
+                              "policy_rule_ref": (promotion.get("authorization") or {}).get("rule_ref")})
+            except Exception as exc:  # one refused suggestion must not block the rest; the reason is the record
+                entry.update({"status": "rejected", "reason": f"{type(exc).__name__}: {exc}"})
+            results.append(entry)
         status = "admitted" if any(r["status"] in ("admitted", "duplicate") for r in results) else (
             "held" if any(r["status"] == "held" for r in results) else (
                 "rejected" if results else "nothing_to_admit"))
         return {"status": status, "admitted": results, "suggestion_count": len(results)}
+
+    def support_verdicts(self, context, mission, pairs):
+        """The independent support check for one window's would-be admissions.
+
+        ``pairs`` is ``(suggestion, subject_ref, basis, held_reason)`` per
+        statement and subject, in admission order.  Returns ``status`` --
+        ``not_applicable`` (a source this check does not cover, nothing left
+        to commit, or a fixture draft with no verifier), ``verified`` or
+        ``deferred`` -- with ``verdicts`` and ``holds`` keyed by pair index.
+
+        Fail closed: a paid draft of a covered source with no verifier
+        installed is deferred, never admitted unverified.  What
+        ``ClaimSupportVerifier.verify`` could not check at all (an
+        unclassified drafter, attempts exhausted) is held for a person.
+        """
+
+        from .claim_support_verification import (
+            VERIFIED_SOURCE_REFS, hold_reason, support_item,
+        )
+
+        result = {"status": "not_applicable", "verdicts": {}, "holds": {}}
+        if context["source_ref"] not in VERIFIED_SOURCE_REFS:
+            return result
+        candidates = [
+            index for index, (_suggestion, subject_ref, _basis, held) in enumerate(pairs)
+            if held is None and not str(subject_ref).startswith("industry:")
+        ]
+        if not candidates:
+            return result
+        verifier = getattr(self.writer, "_claim_support_verifier", None)
+        if verifier is None:
+            if context.get("model_binding"):
+                return {**result, "status": "deferred",
+                        "reason": "no claim support verifier is installed in this process"}
+            return result
+        names = {}
+        items = {}
+        for index in candidates:
+            suggestion, subject_ref, _basis, _held = pairs[index]
+            if subject_ref not in names:
+                member = next((m for m in mission.get("universe") or ()
+                               if m.get("company_ref") == subject_ref), None)
+                names[subject_ref] = (self._company_label(mission, member)
+                                      if member and member.get("ticker") else subject_ref)
+            items[index] = support_item(
+                subject_ref=subject_ref, subject_name=names[subject_ref],
+                statement=suggestion["normalized_statement"],
+                cited_text=suggestion["citation"]["raw_text"],
+                producer_route_ref=suggestion.get("route_ref"))
+        outcome = verifier.verify(mission=mission, items=list(items.values()))
+        if outcome["status"] == "deferred":
+            return {**result, "status": "deferred", "reason": outcome.get("reason"),
+                    "cost_micros": outcome.get("cost_micros", 0)}
+        for index, item in items.items():
+            key = item["item_key"]
+            verdict = outcome["verdicts"].get(key)
+            if verdict is not None:
+                result["verdicts"][index] = {
+                    "item_key": key, "support": verdict["support"],
+                    "subject_relation": verdict["subject_relation"],
+                    "other_subject": verdict.get("other_subject"),
+                    "work_order_ref": verdict.get("work_order_ref")}
+                reason = hold_reason(verdict, item["subject_name"])
+            else:
+                reason = ("held for human review: the independent support check could not "
+                          "be run -- " + str(outcome["unverifiable"].get(key)))
+            if reason is not None:
+                result["holds"][index] = reason
+        result.update({"status": "verified", "cost_micros": outcome.get("cost_micros", 0)})
+        return result
 
     def admission_subject_check(self, context, spec_ref):
         """A checker: why a span may not be admitted for a subject, or None.

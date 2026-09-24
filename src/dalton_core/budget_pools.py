@@ -191,6 +191,10 @@ PURPOSE_POOLS: dict[str, str] = {
     "model_spec": "coverage",
     "claim_index": "maintenance",
     "quality": "maintenance",
+    # 2026-09-24: the support check is part of admitting what extraction
+    # drafted, so it spends from the pool extraction spends from.
+    "claim_support_verifier": "coverage",
+    "claim_support_backfill": "coverage",
     # P14a's judgement lane pays for two calls per event and two more per
     # reflection, and books every one of them in its own
     # ``event_response_spend`` table.  Both purposes belong to the same pool,

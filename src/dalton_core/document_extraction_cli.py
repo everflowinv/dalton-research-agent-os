@@ -127,6 +127,9 @@ class ExtractionHost:
         self._lane_readers: dict[str, Any] = {}
         self._document_extraction_model_config = model_config
         self._document_extraction_worker_factory = None
+        # 2026-09-24: the admission-time support check; installed by
+        # run_extraction in broker mode (``_install_claim_support_verifier``).
+        self._claim_support_verifier = None
         # ADR-0005 / P9d-17b: staging and admission need the shared candidate
         # staging authority the cockpit review plane also opens.
         self._candidate_staging = None
@@ -432,6 +435,9 @@ def run_extraction(
                     context_resolver=lambda c: service.reread(c, actor),
                 )
             host._document_extraction_worker_factory = factory
+        if hermetic_fixture is None:
+            summary["support_verification"] = _install_claim_support_verifier(
+                host, config, scheduler_db if scheduler_db is not None else state / "scheduler.sqlite")
         service = DocumentExtractionService(host)
         windows = ExtractionWindowLedger(host.store.connection)
         # The identity the window verdicts are scoped to: swapping the model
@@ -1149,6 +1155,29 @@ def _awaiting_reviews_in_reading_order(
             for review in reviews[:limit]]
 
 
+def _install_claim_support_verifier(host: ExtractionHost, config: Mapping[str, Any],
+                                    scheduler_db: Path) -> dict[str, Any]:
+    """Put the admission-time support check on the host, or say why not.
+
+    Without it every paid draft of a covered source is deferred rather than
+    admitted (``DocumentExtractionService.support_verdicts``), so a failure
+    here stops admissions from those sources -- it never lets them through.
+    """
+
+    from .claim_support_verification import PURPOSE, build_verifier, load_settings
+
+    try:
+        settings = load_settings(host.state_dir)
+        host._claim_support_verifier = build_verifier(
+            store=host.store, model_config=config, scheduler_db=scheduler_db,
+            purpose=PURPOSE, daily_cap_usd=settings["daily_cap_usd"])
+    except Exception as exc:  # noqa: BLE001 - reported; admissions defer
+        host._claim_support_verifier = None
+        return {"status": "unavailable", "reason": f"{type(exc).__name__}: {exc}"}
+    return {"status": "installed", "purpose": PURPOSE,
+            "daily_cap_usd": settings["daily_cap_usd"]}
+
+
 def _record_provenance(host: ExtractionHost) -> dict[str, Any]:
     """Keep what the searches said about the documents they returned.
 
@@ -1467,8 +1496,14 @@ def _admit_complete_reviews(host: ExtractionHost, service: DocumentExtractionSer
                 # so leaving the review open would retry it forever.
                 unattributed = str(result.get("reason"))
                 break
-            if result["status"] == "gated":
+            if result["status"] in ("gated", "verification_deferred"):
+                # 2026-09-24: a window whose support check cannot run now is
+                # held open exactly like a gated one -- nothing is admitted
+                # unverified, and the next run asks again (drafts replay free).
                 gated = str(result.get("reason"))
+                if result["status"] == "verification_deferred":
+                    summary.setdefault("support_deferred_reviews", 0)
+                    summary["support_deferred_reviews"] += 1
                 break
             for item in result.get("admitted", []):
                 outcomes.append({"review_id": review["review_id"], "offset": offset, **item})
@@ -1513,6 +1548,11 @@ def _admit_complete_reviews(host: ExtractionHost, service: DocumentExtractionSer
         held = [o for o in outcomes if o["status"] == "held"]
         summary.setdefault("held_candidates", 0)
         summary["held_candidates"] += len(held)
+        summary.setdefault("support_checked", 0)
+        summary["support_checked"] += sum(1 for o in outcomes if o.get("support_verdict"))
+        summary.setdefault("held_by_support_check", 0)
+        summary["held_by_support_check"] += sum(
+            1 for o in held if "independent support check" in str(o.get("reason")))
         # A refusal is a judgment only when the policy or a validator said no
         # to the suggestion itself.  A conflict or an unexpected error is the
         # system's problem: hold the review open rather than dismiss it.
@@ -1530,7 +1570,8 @@ def _admit_complete_reviews(host: ExtractionHost, service: DocumentExtractionSer
                     candidate_claim_version_ref=(carried or held)[0]["candidate_claim_ref"],
                     rationale=(f"ADR-0005 policy admission: {len(carried)} qualitative claim(s) admitted, "
                                f"{len(held)} held for human review (cited span does not name the "
-                               f"company), {len(rejected)} suggestion(s) refused"),
+                               f"company, or the independent support check did not pass), "
+                               f"{len(rejected)} suggestion(s) refused"),
                     expected_review_hash=review_hash,
                 )
             elif unstageable is not None:

@@ -18,6 +18,7 @@ REGISTERING_MODULES = (
     "dalton_core.debate_map_draft",
     "dalton_core.industry_framework_draft",
     "dalton_core.zero_base_review",
+    "dalton_core.claim_support_verification",
 )
 
 
