@@ -872,6 +872,13 @@ def run_extraction(
         # duplicates and writes nothing new.
         if candidate_staging is not None:
             _admit_complete_reviews(host, service, complete_reviews, summary)
+        # 2026-09-24: the one-time support check of Claims admitted before the
+        # admission-time check existed, a bounded slice per run under its own
+        # daily ceiling.  Not after a systemic model failure: the provider that
+        # just failed every window is not going to verify anything either.
+        if hermetic_fixture is None and stop_reason != "systemic_model_failure":
+            summary["support_backfill"] = _run_claim_support_backfill(
+                host, config, scheduler_db if scheduler_db is not None else state / "scheduler.sqlite")
         if stop_reason == "systemic_model_failure" or secondary_failure is not None:
             failed = (summary["qualitative_failures"][-1]
                       if stop_reason == "systemic_model_failure"
@@ -1176,6 +1183,22 @@ def _install_claim_support_verifier(host: ExtractionHost, config: Mapping[str, A
         return {"status": "unavailable", "reason": f"{type(exc).__name__}: {exc}"}
     return {"status": "installed", "purpose": PURPOSE,
             "daily_cap_usd": settings["daily_cap_usd"]}
+
+
+def _run_claim_support_backfill(host: ExtractionHost, config: Mapping[str, Any],
+                                scheduler_db: Path) -> dict[str, Any]:
+    """One bounded backfill slice; never a reason for the run to fail."""
+
+    from .claim_review import review_spool
+    from .claim_support_backfill import run_backfill
+
+    try:
+        return run_backfill(
+            store=host.store, missions=host.coverage_mission, model_config=config,
+            scheduler_db=scheduler_db, state_dir=host.state_dir,
+            spool=review_spool(host.state_dir, primary=host._transcript_spool))
+    except Exception as exc:  # noqa: BLE001 - reported, retried next run
+        return {"status": "unavailable", "reason": f"{type(exc).__name__}: {exc}"}
 
 
 def _record_provenance(host: ExtractionHost) -> dict[str, Any]:

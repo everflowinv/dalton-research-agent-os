@@ -38,6 +38,14 @@ the detector at retirement time rather than trusting the caller:
 
 A human may challenge and retire anything.  Automation may only act on a
 deterministic detector, and only when the mission grants ``claim_challenge``.
+
+2026-09-24: or on a *recorded verdict* -- ``citation_support_rejected``, an
+independent model's append-only finding (``claim_support_verification``) that
+the cited sentences do not support the statement or that it is about another
+company.  Nothing is re-run for it, because a model is not a function of the
+bytes; the authority instead re-reads the verdict row bound to the exact
+claim version, its hash, its subject and its statement, and refuses without
+one.  The review patrol never acts on it; the support backfill does.
 """
 
 from __future__ import annotations
@@ -60,19 +68,29 @@ REASON_CODES: tuple[str, ...] = (
     "subject_absent_from_source",
     "boilerplate_disclaimer",
     "human_judgment",
+    "citation_support_rejected",
 )
 DETERMINISTIC_REASONS = frozenset({"subject_absent_from_source", "boilerplate_disclaimer"})
+# 2026-09-24: an independent model's recorded verdict (claim_support_verification)
+# that the cited sentences do not support the statement, or that it is about
+# another company.  Not deterministic -- a model said it -- so the authority
+# does not re-run anything; it re-reads the append-only verdict row bound to
+# the exact claim version, statement and subject, and refuses without one.
+RECORDED_VERDICT_REASONS = frozenset({"citation_support_rejected"})
+SUPPORT_VERIFIER_REF = "claim-verifier:citation-support:v1"
 # v2: span level as well as document level (claim_subject.subject_absent_from_citation).
 SUBJECT_DETECTOR_REF = "claim-detector:subject-absent-from-source:v2"
 BOILERPLATE_DETECTOR_REF = "claim-detector:boilerplate-disclaimer:v1"
 DETECTOR_REFS = {
     "subject_absent_from_source": SUBJECT_DETECTOR_REF,
     "boilerplate_disclaimer": BOILERPLATE_DETECTOR_REF,
+    "citation_support_rejected": SUPPORT_VERIFIER_REF,
 }
 REASON_LABELS = {
     "subject_absent_from_source": "引用的原文（或所引片段及结论本身）没有提到这家公司",
     "boilerplate_disclaimer": "这是免责声明或套话，不是研究结论",
     "human_judgment": "你的判断",
+    "citation_support_rejected": "独立模型核验：所引原文不支持这条结论，或它说的是另一家公司",
 }
 _HUMAN_RE = re.compile(r"^human:[A-Za-z0-9._:-]{1,128}$")
 _AUTOMATION_RE = re.compile(r"^automation:[A-Za-z0-9._:-]{1,128}$")
@@ -226,6 +244,63 @@ class ClaimRetirementAuthority:
         self._authorization_flag = authorization_flag(
             self.connection, "dalton_claim_retirement_authorized")
         self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
+        self._admit_new_reason_codes()
+
+    def _admit_new_reason_codes(self) -> None:
+        """Widen an existing challenges table's reason CHECK, keeping every stored byte.
+
+        ``CREATE TABLE IF NOT EXISTS`` never changes a table that is already
+        there, so a Core created before ``citation_support_rejected`` existed
+        would refuse the row.  Rebuilt the way ``debate_map`` widened its
+        change-reason CHECK: same columns, same rows, same indexes and
+        triggers, one transaction, foreign keys checked afterwards.
+        """
+
+        row = self.connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='claim_retirement_challenges'"
+        ).fetchone()
+        if row is None or all(code in (row[0] or "") for code in REASON_CODES):
+            return
+        if self.connection.in_transaction:
+            raise ClaimRetirementConflict(
+                "the claim challenge reason migration requires no open transaction")
+        reasons = ",\n        ".join(f"'{code}'" for code in REASON_CODES)
+        self.connection.execute("PRAGMA foreign_keys = OFF")
+        try:
+            self.connection.executescript(f"""
+                BEGIN IMMEDIATE;
+                DROP TRIGGER IF EXISTS claim_retirement_challenges_authorized_insert;
+                DROP TRIGGER IF EXISTS claim_retirement_challenges_no_update;
+                DROP TRIGGER IF EXISTS claim_retirement_challenges_no_delete;
+                CREATE TABLE claim_retirement_challenges_v2 (
+                    challenge_id TEXT PRIMARY KEY,
+                    claim_version_ref TEXT NOT NULL REFERENCES claim_versions(claim_version_id),
+                    claim_version_hash TEXT NOT NULL,
+                    claim_ref TEXT NOT NULL,
+                    subject_ref TEXT NOT NULL,
+                    reason_code TEXT NOT NULL CHECK(reason_code IN (
+                        {reasons}
+                    )),
+                    detector_ref TEXT,
+                    detector_hash TEXT,
+                    rationale TEXT NOT NULL,
+                    actor_ref TEXT NOT NULL,
+                    record_json TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(claim_version_ref, reason_code)
+                );
+                INSERT INTO claim_retirement_challenges_v2 SELECT * FROM claim_retirement_challenges;
+                DROP TABLE claim_retirement_challenges;
+                ALTER TABLE claim_retirement_challenges_v2 RENAME TO claim_retirement_challenges;
+                COMMIT;
+            """)
+        finally:
+            self.connection.execute("PRAGMA foreign_keys = ON")
+        # Indexes and triggers, exactly as the schema file declares them.
+        self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
+        if self.connection.execute("PRAGMA foreign_key_check").fetchall():
+            raise ClaimRetirementConflict("the claim challenge reason migration broke foreign keys")
 
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Cursor]:
@@ -320,7 +395,7 @@ class ClaimRetirementAuthority:
         actor = _actor(actor_ref)
         if reason_code not in REASON_CODES:
             raise ClaimRetirementValidationError(f"reason_code must be one of {list(REASON_CODES)}")
-        if reason_code in DETERMINISTIC_REASONS:
+        if reason_code in DETERMINISTIC_REASONS | RECORDED_VERDICT_REASONS:
             expected = DETECTOR_REFS[reason_code]
             if detector_ref is not None and detector_ref != expected:
                 raise ClaimRetirementValidationError("detector_ref does not match the reason code")
@@ -402,13 +477,20 @@ class ClaimRetirementAuthority:
         if _AUTOMATION_RE.fullmatch(actor) and decision == "kept":
             raise ClaimRetirementConflict("only a person decides that a challenged Claim stands")
         if _AUTOMATION_RE.fullmatch(actor):
-            if record["reason_code"] not in DETERMINISTIC_REASONS:
+            if record["reason_code"] not in DETERMINISTIC_REASONS | RECORDED_VERDICT_REASONS:
                 raise ClaimRetirementConflict(
-                    "automation may only retire on a deterministic detector"
+                    "automation may only retire on a deterministic detector or a recorded verdict"
                 )
             # Re-run the detector against the exact original, here.  A caller
             # that says the check fired is not evidence that it fired.
-            if record["reason_code"] == "boilerplate_disclaimer":  # noqa: SIM108
+            if record["reason_code"] in RECORDED_VERDICT_REASONS:
+                from .claim_support_verification import recorded_rejection
+
+                if recorded_rejection(self.connection, claim_version_ref=record["claim_version_ref"],
+                                      claim=claim) is None:
+                    raise ClaimRetirementConflict(
+                        "no recorded support verdict rejects this exact Claim version")
+            elif record["reason_code"] == "boilerplate_disclaimer":  # noqa: SIM108
                 if not statement_is_boilerplate(claim["normalized_statement"]):
                     raise ClaimRetirementConflict("detector no longer fires for this Claim")
             else:
@@ -460,6 +542,8 @@ class ClaimRetirementAuthority:
 
 __all__ = [
     "BOILERPLATE_DETECTOR_REF",
+    "RECORDED_VERDICT_REASONS",
+    "SUPPORT_VERIFIER_REF",
     "ClaimRetirementAuthority",
     "ClaimRetirementConflict",
     "ClaimRetirementError",
