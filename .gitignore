@@ -40,3 +40,8 @@ output/playwright/
 # create an empty file named after the object's repr in the cwd.  Two were
 # committed once (7f24d085); never track another.
 <sqlite3.Connection object at *>
+
+# OpenClaw host-patch fixtures are minimal copies of upstream bundles; the
+# global dist/ and node_modules/ rules above must not drop them.
+!tests/fixtures/openclaw_host_patches/**/dist/
+!tests/fixtures/openclaw_host_patches/**/node_modules/
