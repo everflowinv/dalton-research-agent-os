@@ -102,6 +102,7 @@ def _bars(count: int = BARS, first: str = FIRST_BAR, first_close: int = 11):
 
 class ValuationLaneHarness(P14aHarness):
     grants = ("market_price", "valuation")
+    flows = FLOWS
 
     def setUp(self) -> None:
         super().setUp()
@@ -141,7 +142,7 @@ class ValuationLaneHarness(P14aHarness):
 
     def filing_lines(self, periods, report_date, *, drop=()):
         lines = []
-        for role, (statement, concept, *values) in FLOWS.items():
+        for role, (statement, concept, *values) in self.flows.items():
             if role in drop:
                 continue
             for period in periods:
@@ -506,3 +507,29 @@ class LaneTests(ValuationLaneHarness):
         self.assertEqual(spec.order, 97)
         self.assertEqual(spec.driver_key, "valuation_snapshot")
         self.assertEqual(spec.init_kwarg, "valuation_snapshot_launcher")
+
+class AmazonConceptTests(ValuationLaneHarness):
+    """Net income only on the cash-flow statement, capex as productive assets."""
+
+    flows = {
+        **FLOWS,
+        "net_income": ("cash", "us-gaap:NetIncomeLoss", *FLOWS["net_income"][2:]),
+        "capital_expenditure": ("cash", "us-gaap:PaymentsToAcquireProductiveAssets",
+                                *FLOWS["capital_expenditure"][2:]),
+    }
+
+    def test_the_same_facts_price_the_same_multiples(self):
+        self.publish_prices()
+        self.ingest_filings()
+        summary = self.run_child()
+        self.assertEqual(summary["snapshot_status"], "published")
+        snapshot = self.snapshots.latest_version(ACN)
+        by_metric = self.metrics(snapshot)
+        self.assertEqual(by_metric["trailing_pe"]["value"], "5")
+        self.assertEqual(by_metric["fcf_yield"]["value"], "0.16")
+        coverage = self.coverage(snapshot)
+        self.assertEqual(coverage["net_income"]["status"], "held")
+        self.assertEqual(coverage["capital_expenditure"]["status"], "held")
+        used = json.dumps(snapshot, sort_keys=True)
+        self.assertIn('"statement": "cash"', used)
+        self.assertIn("us-gaap:PaymentsToAcquireProductiveAssets", used)

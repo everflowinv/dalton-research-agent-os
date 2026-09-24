@@ -334,6 +334,29 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(driver["statement"], "income")
         self.assertIsNone(driver["role"])
 
+    def test_net_income_parsed_onto_the_cash_statement_keeps_its_role(self):
+        # Amazon: edgartools files ``NetIncomeLoss`` under cash flow only. Net
+        # income is a result, never summed into a cost, and the exact concept
+        # is the same fact on either statement -- unlike depreciation above.
+        concept = "us-gaap:NetIncomeLoss"
+        missions = FakeMissions(ledger().lines + [
+            _line(concept, start, end, "1", statement="cash")
+            for start, end in QUARTERS])
+        drivers = build_drivers(build_model_inputs(missions, spec(expenses=[
+            {"ref": "net", "label": "Net income", "basis_concept": concept,
+             "behaviour": "fixed", "driver_ref": None, "because": "The result."}])))
+        driver = next(item for item in drivers if item["concept"] == concept)
+        self.assertEqual(driver["statement"], "cash")
+        self.assertEqual(driver["role"], "net_income")
+        # Only the exact net-income concepts cross over.
+        other = "us-gaap:IncomeTaxExpenseBenefit"
+        missions = FakeMissions(ledger().lines + [
+            _line(other, start, end, "1", statement="cash") for start, end in QUARTERS])
+        drivers = build_drivers(build_model_inputs(missions, spec(expenses=[
+            {"ref": "tax", "label": "Tax", "basis_concept": other,
+             "behaviour": "fixed", "driver_ref": None, "because": "Tax."}])))
+        self.assertIsNone(next(item for item in drivers if item["concept"] == other)["role"])
+
     def test_a_concept_with_no_frozen_role_says_nothing_is_computed_from_it(self):
         drivers = build_drivers(build_model_inputs(
             FakeMissions([_line("us-gaap:OperatingExpenses", start, end, "1")

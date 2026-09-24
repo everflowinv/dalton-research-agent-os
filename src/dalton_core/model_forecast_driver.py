@@ -64,7 +64,8 @@ from typing import Any, Iterator, Mapping, Sequence
 
 from .claim_index_authority import MARKET_PROXY
 from .company_model_inputs import (
-    AMBIGUOUS, CASH_FLOW_ROLE_CONCEPTS, ESTIMATED, FILED, INCOMPLETE, NOT_FOUND,
+    AMBIGUOUS, CASH_FLOW_ROLE_CONCEPTS, ESTIMATED, FILED, INCOMPLETE, NET_INCOME_CONCEPTS,
+    NOT_FOUND,
     SHARED, _model_unit, cash_quarter_windows_are_unique,
 )
 from .driver_template import COST_DRIVER_TEMPLATES
@@ -635,7 +636,12 @@ def build_drivers(table: Mapping[str, Any]) -> list[dict[str, Any]]:
             statement = line.get("statement")
             statement = str(statement) if isinstance(statement, str) else None
             role = CONCEPT_ROLES.get(concept)
-            if role is not None and statement != ROLE_STATEMENTS[role]:
+            # Net income is a result, never summed into a cost line, and the
+            # exact concept is the same fact on either statement; a parser that
+            # files it only under cash flow (Amazon) must not lose the role.
+            if role is not None and statement != ROLE_STATEMENTS[role] and not (
+                    role == NET_INCOME and statement == "cash"
+                    and concept in NET_INCOME_CONCEPTS):
                 role = None
             entry = {
                 "ref": ref, "kind": kind,

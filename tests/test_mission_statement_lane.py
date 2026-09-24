@@ -25,7 +25,10 @@ from dalton_core.mission_statement_lane import (
     CONFIGURATION_HOLD_SECONDS,
     MAX_ATTEMPTS_PER_COMPANY,
     MAX_FAILURES_PER_COMPANY,
+    QUARTERLY_HISTORY_FLOOR,
+    REFRESH_INTERVAL_DAYS,
     MissionStatementLaneCoordinator,
+    next_period_due,
 )
 from dalton_core.store import DaltonStore
 from tests.p9a_fixtures import bootstrap_method_authorities, mission_params
@@ -250,7 +253,9 @@ class StatementLaneTests(unittest.TestCase):
 
     def test_a_company_already_covered_is_not_queued_again(self):
         launched = self.lane.dispatch_once()
-        self.launcher.finish(launched["ticket_ref"], summary=self.succeeded_summary())
+        # Reported today, so no next filing can be due yet whenever this runs.
+        self.launcher.finish(launched["ticket_ref"], summary=self.succeeded_summary(
+            _observation(report_date=self.now.date().isoformat())))
         self.lane.dispatch_once()
         quiet = self.lane.dispatch_once()
         self.assertEqual(quiet["queued"], [])
@@ -399,10 +404,32 @@ class StatementLaneTests(unittest.TestCase):
             missions=self.missions, launcher=self.launcher, checklist=angry)
         self.assertEqual(lane.dispatch_once()["status"], "idle")
 
+    def test_a_company_without_a_specification_backfills_a_trailing_year(self):
+        # 2026-09-24: with a one-filing floor a new workspace held one 10-Q per
+        # company, so no trailing year, no valuation and no specification --
+        # which is what would have asked for more history.
+        self.lane.dispatch_once()
+        self.assertEqual(self.launcher.started[0]["limit"], MAX_STATEMENT_FILINGS)
+        self.assertEqual(self.launcher.started[0]["form"], "10-Q")
+
+    def test_the_annual_floor_stays_one_report(self):
+        lane = MissionStatementLaneCoordinator(
+            missions=self.missions, launcher=self.launcher,
+            checklist=lambda: self.companies, forms=("10-K",),
+            clock=lambda: self.now,
+        )
+        lane.dispatch_once()
+        self.assertEqual(self.launcher.started[-1]["limit"], 1)
+
     def test_history_depth_comes_from_the_company_own_model(self):
         # P13am: IBM's specification asked for twenty quarters to separate
-        # mainframe launch cycles from the underlying business. One quarter is
-        # only the floor for a company that has no specification yet.
+        # mainframe launch cycles from the underlying business. The floor is
+        # only for a company that has no specification yet.
+        self.lane = MissionStatementLaneCoordinator(
+            missions=self.missions, launcher=self.launcher,
+            checklist=lambda: self.companies, clock=lambda: self.now,
+            quarterly_history_floor=1,
+        )
         launched = self.lane.dispatch_once()
         self.assertEqual(self.launcher.started[0]["limit"], 1)
         self.launcher.finish(launched["ticket_ref"], summary=self.succeeded_summary())
@@ -431,7 +458,7 @@ class StatementLaneTests(unittest.TestCase):
         self.missions.record_company_model_spec(
             spec, mission_version_ref=self.mission["id"])
         self.lane.dispatch_once()
-        self.assertEqual(self.launcher.started[0]["limit"], 1)
+        self.assertEqual(self.launcher.started[0]["limit"], MAX_STATEMENT_FILINGS)
 
     def test_a_company_without_a_ticker_is_skipped(self):
         self.companies = [{"company_ref": ACN}, {"ticker": "ACN"}]
@@ -496,6 +523,152 @@ class StatementLaneTests(unittest.TestCase):
             "ticker": "ACN", "form": "10-K", "limit": 2,
             "actor_ref": "automation:coverage-mission",
         })
+
+
+class NextPeriodDueTests(unittest.TestCase):
+    """When the next 10-Q or 10-K can exist, from what is already held."""
+
+    def test_a_calendar_year_filer_waits_for_its_next_quarter(self):
+        due = next_period_due({"10-K": "2025-12-31", "10-Q": "2026-06-30"}, "10-Q")
+        self.assertEqual([item.isoformat() for item in due],
+                         ["2026-09-30", "2026-10-20", "2026-11-29"])
+        annual = next_period_due({"10-K": "2025-12-31", "10-Q": "2026-06-30"}, "10-K")
+        self.assertEqual(annual[0].isoformat(), "2026-12-31")
+
+    def test_the_fourth_quarter_is_a_10k_not_a_10q(self):
+        # Accenture closes its year in August: after the May 10-Q the next
+        # filing is the annual report, and asking for a 10-Q would be a poll
+        # for a filing that is never made.
+        held = {"10-K": "2025-08-31", "10-Q": "2026-05-31"}
+        self.assertIsNone(next_period_due(held, "10-Q"))
+        self.assertEqual(next_period_due(held, "10-K")[0].isoformat(), "2026-08-31")
+        # Microsoft (June year end) after its 10-K: the next 10-Q is September.
+        msft = {"10-K": "2026-06-30", "10-Q": "2026-03-31"}
+        self.assertEqual(next_period_due(msft, "10-Q")[0].isoformat(), "2026-09-30")
+
+    def test_a_52_week_year_end_is_still_recognised(self):
+        held = {"10-K": "2025-09-27", "10-Q": "2026-06-27"}
+        self.assertIsNone(next_period_due(held, "10-Q"))
+
+    def test_nothing_held_means_nothing_to_watch(self):
+        self.assertIsNone(next_period_due({}, "10-Q"))
+        self.assertIsNone(next_period_due({"10-Q": "2026-06-30"}, "10-K"))
+
+
+class StatementLaneRefreshTests(unittest.TestCase):
+    """A held history still has to notice the next filing when it lands."""
+
+    def setUp(self) -> None:
+        self.store = DaltonStore(":memory:")
+        self.addCleanup(self.store.close)
+        self.state = bootstrap_method_authorities(self.store)
+        self.missions = CoverageMissionAuthority(self.store)
+        params = mission_params(self.state)
+        self.missions.create_mission(params.pop("mission_ref"), **params)
+        self.launcher = FakeLauncher()
+        self.companies = [{"company_ref": ACN, "ticker": "ACN"}]
+        self.now = datetime(2026, 7, 1, tzinfo=timezone.utc)
+        self.lane = MissionStatementLaneCoordinator(
+            missions=self.missions, launcher=self.launcher,
+            checklist=lambda: self.companies, clock=lambda: self.now,
+            quarterly_history_floor=1,
+        )
+
+    def summary(self, observation):
+        return {"status": "succeeded",
+                "governance_ref": "connector-governance:sec-financial-statements:v2",
+                "governance_hash": "b" * 64, "observation": observation}
+
+    def hold_june_quarter(self):
+        launched = self.lane.dispatch_once()
+        self.launcher.finish(launched["ticket_ref"], summary=self.summary(_observation()))
+        self.lane.dispatch_once()
+
+    def test_nothing_is_asked_before_the_next_quarter_can_have_been_filed(self):
+        self.hold_june_quarter()
+        self.now = datetime(2026, 10, 19, tzinfo=timezone.utc)
+        self.assertEqual(self.lane.dispatch_once()["queued"], [])
+        self.assertEqual(len(self.launcher.started), 1)
+
+    def test_a_due_quarter_is_polled_for_until_it_lands(self):
+        self.hold_june_quarter()
+        self.now = datetime(2026, 10, 21, tzinfo=timezone.utc)
+        poll = self.lane.dispatch_once()
+        self.assertEqual(poll["status"], "launched")
+        self.assertEqual(poll["queued"][0]["refresh_for"], "2026-09-30")
+        # Only the one period that can have closed, not the whole history.
+        self.assertEqual(self.launcher.started[-1]["limit"], 1)
+        # SEC did not have it yet: the same filing comes back and is a no-op.
+        self.launcher.finish(poll["ticket_ref"], summary=self.summary(_observation()))
+        quiet = self.lane.dispatch_once()
+        self.assertEqual(quiet["queued"], [])
+        self.assertEqual(len(self.launcher.started), 2)
+        # Next interval, next poll -- and this time the 10-Q is there.
+        self.now += timedelta(days=REFRESH_INTERVAL_DAYS)
+        again = self.lane.dispatch_once()
+        self.assertEqual(again["status"], "launched")
+        self.launcher.finish(again["ticket_ref"], summary=self.summary(
+            _observation("0001467373-26-000045", report_date="2026-09-30")))
+        self.lane.dispatch_once()
+        self.assertEqual(
+            [item["report_date"] for item in self.missions.statement_filings(ACN)],
+            ["2026-06-30", "2026-09-30"])
+        # Held now: nothing more is asked until the following quarter is due.
+        self.now += timedelta(days=REFRESH_INTERVAL_DAYS)
+        self.assertEqual(self.lane.dispatch_once()["queued"], [])
+        self.assertEqual(len(self.launcher.started), 3)
+
+    def test_a_filer_that_never_files_is_not_polled_forever(self):
+        self.hold_june_quarter()
+        self.now = datetime(2026, 12, 1, tzinfo=timezone.utc)
+        self.assertEqual(self.lane.dispatch_once()["queued"], [])
+
+    def test_a_short_backfill_still_watches_for_new_filings(self):
+        # Asked for eight, SEC had one with XBRL: the backfill is spent, but
+        # the lane must not go blind to the next quarter because of it.
+        lane = MissionStatementLaneCoordinator(
+            missions=self.missions, launcher=self.launcher,
+            checklist=lambda: self.companies, clock=lambda: self.now,
+        )
+        launched = lane.dispatch_once()
+        self.assertEqual(self.launcher.started[-1]["limit"], QUARTERLY_HISTORY_FLOOR)
+        self.launcher.finish(launched["ticket_ref"], summary=self.summary(_observation()))
+        lane.dispatch_once()
+        self.assertEqual(lane.dispatch_once()["queued"], [])
+        self.now = datetime(2026, 10, 21, tzinfo=timezone.utc)
+        self.assertEqual(lane.dispatch_once()["status"], "launched")
+        self.assertEqual(self.launcher.started[-1]["limit"], 1)
+
+    def test_a_success_clears_the_failures_before_it(self):
+        # IBM's four adapter failures from 2026-09-09 were fixed the same day;
+        # a lifetime count kept them one outage away from holding IBM forever.
+        # The ledger stamps failures from the real clock, so the hold windows
+        # run on it too; the held quarter sits far enough ahead that its next
+        # poll is always later than any stamp.
+        self.now = datetime.now(timezone.utc)
+        for _ in range(MAX_ATTEMPTS_PER_COMPANY - 1):
+            launched = self.lane.dispatch_once()
+            self.assertEqual(launched["status"], "launched")
+            self.launcher.finish(launched["ticket_ref"], status="failed",
+                                 summary={"failure_reason": "OSError: something odd"})
+            self.lane.dispatch_once()
+            self.now += timedelta(seconds=CONFIGURATION_HOLD_SECONDS + 1)
+        launched = self.lane.dispatch_once()
+        self.launcher.finish(launched["ticket_ref"], summary=self.summary(
+            _observation(report_date="2040-06-30")))
+        self.lane.dispatch_once()
+        coverage = self.missions.statement_coverage(ACN)
+        self.assertEqual(coverage["latest_report_date_by_form"], {"10-Q": "2040-06-30"})
+        self.assertIn("10-Q", coverage["last_success_by_form"])
+        # One more failure is the eighth ever but the first since it worked.
+        self.now = datetime(2040, 10, 21, tzinfo=timezone.utc)
+        poll = self.lane.dispatch_once()
+        self.launcher.finish(poll["ticket_ref"], status="failed",
+                             summary={"failure_reason": "OSError: something odd"})
+        retried = self.lane.dispatch_once()
+        self.assertEqual(retried["settled"][0]["outcome"], "failed")
+        self.assertEqual(retried["status"], "launched")
+        self.assertNotIn("held", [item["status"] for item in retried["queued"]])
 
 
 if __name__ == "__main__":

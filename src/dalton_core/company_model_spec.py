@@ -48,7 +48,7 @@ import json
 import re
 from typing import Any, Mapping, Sequence
 
-from .company_model_inputs import CASH_FLOW_ROLE_CONCEPTS
+from .company_model_inputs import CASH_FLOW_ROLE_CONCEPTS, NET_INCOME_CONCEPTS
 
 from .driver_template import (
     COST_REGISTRY_HASH, COST_REGISTRY_REF, cost_prompt_block, cost_slot_ids,
@@ -679,6 +679,51 @@ REQUIRED_STATEMENT_ROLES: dict[str, tuple[tuple[str, str], ...]] = {
 }
 
 
+# Exact concepts that answer a required line whatever the filer calls it, and
+# the statements they may be filed on. A label is the filer's wording, and two
+# of the most common are misses for the needles above: Amazon's capital
+# expenditure is "Purchases of property and equipment" under
+# ``PaymentsToAcquireProductiveAssets``, and its ``NetIncomeLoss`` is parsed
+# onto the cash-flow statement only. The concept is the filer's claim about
+# what the number *is*; a label is not, so concepts are matched exactly.
+REQUIRED_ROLE_CONCEPTS: dict[tuple[str, str], tuple[tuple[str, ...], tuple[str, ...]]] = {
+    ("income", "net income"): (NET_INCOME_CONCEPTS, ("income", "cash")),
+    ("cash", "capital expenditure"): (
+        CASH_FLOW_ROLE_CONCEPTS["capital_expenditure"], ("cash",)),
+}
+# Wordings that mean capital expenditure and nothing else. Anchored at the
+# start so "Proceeds from property and equipment sales" is never read as an
+# outflow; diagnostic only -- a value is only ever taken by exact concept.
+_CAPEX_LABEL = re.compile(
+    r"^\s*(?:purchases?|additions?|payments?|acquisitions?)\s+(?:of|to|for)\s+"
+    r"(?:property|premises|fixed assets|capital assets|productive assets)"
+    r"|capital expenditures?",
+    re.IGNORECASE,
+)
+_ROLE_LABELS: dict[tuple[str, str], re.Pattern[str]] = {
+    ("cash", "capital expenditure"): _CAPEX_LABEL,
+}
+
+
+def _role_answered(state: Mapping[str, Any], statement: str, needle: str) -> bool:
+    """Whether an exact concept or an unambiguous wording answers this line."""
+
+    statements = state.get("statements") or {}
+    concepts, where = REQUIRED_ROLE_CONCEPTS.get((statement, needle), ((), ()))
+    pattern = _ROLE_LABELS.get((statement, needle))
+    for name in where or (statement,):
+        for row in statements.get(name) or []:
+            if (not isinstance(row, Mapping) or row.get("is_breakdown")
+                    or row.get("dimension_axis")):
+                continue
+            if row.get("concept") in concepts:
+                return True
+            if (pattern is not None and name == statement
+                    and pattern.search(str(row.get("label") or ""))):
+                return True
+    return False
+
+
 def financial_line_gaps(state: Mapping[str, Any]) -> list[dict[str, str]]:
     """Which company, which statement, which line item is not there yet.
 
@@ -715,6 +760,8 @@ def financial_line_gaps(state: Mapping[str, Any]) -> list[dict[str, str]]:
             if isinstance(row, Mapping))
         for needle, chinese in REQUIRED_STATEMENT_ROLES[statement]:
             if needle in labels or needle.replace(" ", "") in concepts.replace(" ", ""):
+                continue
+            if _role_answered(state, statement, needle):
                 continue
             gaps.append({
                 "company_ref": company_ref, "statement": statement,

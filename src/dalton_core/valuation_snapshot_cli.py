@@ -97,9 +97,14 @@ MAX_PRICE_HISTORY_BARS = 756
 # every enterprise value too small with nothing on the record to say so, so it
 # is not on this list and EV/EBITDA is unavailable instead.
 ROLE_CANDIDATES: Mapping[str, tuple[tuple[str, str], ...]] = {
+    # The cash-flow rows are the same XBRL facts, tried only after the income
+    # statement: edgartools files Amazon's ``NetIncomeLoss`` on the cash-flow
+    # statement alone, which left its P/E with no earnings to divide by.
     "net_income": (
         ("income", "us-gaap:NetIncomeLoss"),
         ("income", "us-gaap:ProfitLoss"),
+        ("cash", "us-gaap:NetIncomeLoss"),
+        ("cash", "us-gaap:ProfitLoss"),
     ),
     "revenue": (
         ("income", "us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax"),

@@ -18,6 +18,21 @@ accessions.  The existing chain does the rest: dispatch → lane → verifier �
 candidate → policy commit → a quantitative Claim the Initial Screen may cite.
 
 No new connector call, no new governance, no widened grant.
+
+2026-09-24: "four quarters held" is not "the newest quarter held".  The gate
+used to be the checklist's count of *any* quantitative Claim period, and once
+the statement-line promoter admitted thousands of numbers every company had far
+more than four, so the coordinator went idle for good -- CTSH's 2026-06-30 10-Q
+(0001058290-26-000031, filed 2026-07-29) was observed and never dispatched,
+and the weekly report repeated itself.  At the same time the newest SEC
+artifact behind a company's Claims had become an EDGAR *submissions* payload
+rather than company facts, so even an open gate would have found no 10-Q in
+it.  The coordinator now asks the question the weekly report depends on --
+does each of the newest four 10-Q quarters carry this lane's own
+``quarterly_revenue_yoy_growth`` Claim -- and reads the filings it may bind to
+from every observation authority already holds: company facts, submissions,
+and the statement lane's ingested filings.  The statement lane is the one that
+goes looking for new filings, so a new 10-Q it ingests is queued here next.
 """
 
 from __future__ import annotations
@@ -44,6 +59,13 @@ MAX_ATTEMPTS_PER_FILING = 3
 # filing whose comparative the lane cannot resolve without wandering into old
 # filings that use different concepts.
 RECENT_FILINGS = 6
+# The one metric this lane's SEC chain produces.  Held periods are read for it
+# alone: a promoted revenue line for the same quarter is not the growth Claim
+# the weekly report reads.
+YOY_METRIC = "quarterly_revenue_yoy_growth"
+# How many distinct SEC artifacts one company's pass may open looking for a
+# company-facts and a submissions payload.  They are megabytes each.
+MAX_ARTIFACTS_READ = 6
 SPOOL_ROOTS = ("transcript-spool", "connector-spool", "raw-spool")
 
 
@@ -96,6 +118,37 @@ def quarterly_filings(
     return ordered[: max(1, int(limit))]
 
 
+def submissions_filings(
+    payload: Mapping[str, Any], *, limit: int = RECENT_FILINGS
+) -> list[dict[str, Any]]:
+    """The most recent 10-Qs listed in an EDGAR submissions payload.
+
+    A submissions payload names each filing's accession, filing date and the
+    period it reports, but not the period's start; the quarter is identified by
+    its end, which is what a held Claim period is matched on.
+    """
+
+    recent = ((payload.get("filings") or {}).get("recent")) if isinstance(payload, Mapping) else None
+    if not isinstance(recent, Mapping):
+        return []
+    columns = [recent.get(name) for name in ("form", "accessionNumber", "filingDate", "reportDate")]
+    if not all(isinstance(column, list) for column in columns):
+        return []
+    seen: dict[str, dict[str, Any]] = {}
+    for form, accession, filed, report in zip(*columns):
+        if form != "10-Q" or not isinstance(accession, str):
+            continue
+        filed_day, end = _parse_date(filed), _parse_date(report)
+        if filed_day is None or end is None or end.isoformat() in seen:
+            continue
+        seen[end.isoformat()] = {
+            "period": None, "start": None, "end": end.isoformat(),
+            "accession": accession, "filed": filed_day.isoformat(),
+        }
+    ordered = sorted(seen.values(), key=lambda item: item["end"], reverse=True)
+    return ordered[: max(1, int(limit))]
+
+
 def read_artifact(state_dir: Path, content_sha256: str) -> Mapping[str, Any] | None:
     """The exact artifact bytes, verified against the hash authority recorded."""
 
@@ -142,8 +195,14 @@ class MissionSecQuartersCoordinator:
     # -- authority reads -----------------------------------------------------
 
     def _facts_artifact(self, company_ref: str) -> str | None:
-        """The newest SEC company-facts artifact hash behind this company's Claims."""
+        """The newest SEC artifact hash behind this company's Claims, of any kind."""
 
+        return next(iter(self._sec_artifacts(company_ref)), None)
+
+    def _sec_artifacts(self, company_ref: str):
+        """SEC artifact hashes behind this company's Claims, newest first, once each."""
+
+        seen: set[str] = set()
         rows = self.connection.execute(
             "SELECT e.evidence_json AS evidence_json, e.created_at AS created_at "
             "FROM evidence_relations r "
@@ -165,15 +224,84 @@ class MissionSecQuartersCoordinator:
                     "SELECT artifact_content_hash FROM observability_artifact_versions_v2 "
                     "WHERE version_id=?", (ref,),
                 ).fetchone()
-                if artifact is not None:
-                    return artifact["artifact_content_hash"]
-        return None
+                if artifact is not None and artifact["artifact_content_hash"] not in seen:
+                    seen.add(artifact["artifact_content_hash"])
+                    yield artifact["artifact_content_hash"]
+
+    def _artifact_filings(self, company_ref: str) -> tuple[list[dict[str, Any]], bool]:
+        """10-Qs named by the newest company-facts and submissions payloads held.
+
+        The second value says whether any SEC artifact was held at all.  The
+        newest artifact is not necessarily company facts -- live it was a
+        submissions payload -- so each is opened and recognised by its shape.
+        """
+
+        facts: list[dict[str, Any]] | None = None
+        listed: list[dict[str, Any]] | None = None
+        any_held = False
+        for count, digest in enumerate(self._sec_artifacts(company_ref)):
+            any_held = True
+            if count >= MAX_ARTIFACTS_READ or (facts is not None and listed is not None):
+                break
+            payload = read_artifact(self.state_dir, digest)
+            if payload is None:
+                continue
+            held_facts = payload.get("facts")
+            if facts is None and isinstance(held_facts, Mapping) \
+                    and isinstance(held_facts.get("us-gaap"), Mapping):
+                facts = [{**item, "observation_ref": f"sec-company-facts-artifact:{digest}"}
+                         for item in quarterly_filings(payload)]
+            elif listed is None and isinstance(payload.get("filings"), Mapping):
+                listed = [{**item, "observation_ref": f"sec-submissions-artifact:{digest}"}
+                          for item in submissions_filings(payload)]
+        return [*(facts or []), *(listed or [])], any_held
+
+    def _statement_filings(self, company_ref: str) -> list[dict[str, Any]]:
+        """10-Qs the statement lane has ingested for this company.
+
+        Each is an accession SEC served for this company, recorded under the
+        mission's own governance: an observation, and the only one that is
+        refreshed on a schedule as new filings land.
+        """
+
+        try:
+            rows = self.connection.execute(
+                "SELECT ingest_id, accession, filed, report_date "
+                "FROM coverage_mission_statement_filings "
+                "WHERE company_ref=? AND form='10-Q'", (company_ref,),
+            ).fetchall()
+        except Exception:  # noqa: BLE001 - an older Core has no statement lane
+            return []
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            filed, end = _parse_date(row["filed"]), _parse_date(row["report_date"])
+            if filed is None or end is None or not isinstance(row["accession"], str):
+                continue
+            result.append({
+                "period": None, "start": None, "end": end.isoformat(),
+                "accession": row["accession"], "filed": filed.isoformat(),
+                "observation_ref": f"statement-ingest:{row['ingest_id']}",
+            })
+        return result
+
+    @staticmethod
+    def _recent_quarters(filings: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+        """One filing per quarter end, newest first, preferring one that names its start."""
+
+        by_end: dict[str, dict[str, Any]] = {}
+        for filing in filings:
+            current = by_end.get(filing["end"])
+            if current is None or (current.get("start") is None and filing.get("start")):
+                by_end[filing["end"]] = dict(filing)
+        ordered = sorted(by_end.values(), key=lambda item: item["end"], reverse=True)
+        return ordered[:RECENT_FILINGS]
 
     def _held_periods(self, company_ref: str) -> set[str]:
         rows = self.connection.execute(
             "SELECT claim_version_id AS id, json_extract(claim_json,'$.period') AS period "
             "FROM claim_versions WHERE json_extract(claim_json,'$.subject_ref')=? "
-            "AND json_extract(claim_json,'$.value') IS NOT NULL", (company_ref,),
+            "AND json_extract(claim_json,'$.metric_or_aspect')=? "
+            "AND json_extract(claim_json,'$.value') IS NOT NULL", (company_ref, YOY_METRIC),
         ).fetchall()
         try:
             retired = {
@@ -277,9 +405,7 @@ class MissionSecQuartersCoordinator:
             item = next(
                 (i for i in entry.get("items", ()) if i["item_ref"] == "quarterly_financials"), None
             )
-            if item is None or item["have"] >= REQUIRED_QUARTERS:
-                if item is not None:
-                    skipped.append({"ticker": entry.get("ticker"), "reason": "已有四个季度"})
+            if item is None:
                 continue
             company_ref = entry["company_ref"]
             open_count = self._open_dispatches(company_ref)
@@ -287,25 +413,43 @@ class MissionSecQuartersCoordinator:
                 skipped.append({"ticker": entry.get("ticker"),
                                 "reason": f"已有 {open_count} 份 filing 在队列里等着跑"})
                 continue
-            digest = self._facts_artifact(company_ref)
-            if digest is None:
-                skipped.append({"ticker": entry.get("ticker"),
-                                "reason": "还没有这家公司的 SEC 财务数据原始件"})
-                continue
-            payload = read_artifact(self.state_dir, digest)
-            if payload is None:
-                skipped.append({"ticker": entry.get("ticker"),
-                                "reason": "原始件读不到或哈希不符，不据此排队"})
-                continue
             held = self._held_periods(company_ref)
+            held_ends = {period.rsplit("..", 1)[-1] for period in held if ".." in period}
+            # The cheap observation first. When the statement lane's own
+            # filings already show the newest four quarters answered, there is
+            # nothing to queue and no reason to open megabytes of artifacts.
+            filings = self._statement_filings(company_ref)
+            recent = self._recent_quarters(filings)
+            newest = recent[:REQUIRED_QUARTERS]
+            if len(newest) < REQUIRED_QUARTERS or any(
+                    filing["end"] not in held_ends for filing in newest):
+                from_artifacts, any_artifact = self._artifact_filings(company_ref)
+                if not filings and not any_artifact:
+                    skipped.append({"ticker": entry.get("ticker"),
+                                    "reason": "还没有这家公司的 SEC 财务数据原始件"})
+                    continue
+                recent = self._recent_quarters([*from_artifacts, *filings])
+                newest = recent[:REQUIRED_QUARTERS]
+                if not recent:
+                    skipped.append({"ticker": entry.get("ticker"),
+                                    "reason": "原始件读不到、哈希不符或里面没有 10-Q，不据此排队"})
+                    continue
+            missing = [filing for filing in newest if filing["end"] not in held_ends]
+            if not missing:
+                skipped.append({"ticker": entry.get("ticker"),
+                                "reason": "最近四个季度的同比增速都已入账"})
+                continue
             # One dispatch per filing: a 10-Q also reports the prior-year
             # quarter, so the same accession can answer two periods and running
             # it twice would spend the lane on a filing already fetched.
             wanted: list[dict[str, Any]] = []
             seen_accessions: set[str] = set()
-            for filing in quarterly_filings(payload):
+            # Only the newest four: a quarter older than those does not make the
+            # weekly report current, and walking further back is how the lane
+            # once spent itself on 2023 filings whose concepts no longer resolve.
+            for filing in newest:
                 tried = attempts.get(filing["accession"], 0)
-                if filing["period"] in held or filing["accession"] in seen_accessions:
+                if filing["end"] in held_ends or filing["accession"] in seen_accessions:
                     continue
                 if tried >= MAX_ATTEMPTS_PER_FILING:
                     skipped.append({"ticker": entry.get("ticker"), "accession": filing["accession"],
@@ -316,11 +460,11 @@ class MissionSecQuartersCoordinator:
                 # what keeps each queued dispatch a new row.
                 wanted.append({**filing, "attempt": tried,
                                "window_salt": windows_used.get(filing["accession"], 0)})
-                if len(wanted) >= max(1, REQUIRED_QUARTERS - item["have"]):
+                if len(wanted) >= len(missing):
                     break
             if not wanted:
                 skipped.append({"ticker": entry.get("ticker"),
-                                "reason": "原始件里没有还没入库的季度"})
+                                "reason": "最近四个季度里缺的那几份都已试满次数"})
                 continue
             try:
                 authorization = self.missions.authorize_sec_lane(
@@ -340,14 +484,15 @@ class MissionSecQuartersCoordinator:
                         filed_from=(filed - timedelta(days=span)).isoformat(),
                         filed_to=(filed + timedelta(days=span)).isoformat(),
                         expected_accession=filing["accession"],
-                        observation_ref=f"sec-company-facts-artifact:{digest}",
+                        observation_ref=filing["observation_ref"],
                     )
                 except Exception as exc:  # noqa: BLE001
                     skipped.append({"ticker": entry.get("ticker"), "accession": filing["accession"],
                                     "reason": f"{type(exc).__name__}: {exc}"})
                     continue
                 queued.append({
-                    "accession": filing["accession"], "period": filing["period"],
+                    "accession": filing["accession"],
+                    "period": filing.get("period") or f"..{filing['end']}",
                     "filed": filing["filed"], "attempt": int(filing.get("attempt", 0)) + 1,
                     "status": record.get("status", "queued"),
                 })
@@ -355,6 +500,7 @@ class MissionSecQuartersCoordinator:
                 return {
                     "status": "queued", "ticker": entry.get("ticker"),
                     "company_ref": company_ref, "quarters_held": item["have"],
+                    "recent_quarters_missing": [filing["end"] for filing in missing],
                     "queued": queued, "skipped": skipped,
                 }
         return {"status": "idle", "skipped": skipped}
@@ -400,9 +546,11 @@ __all__ = [
     "MAX_ATTEMPTS_PER_FILING",
     "MAX_QUEUED_PER_RUN",
     "RECENT_FILINGS",
+    "YOY_METRIC",
     "MissionSecQuartersCoordinator",
     "REQUIRED_QUARTERS",
     "dispatch",
     "quarterly_filings",
     "read_artifact",
+    "submissions_filings",
 ]
