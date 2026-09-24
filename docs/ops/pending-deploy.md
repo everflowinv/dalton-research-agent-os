@@ -63,7 +63,22 @@ $PY scripts/sign_auto_commit_rules.py --state-dir "$W" --rule research-auto-comm
 $PY scripts/sign_auto_commit_rules.py --state-dir "$W" --rule research-auto-commit:sec-statement-line:v1 --rule research-auto-commit:sec-public-company-facts-growth:v1 --apply --actor human:owner
 ```
 
-**P2 周报切到 v4 排程**（启用证据包自动刷新，W40 之前做完即可）：命令在脚本 `scripts/switch_weekly_brief_plan.py` 写好后补到这里（正在写）。
+**P2 周报切到 v4 排程**（启用证据包自动刷新，10-01 11:00Z 的 W40 之前做完即可）。
+
+- 做什么：发布 policy-18，在 `allowed_plan_bindings` 里加入 v4，v3 保留；级联更新 constitution 16 和 mission 26；把 service.json 里的 plan 换成 v4。service.json 会先备份，再原子替换。
+- 为什么必须等部署之后：当前线上 release 不认 0.2 格式的 plan，在旧 release 上执行 `--apply` 会被脚本拒绝（`runtime_ready: false`）。
+- 重复执行是幂等的。如果恰好撞上已经出刊的时段，只会返回 already_issued，不会重复出刊。
+
+```zsh
+S="$HOME/Library/Application Support/Dalton/state/dalton-core"
+C="$HOME/Library/Application Support/Dalton/config/service.json"
+PYTHONPATH=$PWD/src $PY scripts/switch_weekly_brief_plan.py --state-dir "$S" --service-config "$C"                          # dry-run：应为 runtime_ready=true、would-publish
+PYTHONPATH=$PWD/src $PY scripts/switch_weekly_brief_plan.py --state-dir "$S" --service-config "$C" --apply --actor human:owner
+launchctl kickstart -k gui/$(id -u)/space.lumos.dalton.controller                                                          # 只重启 controller，writer 不用重启
+PYTHONPATH=$PWD/src $PY scripts/switch_weekly_brief_plan.py --state-dir "$S" --service-config "$C" --verify                 # 应为 switched，heartbeat 显示 v4 且状态为 waiting
+```
+
+注意：刷新机制本身不会产生新内容。W40 能不能出现新 claim，取决于 SEC 季度修复部署后 CTSH 2026Q2 等数据能否入账。
 
 **P3 恢复 document-research 的 hold**（legacy 15 条、ws-7d 5 条，muse 修好后才能成功）。先确认核验预检通过：
 
