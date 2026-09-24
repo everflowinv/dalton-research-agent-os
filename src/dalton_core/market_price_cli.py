@@ -44,6 +44,7 @@ from .market_price_adapter import (
     daily_prices_wire,
     fetch_daily_prices,
     json_safe,
+    shares_outstanding_source,
 )
 from .raw_spool import RawSpool
 from .store import DaltonStore, canonical_json
@@ -115,6 +116,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "bar_count": 0,
         "dropped_row_count": 0,
         "observation_count": 0,
+        "shares_outstanding_basis": None,
         "captured_at": None,
         "provisional_bar_date": None,
         "series_status": None,
@@ -168,6 +170,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         summary["bar_count"] = len(wire["bars"])
         summary["dropped_row_count"] = wire["dropped_row_count"]
         summary["observation_count"] = len(wire["observations"])
+        # The frozen observation shape has no room for a basis, so the run
+        # says which count its shares_outstanding observation carries.
+        summary["shares_outstanding_basis"] = shares_outstanding_source(
+            raw.get("metadata"))[1]
         summary["captured_at"] = wire["captured_at"]
         if wire["dropped_row_count"] and not wire["bars"]:
             # Yahoo returned rows and every one of them had a hole in it. That

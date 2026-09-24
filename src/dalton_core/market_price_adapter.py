@@ -49,7 +49,27 @@ _WIRE_BY_COLUMN = {
     "Close": "close", "Adj Close": "adj_close", "Volume": "volume",
 }
 # Yahoo publishes these under one name in ``info`` and nowhere else.
+#
+# ``sharesOutstanding`` is the count of the *quoted* share class only.  For a
+# company with several classes that is not the company: GOOGL's is the Class A
+# count (5.87B of ~12.2B), META's the Class A count (2.205B of ~2.55B), and
+# ``close * shares`` then halves Alphabet's market capitalisation.
+# ``impliedSharesOutstanding`` is Yahoo's all-class count expressed in units of
+# the quoted class -- the count its own ``marketCap`` is computed from -- and
+# equals ``sharesOutstanding`` for a single-class company.  It is preferred;
+# the quoted-class count is the fallback when Yahoo has no implied count.
+#
+# SEC ``dei:EntityCommonStockSharesOutstanding`` summed over classes would be
+# the filer's own number, but multi-class filers tag it per class on
+# ``StatementClassOfStockAxis``, which the companyfacts API omits, and the
+# statements lane keeps only statement facts.  Binding it would be a new SEC
+# read and a new share-source binding in the valuation formula, not a change
+# to this adapter.
 SHARES_FIELD = "sharesOutstanding"
+IMPLIED_SHARES_FIELD = "impliedSharesOutstanding"
+# Which count the ``shares_outstanding`` observation carries.
+SHARES_BASIS_ALL_CLASSES = "all_classes_implied"
+SHARES_BASIS_QUOTED_CLASS = "quoted_class_only"
 MARKET_CAP_FIELD = "marketCap"
 CURRENCY_FIELD = "currency"
 ANALYST_COUNT_FIELD = "numberOfAnalystOpinions"
@@ -244,7 +264,7 @@ def fetch_daily_prices(ticker: str, *, start: str, end: str) -> dict[str, Any]:
         info = {}
         metadata["info_error"] = f"{type(exc).__name__}: {exc}"
     for field in (
-        CURRENCY_FIELD, SHARES_FIELD, MARKET_CAP_FIELD, "quoteType",
+        CURRENCY_FIELD, SHARES_FIELD, IMPLIED_SHARES_FIELD, MARKET_CAP_FIELD, "quoteType",
         "shortName", "exchange", "regularMarketTime", ANALYST_COUNT_FIELD,
     ):
         metadata[field] = json_safe(info.get(field))
@@ -326,6 +346,36 @@ def fetch_analyst_estimates(ticker: str) -> dict[str, Any]:
 # -- normalising -----------------------------------------------------------
 
 
+def _positive_text(value: Any, field: str) -> str | None:
+    if value is None:
+        return None
+    try:
+        text = _decimal_text(value, field)
+    except MarketDataAdapterError:
+        return None
+    return text if Decimal(text) > 0 else None
+
+
+def shares_outstanding_source(metadata: Any) -> tuple[str, str | None]:
+    """Which ``info`` field the share count comes from, and on what basis.
+
+    The implied all-class count when Yahoo has a usable one; otherwise the
+    quoted-class count, named as such so a reader of the run can see that a
+    multi-class company's market capitalisation would be understated.  An
+    implied count *below* the quoted-class count cannot be an all-class total
+    and is not used.  Returns ``(field, None)`` when neither is usable.
+    """
+
+    metadata = metadata if isinstance(metadata, dict) else {}
+    implied = _positive_text(metadata.get(IMPLIED_SHARES_FIELD), IMPLIED_SHARES_FIELD)
+    quoted = _positive_text(metadata.get(SHARES_FIELD), SHARES_FIELD)
+    if implied is not None and (quoted is None or Decimal(implied) >= Decimal(quoted)):
+        return IMPLIED_SHARES_FIELD, SHARES_BASIS_ALL_CLASSES
+    if quoted is not None:
+        return SHARES_FIELD, SHARES_BASIS_QUOTED_CLASS
+    return SHARES_FIELD, None
+
+
 def daily_prices_wire(
     raw: dict[str, Any], *, source_record_refs: list[str]
 ) -> dict[str, Any]:
@@ -388,18 +438,13 @@ def daily_prices_wire(
     bars.sort(key=lambda item: item["date"])
 
     observations: list[dict[str, str]] = []
+    shares_field, _basis = shares_outstanding_source(metadata)
     for field, name, unit in (
-        (SHARES_FIELD, "shares_outstanding", "shares"),
+        (shares_field, "shares_outstanding", "shares"),
         (MARKET_CAP_FIELD, "market_cap", currency.upper()),
     ):
-        value = metadata.get(field)
-        if value is None:
-            continue
-        try:
-            text = _decimal_text(value, field)
-        except MarketDataAdapterError:
-            continue
-        if Decimal(text) <= 0:
+        text = _positive_text(metadata.get(field), field)
+        if text is None:
             continue
         observations.append({
             "observation": name,

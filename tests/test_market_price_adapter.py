@@ -25,6 +25,7 @@ from dalton_core.market_price_adapter import (
     analyst_estimates_wire,
     daily_prices_wire,
     json_safe,
+    shares_outstanding_source,
 )
 from dalton_core.yfinance_core import (
     ANALYST_ESTIMATES_OPERATION,
@@ -173,6 +174,57 @@ class RefusalTests(unittest.TestCase):
         wire = daily_prices_wire(raw, source_record_refs=[SINK])
         self.assertEqual(
             [item["observation"] for item in wire["observations"]], ["market_cap"])
+
+
+class ShareClassTests(unittest.TestCase):
+    """2026-09-24: GOOGL's valuation used the Class A count (5.87B of ~12.2B)
+    and META's the Class A count (2.205B), because ``sharesOutstanding`` is the
+    quoted class only."""
+
+    def wire_for(self, **metadata):
+        raw = prices_fixture()
+        raw["metadata"] = {**raw["metadata"], **metadata}
+        wire = daily_prices_wire(raw, source_record_refs=[SINK])
+        shares = [item for item in wire["observations"]
+                  if item["observation"] == "shares_outstanding"]
+        return wire, (shares[0]["value"] if shares else None), raw
+
+    def test_a_multi_class_company_is_counted_across_its_classes(self):
+        for ticker, quoted, implied in (("GOOGL", 5867155790, 12229934831),
+                                        ("META", 2205128509, 2547506225)):
+            with self.subTest(ticker=ticker):
+                wire, value, raw = self.wire_for(
+                    sharesOutstanding=quoted, impliedSharesOutstanding=implied)
+                self.assertEqual(value, str(implied))
+                self.assertEqual(shares_outstanding_source(raw["metadata"]),
+                                 ("impliedSharesOutstanding", "all_classes_implied"))
+                _schema_matches(
+                    wire, yfinance_output_schema(DAILY_PRICES_OPERATION), "output")
+
+    def test_a_single_class_company_is_unchanged(self):
+        _, value, _ = self.wire_for(sharesOutstanding=611942109,
+                                    impliedSharesOutstanding=611942109)
+        self.assertEqual(value, "611942109")
+
+    def test_without_an_implied_count_the_quoted_class_is_used_and_named(self):
+        for implied in (None, 0, float("nan"), "n/a"):
+            with self.subTest(implied=implied):
+                _, value, raw = self.wire_for(
+                    sharesOutstanding=611942109, impliedSharesOutstanding=implied)
+                self.assertEqual(value, "611942109")
+                self.assertEqual(shares_outstanding_source(raw["metadata"])[1],
+                                 "quoted_class_only")
+
+    def test_an_implied_count_below_the_quoted_class_is_not_a_total(self):
+        _, value, _ = self.wire_for(sharesOutstanding=611942109,
+                                    impliedSharesOutstanding=1000)
+        self.assertEqual(value, "611942109")
+
+    def test_only_an_implied_count_is_still_a_count(self):
+        _, value, raw = self.wire_for(sharesOutstanding=None,
+                                      impliedSharesOutstanding=12229934831)
+        self.assertEqual(value, "12229934831")
+        self.assertEqual(shares_outstanding_source({}), ("sharesOutstanding", None))
 
 
 class EstimateTests(unittest.TestCase):

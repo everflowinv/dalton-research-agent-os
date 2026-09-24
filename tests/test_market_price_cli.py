@@ -156,6 +156,8 @@ class ChildTests(unittest.TestCase):
         self.assertEqual(summary["first_bar_date"], "2026-08-25")
         self.assertEqual(summary["last_bar_date"], "2026-09-08")
         self.assertEqual(summary["observation_count"], 2)
+        # The fixture has no implied all-class count, and the run says so.
+        self.assertEqual(summary["shares_outstanding_basis"], "quoted_class_only")
 
     def test_replaying_the_same_call_adds_nothing(self):
         self.run_child()
