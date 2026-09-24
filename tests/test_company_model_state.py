@@ -330,5 +330,91 @@ class CompanyModelStateTests(unittest.TestCase):
         self.assertIn(cell["filing_content_hash"], prompt)
 
 
+class NetIncomeOnTheCashStatementTests(unittest.TestCase):
+    """Amazon's ``NetIncomeLoss`` is parsed onto the cash-flow statement only."""
+
+    setUp = CompanyModelStateTests.setUp
+    ingest = CompanyModelStateTests.ingest
+
+    def amazon_like(self, *, income_net=False, cash_net_axis=None, capex_label=None,
+                    capex_concept="us-gaap:PaymentsToAcquireProductiveAssets"):
+        lines = [
+            _line("us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax",
+                  label="Net sales", value="167702000000"),
+            _line("us-gaap:OperatingIncomeLoss", label="Operating income",
+                  value="19171000000"),
+        ]
+        if income_net:
+            lines.append(_line("us-gaap:NetIncomeLoss", label="Net income",
+                               value="18164000000"))
+        lines += [
+            _line("us-gaap:NetIncomeLoss", statement="cash", label="Net income",
+                  value="18164000000", parent_concept=
+                  "us-gaap:NetCashProvidedByUsedInOperatingActivities",
+                  dimension_axis=cash_net_axis,
+                  dimension_member="srt:SegmentMember" if cash_net_axis else None,
+                  is_breakdown=bool(cash_net_axis)),
+            _line("us-gaap:NetCashProvidedByUsedInOperatingActivities", statement="cash",
+                  label="Net cash provided by (used in) operating activities",
+                  value="32533000000"),
+            _line("amzn:ProceedsFromPropertyPlantAndEquipmentSalesAndIncentives",
+                  statement="cash",
+                  label="Proceeds from property and equipment sales and incentives",
+                  value="1206000000"),
+        ]
+        if capex_concept is not None:
+            lines.append(_line(capex_concept, statement="cash",
+                               label=capex_label or "Purchases of property and equipment",
+                               value="32183000000"))
+        self.ingest("0001018724-26-000026", lines)
+        return build_company_model_state(self.missions, ACN)
+
+    def test_net_income_filed_under_cash_flow_is_on_the_income_statement(self):
+        from dalton_core.company_model_spec import financial_line_gaps
+
+        state = self.amazon_like()
+        carried = [row for row in state["statements"]["income"]
+                   if row["concept"] == "us-gaap:NetIncomeLoss"]
+        self.assertEqual(len(carried), 1)
+        self.assertEqual(carried[0]["carried_from"], "cash")
+        self.assertEqual((carried[0]["level"], carried[0]["parent_concept"]), (0, None))
+        # Still on the cash statement too: nothing was moved, only shown.
+        self.assertIn("us-gaap:NetIncomeLoss",
+                      [row["concept"] for row in state["statements"]["cash"]])
+        lines = {gap["line"] for gap in financial_line_gaps(state)}
+        self.assertNotIn("net income", lines)
+        self.assertNotIn("capital expenditure", lines)
+
+    def test_an_income_statement_with_its_own_net_income_is_left_exactly_as_it_was(self):
+        state = self.amazon_like(income_net=True)
+        rows = [row for row in state["statements"]["income"]
+                if row["concept"] == "us-gaap:NetIncomeLoss"]
+        self.assertEqual(len(rows), 1)
+        self.assertNotIn("carried_from", rows[0])
+
+    def test_a_segment_net_income_is_never_carried(self):
+        from dalton_core.company_model_spec import financial_line_gaps
+
+        state = self.amazon_like(cash_net_axis="us-gaap:StatementBusinessSegmentsAxis")
+        self.assertNotIn("us-gaap:NetIncomeLoss",
+                         [row["concept"] for row in state["statements"]["income"]])
+        self.assertIn("net income", {gap["line"] for gap in financial_line_gaps(state)})
+
+    def test_a_proceeds_line_does_not_answer_capital_expenditure(self):
+        from dalton_core.company_model_spec import financial_line_gaps
+
+        state = self.amazon_like(capex_concept=None)
+        self.assertIn("capital expenditure",
+                      {gap["line"] for gap in financial_line_gaps(state)})
+
+    def test_a_company_specific_capex_concept_is_recognised_by_its_wording(self):
+        from dalton_core.company_model_spec import financial_line_gaps
+
+        state = self.amazon_like(capex_concept="acme:AdditionsToPropertyAndEquipment",
+                                 capex_label="Additions to property and equipment")
+        self.assertNotIn("capital expenditure",
+                         {gap["line"] for gap in financial_line_gaps(state)})
+
+
 if __name__ == "__main__":
     unittest.main()

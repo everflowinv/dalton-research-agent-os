@@ -819,5 +819,48 @@ class ModelInputTests(unittest.TestCase):
         self.assertEqual(table["readiness"]["derived_cells"], 1)
 
 
+class CapitalExpenditureConceptTests(unittest.TestCase):
+    """Amazon files capex only as ``PaymentsToAcquireProductiveAssets``."""
+
+    PERIODS = (("2025-01-01", "2025-03-31"), ("2025-04-01", "2025-06-30"),
+               ("2025-07-01", "2025-09-30"), ("2025-10-01", "2025-12-31"))
+
+    def table(self, cash):
+        ledger = [
+            _line("us-gaap:Revenues", "2026-03-01", "2026-05-31", "18718144000"),
+            _line("us-gaap:CostOfGoodsAndServicesSold",
+                  "2026-03-01", "2026-05-31", "12000000000"),
+        ]
+        spec = {**_spec(), "forecast_statements": [
+            {"statement": "cash", "importance": "required"}]}
+        table = build_model_inputs(FakeMissions(ledger + cash), spec)
+        return {item["role"]: item for item in table["cash_flow_inputs"]}
+
+    def test_productive_assets_answers_capex_when_it_is_all_that_is_filed(self):
+        cash = [_line("us-gaap:PaymentsToAcquireProductiveAssets", start, end, "30",
+                      statement="cash") for start, end in self.PERIODS]
+        capex = self.table(cash)["capital_expenditure"]
+        self.assertEqual(capex["status"], FILED)
+        self.assertEqual(capex["concept"], "us-gaap:PaymentsToAcquireProductiveAssets")
+        self.assertEqual([cell["value"] for cell in capex["series"]["quarters"]],
+                         ["30", "30", "30", "30"])
+
+    def test_the_narrower_concept_wins_when_both_are_filed(self):
+        # Two widths of one outflow are a preference, not an ambiguity; the old
+        # single-concept answer must not change for a filer that tags both.
+        cash = [_line("us-gaap:PaymentsToAcquireProductiveAssets", start, end, "35",
+                      statement="cash") for start, end in self.PERIODS]
+        cash += [_line("us-gaap:PaymentsToAcquirePropertyPlantAndEquipment", start, end, "30",
+                       statement="cash") for start, end in self.PERIODS]
+        capex = self.table(cash)["capital_expenditure"]
+        self.assertEqual(capex["concept"], "us-gaap:PaymentsToAcquirePropertyPlantAndEquipment")
+        self.assertEqual(capex["series"]["quarters"][0]["value"], "30")
+
+    def test_a_proceeds_line_is_never_read_as_capex(self):
+        cash = [_line("amzn:ProceedsFromPropertyPlantAndEquipmentSalesAndIncentives",
+                      start, end, "5", statement="cash") for start, end in self.PERIODS]
+        self.assertEqual(self.table(cash)["capital_expenditure"]["status"], NOT_FOUND)
+
+
 if __name__ == "__main__":
     unittest.main()

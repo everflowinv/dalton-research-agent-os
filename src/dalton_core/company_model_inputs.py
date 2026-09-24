@@ -56,10 +56,27 @@ CASH_FLOW_ROLE_CONCEPTS: Mapping[str, tuple[str, ...]] = {
         "us-gaap:NetCashProvidedByUsedInOperatingActivities",
         "us-gaap:NetCashProvidedByUsedInOperatingActivitiesContinuingOperations",
     ),
+    # Ordered: when a filer tags more than one, the narrowest wins. Amazon
+    # files its capital expenditure only as ``PaymentsToAcquireProductiveAssets``
+    # ("Purchases of property and equipment"), so with the first concept alone
+    # its free cash flow had no capex and the specification was refused.
     "capital_expenditure": (
         "us-gaap:PaymentsToAcquirePropertyPlantAndEquipment",
+        "us-gaap:PaymentsToAcquireProductiveAssets",
     ),
 }
+# Roles whose candidates are a preference order rather than a set: several
+# qualifying is not ambiguity, it is the same outflow tagged at two widths.
+PREFERENCE_ORDERED_CASH_ROLES = frozenset({"capital_expenditure"})
+# The concepts that *are* consolidated net income. The XBRL fact is one fact
+# whichever statement a parser files it under: edgartools puts Amazon's
+# ``NetIncomeLoss`` only on the cash-flow statement, where it opens the
+# operating section, and the income statement then looks as if it had no
+# bottom line. Only these exact concepts are carried across -- never a label.
+NET_INCOME_CONCEPTS: tuple[str, ...] = (
+    "us-gaap:NetIncomeLoss",
+    "us-gaap:ProfitLoss",
+)
 
 # The specification's horizon says how many quarters the model rests on; this
 # bounds one table regardless, so a specification asking for twenty years
@@ -289,6 +306,8 @@ def _cash_flow_inputs(
                     f"{concept} is not a dimension-free, single-unit cash statement "
                     "series with the filed outflow sign convention"
                 )
+        if len(candidates) > 1 and role in PREFERENCE_ORDERED_CASH_ROLES:
+            candidates = candidates[:1]
         if len(candidates) != 1:
             reason = (
                 f"{len(candidates)} frozen filed concepts qualify for {role}"
@@ -631,6 +650,8 @@ def readiness(
 __all__ = [
     "AMBIGUOUS",
     "CASH_FLOW_ROLE_CONCEPTS",
+    "NET_INCOME_CONCEPTS",
+    "PREFERENCE_ORDERED_CASH_ROLES",
     "cash_quarter_windows_are_unique",
     "ESTIMATED",
     "FILED",

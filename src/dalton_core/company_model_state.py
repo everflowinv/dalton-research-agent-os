@@ -117,6 +117,44 @@ def _line(row: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _consolidated(line: Mapping[str, Any]) -> bool:
+    return not line.get("is_breakdown") and not line.get("dimension_axis")
+
+
+def _carry_net_income(statements: dict[str, list[dict[str, Any]]]) -> None:
+    """Show consolidated net income on the income statement when the parser put it elsewhere.
+
+    edgartools files each XBRL fact under one statement. Amazon's
+    ``us-gaap:NetIncomeLoss`` lands on the cash-flow statement, where it opens
+    the operating section, so the income projection had no bottom line: the
+    specification could not tie a final earnings result to anything and the
+    gap report said the income statement had no net income.
+
+    The fact is the same fact on either statement -- one concept, one context,
+    one value -- so the exact concept is carried across, marked as carried,
+    and only when the income statement names no net-income concept of its
+    own. Nothing is matched on a label and no value is touched: the numbers
+    are still read by concept from the filed lines.
+    """
+
+    from .company_model_inputs import NET_INCOME_CONCEPTS
+
+    income = statements.get("income")
+    if not income or len(income) >= MAX_CONCEPTS_PER_STATEMENT:
+        return
+    if any(_consolidated(line) and line["concept"] in NET_INCOME_CONCEPTS for line in income):
+        return
+    cash = statements.get("cash") or []
+    for concept in NET_INCOME_CONCEPTS:
+        found = next((line for line in cash
+                      if _consolidated(line) and line["concept"] == concept
+                      and line["period_kind"] == "duration"), None)
+        if found is not None:
+            income.append({**found, "level": 0, "parent_concept": None,
+                           "carried_from": "cash"})
+            return
+
+
 def _duration_days(start: Any, end: Any) -> int | None:
     if not isinstance(start, str) or not start:
         return None
@@ -473,6 +511,8 @@ def build_company_model_state(
                 continue
             known.add(key)
             bucket.append(_line(row))
+
+    _carry_net_income(statements)
 
     concepts = sorted({
         line["concept"] for lines in statements.values() for line in lines
