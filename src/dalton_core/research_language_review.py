@@ -280,6 +280,61 @@ def _validate_brain_output(product: Mapping[str, Any], review: Mapping[str, Any]
                           for row in checked_sections]}
 
 
+DETERMINISTIC_REVISER = "deterministic-unique-quote-replacement:0.1"
+_EXCERPT_END = re.compile(r"(?:…+|\.{3,})$")
+
+
+def deterministic_revision(
+    product: Mapping[str, Any], review: Mapping[str, Any], *,
+    numeric_source_product: Mapping[str, Any] | None = None,
+    apply_suggestions: bool = True,
+) -> dict[str, Any]:
+    """The brain's output shape, decided without a model.
+
+    For low-value products (a NO_CHANGE judgement, the cycle reflection) the
+    checker's suggestions are applied mechanically instead of by an Opus
+    revision: a suggestion is adopted only when its quote occurs exactly once
+    in the section body, is not an excerpt, and the section still passes the
+    deterministic number and structure check afterwards.  Everything else is
+    rejected with its reason.  ``apply_suggestions=False`` rejects them all
+    and returns the draft unchanged -- the fallback when the semantic
+    verifier refuses the applied text.  Same inputs, same output.
+    """
+
+    sections = [{"index": index, "title": str(row.get("title") or ""),
+                 "body": str(row.get("body") or ""),
+                 "gaps": [str(gap) for gap in row.get("gaps") or []]}
+                for index, row in enumerate(product.get("sections") or [])]
+    numeric = numeric_source_product if numeric_source_product is not None else product
+    decisions = []
+    for number, item in enumerate(review.get("suggestions") or []):
+        index, quote, suggestion = item["section_index"], item["quote"], item["suggestion"]
+        body = sections[index]["body"]
+        reason = None
+        if not apply_suggestions:
+            reason = "低价值成品只做语言检查：语义核验未通过替换稿，改用原中文稿，建议留档"
+        elif _EXCERPT_END.search(quote):
+            reason = "摘录式引用，不做机械替换"
+        elif body.count(quote) != 1:
+            reason = "原句在该章节正文中没有唯一出现，不做机械替换"
+        elif quote == suggestion:
+            reason = "建议与原句相同"
+        else:
+            candidate = [dict(row) for row in sections]
+            candidate[index]["body"] = body.replace(quote, suggestion, 1)
+            try:
+                validate_localized_text(numeric, {"sections": candidate})
+            except ValueError as exc:
+                reason = "替换后未通过确定性校验：" + str(exc)[:200]
+            else:
+                sections = candidate
+                decisions.append({"suggestion_index": number, "decision": "adopt",
+                                  "reason": "原句在章节中唯一出现，机械替换后通过数字与结构校验"})
+                continue
+        decisions.append({"suggestion_index": number, "decision": "reject", "reason": reason})
+    return {"decisions": decisions, "sections": sections}
+
+
 def run_language_review(
     product: Mapping[str, Any], *,
     checker: Callable[[str], Mapping[str, Any]],
@@ -369,7 +424,7 @@ def publish_language_attachment(
 
 
 __all__ = ["BRAIN_PURPOSE", "CHECKER_MODEL", "CHECKER_PROVIDER", "CHECKER_PURPOSE",
-           "ResearchLanguageReviewError",
-           "SCHEMA_VERSION", "build_brain_prompt", "build_checker_prompt",
+           "DETERMINISTIC_REVISER", "ResearchLanguageReviewError",
+           "SCHEMA_VERSION", "build_brain_prompt", "build_checker_prompt", "deterministic_revision",
            "publish_language_attachment", "render_suggestions_markdown", "run_language_review",
            "validate_checker_output"]

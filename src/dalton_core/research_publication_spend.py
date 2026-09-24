@@ -1,4 +1,4 @@
-"""Per-purpose daily ceilings and priority for publication work.
+"""Per-purpose daily ceilings, priority and language tier for publication work.
 
 Live 2026-09-24: the scheduled publication worker spent $51.80 on 181 calls
 of ``research_language_revision`` in four hours (12:30-16:40 UTC) -- 71% of
@@ -21,6 +21,11 @@ This module adds the missing pieces without a second budget system:
   order -- high-value first -- and low-value backlog may only spend
   :data:`LOW_PRIORITY_SHARE` of a ceiling, so a dossier refreshed at 15:00 is
   not locked out by UI text drained at 00:05.
+* **The tier** decides whether the product needs the brain at all.  A NO_CHANGE
+  judgement and the cycle reflection are prepared with the cheap draft, the
+  cheap language check and a deterministic revision
+  (:func:`research_language_review.deterministic_revision`) before the same
+  independent semantic verifier -- never an Opus revision or repair.
 
 Ceilings may be overridden per purpose in the worker configuration
 (``purpose_daily_cap_usd``); absent keys keep :data:`DEFAULT_DAILY_CAP_USD`.
@@ -79,6 +84,11 @@ HIGH_VALUE_KINDS = frozenset({
 })
 #: Always low: the weekly self-review and Claim display strings.
 LOW_VALUE_KINDS = frozenset({"surface_cycle_reflection", "ui_text"})
+
+LANGUAGE_TIER_FULL = "full"
+LANGUAGE_TIER_CHECK_ONLY = "check_only"
+#: Prepared without the brain: the check and a deterministic revision only.
+CHECK_ONLY_KINDS = frozenset({"surface_cycle_reflection"})
 
 DEFERRED_STATUS = "deferred"
 CAP_REACHED_REASON = "purpose_daily_cap_reached"
@@ -225,6 +235,22 @@ def publication_priority(connection: Any, product: Mapping[str, Any]) -> int:
     return PRIORITY_NORMAL
 
 
+def language_tier(connection: Any, product: Mapping[str, Any]) -> str:
+    """``check_only`` for a NO_CHANGE judgement and the cycle reflection.
+
+    Why not skip them: a NO_CHANGE judgement is still listed under 研究判断
+    on the company card (the latest five per company, 99.8% of them
+    NO_CHANGE), and with the language policy required an unreviewed
+    ``because`` is shown as "正文正在检查文字表达" forever.  dd2b7105 moved
+    the *event_note* to one digest a day; it did not remove the judgement
+    from the Cockpit.  So they are still prepared -- cheaply.
+    """
+
+    if product.get("kind") in CHECK_ONLY_KINDS or is_no_change_judgement(connection, product):
+        return LANGUAGE_TIER_CHECK_ONLY
+    return LANGUAGE_TIER_FULL
+
+
 def order_key(priority: int, product: Mapping[str, Any]) -> tuple[Any, ...]:
     """A total, deterministic preparation order: priority, then identity."""
 
@@ -233,10 +259,10 @@ def order_key(priority: int, product: Mapping[str, Any]) -> tuple[Any, ...]:
 
 
 __all__ = [
-    "CAP_REACHED_REASON", "DEFAULT_DAILY_CAP_USD", "DEFERRED_STATUS",
-    "DRAFT_PURPOSE", "HIGH_VALUE_KINDS",
+    "CAP_REACHED_REASON", "CHECK_ONLY_KINDS", "DEFAULT_DAILY_CAP_USD", "DEFERRED_STATUS",
+    "DRAFT_PURPOSE", "HIGH_VALUE_KINDS", "LANGUAGE_TIER_CHECK_ONLY", "LANGUAGE_TIER_FULL",
     "LOW_PRIORITY_SHARE", "LOW_VALUE_KINDS", "PRIORITY_HIGH", "PRIORITY_LOW",
     "PRIORITY_NORMAL", "PurposeDailyCapReached", "PurposeSpendGate", "VERIFIER_PURPOSE",
-    "WORKER_CONFIG_FIELD", "daily_caps_micros", "is_no_change_judgement",
+    "WORKER_CONFIG_FIELD", "daily_caps_micros", "is_no_change_judgement", "language_tier",
     "ledger_gate", "limit_micros", "order_key", "publication_priority",
 ]
