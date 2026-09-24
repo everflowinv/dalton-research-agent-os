@@ -2,8 +2,11 @@
 """为一个已经手工建好 venv 的发布补写 release-manifest.json。
 
 build_release.py --apply 在某些执行环境里会被整体拦下；这时可以分步做：
-build wheel → venv --copies → pip install，最后用本脚本核对依赖集并写 manifest，
+build wheel → venv（不加 --copies，bin/python* 是指向 Homebrew 解释器的符号链接）
+→ pip install，最后用本脚本核对依赖集并写 manifest，
 算法与 build_release.py 完全一致（同一批函数）。
+之后还要用 scripts/write_release_marker.py 补写 venv 内的完整性清单（它会顺手删掉
+3.14 venv 自带的 bin/𝜋thon 软链）。
 
 用法：
   scripts/write_release_manifest.py <release_dir> --wheel <wheel> --source-commit <sha40>
