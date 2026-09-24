@@ -157,7 +157,8 @@ def plan(args: argparse.Namespace) -> dict[str, Any]:
             f"git archive {state['source_commit']} → 临时源码树（只用提交里的字节）",
             f"{wheel_python(args)} -m build --wheel（在临时源码树里）",
             "release_hash = sha256(canonical_json({dependency_lock_hash, wheel_sha256}))",
-            f"{args.python} -m venv --copies {args.releases_root}/<release_hash>/venv",
+            f"{args.python} -m venv {args.releases_root}/<release_hash>/venv"
+            "（bin/python* 是指向该解释器的符号链接，不用 --copies：TCC 按真实路径记授权）",
             "<venv>/bin/python -m pip install <wheel>",
             "核对 venv 里的依赖集与 deploy/release/dependency-lock.json 一致",
             "写 <release>/release-manifest.json（0600）",
@@ -211,7 +212,13 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
             raise BuildError(f"该发布已经存在：{venv}")
         release.mkdir(parents=True)
         os.chmod(release, 0o755)
-        run([args.python, "-m", "venv", "--copies", str(venv)])
+        # 不用 --copies：venv/bin/python* 是指向 args.python 的符号链接。launchd
+        # 执行 venv/bin/python 时内核解析到 Homebrew 的真实文件，macOS TCC 按
+        # 这个真实路径记"可移除宗卷"授权，于是每个新发布不再各弹一次授权窗。
+        # 复制出来的 python 本来也链接着 Homebrew 的 Python.framework，并不独立。
+        from dalton_core.workspace_release import drop_venv_novelty_aliases
+        run([args.python, "-m", "venv", str(venv)])
+        drop_venv_novelty_aliases(venv)
         # 核心包本身不带依赖（全部是 optional extras）；依赖集按锁定清单精确安装，
         # 否则 venv 里只有 dalton_core 一个包，与历史发布不一致。
         pinned = work / "lock-requirements.txt"

@@ -376,6 +376,14 @@ class ImmutableReleaseTests(unittest.TestCase):
                     {key: os.environ[key] for key in poisoned}, poisoned,
                     "release installation must not mutate its parent environment",
                 )
+            # No --copies: bin/python links to the one base interpreter, so
+            # macOS TCC sees the same (already granted) executable per release.
+            python = Path(result["release_path"]) / "bin" / "python"
+            self.assertTrue(python.is_symlink())
+            self.assertEqual(result["schema_version"], "0.3")
+            self.assertEqual(result["base_interpreter"]["path"], os.path.realpath(python))
+            self.assertEqual(validate_release(result["release_path"], digest)["schema_version"],
+                             "0.3")
             environment = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
             environment.pop("PYTHONPATH", None)
             completed = subprocess.run(

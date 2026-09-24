@@ -22,7 +22,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from dalton_core.workspace_release import MARKER, validate_release, write_release_marker  # noqa: E402
+from dalton_core.workspace_release import (  # noqa: E402
+    MARKER, drop_venv_novelty_aliases, validate_release, write_release_marker,
+)
 
 DEFAULT_LOCK = ROOT / "deploy" / "release" / "dependency-lock.json"
 
@@ -57,6 +59,9 @@ def main(argv: list[str] | None = None) -> int:
     if not args.apply:
         print("dry run；加 --apply 才写入", file=sys.stderr)
         return 0
+    # 手工 `python -m venv` 在 3.14 上会多建一个 bin/𝜋thon 软链；发布里只允许
+    # bin/python、python3、python3.X 这几个解释器软链。
+    drop_venv_novelty_aliases(venv)
     record = write_release_marker(
         venv, release_hash=manifest["release_hash"], wheel_sha256=manifest["wheel_sha256"],
         dependency_lock_hash=lock["dependency_lock_hash"], dependency_wheels=lock["dependency_wheels"])
