@@ -16,6 +16,7 @@ group does not prevent the next eligible group from advancing.
 
 from __future__ import annotations
 
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -45,10 +46,18 @@ class MissionEventJudgementLaneCoordinator:
         mission: Callable[[], dict[str, Any] | None],
         pending: Callable[[Mapping[str, Any]], Any],
         failure_ledger_dir: Any | None = None,
+        digest: Callable[[Mapping[str, Any], date], Any] | None = None,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.launcher = launcher
         self.mission = mission
         self.pending = pending
+        # The NO_CHANGE daily digest: deterministic, no model, so it runs in
+        # the tick rather than in a child, and it runs whether or not there
+        # is anything left to judge -- a quiet day still closes.
+        self.digest = digest
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self._digested_day: date | None = None
         self._open: str | None = None
         self.budget = lane_budget("mission_event_judgement", state_dir=failure_ledger_dir)
 
@@ -106,7 +115,32 @@ class MissionEventJudgementLaneCoordinator:
             settled["resumed"] = self.budget.clear(group_key)
         return settled
 
+    def _digest_closed_days(self) -> Any:
+        """Once per UTC day: publish every closed day's NO_CHANGE digest."""
+
+        if self.digest is None:
+            return None
+        today = self.clock().astimezone(timezone.utc).date()
+        if self._digested_day == today:
+            return None
+        try:
+            mission = self.mission()
+            if mission is None:
+                return None
+            results = self.digest(mission, today)
+        except Exception as exc:  # noqa: BLE001 - retried next tick, never the tick's failure
+            return {"status": "unavailable", "reason": f"{type(exc).__name__}: {exc}"[:500]}
+        self._digested_day = today
+        return results
+
     def dispatch_once(self) -> dict[str, Any]:
+        result = self._dispatch_once()
+        digests = self._digest_closed_days()
+        if digests:
+            result["digests"] = digests
+        return result
+
+    def _dispatch_once(self) -> dict[str, Any]:
         settled = self._settle_open()
         mission = self.mission()
         if mission is None:
@@ -243,6 +277,26 @@ def pending_event_groups(store: Any, missions: Any,
                   reverse=True)
 
 
+def publish_no_change_digests(store: Any, mission: Mapping[str, Any],
+                              today: date) -> list[dict[str, Any]]:
+    """The closed days' NO_CHANGE digests, under the mission's own grant."""
+
+    from .event_judgement import publish_daily_digests
+    from .mission_deliverable import MissionDeliverableAuthority
+    from .research_playbook import read_exact_playbook_version
+
+    autonomy = mission.get("autonomy") or {}
+    if "deliverable" not in (autonomy.get("may_write") or ()):
+        return []
+    playbook = read_exact_playbook_version(
+        store.connection, mission["bindings"]["playbook_version"]["ref"]
+    )
+    return publish_daily_digests(
+        MissionDeliverableAuthority(store), mission=mission, playbook=playbook,
+        actor_ref=autonomy["automation_principal"], today=today,
+    )
+
+
 def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
     """Controller tick (P14a)."""
 
@@ -273,6 +327,8 @@ def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
             pending=lambda active: pending_event_groups(
                 server.store, server.coverage_mission, active),
             failure_ledger_dir=getattr(server, "state_dir", None),
+            digest=lambda active, today: publish_no_change_digests(
+                server.store, active, today),
         )
         server.lane_state[LAUNCHER_KWARG] = coordinator
     return coordinator.dispatch_once()
@@ -348,4 +404,5 @@ __all__ = [
     "dispatch",
     "newest_unjudged",
     "pending_event_groups",
+    "publish_no_change_digests",
 ]
