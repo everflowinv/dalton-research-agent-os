@@ -97,7 +97,10 @@ SETTINGS_FILENAME = "claim-support-verification.json"
 DEFAULT_SETTINGS: Mapping[str, Any] = {
     "daily_cap_usd": 0.15,
     "backfill_daily_cap_usd": 0.50,
-    "backfill_batches_per_run": 2,
+    # One call of twenty a run to start with: a retirement is append-only and
+    # nothing restores it automatically, so the backlog is worked down slowly
+    # until a person has read what the check rejects.  See ``load_settings``.
+    "backfill_batches_per_run": 1,
     "backfill_items_per_batch": 20,
     "backfill_claim_sources": ["sales_notes", "alphaengine"],
 }
@@ -137,6 +140,23 @@ def load_settings(state_dir: str | Path | None) -> dict[str, Any]:
     adding a key to it would re-key -- and re-draft, for money -- every window.
     A file that exists but cannot be read is refused, not defaulted: the owner
     wrote a number, and a different one silently applying is the failure.
+
+    The file is ``<state>/claim-support-verification.json`` and every key is
+    optional; absent keys keep the defaults in ``DEFAULT_SETTINGS``::
+
+        {"daily_cap_usd": 0.15,            # admission-time check, USD per UTC day
+         "backfill_daily_cap_usd": 0.50,   # backfill, USD per UTC day
+         "backfill_batches_per_run": 1,    # calls per extraction run
+         "backfill_items_per_batch": 20,   # statements per call (max 20)
+         "backfill_claim_sources": ["sales_notes", "alphaengine"]}
+
+    The backfill starts slow on purpose (one call of twenty statements per
+    extraction run): what it rejects is challenged and *retired*, retirements
+    are append-only, and nothing restores one automatically.  Once the
+    rejected Claims have been read and look right, open it up with
+    ``"backfill_batches_per_run": 2`` (or more, up to 20); pause it with
+    ``"backfill_batches_per_run": 0``.  The file is read at the start of every
+    extraction run, so a change applies to the next run with no restart.
     """
 
     settings = dict(DEFAULT_SETTINGS)

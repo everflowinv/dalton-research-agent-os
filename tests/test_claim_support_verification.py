@@ -148,6 +148,8 @@ class SettingsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             self.assertEqual(load_settings(root)["daily_cap_usd"], 0.15)
+            # Retirement is append-only: the backfill starts at one call a run.
+            self.assertEqual(load_settings(root)["backfill_batches_per_run"], 1)
             (root / "claim-support-verification.json").write_text(
                 json.dumps({"daily_cap_usd": 0.2, "backfill_batches_per_run": 0}), encoding="utf-8")
             settings = load_settings(root)
