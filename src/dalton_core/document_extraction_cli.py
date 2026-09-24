@@ -82,6 +82,19 @@ HIGH_PRIORITY_WINDOW_SHARE = 0.5
 HIGH_PRIORITY_TIERS = ("filing", "management", "sell_side")
 
 
+def extraction_feed_plan_path(state_dir: Path) -> Path | None:
+    """The feed discovery plan this state directory's feed lanes run on, if any."""
+
+    from .mission_feed_lane import resolve_feed_plan
+    from .mission_prior_research_lane import FEED_PLAN_NAME
+
+    try:
+        path = resolve_feed_plan(Path(state_dir), FEED_PLAN_NAME)
+    except (OSError, ValueError):
+        return None
+    return path if path.is_file() else None
+
+
 def secure_dir(path: Path) -> Path:
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(path, 0o700)
@@ -125,6 +138,15 @@ class ExtractionHost:
         # opening one here would be this read-only child creating lane state.
         self.state_dir = state_dir
         self._lane_readers: dict[str, Any] = {}
+        # 2026-09-24b: the feed plan the writer's feed lanes run on, resolved
+        # the way the lanes resolve it (mission-generated plan first).  The
+        # writer's launchers carry it as ``feed_plan_path``; the read-only
+        # readers below did not, so ``claim_subject.writer_feed_plans`` found
+        # no plan in this child and the subject checks ran on the ticker
+        # alone -- five AMZN statements quoting "Amazon" were held because
+        # "the cited span never names the subject (amzn)".  The plan is also
+        # what carries the owner's alias ledger (``company_aliases``).
+        self.feed_plan_path = extraction_feed_plan_path(state_dir)
         self._document_extraction_model_config = model_config
         self._document_extraction_worker_factory = None
         # 2026-09-24: the admission-time support check; installed by
@@ -170,6 +192,9 @@ class ExtractionHost:
 
             reader = ReadOnlyFeedManifestReader(
                 state_dir=self.state_dir, source_ref=feeds[init_kwarg])
+            # Mirrors ``mission_feed_lane._build``: the plan travels with the
+            # lane, so name resolution needs no second path per host.
+            reader.feed_plan_path = self.feed_plan_path
         elif init_kwarg == GUIDEPOINT_LAUNCHER_KWARG:
             from types import SimpleNamespace
 

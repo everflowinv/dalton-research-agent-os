@@ -224,15 +224,19 @@ def writer_feed_plans(writer: Any) -> list[dict[str, Any]]:
     from .document_extraction import FEED_SOURCE_LAUNCHER_KWARGS
 
     getter = getattr(writer, "lane_launcher", None)
-    if not callable(getter):
-        return []
-    plans: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for kwarg in FEED_SOURCE_LAUNCHER_KWARGS.values():
+    launchers: list[Any] = [writer]
+    for kwarg in FEED_SOURCE_LAUNCHER_KWARGS.values() if callable(getter) else ():
         try:
-            launcher = getter(kwarg)
+            launchers.append(getter(kwarg))
         except Exception:  # noqa: BLE001 - an absent lane adds nothing
             continue
+    plans: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    # The host's own plan first (2026-09-24b): the extraction child's feed
+    # readers refuse to open when a lane has no ticket directory, and the plan
+    # -- the mission's names and the owner's alias ledger -- does not depend
+    # on any one lane having run.
+    for launcher in launchers:
         path = getattr(launcher, "feed_plan_path", None)
         if path is None or str(path) in seen:
             continue

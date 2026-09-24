@@ -146,6 +146,16 @@ OUTPUT_SCHEMA = {
 #: whole quote as the citation, exactly as before.
 LEGACY_SUGGESTION_FIELDS = frozenset(
     {"quote_id", "normalized_statement", "metric_or_aspect", "period", "basis"})
+#: 2026-09-24b: the version of "does this document name its company" -- the
+#: P13c/P13i document check and the admission span check.  Written into every
+#: P13i dismissal, so a dismissal decided under an older rule can be told
+#: apart and re-examined (``document_extraction_cli._reevaluate_unattributed``)
+#: while one decided under this rule is final.  Bump it whenever the name table
+#: those checks read gains a source.
+SUBJECT_RULE_REF = "document-subject-names:2026-09-24b"
+UNATTRIBUTED_REASON = (
+    "document never names this company; it is not about it "
+    f"[{SUBJECT_RULE_REF}]")
 # 2026-09-24: subject relationship, absolute periods against the document
 # date, a verbatim excerpt that narrows the citation, sentence-aligned quotes.
 PROMPT_CONTRACT_REF = "document-reading-foundation:2026-09-24"
@@ -1508,12 +1518,56 @@ class DocumentExtractionService:
             base["reading_limits"] = limits
         return base
 
+    def _mission_plans(self):
+        """Every plan that says what this writer's companies are called.
+
+        The feed plans (with the owner's alias ledger attached) and, on the
+        writer, the discovery coordinators' plans.  Read once per service.
+        """
+
+        plans = getattr(self, "_plans_cache", None)
+        if plans is None:
+            from .claim_subject import writer_feed_plans
+
+            plans = list(writer_feed_plans(self.writer))
+            for name in ("_source_discovery", "_web_source_discovery",
+                         "_sec_filings_source_discovery"):
+                coordinator = getattr(self.writer, name, None)
+                plan = getattr(coordinator, "plan", None)
+                if isinstance(plan, Mapping):
+                    plans.append(plan)
+            self._plans_cache = plans
+        return plans
+
+    def mission_names(self, mission):
+        """Ticker -> every name this mission calls the company, merged across plans.
+
+        2026-09-24b: the one table every subject check in this service reads
+        -- the model's label, the P13c/P13i document check and the span check
+        at admission -- so they cannot disagree about who "Amazon" is.  It is
+        ``mission_company_names.mission_name_table`` (the owner's names, the
+        packaged ``COMPANY_NAMES`` and the alias ledger) over each plan.
+        """
+
+        from .mission_company_names import mission_name_table
+
+        cache = getattr(self, "_names_cache", None)
+        if cache is None:
+            cache = self._names_cache = {}
+        key = mission.get("id")
+        if key not in cache:
+            table: dict[str, tuple[str, ...]] = {}
+            for plan in self._mission_plans() or [None]:
+                for name_key, names in mission_name_table(mission["universe"], plan).items():
+                    merged = dict.fromkeys((*table.get(name_key, ()), *names))
+                    table[name_key] = tuple(merged)
+            cache[key] = table
+        return cache[key]
+
     def _company_label(self, mission, member):
         """How the model is told who the subject is: its names, not a ref."""
 
-        from .claim_subject import writer_feed_plans
         from .document_subject import subject_label
-        from .mission_company_names import mission_name_table
 
         cache = getattr(self, "_label_cache", None)
         if cache is None:
@@ -1521,12 +1575,7 @@ class DocumentExtractionService:
         ticker = member.get("ticker")
         key = (mission.get("id"), ticker)
         if key not in cache:
-            table: dict[str, tuple[str, ...]] = {}
-            for plan in writer_feed_plans(self.writer) or [None]:
-                for name_key, names in mission_name_table(mission["universe"], plan).items():
-                    merged = dict.fromkeys((*table.get(name_key, ()), *names))
-                    table[name_key] = tuple(merged)
-            cache[key] = subject_label(ticker, table) if ticker else None
+            cache[key] = subject_label(ticker, self.mission_names(mission)) if ticker else None
         return cache[key]
 
     def _document_dating(self, manifest, review, reading_config):
@@ -2014,6 +2063,16 @@ class DocumentExtractionService:
         if cached is None:
             cached = self._subject_cache = {}
         if key not in cached:
+            # 2026-09-24b: the mission's whole name table, not the packaged
+            # fallback.  Called with the ticker alone, this check refused five
+            # AMZN web pages saying "Amazon" 195-255 times each as "never
+            # names this company" on a deploy whose packaged table had no AMZN
+            # row -- and the owner's alias ledger could never reach it.
+            try:
+                table = self.mission_names(
+                    self.writer.coverage_mission.mission(context["mission_version_ref"]))
+            except Exception:  # noqa: BLE001 - no mission: the packaged fallback
+                table = None
             if self._document_spec_ref(context) == "earnings-call-transcripts":
                 from .document_subject import (
                     document_names_subject as names_subject,
@@ -2038,10 +2097,10 @@ class DocumentExtractionService:
                 except (TypeError, ValueError):
                     named = []
                 issuer = earnings_call_names_issuer(
-                    row["title"], context.get("company_ticker"))
+                    row["title"], context.get("company_ticker"), table)
                 listed = names_subject(
                     " | ".join(str(value) for value in named),
-                    context.get("company_ticker"),
+                    context.get("company_ticker"), table,
                 )
                 cached[key] = {
                     # This earnings-specific proof was attempted. A missing
@@ -2059,7 +2118,7 @@ class DocumentExtractionService:
             except Exception:  # noqa: BLE001 - unreadable is not attributed
                 cached[key] = {"checked": False, "names_subject": False, "matched": []}
             else:
-                cached[key] = names_subject(text, context.get("company_ticker"))
+                cached[key] = names_subject(text, context.get("company_ticker"), table)
         return cached[key]
 
     def _document_text(self, context):
@@ -2391,8 +2450,7 @@ class DocumentExtractionService:
             subject = self.document_names_subject(context)
             if subject.get("checked") and not subject.get("names_subject"):
                 return {"status": "not_attributed", "admitted": [],
-                        "reason": "document never names this company; it is not about it",
-                        "subject": subject}
+                        "reason": UNATTRIBUTED_REASON, "subject": subject}
         from .research_auto_commit import DOCUMENT_QUALITATIVE_RULE_REF
         policy = self.writer.store.active_policy_version().to_dict()["policy"]
         rule = policy.get("research_candidate_auto_commit") or {}
@@ -2634,19 +2692,21 @@ class DocumentExtractionService:
         """
 
         from .claim_subject import (
-            document_is_subjects, mission_subject_needles, writer_feed_plans,
+            document_is_subjects, mission_subject_needles, name_needles,
         )
         from .document_figure_grade import attribution_for
         from .research_auto_commit import document_qualitative_subject_rejection
 
         mission = self.writer.coverage_mission.mission(context["mission_version_ref"])
-        plans = list(writer_feed_plans(self.writer))
-        for name in ("_source_discovery", "_web_source_discovery", "_sec_filings_source_discovery"):
-            coordinator = getattr(self.writer, name, None)
-            plan = getattr(coordinator, "plan", None)
-            if isinstance(plan, Mapping):
-                plans.append(plan)
-        table = mission_subject_needles(mission["universe"], plans=plans)
+        table = mission_subject_needles(mission["universe"], plans=self._mission_plans())
+        # 2026-09-24b: and every name the document check and the model's label
+        # use, so the span check can never know fewer names than they do.
+        names = self.mission_names(mission)
+        for member in mission.get("universe") or ():
+            ref = str(member.get("company_ref") or "")
+            ticker = str(member.get("ticker") or "").strip().upper()
+            if ref and names.get(ticker):
+                table[ref] = sorted(set(table.get(ref, ())) | set(name_needles(names[ticker])))
         own_cache: dict[str, bool] = {}
 
         def document_is_own(needles):
