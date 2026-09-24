@@ -865,6 +865,10 @@ class AgendaControlApplication:
             return plane.workspaces(login)
         if path == "/v1/cockpit/overview":
             return {**plane.overview(), "enabled": True}
+        # The reviewed UI translations one view needs, by key.  Read-only and
+        # bounded per response; see CockpitPlane.ui_texts.
+        if path == "/v1/cockpit/ui-texts":
+            return {**plane.ui_texts(query.get("keys", "")), "enabled": True}
         if path == "/v1/cockpit/log":
             limit = query.get("limit", "150")
             return {**plane.log(since=query.get("since") or None, limit=int(limit) if limit.isdigit() else 150), "enabled": True}

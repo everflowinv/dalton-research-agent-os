@@ -172,6 +172,23 @@ class CockpitPlaneTests(unittest.TestCase):
         policy_path.write_text(json.dumps({"required": True}), encoding="utf-8")
         self.assertTrue(self.c.plane.overview()["publication_policy"]["language_review_required"])
 
+    def test_overview_names_the_ui_text_revision_and_the_plane_serves_by_key(self) -> None:
+        from dalton_core.research_localization_store import (
+            publish_ui_texts, ui_text_key, ui_texts_revision)
+        from tests.test_cockpit_ui_text_delivery import batch
+        self.assertIsNone(self.c.plane.overview()["text_localization_revision"])
+        publish_ui_texts(self.c.core_path.parent / "research-localization",
+                         [batch("Revenue increased.", "收入增长。")])
+        self.c.plane.invalidate_overview()
+        overview = self.c.plane.overview()
+        self.assertNotIn("text_localizations", overview)
+        self.assertEqual(overview["text_localization_revision"],
+                         ui_texts_revision(self.c.core_path))
+        key = ui_text_key("Revenue increased.")
+        page = self.c.plane.ui_texts(f"{key},{ui_text_key('Other.')},bogus")
+        self.assertEqual(page["texts"], {key: "收入增长。"})
+        self.assertEqual(self.c.plane.ui_texts("")["texts"], {})
+
     def test_sources_separate_connector_installation_from_mission_state(self) -> None:
         rows = self.c.plane.sources()["sources"]
         guidepoint = next(row for row in rows if row["slug"] == "guidepoint")
