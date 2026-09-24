@@ -158,7 +158,8 @@ UNATTRIBUTED_REASON = (
     f"[{SUBJECT_RULE_REF}]")
 # 2026-09-24: subject relationship, absolute periods against the document
 # date, a verbatim excerpt that narrows the citation, sentence-aligned quotes.
-PROMPT_CONTRACT_REF = "document-reading-foundation:2026-09-24"
+# 2026-09-24b: restate only; no inference beyond the cited sentences.
+PROMPT_CONTRACT_REF = "document-reading-foundation:2026-09-24b"
 TASK_HASH = content_hash({"task": TASK_REF, "prompt_contract": PROMPT_CONTRACT_REF,
                           "output": OUTPUT_SCHEMA, "window_chars": WINDOW_CHARS,
                           "quote_chars": QUOTE_CHARS, "quote_slicing": QUOTE_SLICING_REF,
@@ -771,6 +772,21 @@ def _date_instruction(context: Mapping[str, Any]) -> str:
     return text
 
 
+#: 2026-09-24b.  Three of ten statements admitted on the legacy Core said more
+#: than their span: "the lack of large deal closures reduced the likelihood of
+#: recognizing revenue in 2026" from a sentence saying the midpoint was
+#: achievable *without* large deal wins; a coverage-universe list turned into
+#: "framing EPAM as a directly comparable name"; a caveat the span never
+#: mentions appended to an endorsement.  The support check catches this after
+#: the fact on the sources it covers; the prompt now forbids it on all of them.
+NO_INFERENCE_INSTRUCTION = (
+    "normalized_statement may only restate what the cited excerpt itself says: no inference, "
+    "implication, consequence, cause, comparison or conclusion that the excerpt does not state in "
+    "its own words, nothing carried in from another quote or from background knowledge, and never "
+    "a reading the excerpt contradicts. If the finding needs a step the text does not take, leave "
+    "the step out or leave the finding out.")
+
+
 def build_prompt(context: Mapping[str, Any]) -> str:
     subject = context.get("company_label") or context.get("company_ticker") or context["company_ref"]
     focus = context.get("mission_focus") or {}
@@ -803,7 +819,9 @@ def build_prompt(context: Mapping[str, Any]) -> str:
         "where the quote names it, the subject company. Never paraphrase or join text from two quotes. "
         + _date_instruction(context) +
         "Each suggestion is ONE source-supported finding in ONE or TWO sentences, under 300 characters, with "
-        "attribution, preserving negation, uncertainty and the subject. Never write a number, "
+        "attribution, preserving negation, uncertainty and the subject. "
+        + NO_INFERENCE_INSTRUCTION + " "
+        "Never write a number, "
         "percentage or currency amount in normalized_statement, only direction and qualitative "
         "magnitude; figures are handled by the separate numeric extraction and verification lanes. "
         "Do not turn a quotation into your own investment recommendation. Naming the period (a year, quarter "
