@@ -269,8 +269,20 @@ def unjudged_event_groups(
     groups: list[list[dict[str, Any]]] = []
     positions: dict[tuple[str, ...], int] = {}
     moment = now or datetime.now(timezone.utc)
+    from .claim_retirement import retired_claim_version_refs
+
+    # An event that *is* a Claim is recorded while the Claim is live; if P10b
+    # retires it before the judge gets to it, judging it would put a disowned
+    # fact in front of the model (live 2026-09-24: judged 11:40 on a Claim
+    # retired 10:49).  It is skipped, not judged: a later revoked retirement
+    # (a reinstatement) makes it eligible again: the set is read every time.
+    retired = retired_claim_version_refs(events.connection)
     for row in rows:
         event = events.event(row["event_id"])
+        if retired and retired.intersection(
+                ref for ref in event.get("source_refs") or ()
+                if isinstance(ref, str)):
+            continue
         grouped_key = buyback_group_key(event)
         if not _closed_hk_week(grouped_key, moment):
             continue

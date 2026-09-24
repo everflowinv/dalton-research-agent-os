@@ -843,10 +843,12 @@ class GateTests(unittest.TestCase):
         # week rests on a Claim retired since would freeze the file for ever on
         # the one section nobody can fix without publishing.
         self.assertEqual(summary["dossier_status"], "partial_published")
-        # The classification drew on the same Claim, so it goes too: a ref
-        # that stopped resolving is a defect in every part that cites it.
-        self.assertEqual(summary["dropped_units"],
-                         ["business_model", "industry_classification"])
+        # The classification drew on the same Claim.  It still has live
+        # material, so since the retirement reopen it is redrafted in this run
+        # (a unit citing a retired Claim is stale) rather than dropped; the
+        # business model has nothing left to rest on, so it is the one dropped.
+        self.assertEqual(summary["dropped_units"], ["business_model"])
+        self.assertIn("industry_classification", summary["units_drafted"])
         after = self.authority.latest(ACN)
         dropped = next(item for item in after["sections"]
                        if item["aspect"] == "business_model")

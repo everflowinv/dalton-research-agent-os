@@ -79,23 +79,32 @@ def subject_change_keys(connection: Any, subjects: Any) -> dict[str, str]:
     """A cheap key per subject that moves whenever its fingerprint could.
 
     Narrower than the dossier's on purpose.  This fingerprint is a hash of one
-    subject's canonical claim version refs and nothing else, so exactly two
-    tables can move it: the Claims themselves and the index entries that say
-    which of them are canonical.  Aggregating anything else here would make
+    subject's canonical, unretired claim version refs and nothing else, so
+    three things can move it: the Claims themselves, the index entries that
+    say which of them are canonical, and retirements / reinstatements.
+    Aggregating anything else here would make
     another lane's writes re-fingerprint five subjects, and a gate that opens
     for writes its lane does not read is not a gate.
     """
 
     claims = claim_change_keys(connection)
     entries = claim_index_change_keys(connection)
+    # The fingerprint excludes retired Claims, so a retirement or a
+    # reinstatement is the third thing that can move it.  Aggregated whole,
+    # as the dossier's key does: both tables are small and append-only, and a
+    # key that moves for another company costs one refs read, never a draft.
+    from .claim_retirement import retirement_state_probe
+
+    retirements = retirement_state_probe(connection)
     keys: dict[str, str] = {}
     for subject_ref in subjects:
         if subject_ref is None:
             continue
         label = str(subject_ref)
         keys[label] = compose([
-            "debate-map-change-key:v1", label,
+            "debate-map-change-key:v2", label,
             claims.get(label), entries.get(label),
+            retirements,
         ])
     return keys
 

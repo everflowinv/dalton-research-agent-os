@@ -1077,7 +1077,10 @@ def subject_claim_rows(store: Any, subject_ref: str) -> list[dict[str, Any]]:
     from .claim_index_tagging import ProvenanceResolver
     from .company_research_view import query_company_research
 
-    rows = query_company_research(store, company_ref=subject_ref, limit=1000)
+    # A retired Claim is a fact P10b disowned; a debate position resting on
+    # it would argue from something the Ledger no longer stands behind.
+    rows = query_company_research(store, company_ref=subject_ref, limit=1000,
+                                  exclude_retired=True)
     provenance = ProvenanceResolver(store.connection)
     titles = _document_titles(store.connection)
     attribution = document_attribution(store.connection)
@@ -1187,7 +1190,8 @@ def subject_claim_refs(
     return [
         row["claim_version_ref"]
         for row in query_company_research(
-            store, company_ref=subject_ref, limit=1000, claim_context=context)
+            store, company_ref=subject_ref, limit=1000, claim_context=context,
+            exclude_retired=True)
     ]
 
 

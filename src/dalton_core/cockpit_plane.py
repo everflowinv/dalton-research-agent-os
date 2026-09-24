@@ -3216,6 +3216,10 @@ class CockpitPlane:
             return empty
         by_company: dict[str, dict[str, Any]] = {}
         by_ref: dict[str, dict[str, Any]] = {}
+        from .claim_retirement import retired_claim_version_refs
+        from .cockpit_research_library import retired_citation_notice
+
+        retired = retired_claim_version_refs(core)
         for row in self._rows(core,
             "SELECT judgement_id, company_ref, record_json, created_at "
             "FROM event_judgements ORDER BY created_at, judgement_id",
@@ -3247,6 +3251,13 @@ class CockpitPlane:
                 "verifier_verdict": verdict,
                 "verifier_label": VERIFIER_VERDICT_LABELS.get(verdict, verdict),
             }
+            # A judgement is immutable; one resting on a Claim retired since
+            # (or before -- live 2026-09-24) is marked, never rewritten.
+            stale = [ref for ref in item["citations"]
+                     if isinstance(ref, str) and ref in retired]
+            if stale:
+                item["retired_citations"] = stale
+                item["retired_citation_label"] = retired_citation_notice(len(stale))
             by_ref[row["judgement_id"]] = item
             bucket = by_company.setdefault(
                 row["company_ref"], {"total": 0, "latest": []})

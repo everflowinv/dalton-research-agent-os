@@ -106,6 +106,28 @@ def _sections(kind: str, record: Mapping[str, Any]) -> list[dict[str, Any]]:
              "gaps": list(s.get("gaps") or [])} for s in sections]
 
 
+RETIRED_CITATION_NOTICE = "引用的 {count} 条结论已退役，这部分内容待重新核对"
+
+
+def retired_citation_notice(count: int) -> str | None:
+    """The one sentence a product shows when it cites Claims retired since."""
+
+    return RETIRED_CITATION_NOTICE.format(count=count) if count > 0 else None
+
+
+def _retired_sources(sources: Any, retired: set[str]) -> list[str]:
+    """Retired Claim refs among a section's sources, which are refs or source rows."""
+
+    if not retired:
+        return []
+    refs = []
+    for source in sources or []:
+        ref = source.get("ref") if isinstance(source, Mapping) else source
+        if isinstance(ref, str) and ref in retired and ref not in refs:
+            refs.append(ref)
+    return refs
+
+
 def research_library(connection: sqlite3.Connection, mission: Mapping[str, Any],
                      company_ref: str, *, localize: bool = True) -> dict[str, Any]:
     if company_ref not in {m["company_ref"] for m in mission["universe"]}:
@@ -175,8 +197,16 @@ def research_library(connection: sqlite3.Connection, mission: Mapping[str, Any],
         # Display-only fields follow the exact-source receipt lookup. Raw
         # snapshots and the source hashes used by paid reviews stay stable.
         result = localize_library(connection, result)
+        from .claim_retirement import retired_claim_version_refs
+
+        retired = retired_claim_version_refs(connection)
         for product in result["products"]:
             product["display_gaps"] = [gap_display_text(gap) for gap in product.get("gaps", [])]
+            # Display only, after the hash-bound overlay: a published product
+            # is never edited, but a reader is told when it rests on Claims
+            # retired since it was written.  Its own reopen path (the dossier
+            # redrafts the unit) replaces it; until then this is the notice.
+            product_retired: set[str] = set()
             for section in product.get("sections", []):
                 comparison = _comparison_table_display(
                     section.get("title"), section.get("body"),
@@ -188,6 +218,14 @@ def research_library(connection: sqlite3.Connection, mission: Mapping[str, Any],
                         "headers": comparison["headers"], "rows": comparison["rows"]}
                     section["display_body_technical"] = comparison["original"]
                 section["display_gaps"] = [gap_display_text(gap) for gap in section.get("gaps", [])]
+                cited = _retired_sources(section.get("sources"), retired)
+                if cited:
+                    product_retired.update(cited)
+                    section["retired_sources"] = cited
+                    section["display_gaps"].append(retired_citation_notice(len(cited)))
+            if product_retired:
+                product["retired_citation_count"] = len(product_retired)
+                product["display_gaps"].append(retired_citation_notice(len(product_retired)))
         return result
     return result
 
