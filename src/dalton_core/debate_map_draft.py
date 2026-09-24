@@ -1083,22 +1083,83 @@ def subject_claim_rows(store: Any, subject_ref: str) -> list[dict[str, Any]]:
     attribution = document_attribution(store.connection)
     enriched: list[dict[str, Any]] = []
     for row in rows:
-        ref = row["claim_version_ref"]
-        origin = provenance.resolve(ref)
-        document_ref = origin.get("document_ref")
-        attributed = attribution.get(document_ref or "", {})
-        enriched.append({
-            **row,
-            "importance": row.get("importance") or origin.get("importance"),
-            "spec_ref": origin.get("spec_ref"),
-            "document_ref": document_ref,
-            "document_title": attributed.get("title") or titles.get(document_ref or ""),
-            "document_authors": attributed.get("authors"),
-            "document_sources": attributed.get("sources"),
-            "document_publisher": attributed.get("publisher"),
-            "host": attributed.get("host"),
-        })
+        enriched.append(_attributed_row(row, provenance.resolve(row["claim_version_ref"]),
+                                        attribution, titles))
     return enriched
+
+
+def _attributed_row(row: Mapping[str, Any], origin: Mapping[str, Any],
+                    attribution: Mapping[str, Mapping[str, Any]],
+                    titles: Mapping[str, str]) -> dict[str, Any]:
+    document_ref = origin.get("document_ref")
+    attributed = attribution.get(document_ref or "", {})
+    return {
+        **row,
+        "importance": row.get("importance") or origin.get("importance"),
+        "spec_ref": origin.get("spec_ref"),
+        "document_ref": document_ref,
+        "document_title": attributed.get("title") or titles.get(document_ref or ""),
+        "document_authors": attributed.get("authors"),
+        "document_sources": attributed.get("sources"),
+        "document_publisher": attributed.get("publisher"),
+        "host": attributed.get("host"),
+    }
+
+
+def reassess_source_independence(
+    connection: Any, record: Mapping[str, Any],
+    policy: Mapping[str, Any] = DEBATE_POLICY,
+) -> list[dict[str, Any]]:
+    """Read-only: what each debate of one stored version would count today.
+
+    A published version keeps the ``source_independence`` it was screened
+    with, and a version is immutable, so better attribution changes nothing
+    on the page until the lane publishes the next version (which it does when
+    the subject's evidence next moves).  This answers "what would it say now"
+    from the same ladder, the same policy and the stored claim refs, and
+    writes nothing, so an owner can see which ``candidate`` debates the
+    attribution has made groundable before the redraw happens.
+    """
+
+    from .claim_index_tagging import ProvenanceResolver
+    from .debate_map import count_independent_sources
+
+    debates = [item for item in record.get("debates") or [] if isinstance(item, Mapping)]
+    refs: list[str] = []
+    for debate in debates:
+        for side in ("bull_position", "bear_position"):
+            for ref in (debate.get(side) or {}).get("claim_refs") or []:
+                if isinstance(ref, str) and ref not in refs:
+                    refs.append(ref)
+    provenance = ProvenanceResolver(connection)
+    attribution = document_attribution(connection)
+    titles = _document_titles(connection)
+    rows = [
+        _attributed_row({"claim_version_ref": ref, "subject_ref": record.get("subject_ref")},
+                        provenance.resolve(ref), attribution, titles)
+        for ref in refs
+    ]
+    claims = index_claims(rows, policy)
+    minimum = int(policy["min_independent_sources_per_side"])
+    result: list[dict[str, Any]] = []
+    for debate in debates:
+        bull = count_independent_sources(
+            (debate.get("bull_position") or {}).get("claim_refs") or [], claims, policy)
+        bear = count_independent_sources(
+            (debate.get("bear_position") or {}).get("claim_refs") or [], claims, policy)
+        stored = debate.get("source_independence") or {}
+        result.append({
+            "debate_ref": debate.get("debate_ref"),
+            "status": debate.get("status"),
+            "stored": {"bull_sources": stored.get("bull_sources"),
+                       "bear_sources": stored.get("bear_sources")},
+            "now": {"bull_sources": bull["count"], "bear_sources": bear["count"],
+                    "bull_source_keys": bull["keys"], "bear_source_keys": bear["keys"],
+                    "bull_unattributed": bull["unattributed"],
+                    "bear_unattributed": bear["unattributed"]},
+            "groundable_now": bull["count"] >= minimum and bear["count"] >= minimum,
+        })
+    return result
 
 
 def subject_claim_refs(
@@ -1179,6 +1240,75 @@ _ATTRIBUTION_COLUMNS: Mapping[str, tuple[str, ...]] = {
 
 def document_attribution(connection: Any) -> dict[str, dict[str, Any]]:
     """Document ref -> whatever the Core can say about who published it.
+
+    Two readers, merged: the attribution columns a discovered-document row may
+    carry (below), and the append-only provenance record the acquisition side
+    keeps per document (``provenance_attribution``).  Where both name a
+    publisher, the provenance record wins: it is what the wire -- AlphaEngine's
+    ``sources``, a sales note's sending domain -- said, not a column somebody
+    added later.
+    """
+
+    found = _discovered_document_attribution(connection)
+    for document_ref, values in provenance_attribution(connection).items():
+        found[document_ref] = {**found.get(document_ref, {}), **values}
+    return found
+
+
+def provenance_attribution(
+    connection: Any, policy: Mapping[str, Any] = DEBATE_POLICY,
+) -> dict[str, dict[str, Any]]:
+    """Publisher facts from ``document_provenance_records``, one key per house.
+
+    2026-09-24: every debate on the live maps sat at 0/0 independent sources
+    because nothing ever read this table -- AlphaEngine's publisher for 1,637
+    documents and, now, the sending house of every sales note were recorded
+    and then ignored, so every broker note fell to the ``document`` rung,
+    which does not count.
+
+    The publisher is normalised before it reaches the ladder so that one house
+    is one key whichever rung found it: a name the frozen publisher table
+    knows becomes that table's slug ("Goldman Sachs" and a title matched on
+    "goldman sachs" are both ``goldman``), and any other name becomes its
+    ``broker_key`` ("Wells Fargo Securities, LLC" and "Wells Fargo" were already
+    one key there), or, when that key is empty (a name with no Latin letters),
+    its folded name.  A record with no broker contributes its title, authors and
+    sources as text for the table to match, and no publisher.
+    """
+
+    from .debate_map import publisher_of, publisher_slug
+
+    try:
+        rows = connection.execute(
+            "SELECT document_ref, broker, broker_key, authors, sources, title "
+            "FROM document_provenance_records"
+        ).fetchall()
+    except sqlite3.Error:
+        return {}
+    found: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        document_ref, broker, key, authors, sources, title = (
+            row[0], row[1], row[2], row[3], row[4], row[5])
+        values = {
+            field: value for field, value in (
+                ("authors", authors), ("sources", sources), ("title", title))
+            if isinstance(value, str) and value.strip()
+        }
+        if isinstance(broker, str) and broker.strip():
+            # ``broker_key`` keeps ASCII only, so a house named in Chinese
+            # ("中信建投") has an empty key; its folded name is still one house.
+            publisher = publisher_of(broker, policy) or (
+                key.strip() if isinstance(key, str) and key.strip()
+                else publisher_slug(broker))
+            if publisher:
+                values["publisher"] = publisher
+        if values and isinstance(document_ref, str):
+            found[document_ref] = values
+    return found
+
+
+def _discovered_document_attribution(connection: Any) -> dict[str, dict[str, Any]]:
+    """The attribution columns a discovered-document row happens to carry.
 
     Three things feed the source ladder from here.  ``publisher`` is an
     attribution the acquisition layer read off the document itself and is
@@ -1335,6 +1465,8 @@ __all__ = [
     "prompt_drafter",
     "route_family",
     "document_attribution",
+    "provenance_attribution",
+    "reassess_source_independence",
     "subject_claim_refs",
     "subject_claim_rows",
     "subject_driver_rows",

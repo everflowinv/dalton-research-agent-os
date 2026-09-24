@@ -131,6 +131,8 @@ PURPOSE_LABELS: dict[str, str] = {
     "claim_index": "建立研究结论索引",
     "quality": "评估研究产出质量",
     "document_extraction": "从文档抽取研究事实",
+    "claim_support_verifier": "核验定性结论是否有原文支持",
+    "claim_support_backfill": "回补核验已入账定性结论",
     "discovery_selection": "从搜索结果选择研究资料",
     "registered_annual_report_draft": "从已登记年报起草定向回答",
     "registered_annual_report_verifier": "独立核验年报定向回答",

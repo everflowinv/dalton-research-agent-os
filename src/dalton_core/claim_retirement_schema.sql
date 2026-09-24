@@ -17,7 +17,8 @@ CREATE TABLE IF NOT EXISTS claim_retirement_challenges (
     reason_code TEXT NOT NULL CHECK(reason_code IN (
         'subject_absent_from_source',
         'boilerplate_disclaimer',
-        'human_judgment'
+        'human_judgment',
+        'citation_support_rejected'
     )),
     detector_ref TEXT,
     detector_hash TEXT,

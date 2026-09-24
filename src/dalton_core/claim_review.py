@@ -79,6 +79,7 @@ WRITE_SCOPE = "claim_challenge"
 #: other readers of acquired bytes already use (``mission_sec_quarters``).
 SPOOL_ROOTS = ("transcript-spool", "connector-spool", "raw-spool")
 _WEB_BODY_RE = re.compile(r":body-sha256:([0-9a-f]{64})$")
+_ROUTE_REF_RE = re.compile(r"\bvia (route-decision:[0-9A-Za-z_-]+)")
 # Rendering limits a stored rendering hash may have been produced under: the
 # workspace-configured reading limits first, then the packaged defaults.  The
 # hash decides which one is right; a wrong guess is simply "not this one".
@@ -255,9 +256,15 @@ class ClaimReviewDriver:
             correction = None if binding is None else corrections.get(binding[0])
             if correction is not None:
                 digest = correction["source_content_hash"]
+                rationale = (correction.get("raw_review") or {}).get("rationale")
+                route = _ROUTE_REF_RE.search(rationale) if isinstance(rationale, str) else None
                 chain[claim_ref] = {
                     "digest": digest, "start": binding[1], "end": binding[2],
                     "document_ref": correction.get("document_ref"),
+                    # The route decision that drafted the statement, as the
+                    # automation correction set recorded it: the producer an
+                    # independent check must differ from.
+                    "route_decision_ref": None if route is None else route.group(1),
                 }
                 if isinstance(correction.get("document_ref"), str):
                     self._document_refs.setdefault(digest, correction["document_ref"])

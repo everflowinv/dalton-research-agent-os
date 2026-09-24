@@ -165,6 +165,12 @@ _PURPOSE_TIERS: dict[str, str] = {
     "claim_index": TIER_CHEAP,
     "quality": TIER_CHEAP,
     "document_extraction": TIER_CHEAP,
+    # 2026-09-24: the support check on a drafted statement, before admission
+    # and as a backfill after.  Two closed answers per statement -- a flash
+    # model's job -- and independent of the drafter because the drafter's
+    # route is passed as the producer, not because the tier is different.
+    "claim_support_verifier": TIER_CHEAP,
+    "claim_support_backfill": TIER_CHEAP,
     "discovery_selection": TIER_CHEAP,
     "registered_annual_report_draft": TIER_BRAIN,
     "registered_annual_report_verifier": TIER_VERIFIER,
