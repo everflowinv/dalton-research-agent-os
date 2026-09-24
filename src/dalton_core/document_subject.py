@@ -63,9 +63,10 @@ COMPANY_NAMES: Mapping[str, tuple[str, ...]] = {
     "ACN": ("Accenture", "Accenture plc", "埃森哲"),
     "CTSH": ("Cognizant", "Cognizant Technology Solutions", "高知特"),
     "EPAM": ("EPAM Systems", "EPAM"),
-    "IBM": ("IBM", "International Business Machines", "国际商业机器"),
+    "IBM": ("IBM", "International Business Machines", "国际商业机器",
+            "Red Hat", "HashiCorp", "Confluent", "watsonx"),
     "DXC": ("DXC Technology", "DXC"),
-    "GOOGL": ("Alphabet", "Alphabet Inc.", "Google", "谷歌"),
+    "GOOGL": ("Alphabet", "Alphabet Inc.", "Google", "谷歌", "GOOG", "Gemini", "YouTube"),
     "AMZN": ("Amazon", "Amazon.com", "亚马逊", "AWS", "Amazon Web Services"),
     "META": ("Meta Platforms", "Meta", "Facebook", "脸书", "Instagram", "WhatsApp"),
     "MSFT": ("Microsoft", "微软", "Azure", "Microsoft Azure"),
@@ -76,8 +77,22 @@ COMPANY_NAMES: Mapping[str, tuple[str, ...]] = {
 #: being discussed, not a second company presenting.  So the ambiguity check
 #: that refuses a title naming two covered issuers does not count them (see
 #: ``earnings_call_names_issuer``); everywhere else they are ordinary names.
+#:
+#: 2026-09-24b: Gemini and YouTube (Alphabet's), Red Hat, HashiCorp, Confluent
+#: and watsonx (IBM's) join them.  The three acquisitions are brands for the
+#: same reason AWS is: none is a covered issuer, so naming one next to a
+#: covered company is that company's business, never a second presenter.
+#: They are also left out of the *issuer position* of a call title, which a
+#: product never holds: "Confluent Q4 2025 Earnings Call" is Confluent's own
+#: call from before IBM owned it, not IBM's.  "GOOG" is not here: it is
+#: Alphabet's other share class, i.e. the issuer itself.
+#:
+#: Executives (Jassy, Pichai, Zuckerberg, Nadella, Krishna) are deliberately
+#: in neither table: a person is quoted about other companies, moves between
+#: them, and would make a span about anything they said "name" the company.
 BRAND_NAMES: frozenset[str] = frozenset({
     "AWS", "Amazon Web Services", "Azure", "Microsoft Azure", "Instagram", "WhatsApp",
+    "Gemini", "YouTube", "Red Hat", "HashiCorp", "Confluent", "watsonx",
 })
 # What each covered industry is called, for the same check. An industry screen
 # rests on facts about the market -- how demand is moving, how the field is
@@ -223,7 +238,8 @@ def earnings_call_names_issuer(title: Any, subject: Any,
     issuer_zone = folded[:quarter.start()]
     if call is not None:
         issuer_zone += " " + folded[quarter.end():quarter.end() + call.end()]
-    matched = _mentions(issuer_zone, names)
+    brands = {brand.casefold() for brand in BRAND_NAMES}
+    matched = _mentions(issuer_zone, [name for name in names if name.casefold() not in brands])
     # The other covered issuers, so a title naming two of them is refused as
     # ambiguous. Read from the mission's table when there is one: on a
     # workspace the packaged five are not the covered set and would make a
@@ -231,7 +247,6 @@ def earnings_call_names_issuer(title: Any, subject: Any,
     # Product names (``BRAND_NAMES``) are left out: a competitor's cloud named
     # in a call title is the market being discussed, not a second issuer.
     source = table if table is not None else COMPANY_NAMES
-    brands = {brand.casefold() for brand in BRAND_NAMES}
     other_names = tuple(
         str(name) for key, aliases in source.items()
         if not str(key).startswith("industry:")

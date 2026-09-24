@@ -1861,6 +1861,17 @@ class DaltonStore:
             # version numbers do not reserve or skip versions in the formal
             # Ledger; the first accepted candidate is formal version 1 even
             # when a rejected/revised staging predecessor exists.
+            # 2026-09-24b: the versions are stamped when they are written.  The
+            # decision's own ``created_at`` is deterministic on purpose -- the
+            # later of the candidate's creation and the active policy's, so a
+            # replayed admission hashes to the same decision and is a
+            # duplicate, not a conflict -- which made every candidate staged
+            # before policy-17 enter the Ledger dated 2026-09-17T02:35:49, a
+            # week before it did, and invisible to "what is new since".  The
+            # decision keeps that time; the Ledger rows record the write.  A
+            # replay never reaches here (the idempotency rows above answer
+            # it), so the written time is recorded once.
+            written_at = max(_now(), str(decision_wire["created_at"]))
             expected_evidence_version = 1 if previous_evidence is None else int(previous_evidence["version_number"]) + 1
             expected_claim_version = 1 if previous_claim is None else int(previous_claim["version_number"]) + 1
             evidence_version_id = "evidence-version:" + content_hash({
@@ -1871,7 +1882,7 @@ class DaltonStore:
             })
             evidence_v2 = {
                 "schema_version": "0.2", "id": evidence_version_id,
-                "created_at": decision_wire["created_at"], "evidence_ref": evidence_ref,
+                "created_at": written_at, "evidence_ref": evidence_ref,
                 "version": expected_evidence_version, "source_type": evidence_wire["source_type"],
                 "source_ref": evidence_wire["source_ref"],
                 "source_envelope_ref": evidence_wire["source_envelope_ref"],
@@ -1894,7 +1905,7 @@ class DaltonStore:
             evidence_v2 = validate_evidence_version_v0_2(evidence_v2)
             claim_v2 = {
                 "schema_version": "0.2", "id": claim_version_id,
-                "created_at": decision_wire["created_at"], "claim_ref": claim_ref,
+                "created_at": written_at, "claim_ref": claim_ref,
                 "version": expected_claim_version, "subject_ref": claim_wire["subject_ref"],
                 "metric_or_aspect": claim_wire["metric_or_aspect"],
                 "period": claim_wire["period"], "basis": claim_wire["basis"],
@@ -1954,7 +1965,7 @@ class DaltonStore:
                     "evidence": evidence_v2["id"], "claim": claim_v2["id"],
                     "review": decision_wire["id"],
                 }),
-                "created_at": decision_wire["created_at"],
+                "created_at": written_at,
                 "evidence_ref": evidence_v2["evidence_ref"],
                 "evidence_version_ref": evidence_v2["id"],
                 "claim_ref": claim_v2["claim_ref"],
