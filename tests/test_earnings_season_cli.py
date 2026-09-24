@@ -47,6 +47,18 @@ class EarningsSeasonBudgetTests(unittest.TestCase):
         ):
             self.assertEqual(default_call_budget(purpose)["max_cost_usd"], 1.0)
 
+    def test_the_preview_writer_has_room_for_the_answers_the_chain_gives(self):
+        # 2026-09-14..24: eleven preview attempts were refused by the broker
+        # with "provider max_output_tokens telemetry exceeds WorkOrder budget"
+        # after the providers had answered (and billed) 2,138-2,980 output
+        # tokens against a 2,000 cap -- every link of the brain chain, so the
+        # chain was exhausted. The cap now matches the other long-form lanes.
+        budget = default_call_budget(season.PREVIEW_PURPOSE)
+        self.assertEqual(budget["max_output_tokens"], 4_000)
+        self.assertGreater(budget["max_output_tokens"], 2_980)
+        self.assertEqual(budget["max_input_tokens"], 60_000)
+        self.assertEqual(budget["max_cost_usd"], 1.0)
+
     def test_packaged_budget_change_changes_request_identity(self):
         base = {
             "max_input_tokens": 60_000, "max_output_tokens": 2_000,
