@@ -183,7 +183,17 @@ def mission_subject_needles(
                 names.extend(value)
         names.extend(COMPANY_NAMES.get(ticker.upper(), ()))
         table.setdefault(ref, set()).update(name_needles(names))
+    refs_by_ticker = {
+        str(member.get("ticker") or "").strip().upper(): str(member.get("company_ref") or "")
+        for member in universe or () if isinstance(member, Mapping)}
     for plan in plans or ():
+        # The owner's alias ledger, as ``load_feed_discovery_plan`` attaches it.
+        aliases = plan.get("company_aliases") if isinstance(plan, Mapping) else None
+        added = aliases.get("added") if isinstance(aliases, Mapping) else None
+        for ticker, extra in (added.items() if isinstance(added, Mapping) else ()):
+            ref = refs_by_ticker.get(str(ticker).strip().upper())
+            if ref and isinstance(extra, Sequence) and not isinstance(extra, str):
+                table.setdefault(ref, set()).update(name_needles(extra))
         companies = (plan or {}).get("companies") if isinstance(plan, Mapping) else None
         if not isinstance(companies, Mapping):
             continue

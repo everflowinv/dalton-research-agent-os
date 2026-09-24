@@ -53,13 +53,32 @@ NameTable = Mapping[str, Sequence[str]]
 # table (``mission_company_names.mission_name_table``) that each caller passes
 # in; this dict is consulted only when no table was supplied, which is what
 # keeps the legacy Core working unchanged.
+#
+# 2026-09-24: the hyperscalers and the Chinese names are here too, because a
+# workspace's own table used to *replace* this one and so could never pick up
+# a name added here; ``mission_name_table`` now unions the two, so a name added
+# below reaches every environment on the next deploy.  A name somebody needs
+# before a deploy goes through ``company_aliases`` (append-only, audited).
 COMPANY_NAMES: Mapping[str, tuple[str, ...]] = {
-    "ACN": ("Accenture",),
-    "CTSH": ("Cognizant",),
+    "ACN": ("Accenture", "Accenture plc", "埃森哲"),
+    "CTSH": ("Cognizant", "Cognizant Technology Solutions", "高知特"),
     "EPAM": ("EPAM Systems", "EPAM"),
-    "IBM": ("IBM", "International Business Machines"),
+    "IBM": ("IBM", "International Business Machines", "国际商业机器"),
     "DXC": ("DXC Technology", "DXC"),
+    "GOOGL": ("Alphabet", "Alphabet Inc.", "Google", "谷歌"),
+    "AMZN": ("Amazon", "Amazon.com", "亚马逊", "AWS", "Amazon Web Services"),
+    "META": ("Meta Platforms", "Meta", "Facebook", "脸书", "Instagram", "WhatsApp"),
+    "MSFT": ("Microsoft", "微软", "Azure", "Microsoft Azure"),
 }
+#: Names of a company's *products*, not of the company.  They name the subject
+#: when they appear -- a note about AWS margins is Amazon's -- but they do not
+#: name an *issuer*: "Azure vs AWS" in Microsoft's call title is the business
+#: being discussed, not a second company presenting.  So the ambiguity check
+#: that refuses a title naming two covered issuers does not count them (see
+#: ``earnings_call_names_issuer``); everywhere else they are ordinary names.
+BRAND_NAMES: frozenset[str] = frozenset({
+    "AWS", "Amazon Web Services", "Azure", "Microsoft Azure", "Instagram", "WhatsApp",
+})
 # What each covered industry is called, for the same check. An industry screen
 # rests on facts about the market -- how demand is moving, how the field is
 # arranged -- and those belong to no company, so the industry is a subject in
@@ -121,12 +140,32 @@ def subject_label(ticker: Any, names: NameTable | None = None) -> str:
     return f"{names[0]} ({', '.join(names[1:])})"
 
 
+_CJK_RE = re.compile(r"[\u3400-\u9fff\uf900-\ufaff]")
+
+
+def _fold_cjk(text: str) -> str:
+    """NFKC, lowercased, all whitespace removed: how a CJK name is compared."""
+
+    return re.sub(r"\s+", "", unicodedata.normalize("NFKC", str(text)).lower())
+
+
 def _mentions(text: str, names: Sequence[str]) -> list[str]:
     folded = _fold(text)
-    if not folded:
-        return []
+    cjk_text: str | None = None
     found = []
     for name in names:
+        if _CJK_RE.search(str(name)):
+            # ``_fold`` keeps [a-z0-9] only, so "谷歌" folded to nothing and was
+            # silently skipped, and "IT 服务" folded to "it" and matched every
+            # English "it".  A CJK name has no word boundaries to respect: it
+            # is a substring test on the NFKC text with whitespace removed.
+            if cjk_text is None:
+                cjk_text = _fold_cjk(text)
+            if cjk_text and _fold_cjk(name) in cjk_text:
+                found.append(name)
+            continue
+        if not folded:
+            continue
         needle = _fold(name)
         if not needle:
             continue
@@ -189,11 +228,15 @@ def earnings_call_names_issuer(title: Any, subject: Any,
     # ambiguous. Read from the mission's table when there is one: on a
     # workspace the packaged five are not the covered set and would make a
     # "Cognizant" in an Amazon title invisible.
+    # Product names (``BRAND_NAMES``) are left out: a competitor's cloud named
+    # in a call title is the market being discussed, not a second issuer.
     source = table if table is not None else COMPANY_NAMES
+    brands = {brand.casefold() for brand in BRAND_NAMES}
     other_names = tuple(
         str(name) for key, aliases in source.items()
         if not str(key).startswith("industry:")
-        for name in aliases if str(name) not in names
+        for name in aliases
+        if str(name) not in names and str(name).casefold() not in brands
     )
     ambiguous = _mentions(issuer_zone, other_names)
     return {"checked": True, "names_issuer": bool(matched) and not ambiguous,
@@ -201,6 +244,7 @@ def earnings_call_names_issuer(title: Any, subject: Any,
 
 
 __all__ = [
+    "BRAND_NAMES",
     "COMPANY_NAMES",
     "NameTable",
     "INDUSTRY_NAMES",

@@ -514,9 +514,11 @@ def build_mission_feed_plan(
     extra.update(resolve_universe_names(
         [item for item in members
          if str(item.get("ticker") or "").strip().upper() in set(
-             unnamed_tickers(mission_name_table(members, extra=extra)))],
+             unnamed_tickers(mission_name_table(members, extra=extra,
+                                                union_packaged=False)))],
         resolve=resolve_name))
-    table = mission_name_table(members, extra=extra)
+    # The owner's names only: every lane adds the packaged ones at run time.
+    table = mission_name_table(members, extra=extra, union_packaged=False)
     missing = unnamed_tickers(table)
     if missing:
         raise LaneParityError(

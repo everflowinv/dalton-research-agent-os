@@ -253,6 +253,14 @@ def validate_feed_discovery_plan(value: Mapping[str, Any]) -> dict[str, Any]:
     document worth reading, and how many to read per tick.
     """
 
+    # 2026-09-24: the owner's alias overlay travels beside the plan, not in it.
+    # It is not part of the plan's content hash -- the plan is what the mission
+    # published; the overlay is the ledger's current answer, attached by
+    # ``load_feed_discovery_plan`` -- so it is set aside, checked, and put back.
+    aliases = None
+    if isinstance(value, Mapping) and COMPANY_ALIASES_KEY in value:
+        aliases = _validate_alias_overlay(value[COMPANY_ALIASES_KEY])
+        value = {key: item for key, item in value.items() if key != COMPANY_ALIASES_KEY}
     if not isinstance(value, Mapping) or set(value) != _PLAN_FIELDS:
         raise FeedLaneRejected("feed discovery plan has an invalid closed shape")
     wire = json.loads(canonical_json(value))
@@ -304,13 +312,52 @@ def validate_feed_discovery_plan(value: Mapping[str, Any]) -> dict[str, Any]:
     if content_hash(wire) != declared:
         raise FeedLaneRejected("feed discovery plan content_hash is invalid")
     wire["content_hash"] = declared
+    if aliases is not None:
+        wire[COMPANY_ALIASES_KEY] = aliases
     return wire
 
 
+#: Where ``load_feed_discovery_plan`` puts the owner's alias overlay.
+COMPANY_ALIASES_KEY = "company_aliases"
+
+
+def _validate_alias_overlay(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise FeedLaneRejected("company_aliases must be an object")
+    out = json.loads(canonical_json(value))
+    for key in ("added", "retired"):
+        entries = out.get(key, {})
+        if not isinstance(entries, Mapping) or any(
+                not isinstance(names, list)
+                or any(not isinstance(name, str) or not name.strip() for name in names)
+                for names in entries.values()):
+            raise FeedLaneRejected(f"company_aliases.{key} must map tickers to names")
+    return out
+
+
 def load_feed_discovery_plan(path: str | Path) -> dict[str, Any]:
-    return validate_feed_discovery_plan(
-        json.loads(Path(path).expanduser().read_text(encoding="utf-8"))
-    )
+    """The plan at ``path``, with its environment's alias overlay attached.
+
+    The overlay is the owner's ``company_aliases`` ledger in the state
+    directory this plan belongs to (``<state>/feed-plans/<plan>``).  A ledger
+    that fails its own chain check is reported on the plan and contributes no
+    names: an alias can only widen what a document is attributed to, so the
+    safe failure is to fall back to the names the plan and the package give.
+    """
+
+    path = Path(path).expanduser()
+    plan = validate_feed_discovery_plan(json.loads(path.read_text(encoding="utf-8")))
+    if path.parent.name == "feed-plans":
+        from .company_aliases import CompanyAliasError, load_overlay
+
+        try:
+            overlay = load_overlay(path.parent.parent)
+        except (CompanyAliasError, OSError, ValueError) as exc:
+            overlay = {"error": f"{type(exc).__name__}: {exc}"[:500],
+                       "added": {}, "retired": {}}
+        if overlay is not None:
+            plan[COMPANY_ALIASES_KEY] = _validate_alias_overlay(overlay)
+    return plan
 
 
 def plan_terms(plan: Mapping[str, Any]) -> list[str]:
@@ -385,7 +432,8 @@ def _universe_terms(
         require_named(
             {ticker: table.get(ticker, ()) for ticker in (
                 str(item["ticker"]).strip().upper() for item in universe)},
-            where="this mission's feed discovery plan (companies[].names)",
+            where=("this mission's feed discovery plan (companies[].names) or the "
+                   "owner's alias ledger (python -m dalton_core.company_aliases add)"),
         )
     except MissionCompanyNamesError as exc:
         raise FeedLaneRejected(str(exc)) from exc
@@ -2465,6 +2513,7 @@ __all__ = [
     "resolve_feed_plan",
     "feed_identity",
     "feed_query_hash",
+    "COMPANY_ALIASES_KEY",
     "load_feed_discovery_plan",
     "mentions_any",
     "plan_company_names",
