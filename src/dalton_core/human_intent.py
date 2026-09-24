@@ -20,6 +20,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator, Protocol
 
+from .sqlite_path import sqlite_path
 from .contracts import ModelInvocation, ResultEnvelope, WorkOrder
 from .model_router import ModelRouter
 from .model_transport import (
@@ -2160,7 +2161,7 @@ class HumanIntentAuthority:
     """Append-only authority for context, utterances, attempts, and candidates."""
 
     def __init__(self, path: str | Path) -> None:
-        self.path = str(path)
+        self.path = sqlite_path(path)
         self._lock = threading.RLock()
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(mode=0o700, parents=True, exist_ok=True)

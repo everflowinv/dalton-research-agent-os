@@ -25,6 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .sqlite_path import sqlite_path
 from .connector import ConnectorStore, source_envelope_content_hash
 from .observability import ObservabilityNotFound, ObservabilityStore
 from .raw_spool import RawSpool
@@ -406,7 +407,7 @@ class DocumentIndex:
             raise DocumentIndexValidationError("visible_access_classes is invalid")
         if len(classes) != len(set(classes)):
             raise DocumentIndexValidationError("visible_access_classes contains duplicates")
-        self.path = str(path)
+        self.path = sqlite_path(path)
         self.store = store
         self.observability = observability
         self.raw_spool = raw_spool

@@ -35,3 +35,8 @@ temp/
 legacy-artifacts/
 .playwright-cli/
 output/playwright/
+
+# str(sqlite3.Connection) used where a database path belongs makes sqlite
+# create an empty file named after the object's repr in the cwd.  Two were
+# committed once (7f24d085); never track another.
+<sqlite3.Connection object at *>

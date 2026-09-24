@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from .sqlite_path import sqlite_path
 from .contracts import WorkOrder
 
 
@@ -695,7 +696,7 @@ class CapabilityCatalog:
     ) -> None:
         if type(max_lease_seconds) is not int or max_lease_seconds < 1:
             raise CatalogValidationError("max_lease_seconds must be a positive integer")
-        self.path = str(path)
+        self.path = sqlite_path(path)
         self.clock = clock or _now
         self.max_lease_seconds = max_lease_seconds
         self.approval_resolver = approval_resolver

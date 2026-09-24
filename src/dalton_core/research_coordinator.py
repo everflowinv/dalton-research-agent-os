@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
+from .sqlite_path import sqlite_path
 from .connector_runner import validate_connector_runner_request
 from .recorded_alphaengine_adapter import load_recorded_alphaengine_fixture
 from .recorded_source_adapter import load_recorded_source_fixture
@@ -526,7 +527,7 @@ class ResearchCoordinatorStore:
     """Owner-local, rebuildable scratch store; not a Research Ledger authority."""
 
     def __init__(self, path: str | Path = ":memory:") -> None:
-        self.path = str(path)
+        self.path = sqlite_path(path)
         if self.path != ":memory:":
             target = Path(self.path)
             target.parent.mkdir(parents=True, exist_ok=True)
