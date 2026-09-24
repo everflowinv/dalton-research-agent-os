@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .sqlite_path import sqlite_path
+from .sqlite_contention import SQLITE_BUSY_TIMEOUT_MS, SQLITE_BUSY_TIMEOUT_SECONDS
 from .budget_pools import (
     apply_pool_migration,
     pool_decision,
@@ -144,9 +145,13 @@ class ThesisImpactBudgetStore:
             os.chmod(target, 0o600)
         from .readonly_sqlite import connect_read_only
         self.connection = (connect_read_only(path) if read_only else
-                           sqlite3.connect(self.path, isolation_level=None))
+                           sqlite3.connect(self.path, isolation_level=None,
+                                           timeout=SQLITE_BUSY_TIMEOUT_SECONDS))
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys=ON")
+        # Shared with every lane child that admits or settles a paid call;
+        # the implicit 5 s of sqlite3.connect lost settlements to a burst.
+        self.connection.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
         if not read_only:
             self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
             # C2: the pool columns and the pool-refusal table. Additive and

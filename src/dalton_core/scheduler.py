@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .sqlite_path import sqlite_path
+from .sqlite_contention import SQLITE_BUSY_TIMEOUT_MS
 from .contracts import ResultEnvelope, WorkOrder
 from .recorded_completion import (
     build_recorded_parent_response,
@@ -193,7 +194,7 @@ class Scheduler:
             os.chmod(self.path, 0o600)
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys = ON")
-        self.connection.execute("PRAGMA busy_timeout = 5000")
+        self.connection.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
         if connection is None and self.path != ":memory:":
             # The controller, writer and child workers share this file. A
             # read snapshot must not block a completion from committing.
