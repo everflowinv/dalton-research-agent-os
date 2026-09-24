@@ -73,6 +73,8 @@ CHANGE_REASON_HUMAN = "human_revision"
 REOPEN_CHANGE_REASONS: tuple[str, ...] = (CHANGE_REASON_EVIDENCE, CHANGE_REASON_HUMAN)
 
 VERDICTS: tuple[str, ...] = ("approve", "decline")
+# Why a proposal left the undecided list without a person's decision.
+WITHDRAWAL_TARGET_SUPERSEDED = "target_superseded"
 VERDICT_LABELS: Mapping[str, str] = {
     "approve": "重出一版",
     "decline": "不重出",
@@ -796,10 +798,20 @@ class GateReopenAuthority:
         ).fetchone()
         return None if row is None else _decode(row, "GateReopenDecision")
 
+    def withdrawal_for(self, proposal_ref: str) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT * FROM gate_reopen_withdrawals WHERE proposal_ref=?",
+            (_text(proposal_ref, "proposal_ref"),),
+        ).fetchone()
+        return None if row is None else _decode(row, "GateReopenWithdrawal")
+
     def undecided(self, company_ref: str | None = None) -> list[dict[str, Any]]:
+        """Proposals still waiting for a person: not decided, not withdrawn."""
+
         return [
             proposal for proposal in self.proposals(company_ref)
             if self.decision_for(proposal["id"]) is None
+            and self.withdrawal_for(proposal["id"]) is None
         ]
 
     def holds_assessment(self, *, company_ref: str, assessment_hash: str) -> bool:
@@ -887,6 +899,88 @@ class GateReopenAuthority:
                 ),
             )
         return {**record, "status": "fresh"}
+
+    def withdraw_superseded(
+        self, *, mission: Mapping[str, Any], actor_ref: str,
+    ) -> list[dict[str, Any]]:
+        """Withdraw every undecided proposal whose target is no longer the passed version.
+
+        The proposer's half of 2026-09-24: forty-seven proposals sat in front
+        of the owner naming screen versions that had since been re-issued and
+        passed again, and approving any of them would have re-opened the
+        *current* screen on evidence the re-issue had already used.  A
+        proposal is withdrawn only when a different version is now the passed
+        one -- a gate that is open (reopened, re-issue pending) withdraws
+        nothing, because that state can still settle on the named version.
+        Append-only and idempotent: one withdrawal per proposal.
+        """
+
+        actor_ref = _text(actor_ref, "actor_ref")
+        if actor_ref.startswith("automation:"):
+            if actor_ref != mission["autonomy"]["automation_principal"]:
+                raise DeliverableReopenConflict(
+                    "automation actor is not the mission principal")
+        elif not actor_ref.startswith("human:"):
+            raise DeliverableReopenValidationError(
+                "actor_ref must be a human: or automation: principal")
+        withdrawn: list[dict[str, Any]] = []
+        current: dict[tuple[str, str], dict[str, Any] | None] = {}
+        for proposal in self.undecided():
+            key = (proposal["company_ref"], proposal["stage_ref"])
+            if key not in current:
+                current[key] = passed_version(
+                    self.connection, company_ref=key[0], stage_ref=key[1])
+            passed = current[key]
+            if passed is None or passed["version_id"] == proposal["passed_version_ref"]:
+                continue
+            record = {
+                "schema_version": SCHEMA_VERSION,
+                "id": "gate-reopen-withdrawal:" + content_hash({
+                    "proposal_ref": proposal["id"],
+                    "proposal_hash": proposal["content_hash"],
+                })[:32],
+                "created_at": _now(),
+                "proposal_ref": proposal["id"],
+                "proposal_hash": proposal["content_hash"],
+                "company_ref": proposal["company_ref"],
+                "stage_ref": proposal["stage_ref"],
+                "passed_version_ref": proposal["passed_version_ref"],
+                "reason_code": WITHDRAWAL_TARGET_SUPERSEDED,
+                "superseded_by_version_ref": passed["version_id"],
+                "superseded_by_version_number": passed["version_number"],
+                "superseded_by_passed_at": passed["passed_at"],
+                "reason": (
+                    f"提案针对的 v{proposal.get('passed_version_number')} "
+                    f"{proposal['passed_version_ref']} 已不是当前通过版本；当前通过的是 "
+                    f"v{passed['version_number']} {passed['version_id']}"
+                    f"（{passed['passed_at']} 过闸），提案自动撤回"
+                ),
+                "actor_ref": actor_ref,
+            }
+            record["content_hash"] = content_hash(record)
+            with self.store._transaction() as cur:
+                if cur.execute(
+                    "SELECT 1 FROM gate_reopen_decisions WHERE proposal_ref=?",
+                    (proposal["id"],),
+                ).fetchone() is not None or cur.execute(
+                    "SELECT 1 FROM gate_reopen_withdrawals WHERE proposal_ref=?",
+                    (proposal["id"],),
+                ).fetchone() is not None:
+                    continue
+                cur.execute(
+                    "INSERT INTO gate_reopen_withdrawals(withdrawal_id,proposal_ref,"
+                    "proposal_hash,company_ref,reason_code,superseded_by_version_ref,"
+                    "record_json,content_hash,actor_ref,created_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        record["id"], record["proposal_ref"], record["proposal_hash"],
+                        record["company_ref"], record["reason_code"],
+                        record["superseded_by_version_ref"], canonical_json(record),
+                        record["content_hash"], actor_ref, record["created_at"],
+                    ),
+                )
+            withdrawn.append({**record, "status": "fresh"})
+        return withdrawn
 
     def propose_human_revision(
         self, *, candidate: Mapping[str, Any], candidate_hash: str,
@@ -1157,8 +1251,21 @@ class GateReopenAuthority:
     # -- the ladder entry --------------------------------------------------
 
     def _assert_reopenable(self, proposal: Mapping[str, Any]) -> None:
-        """Is the stage this proposal names actually a passed gate right now?"""
+        """Is the version this proposal names the passed gate right now?
 
+        2026-09-24: checking only that *a* gate is passed let a proposal about
+        a superseded version re-open the current one -- approve an old
+        "evidence thickened since v1" and the v2 that already used that
+        evidence is un-decided with nothing new behind it.  The proposal is
+        about one version; it may only re-open that version.
+        """
+
+        withdrawal = self.withdrawal_for(proposal["id"])
+        if withdrawal is not None:
+            raise DeliverableReopenConflict(
+                f"this proposal was withdrawn at {withdrawal['created_at']}: "
+                f"{withdrawal['reason']}"
+            )
         missions = self._mission_authority()
         mission = self._active_mission(proposal)
         state = missions.current_stage_state(mission["mission_ref"], proposal["company_ref"])
@@ -1167,6 +1274,21 @@ class GateReopenAuthority:
             raise DeliverableReopenConflict(
                 f"{proposal['stage_ref']} is {stage.get('status') or 'not reached'} for "
                 f"{proposal['company_ref']}; only a passed gate can be re-opened"
+            )
+        passed = passed_version(
+            self.connection, company_ref=proposal["company_ref"],
+            stage_ref=proposal["stage_ref"])
+        if passed is None or passed["version_id"] != proposal["passed_version_ref"] \
+                or passed["content_hash"] != proposal["passed_version_hash"]:
+            current = ("no passed version" if passed is None else
+                       f"v{passed['version_number']} {passed['version_id']} "
+                       f"(passed {passed['passed_at']})")
+            raise DeliverableReopenConflict(
+                f"this proposal targets {proposal['passed_version_ref']}, which is no "
+                f"longer the passed {proposal['stage_ref']} for {proposal['company_ref']}; "
+                f"the current one is {current}. Approving it would re-open the current "
+                "version without new evidence -- decline it, and the weekly assessment "
+                "will propose against the current version if its evidence thickens"
             )
 
     def _record_stage_reopen(
@@ -1272,6 +1394,7 @@ __all__ = [
     "STAGE_REF",
     "VERDICTS",
     "VERDICT_LABELS",
+    "WITHDRAWAL_TARGET_SUPERSEDED",
     "approved_reopen",
     "consumed_reopen_refs",
     "evidence_items",

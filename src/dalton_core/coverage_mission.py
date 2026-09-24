@@ -4638,6 +4638,38 @@ class CoverageMissionAuthority:
         query = f"{records} UNION ALL {reopens} ORDER BY created_at,record_id"
         return cur.execute(query, params).fetchall()
 
+    def _current_pass_deliverable_refs(
+        self, cur: sqlite3.Cursor, mission_ref: str, company_ref: str, stage_ref: str
+    ) -> set[str]:
+        """The deliverable versions the latest ``gate_passed`` record cites.
+
+        Empty when the pass cites none (or no deliverable ledger exists here):
+        then there is nothing to compare a reopen's version against, and the
+        folded status check alone decides, as it always has.
+        """
+
+        passes = [
+            row for row in self._folded_rows(cur, mission_ref, company_ref)
+            if row["record_kind"] == "stage" and row["stage_ref"] == stage_ref
+            and row["status"] == "gate_passed"
+        ]
+        if not passes or cur.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='mission_deliverable_versions'"
+        ).fetchone() is None:
+            return set()
+        try:
+            refs = json.loads(passes[-1]["record_json"]).get("evidence_refs") or []
+        except (TypeError, ValueError):
+            return set()
+        found: set[str] = set()
+        for ref in refs:
+            if isinstance(ref, str) and cur.execute(
+                "SELECT 1 FROM mission_deliverable_versions WHERE version_id=?", (ref,)
+            ).fetchone() is not None:
+                found.add(ref)
+        return found
+
     def _folded_statuses(
         self, cur: sqlite3.Cursor, mission_ref: str, company_ref: str
     ) -> dict[str, list[str]]:
@@ -4996,6 +5028,18 @@ class CoverageMissionAuthority:
             if spent is not None:
                 raise CoverageMissionConflict(
                     "this gate_reopen decision has already re-opened this stage"
+                )
+            # 2026-09-24: and only the version that is passed *now*.  The pass
+            # binds its deliverable version in its evidence refs; a reopen
+            # naming any other version is about a superseded document and
+            # would un-decide the current one on nobody's evidence.
+            passed_refs = self._current_pass_deliverable_refs(
+                cur, mission["mission_ref"], company_ref, stage_ref)
+            if passed_refs and reopened_version_ref not in passed_refs:
+                raise CoverageMissionConflict(
+                    f"{reopened_version_ref} is not the version {stage_ref} is currently "
+                    f"passed against ({', '.join(sorted(passed_refs))}); a reopen may "
+                    "only re-open the current passed version"
                 )
             created_at = _now()
             record = {
