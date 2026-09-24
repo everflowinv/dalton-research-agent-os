@@ -1161,9 +1161,24 @@ def _record_provenance(host: ExtractionHost) -> dict[str, Any]:
     from .extraction_backlog import backfill_provenance
 
     try:
-        return backfill_provenance(host.store.connection, host._transcript_spool)
+        result = backfill_provenance(host.store.connection, host._transcript_spool)
     except Exception as exc:  # noqa: BLE001 - provenance is not a gate
-        return {"status": "unavailable", "reason": f"{type(exc).__name__}: {exc}"}
+        result = {"status": "unavailable", "reason": f"{type(exc).__name__}: {exc}"}
+    # 2026-09-24: the sending house of every served sales note, read off the
+    # raw get_note header the Core already binds, so the debate map's
+    # independence ladder can tell GS from BofA.  Those raw responses are in
+    # the connector spool, which is not this child's own spool.
+    from .claim_review import review_spool
+    from .sales_note_broker import backfill_sales_note_provenance
+
+    try:
+        result["sales_notes"] = backfill_sales_note_provenance(
+            host.store.connection,
+            review_spool(host.state_dir, primary=host._transcript_spool))
+    except Exception as exc:  # noqa: BLE001 - provenance is not a gate
+        result["sales_notes"] = {"status": "unavailable",
+                                 "reason": f"{type(exc).__name__}: {exc}"}
+    return result
 
 
 def _thinness_ranks(host: ExtractionHost, mission: Mapping[str, Any]) -> dict[tuple[str, str], int]:
