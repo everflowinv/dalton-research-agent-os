@@ -126,11 +126,13 @@ class NeedleFallbackTests(ClaimRetirementHarness):
         for company_ref, values in roster.items():
             self.assertTrue(values, company_ref)
 
-    def test_a_planned_company_keeps_the_plan_names(self) -> None:
+    def test_a_planned_company_keeps_the_plan_names_and_gains_the_roster_aliases(self) -> None:
+        # 2026-09-24: a union, not a precedence.  ws-7d's discovery plans
+        # search by ticker alone, so "plan names win" hid "Alphabet".
         driver = self.driver()
         roster = driver._roster_needles()
-        self.assertEqual(driver._needles_for(EPAM, roster), ["epam"])
-        self.assertEqual(driver._needles_for(ACN, roster), ["accenture", "acn"])
+        self.assertIn("epam", driver._needles_for(EPAM, roster))
+        self.assertTrue({"accenture", "acn"} <= set(driver._needles_for(ACN, roster)))
 
     def test_subject_needles_still_refuse_a_one_letter_name(self) -> None:
         self.assertEqual(subject_needles({"ticker": "X", "name": "Ab"}), ["ab"])
