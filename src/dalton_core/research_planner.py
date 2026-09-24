@@ -101,7 +101,21 @@ MAX_REQUIRED_MULTIPLE = 3
 # omitted rows.  The planner chooses what to work on next from checklist
 # gaps, theses and outcomes; the newest documents per company are what it
 # would realistically order read next, and the aggregate is the rest.
-PROMPT_PROJECTION_REF = "rule:research-plan-input-projection:0.3"
+#
+# 0.4, 2026-09-24: the directed-reading feedback was the next unbounded term.
+# Every directed read appends one immutable observation (~2-4KB with its proof
+# refs) and the state carried all of them: AMZN alone reached 51KB, the prompt
+# 82.6KB against a 64KB bound, and the planner refused 74 times a day for six
+# days while every stage above had nothing left to give.  Two more stages now
+# engage: the observations lose their verification-only refs, and each
+# company keeps only its newest observations in full on the same recency
+# ladder as the readable inventory (down to none), the rest becoming counts by
+# outcome, a date span and the hash of the omitted rows.  Because no per-company
+# floor survives an unbounded number of companies, two final stages reduce each
+# company to its checklist core and then, only if that is still too large,
+# carry the leading companies in checklist order and aggregate the rest by
+# count and hash.  With those, any state fits any bound above the fixed prompt.
+PROMPT_PROJECTION_REF = "rule:research-plan-input-projection:0.4"
 PROMPT_PROJECTION_RULE = {
     "ref": PROMPT_PROJECTION_REF,
     "preserved": "every company identity; omission records for everything projected away",
@@ -116,8 +130,12 @@ PROMPT_PROJECTION_RULE = {
         "drop_preview_triplets",
         "aggregate_unavailable_documents",
         "slim_readable_document_identity",
+        "slim_document_research_feedback",
         "digest_financial_models",
         "aggregate_readable_document_inventory",
+        "aggregate_document_research_feedback",
+        "compact_company_detail",
+        "aggregate_companies",
     ],
     "readable_keep_per_company": 8,
     # Stage five is a ladder, not one rung.  It was written with a single
@@ -129,6 +147,18 @@ PROMPT_PROJECTION_RULE = {
     # unapplied is not.  Every rung keeps every company identity and records
     # what it aggregated by hash, exactly as the first rung does.
     "readable_keep_ladder": [8, 4, 2, 1],
+    # Walked in step with the readable ladder: rung i keeps
+    # readable_keep_ladder[min(i, 3)] documents and
+    # feedback_keep_ladder[i] observations per company, newest first.
+    "feedback_keep_ladder": [8, 4, 2, 1, 0],
+    "company_core_fields": [
+        "company_ref", "ticker", "priority", "stage", "stage_status", "items",
+        "gaps", "blocked_on", "source_base_ready", "figures",
+        "readable_documents", "readable_documents_summary",
+        "document_research_feedback_summary", "dossier_feedback.repair_target_ids",
+    ],
+    "company_order": "checklist order; the leading companies that fit are "
+                     "carried, the rest aggregated by count and hash",
     "refusal": "if the state after every rung of every stage exceeds the "
                "configured input bound, send nothing",
 }
@@ -141,6 +171,26 @@ READABLE_KEEP_PER_COMPANY = 8
 # company is the floor: below that no company can be named a next read at all,
 # and a planner that cannot name a document is not worth the call.
 READABLE_KEEP_LADDER: tuple[int, ...] = (READABLE_KEEP_PER_COMPANY, 4, 2, 1)
+# The directed-reading observations walk their own ladder in step with the
+# readable one, and may go to none: the counts, outcomes and hash of what was
+# tried still travel, and no directed read depends on seeing an old attempt.
+FEEDBACK_KEEP_LADDER: tuple[int, ...] = (READABLE_KEEP_PER_COMPANY, 4, 2, 1, 0)
+
+# What a planner uses from one directed-reading observation: what was asked,
+# of which document, with which terms, and how it ended.  The rest are proof
+# refs a reader re-verifies the observation with (stage "slim").
+_FEEDBACK_PLANNER_FIELDS: tuple[str, ...] = (
+    "id", "created_at", "outcome", "stage", "document_ref", "question", "wants",
+    "tried_query_terms", "missing_evidence", "recovery", "candidate_claim_ref",
+)
+
+# Stage "compact_company_detail" keeps these fields of every company.
+_COMPANY_CORE_FIELDS: tuple[str, ...] = (
+    "company_ref", "ticker", "priority", "stage", "stage_status", "items",
+    "gaps", "blocked_on", "source_base_ready", "figures",
+    "readable_documents", "readable_documents_summary",
+    "document_research_feedback_summary",
+)
 
 # Stage three's verification-only fields.  The planner chooses work; these
 # four fields exist so a reader can re-verify a registration, and a work
@@ -485,6 +535,9 @@ def project_state_for_prompt(
     # token for everything that reads this list, while the reader can still
     # see how hard the fit had to be pushed.
     readable_keep: list[int] = [READABLE_KEEP_PER_COMPANY]
+    feedback_keep_in_force: list[int | None] = [None]
+    companies_total = len(companies)
+    companies_carried: list[int] = [companies_total]
 
     def projection_meta(retained: set[tuple[int, int]], prompt_bytes: int | None) -> dict[str, Any]:
         omitted = [identities[position] for position in order if position not in retained]
@@ -508,8 +561,16 @@ def project_state_for_prompt(
                 "document identity is preserved; everything projected away is "
                 "recorded here by hash. An unread preview or an aggregated "
                 "unavailable row says nothing about whether that document "
-                "answers a question."
+                "answers a question. An aggregated directed-reading observation "
+                "was still tried; its terms are not shown here."
             )
+            if "aggregate_companies" in stages_applied:
+                notice = notice.replace(
+                    "Every company and document identity is preserved",
+                    "Only the leading companies_carried companies are listed; the "
+                    "rest are counted in companies_omitted_summary and must not be "
+                    "directed in this plan. Every listed company and document "
+                    "identity is preserved")
         return {
             "schema_version": "0.1",
             "rule_ref": PROMPT_PROJECTION_REF,
@@ -518,15 +579,23 @@ def project_state_for_prompt(
             "full_prompt_sha256": hashlib.sha256(full_prompt.encode("utf-8")).hexdigest(),
             "full_prompt_bytes": full_prompt_bytes,
             "configured_max_input_bytes": max_input_bytes,
-            "projected_prompt_bytes": prompt_bytes,
+            # Until the final measurement, reserve the bound's own width so a
+            # fit decided here cannot be broken by writing the real count.
+            "projected_prompt_bytes": max_input_bytes if prompt_bytes is None else prompt_bytes,
             "document_identities_preserved": True,
             "stages_applied": list(stages_applied),
             "readable_keep_per_company": readable_keep[0],
+            "document_research_feedback_keep_per_company": feedback_keep_in_force[0],
+            "companies_total": companies_total,
+            "companies_carried": companies_carried[0],
             "preview_triplets_total": len(order),
             "preview_triplets_retained": len(retained),
             "preview_triplets_omitted": len(omitted),
             "omitted_preview_set_hash": content_hash(omitted),
-            "preview_counts_by_company": by_company,
+            # Per company only while the company rows are whole; after that the
+            # map would itself grow with the number of companies.
+            "preview_counts_by_company": (
+                None if "compact_company_detail" in stages_applied else by_company),
             "notice": notice,
         }
 
@@ -573,6 +642,26 @@ def project_state_for_prompt(
         stages_applied.append("slim_readable_document_identity")
         projected["prompt_projection"] = projection_meta(retained, None)
 
+    if not _fits() and any(company.get("document_research_feedback")
+                           for company in companies):
+        # Stage three-b: the same rule for the directed-reading observations.
+        # Admission, plan, inquiry, proof and work-order refs let a reader
+        # re-verify an observation; what the planner needs is what was asked
+        # of which document, with which terms, and how it ended.  ``meaning``
+        # and ``suggested_actions`` are fixed per outcome and restated in the
+        # prompt text.
+        for company in companies:
+            rows = company.get("document_research_feedback")
+            if not isinstance(rows, list):
+                continue
+            company["document_research_feedback"] = [
+                {key: row[key] for key in _FEEDBACK_PLANNER_FIELDS if key in row}
+                if isinstance(row, Mapping) else row
+                for row in rows
+            ]
+        stages_applied.append("slim_document_research_feedback")
+        projected["prompt_projection"] = projection_meta(retained, None)
+
     if not _fits():
         # Stage four: each financial model becomes its status plus the hash of
         # the whole model.  The planner is not forecasting; the model's shape
@@ -587,30 +676,74 @@ def project_state_for_prompt(
         stages_applied.append("digest_financial_models")
         projected["prompt_projection"] = projection_meta(retained, None)
 
+    def _aggregate_feedback(company: dict[str, Any], rows: list[Any], keep_per_company: int) -> None:
+        company.pop("document_research_feedback_summary", None)
+        company["document_research_feedback"] = json.loads(canonical_json(rows))
+        if len(rows) <= keep_per_company:
+            return
+        ordered = sorted(
+            (row for row in rows if isinstance(row, Mapping)),
+            key=lambda row: (str(row.get("created_at") or ""), str(row.get("id") or "")),
+            reverse=True,
+        )
+        keep, omit = ordered[:keep_per_company], ordered[keep_per_company:]
+        by_outcome: dict[str, int] = {}
+        for row in omit:
+            outcome = str(row.get("outcome") or "unknown")
+            by_outcome[outcome] = by_outcome.get(outcome, 0) + 1
+        # Chronological, like the full list, so "newest last" reads the same.
+        company["document_research_feedback"] = list(reversed(keep))
+        company["document_research_feedback_summary"] = {
+            "retained_recent": len(keep),
+            "aggregated": len(omit),
+            "by_outcome": dict(sorted(by_outcome.items())),
+            "distinct_documents": len({str(row.get("document_ref")) for row in omit}),
+            "earliest_created_at": min(
+                (row.get("created_at") for row in omit if row.get("created_at")), default=None),
+            "latest_created_at": max(
+                (row.get("created_at") for row in omit if row.get("created_at")), default=None),
+            "omitted_rows_hash": content_hash(omit),
+        }
+
     inventory_aggregated = False
+    # Set once a stage has reorganized the companies list or the inventories
+    # it indexes; preview restoration relies on the original coordinates.
+    restructured = False
     if not _fits():
-        # Stage five: the readable inventory itself is the unbounded term --
-        # every document the extraction queue drains becomes an identity here,
-        # and no fixed input bound survives that.  Each company keeps its K
-        # newest documents in full (what a work order would realistically name
-        # next); the rest becomes counts by kind, the date span, and the hash
-        # of the omitted rows.  Preview restoration is skipped when this stage
-        # engages: the retention loop indexes the original inventory and would
-        # write into the wrong rows of the truncated one.
+        # Stage five: the readable inventory and the directed-reading feedback
+        # are the unbounded terms -- every document the extraction queue
+        # drains becomes an identity here, and every directed read appends an
+        # observation -- and no fixed input bound survives either.  Each
+        # company keeps its newest K documents and newest F observations in
+        # full; the rest becomes counts, a date span and the hash of the
+        # omitted rows.  Preview restoration is skipped when the inventory is
+        # aggregated: the retention loop indexes the original inventory and
+        # would write into the wrong rows of the truncated one.
         #
-        # K walks down ``READABLE_KEEP_LADDER`` until the prompt fits.  Each
-        # rung re-aggregates from the *unaggregated* inventory rather than
-        # aggregating an aggregate, so the summary always describes exactly
-        # what it omitted and the omitted-rows hash stays checkable.
+        # (K, F) walk ``READABLE_KEEP_LADDER`` and ``FEEDBACK_KEEP_LADDER`` in
+        # step until the prompt fits.  Each rung re-aggregates from the
+        # *unaggregated* lists rather than aggregating an aggregate, so each
+        # summary describes exactly what it omitted and its hash stays
+        # checkable.
         untouched = {
             index: json.loads(canonical_json(company.get("readable_documents") or []))
             for index, company in enumerate(companies)
         }
-        for keep_per_company in READABLE_KEEP_LADDER:
+        untouched_feedback = {
+            index: json.loads(canonical_json(company["document_research_feedback"]))
+            for index, company in enumerate(companies)
+            if isinstance(company.get("document_research_feedback"), list)
+        }
+        rungs = max(len(READABLE_KEEP_LADDER), len(FEEDBACK_KEEP_LADDER))
+        for rung in range(rungs):
+            keep_per_company = READABLE_KEEP_LADDER[min(rung, len(READABLE_KEEP_LADDER) - 1)]
+            feedback_keep = FEEDBACK_KEEP_LADDER[min(rung, len(FEEDBACK_KEEP_LADDER) - 1)]
             for index, company in enumerate(companies):
                 documents = untouched[index]
                 company.pop("readable_documents_summary", None)
                 company["readable_documents"] = json.loads(canonical_json(documents))
+                if index in untouched_feedback:
+                    _aggregate_feedback(company, untouched_feedback[index], feedback_keep)
                 if len(documents) <= keep_per_company:
                     continue
                 ordered = sorted(
@@ -641,14 +774,89 @@ def project_state_for_prompt(
                 }
             inventory_aggregated = any(
                 "readable_documents_summary" in company for company in companies)
-            if not inventory_aggregated:
-                break
-            readable_keep[0] = keep_per_company
-            if "aggregate_readable_document_inventory" not in stages_applied:
-                stages_applied.append("aggregate_readable_document_inventory")
+            feedback_aggregated = any(
+                "document_research_feedback_summary" in company for company in companies)
+            if not (inventory_aggregated or feedback_aggregated):
+                continue
+            if inventory_aggregated:
+                readable_keep[0] = keep_per_company
+                if "aggregate_readable_document_inventory" not in stages_applied:
+                    stages_applied.append("aggregate_readable_document_inventory")
+            if feedback_aggregated:
+                feedback_keep_in_force[0] = feedback_keep
+                if "aggregate_document_research_feedback" not in stages_applied:
+                    stages_applied.append("aggregate_document_research_feedback")
             projected["prompt_projection"] = projection_meta(retained, None)
             if _fits():
                 break
+        restructured = inventory_aggregated
+
+    if not _fits():
+        # Stage six: every per-company term above is now bounded, but the
+        # number of companies is not.  Each company is reduced to its
+        # checklist core -- what is required, held, missing and blocked, the
+        # one retained document and the aggregates -- and the rest of its row
+        # travels as one hash.  Dossier repair targets keep their exact ids,
+        # because an inquiry may only cite a target by id.
+        for index, company in enumerate(companies):
+            detail = {key: value for key, value in company.items()
+                      if key not in _COMPANY_CORE_FIELDS}
+            core = {key: company[key] for key in _COMPANY_CORE_FIELDS if key in company}
+            feedback = company.get("dossier_feedback")
+            if isinstance(feedback, Mapping):
+                core["dossier_feedback"] = {
+                    "feedback_ref": feedback.get("feedback_ref"),
+                    "dossier_status": feedback.get("dossier_status"),
+                    "repair_target_ids": [
+                        target.get("id") for target in feedback.get("repair_targets") or ()
+                        if isinstance(target, Mapping)
+                    ],
+                }
+            core["items"] = [
+                {key: item.get(key) for key in (
+                    "item_ref", "required", "have", "deficit", "status", "note")}
+                for item in core.get("items") or () if isinstance(item, Mapping)
+            ]
+            core["omitted_detail_hash"] = content_hash(detail)
+            companies[index] = core
+        stages_applied.append("compact_company_detail")
+        restructured = True
+        projected["prompt_projection"] = projection_meta(retained, None)
+
+    if not _fits():
+        # Stage seven: carry the leading companies, in checklist order, that
+        # fit; aggregate the rest by count and hash.  This is the only stage
+        # that removes a company identity from the prompt, and it says so.
+        # The plan is still validated against the complete state.
+        all_companies = list(companies)
+
+        def carry(count: int) -> None:
+            omitted = all_companies[count:]
+            projected["companies"] = all_companies[:count]
+            projected["companies_omitted_summary"] = {
+                "count": len(omitted),
+                "open_gaps": sum(len(company.get("gaps") or ()) for company in omitted),
+                "sample_company_refs": [
+                    company.get("company_ref") for company in omitted[:3]],
+                "omitted_companies_hash": content_hash(omitted),
+            }
+            companies_carried[0] = count
+            projected["prompt_projection"] = projection_meta(retained, None)
+
+        if "aggregate_companies" not in stages_applied:
+            stages_applied.append("aggregate_companies")
+        low, high = 0, len(all_companies) - 1
+        carry(low)
+        # Largest count that fits; fitting is monotone in the count.
+        while low < high:
+            middle = (low + high + 1) // 2
+            carry(middle)
+            if _fits():
+                low = middle
+            else:
+                high = middle - 1
+        carry(low)
+        companies = projected["companies"]
 
     base_report = prompt_size_report(projected, max_input_bytes=max_input_bytes)
     if not base_report["fits"]:
@@ -662,8 +870,8 @@ def project_state_for_prompt(
 
     # Try every preview, because a later short one may fit when an earlier long
     # one does not. A preview and its exact proof identity are always restored as
-    # one unit.  Skipped when stage five reorganized the inventories.
-    if not inventory_aggregated:
+    # one unit.  Skipped when a stage reorganized the inventories or companies.
+    if not restructured:
         for position in order:
             company_index, document_index = position
             document = companies[company_index]["readable_documents"][document_index]
@@ -778,7 +986,9 @@ def build_prompt(state: Mapping[str, Any]) -> str:
         "Do not repeat an identical unsuccessful document-version/query merely by changing its "
         "rationale. candidate_staged means a candidate awaits completion of the publication "
         "path; it does not establish a Claim or satisfy a Dossier gap. recovery_required means "
-        "execution is blocked, not that the research question has no answer.\n\n"
+        "execution is blocked, not that the research question has no answer. A "
+        "document_research_feedback_summary counts older observations aggregated only to fit "
+        "the input bound; those reads were tried, and the summary is not a finding.\n\n"
         "When RESEARCH_STATE carries `prompt_projection`, read its notice before using "
         "the document inventory. Every document identity is still listed, but a document "
         "without original_preview was not shown to you; do not infer its contents or claim "
@@ -1134,6 +1344,7 @@ __all__ = [
     "PROMPT_PROJECTION_HASH",
     "PROMPT_PROJECTION_REF",
     "PROMPT_PROJECTION_RULE",
+    "FEEDBACK_KEEP_LADDER",
     "READABLE_KEEP_LADDER",
     "READABLE_KEEP_PER_COMPANY",
     "READING_ACTIONS",
