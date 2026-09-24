@@ -493,13 +493,65 @@ pre.table{background:#f6f8fb;color:#28364b;border-color:var(--line)}table{color:
 <script>
 const GRADE_LABEL={"company-filed-document":"公司文件披露","earnings-call-transcript":"电话会口述"};
 const $=id=>document.getElementById(id);
-let UI_TEXT={};
+let UI_TEXT=Object.create(null);
 let UI_TEXT_REVISION=0;
 let FINAL_RESEARCH_REQUIRED=false;
 const displayText=value=>typeof value==="string"&&Object.prototype.hasOwnProperty.call(UI_TEXT,value)?UI_TEXT[value]:value;
 const FINAL_RESEARCH_KINDS=new Set(["thesis","thesis_revision_candidate","deep_insight_gate","conviction_call"]);
 const finalResearchText=value=>{if(typeof value!=="string"||!value)return value;return FINAL_RESEARCH_REQUIRED&&!Object.prototype.hasOwnProperty.call(UI_TEXT,value)?"正文正在检查文字表达，完成后会显示。":displayText(value)};
 const finalResearchReady=values=>!FINAL_RESEARCH_REQUIRED||values.filter(x=>typeof x==="string"&&x).every(x=>Object.prototype.hasOwnProperty.call(UI_TEXT,x));
+/* Reviewed UI translations are fetched per view: every JSON response a view
+   reads is scanned for its strings, and only those are asked for, by key, from
+   /v1/cockpit/ui-texts before the view renders.  The whole mapping used to
+   ride inside the overview and was dropped whole past 2 MB -- live it is
+   4.46 MB, so no reviewed translation reached the page.  A key is the first
+   16 hex digits of SHA-256 over the exact UTF-8 string (the server computes
+   the same).  A string with no reviewed translation stays out of UI_TEXT, so
+   finalResearchText keeps showing it as still being checked. */
+const UI_TEXT_ENDPOINT="/v1/cockpit/ui-texts",UI_TEXT_BATCH=200,UI_TEXT_PARALLEL=4,UI_TEXT_DEADLINE_MS=15000;
+const SHA256_K=new Uint32Array([0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2]);
+const UI_TEXT_ENCODER=new TextEncoder();
+function uiTextKey(text){
+  const bytes=UI_TEXT_ENCODER.encode(text),n=bytes.length,total=((n+72)>>6)<<6,m=new Uint8Array(total);m.set(bytes);m[n]=0x80;
+  const dv=new DataView(m.buffer);dv.setUint32(total-8,Math.floor(n/0x20000000));dv.setUint32(total-4,(n*8)>>>0);
+  const h=[0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19],w=new Uint32Array(64);
+  for(let off=0;off<total;off+=64){
+    for(let i=0;i<16;i++)w[i]=dv.getUint32(off+i*4);
+    for(let i=16;i<64;i++){const a=w[i-15],b=w[i-2];w[i]=(w[i-16]+(((a>>>7)|(a<<25))^((a>>>18)|(a<<14))^(a>>>3))+w[i-7]+(((b>>>17)|(b<<15))^((b>>>19)|(b<<13))^(b>>>10)))>>>0}
+    let [A,B,C,D,E,F,G,H]=h;
+    for(let i=0;i<64;i++){const t1=(H+(((E>>>6)|(E<<26))^((E>>>11)|(E<<21))^((E>>>25)|(E<<7)))+((E&F)^(~E&G))+SHA256_K[i]+w[i])>>>0,t2=((((A>>>2)|(A<<30))^((A>>>13)|(A<<19))^((A>>>22)|(A<<10)))+((A&B)^(A&C)^(B&C)))>>>0;H=G;G=F;F=E;E=(D+t1)>>>0;D=C;C=B;B=A;A=(t1+t2)>>>0}
+    h[0]=(h[0]+A)>>>0;h[1]=(h[1]+B)>>>0;h[2]=(h[2]+C)>>>0;h[3]=(h[3]+D)>>>0;h[4]=(h[4]+E)>>>0;h[5]=(h[5]+F)>>>0;h[6]=(h[6]+G)>>>0;h[7]=(h[7]+H)>>>0}
+  return h[0].toString(16).padStart(8,"0")+h[1].toString(16).padStart(8,"0")}
+const UI_TEXT_KEYS=new Map(),UI_TEXT_RESOLVED=new Set();
+let UI_TEXT_SOURCE=null,UI_TEXT_EPOCH=0;
+function uiTextKeyOf(text){let key=UI_TEXT_KEYS.get(text);if(key===undefined){if(UI_TEXT_KEYS.size>=50000)UI_TEXT_KEYS.clear();key=uiTextKey(text);UI_TEXT_KEYS.set(text,key)}return key}
+/* A new mapping revision (something was published) makes every earlier answer
+   stale, "not reviewed" included; shown translations stay until re-asked. */
+function uiTextSource(revision){if(revision===undefined||revision===UI_TEXT_SOURCE)return;UI_TEXT_SOURCE=revision;UI_TEXT_RESOLVED.clear();UI_TEXT_EPOCH++}
+function collectUiStrings(value,out,depth=0){if(out.size>=20000||depth>40)return out;if(typeof value==="string"){if(value&&value.length<=200000)out.add(value)}else if(Array.isArray(value)){for(const x of value)collectUiStrings(x,out,depth+1)}else if(value&&typeof value==="object"){for(const k of Object.keys(value))if(k!=="csrf_token")collectUiStrings(value[k],out,depth+1)}return out}
+async function fetchUiTexts(keys){const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),10000);try{const r=await fetch(`${UI_TEXT_ENDPOINT}?keys=${keys.join(",")}`,{headers:{Accept:"application/json"},cache:"no-store",signal:controller.signal});if(!r.ok)throw new Error(`HTTP ${r.status}`);return await r.json()}finally{clearTimeout(timer)}}
+function applyUiTexts(chunk,byKey,r,deferred){
+  const texts=r.texts&&typeof r.texts==="object"?r.texts:{},same=new Set(Array.isArray(r.same)?r.same:[]),later=new Set(Array.isArray(r.deferred)?r.deferred:[]);let changed=false;
+  for(const key of chunk){if(later.has(key)){deferred.push(key);continue}
+    const reviewed=Object.prototype.hasOwnProperty.call(texts,key)&&typeof texts[key]==="string"?texts[key]:same.has(key)?null:undefined;
+    for(const text of byKey.get(key)||[]){const shown=reviewed===null?text:reviewed,held=Object.prototype.hasOwnProperty.call(UI_TEXT,text);
+      if(shown===undefined){if(held){delete UI_TEXT[text];changed=true}}else if(!held||UI_TEXT[text]!==shown){UI_TEXT[text]=shown;changed=true}}
+    UI_TEXT_RESOLVED.add(key)}
+  return changed}
+async function resolveUiTexts(payload){
+  if(!payload||typeof payload!=="object")return;
+  if(Object.prototype.hasOwnProperty.call(payload,"text_localization_revision"))uiTextSource(payload.text_localization_revision);
+  const byKey=new Map();
+  for(const text of collectUiStrings(payload,new Set())){const key=uiTextKeyOf(text);if(UI_TEXT_RESOLVED.has(key))continue;const list=byKey.get(key);if(list)list.push(text);else byKey.set(key,[text])}
+  let queue=[...byKey.keys()],changed=false;const deadline=Date.now()+UI_TEXT_DEADLINE_MS;
+  while(queue.length&&Date.now()<deadline){
+    const chunks=[],deferred=[];for(let i=0;i<queue.length;i+=UI_TEXT_BATCH)chunks.push(queue.slice(i,i+UI_TEXT_BATCH));
+    for(let i=0;i<chunks.length&&Date.now()<deadline;i+=UI_TEXT_PARALLEL){
+      const answers=await Promise.all(chunks.slice(i,i+UI_TEXT_PARALLEL).map(chunk=>fetchUiTexts(chunk).then(r=>[chunk,r],()=>[chunk,null])));
+      for(const [chunk,r] of answers){if(!r||typeof r!=="object")continue;if(r.revision!==undefined&&r.revision!==UI_TEXT_SOURCE){uiTextSource(r.revision)}if(applyUiTexts(chunk,byKey,r,deferred))changed=true}}
+    if(deferred.length>=queue.length)break;queue=deferred}
+  if(changed)UI_TEXT_REVISION++}
+const uiTextPath=path=>path.startsWith("/v1/")&&!path.startsWith(UI_TEXT_ENDPOINT);
 const rawNode=(tag,text,cls)=>{const n=document.createElement(tag);if(text!=null)n.textContent=text;if(cls)n.className=cls;return n};
 const node=(tag,text,cls)=>rawNode(tag,text==null?text:displayText(text),cls);
 function formatDisplayMetric(value,{unit=null,currency=null,scale=null,metric_ref=""}={}){
@@ -659,8 +711,8 @@ function readableError(value,context="操作"){
 function showProblem(container,value,context){const p=readableError(value,context);container.replaceChildren(node("div",p.message,"gap"));if(p.nextStep)container.append(node("div",p.nextStep,"hint"));const tech=technicalDetails(p.technical);if(tech)container.append(tech)}
 let csrf="";
 const titles={workspace:["研究环境","新建或进入独立的研究环境"],goal:["研究目标与计划","当前生效的研究任务"],steer:["策略指引与方向调整","告诉系统要增加、减少或改写什么"],log:["投研执行日志","查看正在进行和已经完成的工作"],ask:["投研问答","回答只使用已核实的结论"],approve:["待办审批","需要你确认的研究决定"]};
-async function getJson(path,{timeoutMs=0}={}){const controller=timeoutMs?new AbortController():null,timer=controller?setTimeout(()=>controller.abort(),timeoutMs):null;try{const r=await fetch(path,{headers:{Accept:"application/json"},cache:"no-store",signal:controller?.signal});const v=await r.json().catch(()=>({}));if(!r.ok){const e=new Error(v.message||`HTTP ${r.status}`);Object.assign(e,v,{technical_detail:v.technical_detail||v.message||`HTTP ${r.status}`});throw e}if(v.csrf_token)csrf=v.csrf_token;return v}finally{if(timer)clearTimeout(timer)}}
-async function postJson(path,value,{timeoutMs=0}={}){const controller=timeoutMs?new AbortController():null,timer=controller?setTimeout(()=>controller.abort(),timeoutMs):null;try{const r=await fetch(path,{method:"POST",headers:{"Content-Type":"application/json","X-Dalton-CSRF":csrf},body:JSON.stringify(value),signal:controller?.signal});const v=await r.json().catch(()=>({}));if(!r.ok){const e=new Error(v.message||`HTTP ${r.status}`);Object.assign(e,v,{display_message:r.status===403?"登录状态已变化，请刷新页面":v.display_message,technical_detail:v.technical_detail||v.message||`HTTP ${r.status}`});throw e}return v}finally{if(timer)clearTimeout(timer)}}
+async function getJson(path,{timeoutMs=0}={}){const controller=timeoutMs?new AbortController():null,timer=controller?setTimeout(()=>controller.abort(),timeoutMs):null;try{const r=await fetch(path,{headers:{Accept:"application/json"},cache:"no-store",signal:controller?.signal});const v=await r.json().catch(()=>({}));if(!r.ok){const e=new Error(v.message||`HTTP ${r.status}`);Object.assign(e,v,{technical_detail:v.technical_detail||v.message||`HTTP ${r.status}`});throw e}if(v.csrf_token)csrf=v.csrf_token;if(uiTextPath(path))await resolveUiTexts(v).catch(()=>{});return v}finally{if(timer)clearTimeout(timer)}}
+async function postJson(path,value,{timeoutMs=0}={}){const controller=timeoutMs?new AbortController():null,timer=controller?setTimeout(()=>controller.abort(),timeoutMs):null;try{const r=await fetch(path,{method:"POST",headers:{"Content-Type":"application/json","X-Dalton-CSRF":csrf},body:JSON.stringify(value),signal:controller?.signal});const v=await r.json().catch(()=>({}));if(!r.ok){const e=new Error(v.message||`HTTP ${r.status}`);Object.assign(e,v,{display_message:r.status===403?"登录状态已变化，请刷新页面":v.display_message,technical_detail:v.technical_detail||v.message||`HTTP ${r.status}`});throw e}if(uiTextPath(path))await resolveUiTexts(v).catch(()=>{});return v}finally{if(timer)clearTimeout(timer)}}
 const rid=()=>crypto.randomUUID?crypto.randomUUID():Math.random().toString(16).slice(2)+Date.now();
 function toast(text,ms=3200){const t=$("toast");t.textContent=text;t.classList.add("show");clearTimeout(t._h);t._h=setTimeout(()=>t.classList.remove("show"),ms)}
 function ago(iso){if(!iso)return"";const d=(Date.now()-new Date(iso).getTime())/1000;if(d<60)return"刚刚";if(d<3600)return`${Math.floor(d/60)} 分钟前`;if(d<86400)return`${Math.floor(d/3600)} 小时前`;return`${Math.floor(d/86400)} 天前`}
@@ -830,11 +882,13 @@ $("workspace-create").onclick=async()=>{
 };
 
 // ---------- overview
+let overviewUiText=[0,0];
 function renderOverview(o){
-  const nextUiText=o.text_localizations&&typeof o.text_localizations==="object"?o.text_localizations:{};
-  const nextUiTextRevision=Object.keys(nextUiText).length;
-  const approvalTextChanged=nextUiTextRevision!==UI_TEXT_REVISION;
-  UI_TEXT=nextUiText;UI_TEXT_REVISION=nextUiTextRevision;
+  // getJson has already fetched the reviewed translations of this payload.
+  // Approval cards hold their own strings; a newly published mapping or a
+  // changed translation re-reads them, as the whole-mapping swap used to.
+  const approvalTextChanged=UI_TEXT_REVISION!==overviewUiText[0]||UI_TEXT_EPOCH!==overviewUiText[1];
+  overviewUiText=[UI_TEXT_REVISION,UI_TEXT_EPOCH];
   if(approvalTextChanged&&approvalCards.size)loadApprovals();
   FINAL_RESEARCH_REQUIRED=o.publication_policy?.language_review_required===true;
   const workspace=o.workspace;

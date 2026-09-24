@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import copy
 import functools
+import hashlib
 import json
 import os
 import re
@@ -266,18 +267,139 @@ def _load_ui_cached(path_string: str, inode: int, modified_ns: int, size: int) -
     return entries
 
 
-def load_ui_texts(database: str | Path) -> dict[str, str]:
+# The Cockpit asks for UI translations by key, one view at a time, instead of
+# receiving the whole mapping inside the overview.  Live on 2026-09-24 the
+# mapping held 8,124 approved strings, 4.46 MB of JSON; the overview dropped
+# any mapping over 2 MB whole, so not one approved translation reached the
+# page.  A key is the first 16 hex digits of SHA-256 over the exact UTF-8
+# source string; the page computes the same digest.
+UI_TEXT_KEY_LENGTH = 16
+UI_TEXT_MAX_KEYS_PER_REQUEST = 256
+UI_TEXT_MAX_RESPONSE_BYTES = 256 * 1024
+_UI_TEXT_KEY = re.compile(r"[0-9a-f]{%d}\Z" % UI_TEXT_KEY_LENGTH)
+
+
+def ui_text_key(text: str) -> str | None:
+    """The lookup key of one exact source string, or None if it has none.
+
+    A lone surrogate has no UTF-8 form; the browser would encode it as
+    U+FFFD and so could never ask for it by the same key.
+    """
+    try:
+        data = text.encode("utf-8")
+    except UnicodeEncodeError:
+        return None
+    return hashlib.sha256(data).hexdigest()[:UI_TEXT_KEY_LENGTH]
+
+
+@functools.lru_cache(maxsize=4)
+def _ui_index_cached(path_string: str, inode: int, modified_ns: int,
+                     size: int) -> tuple[str, dict[str, str], dict[str, str | None]]:
+    """Display mapping and key index, built once per ``ui-texts.json`` state.
+
+    Every publish rewrites ``ui-texts.json`` (0.1 whole; 0.2 its batch index
+    after the records), so its stat identifies the mapping.  A request then
+    costs one ``stat`` and dictionary lookups, not a re-read of every batch.
+    In the key index ``None`` means the reviewed translation is the source
+    string itself, which the page already holds.
+    """
     from .research_gap_display import display_metadata_text
+    entries = _load_ui_cached(path_string, inode, modified_ns, size)
+    display: dict[str, str] = {}
+    index: dict[str, str | None] = {}
+    collided: set[str] = set()
+    for original, localized in entries.items():
+        shown = display_metadata_text(localized)
+        display[original] = shown
+        key = ui_text_key(original)
+        if key is None:
+            continue
+        if key in index:
+            # Two sources sharing a key: neither is served by key, so neither
+            # can be shown the other's translation.
+            collided.add(key)
+            continue
+        index[key] = None if shown == original else shown
+    for key in collided:
+        index.pop(key, None)
+    revision = hashlib.sha256(
+        f"{path_string}\0{inode}\0{modified_ns}\0{size}".encode()).hexdigest()[:16]
+    return revision, display, index
+
+
+def _ui_index(database: str | Path) -> tuple[str, dict[str, str], dict[str, str | None]] | None:
     path = directory_for_database(database) / "ui-texts.json"
     try:
         if path.parent.is_symlink() or path.is_symlink():
-            return {}
+            return None
         stat = path.stat()
-        return {original: display_metadata_text(localized)
-                for original, localized in _load_ui_cached(
-                    str(path), stat.st_ino, stat.st_mtime_ns, stat.st_size).items()}
+        return _ui_index_cached(str(path), stat.st_ino, stat.st_mtime_ns, stat.st_size)
     except (OSError, ValueError, KeyError, TypeError, ResearchLocalizationError):
-        return {}
+        return None
+
+
+def load_ui_texts(database: str | Path) -> dict[str, str]:
+    index = _ui_index(database)
+    return {} if index is None else dict(index[1])
+
+
+def ui_texts_revision(database: str | Path) -> str | None:
+    """Identity of the current mapping; changes whenever a batch is published."""
+    index = _ui_index(database)
+    return None if index is None else index[0]
+
+
+def lookup_ui_texts(database: str | Path, keys: list[str], *,
+                    max_bytes: int | None = None,
+                    max_keys: int | None = None) -> dict[str, Any]:
+    """Reviewed translations for the requested keys, in one bounded page.
+
+    ``texts`` maps a key to its reviewed translation; ``same`` lists keys whose
+    reviewed translation is the source string itself.  A requested key in
+    neither list and not in ``deferred`` has no reviewed translation.  Keys
+    past ``max_keys``, or whose translation would take the page past
+    ``max_bytes``, are returned in ``deferred`` to be asked for again -- a
+    page is cut, never dropped.  A single translation larger than
+    ``max_bytes`` on its own is listed in ``withheld``: it cannot be sent
+    within the bound, and the page treats it as not yet reviewed.
+    """
+    max_bytes = UI_TEXT_MAX_RESPONSE_BYTES if max_bytes is None else max_bytes
+    max_keys = UI_TEXT_MAX_KEYS_PER_REQUEST if max_keys is None else max_keys
+    wanted: list[str] = []
+    seen: set[str] = set()
+    for key in keys:
+        if isinstance(key, str) and _UI_TEXT_KEY.fullmatch(key) and key not in seen:
+            seen.add(key)
+            wanted.append(key)
+    loaded = _ui_index(database)
+    revision, index = (None, {}) if loaded is None else (loaded[0], loaded[2])
+    texts: dict[str, str] = {}
+    same: list[str] = []
+    deferred: list[str] = list(wanted[max_keys:])
+    withheld: list[str] = []
+    used = 0
+    for position, key in enumerate(wanted[:max_keys]):
+        if key not in index:
+            continue
+        value = index[key]
+        if value is None:
+            cost = len(key) + 3
+        else:
+            cost = len(key) + 6 + len(json.dumps(value, ensure_ascii=False).encode())
+        if cost > max_bytes:
+            withheld.append(key)
+            continue
+        if used + cost > max_bytes:
+            deferred = [k for k in wanted[position:max_keys] if k in index
+                        and k not in withheld] + deferred
+            break
+        used += cost
+        if value is None:
+            same.append(key)
+        else:
+            texts[key] = value
+    return {"revision": revision, "texts": texts, "same": same,
+            "deferred": deferred, "withheld": withheld}
 
 
 def publish_reviewed_attachment(directory: str | Path, product: Mapping[str, Any],

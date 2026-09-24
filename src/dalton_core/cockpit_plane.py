@@ -3548,6 +3548,21 @@ class CockpitPlane:
             self._overview_condition.notify_all()
         return result
 
+    def ui_texts(self, keys: str) -> dict[str, Any]:
+        """Reviewed UI translations for the keys one view holds.  Read-only.
+
+        ``keys`` is the comma-separated list the page sends; see
+        ``research_localization_store.lookup_ui_texts`` for the bounded page
+        this returns.  Unreviewed strings are simply absent, so under the
+        required language-review policy the page keeps showing them as still
+        being checked.
+        """
+        from .research_localization_store import lookup_ui_texts
+        # The request line itself is bounded (64 KiB in http.server), so the
+        # split is too; keys past one page come back as ``deferred``.
+        parts = keys.split(",") if isinstance(keys, str) and keys else []
+        return lookup_ui_texts(self.config.core_db, parts)
+
     def invalidate_overview(self) -> None:
         """Forget the cached snapshot, so the next reader rebuilds.
 
@@ -3560,15 +3575,16 @@ class CockpitPlane:
             self._overview_built_at = None
 
     def _build_overview(self) -> dict[str, Any]:
-        # UI translations are a read-only adjunct to authority text. Older
-        # installations retain their exact payload when the cache is absent.
+        # UI translations are a read-only adjunct to authority text.  The
+        # overview names the mapping's revision only; the page asks
+        # /v1/cockpit/ui-texts for the strings each view holds.  Embedding the
+        # whole mapping here, capped at 2 MB, sent none of it once the mapping
+        # outgrew the cap (4.46 MB live on 2026-09-24).
         try:
-            from .research_localization_store import load_ui_texts
-            text_localizations = load_ui_texts(self.config.core_db)
-            if len(json.dumps(text_localizations, ensure_ascii=False).encode()) > 2_000_000:
-                text_localizations = {}
+            from .research_localization_store import ui_texts_revision
+            text_localization_revision = ui_texts_revision(self.config.core_db)
         except (ImportError, OSError, sqlite3.Error, ValueError, TypeError):
-            text_localizations = {}
+            text_localization_revision = None
         language_review_required = False
         try:
             policy = _load_json(self.config.core_db.parent / "research-language-policy.json")
@@ -3833,7 +3849,7 @@ class CockpitPlane:
             # that fail when pressed.
             "feedback_enabled": journal["enabled"],
             "model_available": self._model_status(),
-            "text_localizations": text_localizations,
+            "text_localization_revision": text_localization_revision,
             "publication_policy": {"language_review_required": language_review_required},
         }
 
