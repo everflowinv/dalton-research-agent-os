@@ -95,6 +95,61 @@ def write_owner_only(path: Path, value: Any) -> None:
     os.replace(tmp, path)
 
 
+# A re-run of the same ticket (same batch, same digest) used to open run.log
+# with O_TRUNC and erase the only record of the run before it -- 2026-09-24
+# that was the event-judgement run whose lease hung, overwritten by the retry.
+# Earlier runs are now kept as run.<n>.log, newest n highest, a few of them,
+# each trimmed to its last few MiB.
+RUN_LOG_ARCHIVES_KEPT = 5
+RUN_LOG_ARCHIVE_MAX_BYTES = 4 << 20
+_RUN_LOG_ARCHIVE_RE = re.compile(r"run\.(\d+)\.log")
+
+
+def preserve_prior_run_log(ticket_dir: Path) -> Path | None:
+    """Move the previous run's ``run.log`` aside before a re-run opens it.
+
+    Returns the archive's path, or ``None`` when there was nothing to keep.
+    Only a non-empty regular file is moved; a symlink or anything else is left
+    for the caller's own open to deal with, exactly as before.
+    """
+
+    log_path = ticket_dir / "run.log"
+    try:
+        log_stat = log_path.lstat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(log_stat.st_mode) or log_stat.st_size == 0:
+        return None
+    numbers = sorted(
+        int(match.group(1))
+        for match in (_RUN_LOG_ARCHIVE_RE.fullmatch(entry.name)
+                      for entry in ticket_dir.iterdir())
+        if match is not None
+    )
+    archive = ticket_dir / f"run.{(numbers[-1] + 1) if numbers else 1}.log"
+    os.replace(log_path, archive)
+    if log_stat.st_size > RUN_LOG_ARCHIVE_MAX_BYTES:
+        with archive.open("rb") as stream:
+            stream.seek(log_stat.st_size - RUN_LOG_ARCHIVE_MAX_BYTES)
+            tail = stream.read()
+        dropped = log_stat.st_size - len(tail)
+        tmp = archive.with_name(f".{archive.name}.tmp")
+        descriptor = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            _write_all(descriptor, f"[run log trimmed: first {dropped} bytes dropped]\n"
+                       .encode("utf-8") + tail)
+        finally:
+            os.close(descriptor)
+        os.replace(tmp, archive)
+    os.chmod(archive, 0o600)
+    for number in numbers[:max(0, len(numbers) + 1 - RUN_LOG_ARCHIVES_KEPT)]:
+        try:
+            (ticket_dir / f"run.{number}.log").unlink()
+        except OSError:
+            pass
+    return archive
+
+
 def _write_all(descriptor: int, payload: bytes) -> None:
     """Write an append-only marker completely, or fail before child spawn."""
     view = memoryview(payload)
@@ -596,6 +651,7 @@ class LaneChildLauncher:
                     ticket_id, authorization, expected_summary_sha256)
             ticket_dir = secure_dir(ticket_dir)
             log_path = ticket_dir / "run.log"
+            preserve_prior_run_log(ticket_dir)
             log_fd = os.open(str(log_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             try:
                 process = subprocess.Popen(
