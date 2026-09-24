@@ -677,21 +677,14 @@ def query_company_research(
         # the same context.
         entries=None if claim_context is None else claim_context.index_entries(),
     )
-    retirement_table = None
     if exclude_retired:
-        retirement_table = store.connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
-            ("claim_retirement_decisions",),
-        ).fetchone()
-    if retirement_table is not None:
-        retired = {
-            str(row[0]) for row in store.connection.execute(
-                "SELECT claim_version_ref FROM claim_retirement_decisions "
-                "WHERE decision='retired'"
-            ).fetchall()
-        }
-        joined = [row for row in joined
-                  if str(row["claim_version_ref"]) not in retired]
+        from .claim_retirement import retired_claim_version_refs
+
+        # Retired less reinstated (2026-09-24); empty on a Core without the table.
+        retired = retired_claim_version_refs(store.connection)
+        if retired:
+            joined = [row for row in joined
+                      if str(row["claim_version_ref"]) not in retired]
     # A Core that has never opened the index answers byte-identically to the
     # way it did before P12b -- not with seven null columns bolted on.  A Core
     # that has one always carries them, including on a claim the index has not

@@ -303,12 +303,11 @@ class MissionSecQuartersCoordinator:
             "AND json_extract(claim_json,'$.metric_or_aspect')=? "
             "AND json_extract(claim_json,'$.value') IS NOT NULL", (company_ref, YOY_METRIC),
         ).fetchall()
+        from .claim_retirement import retired_claim_version_refs
+
         try:
-            retired = {
-                r["claim_version_ref"] for r in self.connection.execute(
-                    "SELECT claim_version_ref FROM claim_retirement_decisions WHERE decision='retired'"
-                ).fetchall()
-            }
+            # Retired less reinstated (2026-09-24).
+            retired = retired_claim_version_refs(self.connection)
         except Exception:  # noqa: BLE001 - an older Core has no retirements
             retired = set()
         return {row["period"] for row in rows if row["id"] not in retired and row["period"]}

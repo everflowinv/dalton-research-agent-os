@@ -79,7 +79,24 @@ DETERMINISTIC_REASONS = frozenset({"subject_absent_from_source", "boilerplate_di
 RECORDED_VERDICT_REASONS = frozenset({"citation_support_rejected"})
 SUPPORT_VERIFIER_REF = "claim-verifier:citation-support:v1"
 # v2: span level as well as document level (claim_subject.subject_absent_from_citation).
-SUBJECT_DETECTOR_REF = "claim-detector:subject-absent-from-source:v2"
+# v3 (2026-09-24 audit): the span rule also keeps a Claim whose statement leans
+# on an antecedent just before the span, or names an executive, and a document
+# is the subject's own on its filing cover or by density
+# (claim_subject.own_document_evidence).  Stricter to retire, admission untouched.
+SUBJECT_DETECTOR_REF = "claim-detector:subject-absent-from-source:v3"
+#: The detector the pre-audit span retirements were made under -- the ones
+#: the re-review may withdraw (claim_review.ClaimReviewDriver.rereview_retirements).
+SPAN_V2_DETECTOR_REF = "claim-detector:subject-absent-from-source:v2"
+#: How a span retirement's rationale begins (``detect``), which is how it is
+#: told apart from a whole-document one under the same detector ref.
+SPAN_RATIONALE_PREFIX = "这条结论所引的原文片段"
+REINSTATEMENT_REASONS: tuple[str, ...] = (
+    "human_judgment",
+    "subject_named_under_current_rule",
+)
+#: The rule an automatic reinstatement re-runs: the current span detector,
+#: over the current alias table.
+REREVIEW_RULE_REF = "claim-rereview:subject-absent-span:" + SUBJECT_DETECTOR_REF.rsplit(":", 1)[-1]
 BOILERPLATE_DETECTOR_REF = "claim-detector:boilerplate-disclaimer:v1"
 DETECTOR_REFS = {
     "subject_absent_from_source": SUBJECT_DETECTOR_REF,
@@ -170,6 +187,9 @@ def subject_absent(
     needles: Sequence[str],
     cited_span: str | None = None,
     document_is_own: bool = False,
+    context_before: str | None = None,
+    context_after: str | None = None,
+    peer_needles: Sequence[str] = (),
 ) -> str | None:
     """Which form of the subject-absent rule fires: "document", "span" or None."""
 
@@ -181,7 +201,8 @@ def subject_absent(
         return "document"
     if cited_span is not None and subject_absent_from_citation(
         span=cited_span, statement=statement, needles=needles,
-        document_is_own=document_is_own,
+        document_is_own=document_is_own, context_before=context_before,
+        context_after=context_after, peer_needles=peer_needles,
     ):
         return "span"
     return None
@@ -194,6 +215,9 @@ def detect(
     needles: Sequence[str],
     cited_span: str | None = None,
     document_is_own: bool = False,
+    context_before: str | None = None,
+    context_after: str | None = None,
+    peer_needles: Sequence[str] = (),
 ) -> tuple[str, str] | None:
     """The first deterministic reason this Claim should be retired, or None.
 
@@ -207,6 +231,8 @@ def detect(
     which = subject_absent(
         statement=statement, source_text=source_text, needles=needles,
         cited_span=cited_span, document_is_own=document_is_own,
+        context_before=context_before, context_after=context_after,
+        peer_needles=peer_needles,
     )
     names = "、".join(needles)
     if which == "document":
@@ -218,11 +244,73 @@ def detect(
     if which == "span":
         return (
             "subject_absent_from_source",
-            f"这条结论所引的原文片段（{len(cited_span or ''):,} 字）和结论本身都没有出现 "
+            f"{SPAN_RATIONALE_PREFIX}（{len(cited_span or ''):,} 字）和结论本身都没有出现 "
             f"{names} 中的任何一个，且这份原文不是该公司自己的文件（标题/开头未提到它）；"
             "它说的是别的公司或行业，被挂在了这家公司名下。",
         )
     return None
+
+
+def _table_exists(connection: Any, name: str) -> bool:
+    try:
+        return connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+        ).fetchone() is not None
+    except sqlite3.Error:
+        return False
+
+
+def reinstated_claim_version_refs(connection: Any) -> set[str]:
+    """Claim versions whose retirement a later record withdrew.
+
+    Empty on a Core without the table (older, or opened read-only before the
+    authority ever ran there).  The one query every read path shares; see
+    :func:`retired_claim_version_refs`.
+    """
+
+    if not _table_exists(connection, "claim_retirement_reinstatements"):
+        return set()
+    return {
+        str(row[0]) for row in connection.execute(
+            "SELECT claim_version_ref FROM claim_retirement_reinstatements"
+        ).fetchall()
+    }
+
+
+def retired_claim_version_refs(connection: Any) -> set[str]:
+    """Claim versions that are retired *now*: retired, less reinstated.
+
+    Every read path that skips retired Claims goes through this, so that a
+    reinstatement puts a Claim back everywhere at once.  Empty on a Core
+    without the decisions table.
+    """
+
+    if not _table_exists(connection, "claim_retirement_decisions"):
+        return set()
+    retired = {
+        str(row[0]) for row in connection.execute(
+            "SELECT claim_version_ref FROM claim_retirement_decisions WHERE decision='retired'"
+        ).fetchall()
+    }
+    return retired - reinstated_claim_version_refs(connection)
+
+
+def retirement_state_probe(connection: Any) -> str:
+    """One short string that moves whenever the retired set can have moved.
+
+    For change keys and cheap signatures (``lane_change_key``, the lanes'
+    "is it worth re-running" counts): a retirement *and* a reinstatement each
+    append a row, so both tables' append state is in it.
+    """
+
+    parts = []
+    for table in ("claim_retirement_decisions", "claim_retirement_reinstatements"):
+        if not _table_exists(connection, table):
+            parts.append(f"{table}:absent")
+            continue
+        row = connection.execute(f"SELECT COUNT(*), MAX(rowid) FROM {table}").fetchone()
+        parts.append(f"{table}:{row[0]}:{row[1]}")
+    return "|".join(parts)
 
 
 class ClaimRetirementAuthority:
@@ -316,14 +404,24 @@ class ClaimRetirementAuthority:
     # -- reads ---------------------------------------------------------------
 
     def retired_claim_version_refs(self) -> set[str]:
-        """Claim versions a decision has retired; read paths skip exactly these."""
+        """Claim versions retired now -- a decision retired them and no
+        reinstatement withdrew it; read paths skip exactly these."""
 
-        return {
-            row["claim_version_ref"]
+        return retired_claim_version_refs(self.connection)
+
+    def reinstated_claim_version_refs(self) -> set[str]:
+        return reinstated_claim_version_refs(self.connection)
+
+    def reinstatements(self, *, limit: int = 200) -> list[dict[str, Any]]:
+        import json
+
+        return [
+            {**json.loads(row["record_json"]), "content_hash": row["content_hash"]}
             for row in self.connection.execute(
-                "SELECT claim_version_ref FROM claim_retirement_decisions WHERE decision='retired'"
+                "SELECT record_json, content_hash FROM claim_retirement_reinstatements "
+                "ORDER BY created_at, reinstatement_id LIMIT ?", (int(limit),),
             ).fetchall()
-        }
+        ]
 
     def challenges(self, *, open_only: bool = False, limit: int = 200) -> list[dict[str, Any]]:
         query = (
@@ -453,6 +551,9 @@ class ClaimRetirementAuthority:
         source_text: str | None = None,
         cited_span: str | None = None,
         document_is_own: bool = False,
+        context_before: str | None = None,
+        context_after: str | None = None,
+        peer_needles: Sequence[str] = (),
     ) -> dict[str, Any]:
         """Retire or keep a challenged Claim.
 
@@ -503,7 +604,8 @@ class ClaimRetirementAuthority:
                 if subject_absent(
                     statement=claim["normalized_statement"], source_text=source_text,
                     needles=list(subject_needles), cited_span=cited_span,
-                    document_is_own=document_is_own,
+                    document_is_own=document_is_own, context_before=context_before,
+                    context_after=context_after, peer_needles=list(peer_needles),
                 ) is None:
                     raise ClaimRetirementConflict("detector no longer fires for this Claim")
         wire = {
@@ -539,9 +641,120 @@ class ClaimRetirementAuthority:
             )
         return {**wire, "status": "fresh"}
 
+    def reinstate(
+        self,
+        *,
+        claim_version_ref: str,
+        actor_ref: str,
+        rationale: str,
+        decision_hash: str | None = None,
+        subject_needles: Sequence[str] = (),
+        source_text: str | None = None,
+        cited_span: str | None = None,
+        document_is_own: bool = False,
+        context_before: str | None = None,
+        context_after: str | None = None,
+        peer_needles: Sequence[str] = (),
+    ) -> dict[str, Any]:
+        """Withdraw one retirement by appending a record that names it.
+
+        Nothing is edited: the decision row stays, byte for byte, and the
+        reinstatement binds its id and hash.  A person may withdraw any
+        retirement (``human_judgment``).  Automation may withdraw only a
+        subject-absent retirement, and only when the *current* span rule --
+        today's alias table, the v3 context and own-document tests -- no
+        longer fires on the exact original; the rule is re-run here, the same
+        way ``decide`` re-runs a detector before it retires.  One
+        reinstatement per decision, so a repeat is ``duplicate``.
+        """
+
+        import json
+
+        claim_version_ref = _text(claim_version_ref, "claim_version_ref", maximum=512)
+        rationale = _text(rationale, "rationale")
+        actor = _actor(actor_ref)
+        row = self.connection.execute(
+            "SELECT record_json, content_hash, decision FROM claim_retirement_decisions "
+            "WHERE claim_version_ref=?", (claim_version_ref,),
+        ).fetchone()
+        if row is None:
+            raise ClaimRetirementNotFound("no retirement decision names this claim version")
+        decision = json.loads(row["record_json"])
+        if decision.get("content_hash") != row["content_hash"]:
+            raise ClaimRetirementConflict("claim retirement decision authority drifted")
+        if row["decision"] != "retired":
+            raise ClaimRetirementConflict("only a retired claim version can be reinstated")
+        if decision_hash is not None and _sha256(decision_hash, "decision_hash") != row["content_hash"]:
+            raise ClaimRetirementConflict("decision hash binding failed")
+        challenge = self.challenge_record(decision["challenge_ref"])
+        claim = self._claim(claim_version_ref)
+        rule_ref = None
+        if _AUTOMATION_RE.fullmatch(actor):
+            if challenge["reason_code"] != "subject_absent_from_source":
+                raise ClaimRetirementConflict(
+                    "automation may only reinstate a subject-absent retirement")
+            if source_text is None and self.source_text_resolver is not None:
+                source_text = self.source_text_resolver(claim_version_ref)
+            if source_text is None or cited_span is None:
+                raise ClaimRetirementConflict(
+                    "the original cannot be read; a retirement is never withdrawn unverified")
+            if subject_absent(
+                statement=claim["normalized_statement"], source_text=source_text,
+                needles=list(subject_needles), cited_span=cited_span,
+                document_is_own=document_is_own, context_before=context_before,
+                context_after=context_after, peer_needles=list(peer_needles),
+            ) is not None:
+                raise ClaimRetirementConflict("the current rule still retires this Claim")
+            reason_code, rule_ref = "subject_named_under_current_rule", REREVIEW_RULE_REF
+        else:
+            reason_code = "human_judgment"
+        wire = {
+            "schema_version": SCHEMA_VERSION,
+            "claim_version_ref": claim_version_ref,
+            "claim_ref": decision["claim_ref"],
+            "subject_ref": challenge["subject_ref"],
+            "decision_ref": decision["id"],
+            "decision_hash": row["content_hash"],
+            "challenge_ref": challenge["id"],
+            "retired_reason_code": challenge["reason_code"],
+            "retired_detector_ref": challenge.get("detector_ref"),
+            "reason_code": reason_code,
+            "rule_ref": rule_ref,
+            "actor_ref": actor,
+            "rationale": rationale,
+            "created_at": self.clock(),
+        }
+        wire["id"] = "claim-retirement-reinstatement:" + content_hash(
+            {"decision": decision["id"]})[:32]
+        wire["content_hash"] = content_hash({k: v for k, v in wire.items() if k != "content_hash"})
+        with self._transaction() as cur:
+            existing = cur.execute(
+                "SELECT record_json FROM claim_retirement_reinstatements WHERE decision_ref=?",
+                (decision["id"],),
+            ).fetchone()
+            if existing is not None:
+                return {**json.loads(existing["record_json"]), "status": "duplicate"}
+            cur.execute(
+                "INSERT INTO claim_retirement_reinstatements(reinstatement_id,claim_version_ref,"
+                "decision_ref,decision_hash,reason_code,rule_ref,actor_ref,rationale,record_json,"
+                "content_hash,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (wire["id"], claim_version_ref, decision["id"], row["content_hash"],
+                 reason_code, rule_ref, actor, rationale,
+                 json.dumps(wire, ensure_ascii=False, sort_keys=True),
+                 wire["content_hash"], wire["created_at"]),
+            )
+        return {**wire, "status": "fresh"}
+
 
 __all__ = [
     "BOILERPLATE_DETECTOR_REF",
+    "REINSTATEMENT_REASONS",
+    "REREVIEW_RULE_REF",
+    "SPAN_RATIONALE_PREFIX",
+    "SPAN_V2_DETECTOR_REF",
+    "reinstated_claim_version_refs",
+    "retired_claim_version_refs",
+    "retirement_state_probe",
     "RECORDED_VERDICT_REASONS",
     "SUPPORT_VERIFIER_REF",
     "ClaimRetirementAuthority",

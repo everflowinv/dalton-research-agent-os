@@ -305,15 +305,12 @@ def debate_map_version(store: DaltonStore, company_ref: str) -> dict[str, Any] |
 
 
 def retired_claim_refs(connection: Any) -> set[str]:
-    """Every Claim version the Ledger has retired; empty on a Core without the table."""
+    """Every Claim version retired now (retired less reinstated, 2026-09-24);
+    empty on a Core without the table."""
 
-    if not table_exists(connection, "claim_retirement_decisions"):
-        return set()
-    return {
-        str(row[0]) for row in connection.execute(
-            "SELECT claim_version_ref FROM claim_retirement_decisions "
-            "WHERE decision='retired'").fetchall()
-    }
+    from .claim_retirement import retired_claim_version_refs
+
+    return retired_claim_version_refs(connection)
 
 
 CLASSIFICATION_PIN_NOTE = (
@@ -454,13 +451,7 @@ def unresolved_refs(connection: Any, record: Mapping[str, Any]) -> list[dict[str
     for answer in record.get("answers") or []:
         for row in answer.get("sources") or []:
             kinds[row["ref"]] = row["kind"]
-    retired: set[str] = set()
-    if table_exists(connection, "claim_retirement_decisions"):
-        retired = {
-            str(row[0]) for row in connection.execute(
-                "SELECT claim_version_ref FROM claim_retirement_decisions "
-                "WHERE decision='retired'").fetchall()
-        }
+    retired = retired_claim_refs(connection)
 
     def stored(table: str, column: str, value: str) -> Mapping[str, Any] | None:
         if not table_exists(connection, table):

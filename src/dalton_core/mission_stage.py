@@ -516,17 +516,15 @@ def _required_quarters(latest: str) -> list[str]:
 
 
 def retired_claim_refs(connection: sqlite3.Connection) -> set[str]:
-    """P10b: claim versions a challenge decision retired, or none on an older Core."""
+    """P10b: claim versions retired now, or none on an older Core.
 
-    try:
-        rows = connection.execute(
-            "SELECT claim_version_ref FROM claim_retirement_decisions WHERE decision='retired'"
-        ).fetchall()
-    except sqlite3.OperationalError as exc:
-        if "no such table" in str(exc):
-            return set()
-        raise
-    return {row["claim_version_ref"] for row in rows}
+    2026-09-24: retired *less reinstated* -- the shared
+    ``claim_retirement.retired_claim_version_refs``.
+    """
+
+    from .claim_retirement import retired_claim_version_refs
+
+    return retired_claim_version_refs(connection)
 
 
 def _claim_periods(connection: sqlite3.Connection) -> dict[str, set[str]]:
