@@ -76,14 +76,24 @@ def poll_once(
     prepare: Callable[[Mapping[str, Any]], Mapping[str, Any]],
     library_reader: Callable[[Any, Mapping[str, Any], str], Mapping[str, Any]] | None = None,
     extra_reader: Callable[[Any, Mapping[str, Any], str], list[Mapping[str, Any]]] | None = None,
+    priority: Callable[[Mapping[str, Any]], int] | None = None,
 ) -> dict[str, Any]:
     """Discover current products and prepare each unseen hash independently.
 
     Library reads never call ``prepare`` for missing products or completed
     hashes. The injected prepare callback is the only place allowed to spend.
+
+    2026-09-24: every current product is discovered first and then prepared
+    in one deterministic order -- ``priority(product)`` (lower first), then
+    kind, subject, version and hash -- so high-value work reaches a spend
+    ceiling before backlog does.  A ``deferred`` outcome (a spend ceiling, not
+    a fault) is kept as ``deferred`` and, unlike ``pending``, offered again on
+    every poll until it finds room.
     """
 
-    summaries = []
+    from .research_publication_spend import DEFERRED_STATUS, order_key
+
+    candidates: list[tuple[tuple[Any, ...], dict[str, str], str, Mapping[str, Any]]] = []
     seen: set[tuple[str, str]] = set()
     for member in mission.get("universe") or []:
         company_ref = member.get("company_ref") if isinstance(member, Mapping) else None
@@ -94,10 +104,10 @@ def poll_once(
             if library_reader is None
             else library_reader(connection, mission, company_ref)
         )
-        candidates = list(library.get("products") or [])
+        found = list(library.get("products") or [])
         if extra_reader is not None:
-            candidates.extend(extra_reader(connection, mission, company_ref))
-        for product in candidates:
+            found.extend(extra_reader(connection, mission, company_ref))
+        for product in found:
             if not isinstance(product, Mapping) or product.get("status") != "available":
                 continue
             identity = _identity(product)
@@ -106,38 +116,49 @@ def poll_once(
             if key in seen:
                 continue
             seen.add(key)
-            path = _state_path(state_dir, identity)
-            prior = _read_state(path)
-            if (prior is not None and prior.get("status") == "completed"
-                    and prior.get("product_hash") == product_hash):
-                summaries.append({"identity": identity, "product_hash": product_hash,
-                                  "status": "unchanged"})
-                continue
-            if (prior is not None and prior.get("status") == "pending"
-                    and prior.get("product_hash") == product_hash):
-                summaries.append({"identity": identity, "product_hash": product_hash,
-                                  "status": "pending"})
-                continue
-            try:
-                outcome = prepare(product)
-                completed = isinstance(outcome, Mapping) and outcome.get("status") == "completed"
-                state = {"schema_version": SCHEMA_VERSION,
-                         "status": "completed" if completed else "pending",
-                         "identity": identity, "product_hash": product_hash,
-                         "result": dict(outcome) if isinstance(outcome, Mapping) else {
-                             "reason": "prepare returned no result"}}
-            except Exception as exc:  # one product must not stop the rest
-                state = {"schema_version": SCHEMA_VERSION, "status": "pending",
-                         "identity": identity, "product_hash": product_hash,
-                         "result": {"reason": f"{type(exc).__name__}: {exc}"}}
-            state["content_hash"] = _hash(state)
-            _atomic_write(path, state)
+            rank = 0 if priority is None else int(priority(product))
+            candidates.append(((*order_key(rank, product), product_hash),
+                               identity, product_hash, product))
+    candidates.sort(key=lambda row: row[0])
+    summaries = []
+    for _, identity, product_hash, product in candidates:
+        path = _state_path(state_dir, identity)
+        prior = _read_state(path)
+        if (prior is not None and prior.get("status") == "completed"
+                and prior.get("product_hash") == product_hash):
             summaries.append({"identity": identity, "product_hash": product_hash,
-                              "status": state["status"]})
+                              "status": "unchanged"})
+            continue
+        if (prior is not None and prior.get("status") == "pending"
+                and prior.get("product_hash") == product_hash):
+            summaries.append({"identity": identity, "product_hash": product_hash,
+                              "status": "pending"})
+            continue
+        try:
+            outcome = prepare(product)
+            status = outcome.get("status") if isinstance(outcome, Mapping) else None
+            state = {"schema_version": SCHEMA_VERSION,
+                     "status": status if status in {"completed", DEFERRED_STATUS} else "pending",
+                     "identity": identity, "product_hash": product_hash,
+                     "result": dict(outcome) if isinstance(outcome, Mapping) else {
+                         "reason": "prepare returned no result"}}
+        except Exception as exc:  # one product must not stop the rest
+            state = {"schema_version": SCHEMA_VERSION, "status": "pending",
+                     "identity": identity, "product_hash": product_hash,
+                     "result": {"reason": f"{type(exc).__name__}: {exc}"}}
+        state["content_hash"] = _hash(state)
+        _atomic_write(path, state)
+        summaries.append({"identity": identity, "product_hash": product_hash,
+                          "status": state["status"]})
+    deferred = sum(row["status"] == DEFERRED_STATUS for row in summaries)
     return {"schema_version": "research-publication-worker-poll:0.1",
             "products": summaries,
             "completed": sum(row["status"] == "completed" for row in summaries),
-            "pending": sum(row["status"] == "pending" for row in summaries),
+            # Deferred work is still owed, so it is pending to every reader
+            # that asks "is there more to do"; ``deferred`` says how much of it
+            # is only waiting for tomorrow's ceiling.
+            "pending": sum(row["status"] == "pending" for row in summaries) + deferred,
+            "deferred": deferred,
             "unchanged": sum(row["status"] == "unchanged" for row in summaries)}
 
 

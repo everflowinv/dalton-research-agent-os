@@ -39,6 +39,9 @@ _RETRY_FIELDS = {"schema_version", "batch_ref", "manifest_hash", "generation",
                  "prior_status", "prior_attempts", "prior_result_hash",
                  "prior_failure_class", "route_fingerprint", "created_at",
                  "content_hash"}
+#: A prepare outcome that ran into a daily spend ceiling (see
+#: ``research_publication_spend``); never an attempt.
+DEFERRED_STATUS = "deferred"
 #: Who writes the retry that follows a route/family fix.
 AUTOMATIC_RETRY_ACTOR = "automation:ui-text-discovery"
 RETRY_TRIGGERS = ("owner", "route_fingerprint_changed")
@@ -658,9 +661,15 @@ def poll_ui_texts(connection: Any, mission: Mapping[str, Any], *, state_dir: Pat
         for row in eligible:
             if row["status"] == "eligible" and row["batch_ref"] not in selected:
                 row["status"] = "deferred"
+        ceiling_reached = False
         for row in queue:
             manifest = row.pop("manifest")
             result_path = row.pop("result_path")
+            if ceiling_reached:
+                # The batches share one purpose and one priority: once today's
+                # share is spent, the rest of the queue waits with it.
+                row["status"] = "deferred"
+                continue
             attempted += 1
             redraft_generation = row.pop("redraft_generation")
             generation = row.pop("generation")
@@ -676,6 +685,13 @@ def poll_ui_texts(connection: Any, mission: Mapping[str, Any], *, state_dir: Pat
             except Exception as exc:
                 completed = False
                 result_value = {"reason": f"{type(exc).__name__}: {exc}"}
+            if not completed and result_value.get("status") == DEFERRED_STATUS:
+                # A spend ceiling is not a failure: no attempt is counted, the
+                # saved result is left as it was, and the batch is offered
+                # again on the next poll -- tomorrow, once the day has room.
+                ceiling_reached = True
+                row["status"] = "deferred"
+                continue
             attempts = row["attempts"] + 1
             route_family = (not completed and failure_class(result_value)
                             == FAILURE_CLASS_ROUTE_FAMILY)
