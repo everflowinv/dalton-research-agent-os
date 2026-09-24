@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from .model_deployment import ADAPTER_REF, openclaw_broker_profiles
+from .model_family_lineage import family_for_route
 from .model_router import (
     RETIRED_REASON_NOT_IN_BROKER,
     ModelRouter,
@@ -408,8 +409,10 @@ def openclaw_broker_profiles_from_config(
     """Project explicitly brokered models into Dalton's current catalog.
 
     Route, price and capacity come from the current public broker catalog.
-    Curated profile IDs supply initial role metadata; changed and unknown
-    routes need an exact-route Dalton declaration to establish lineage.
+    Curated profile IDs supply initial role metadata. Changed and unknown
+    routes take their family from an exact-route Dalton declaration, else from
+    ``model_family_lineage`` when the lineage is certain, else stay
+    ``unclassified:<provider>`` (never independent).
     The synchronizer appends versions when this projection changes, retaining
     immutable history. Models absent from the provider catalog are refused.
     """
@@ -463,7 +466,15 @@ def openclaw_broker_profiles_from_config(
                 f"credential-slot:openclaw:{provider_model['provider']}"
             )
             if route_changed:
-                profile["family"] = f"unclassified:{provider_model['provider']}"
+                # A changed route is re-derived from the *new* provider/model,
+                # never copied from the curated one: a point upgrade on the same
+                # gateway (claude-opus-5 -> claude-opus-5-5) keeps its family,
+                # a new generation (gpt-5.6-sol -> gpt-6-sol) takes that
+                # generation's family, and anything uncertain stays
+                # unclassified. See model_family_lineage for the rules.
+                profile["family"] = family_for_route(
+                    provider_model["provider"], provider_model["model"]
+                )
             if declaration is not None:
                 profile["family"] = declaration["family"]
                 profile["capabilities"] = list(declaration["capabilities"])
@@ -550,7 +561,8 @@ def openclaw_broker_profiles_from_config(
             "provider": provider_model["provider"],
             "model": provider_model["model"],
             "family": ((declaration or {}).get("family")
-                       or f"unclassified:{provider_model['provider']}"),
+                       or family_for_route(provider_model["provider"],
+                                           provider_model["model"])),
             "adapter_ref": ADAPTER_REF,
             "credential_slot_ref": f"credential-slot:openclaw:{provider_model['provider']}",
             # The owner's standing rule: a model the catalog just met is not
