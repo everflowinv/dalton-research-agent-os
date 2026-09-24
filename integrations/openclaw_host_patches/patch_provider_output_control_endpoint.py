@@ -15,9 +15,11 @@ from pathlib import Path
 import subprocess
 import tempfile
 
-SUPPORTED_VERSION = "2026.9.3"
+SUPPORTED_VERSIONS = ("2026.9.3", "2026.9.5", "2026.9.6")
 ORIGINAL = '''\t\tif ("error" in prepared) throw new Error(`Plugin LLM completion failed: ${prepared.error}`);'''
-PATCHED = '''\t\tif ("error" in prepared) throw new Error(`Plugin LLM completion failed: ${prepared.error}`);
+# 2026.9.5 checks `preparation`, then binds the disposable `prepared` inside an async work scope.
+ORIGINAL_2026_9_5 = "\t\t\t\tconst prepared = _usingCtx$1.a(preparation);"
+PATCHED_BODY = '''
         if (params.providerControls?.mode === "openai-responses-input-count-v1") {
             const resolvedApi = prepared.model.api;
             const resolvedBaseUrl = typeof prepared.model.baseUrl === "string" ? prepared.model.baseUrl.trim() : "";
@@ -33,6 +35,8 @@ PATCHED = '''\t\tif ("error" in prepared) throw new Error(`Plugin LLM completion
             } catch {}
             if (!supportsProviderOutputLimit) throw createLlmCompleteError("REQUIRED_CONTROLS_UNAVAILABLE", "Plugin LLM completion failed: selected endpoint cannot enforce provider max_output_tokens.");
         }'''
+PATCHED = ORIGINAL + PATCHED_BODY
+PATCHED_2026_9_5 = ORIGINAL_2026_9_5 + PATCHED_BODY
 
 CODEX_SANITIZER_MARKERS = (
     'const OPENAI_CODEX_RESPONSES_UNSUPPORTED_PARAMS = [',
@@ -43,11 +47,13 @@ CODEX_SANITIZER_MARKERS = (
 
 
 def assert_codex_transport_contract(root: Path) -> None:
-    matches = sorted((root / "node_modules" / "@openclaw" / "ai" / "dist").glob(
-        "transports.mjs"
-    ))
+    # 2026.9.5 moved the sanitizer out of transports.mjs into a hashed chunk.
+    matches = [
+        p for p in sorted((root / "node_modules" / "@openclaw" / "ai" / "dist").glob("*.mjs"))
+        if CODEX_SANITIZER_MARKERS[0] in p.read_text(encoding="utf-8")
+    ]
     if len(matches) != 1:
-        raise ValueError(f"expected one OpenClaw AI transports bundle, found {len(matches)}")
+        raise ValueError(f"expected one OpenClaw AI Codex sanitizer bundle, found {len(matches)}")
     source = matches[0].read_text(encoding="utf-8")
     if any(marker not in source for marker in CODEX_SANITIZER_MARKERS):
         raise ValueError("OpenClaw Codex max_output_tokens sanitizer contract changed")
@@ -55,8 +61,8 @@ def assert_codex_transport_contract(root: Path) -> None:
 
 def target(root: Path) -> Path:
     package = json.loads((root / "package.json").read_text(encoding="utf-8"))
-    if package.get("version") != SUPPORTED_VERSION:
-        raise ValueError(f"provider output control endpoint patch supports OpenClaw {SUPPORTED_VERSION}")
+    if package.get("version") not in SUPPORTED_VERSIONS:
+        raise ValueError(f"provider output control endpoint patch supports OpenClaw {', '.join(SUPPORTED_VERSIONS)}")
     matches = sorted((root / "dist").glob("runtime-llm.runtime-*.mjs"))
     if len(matches) != 1:
         raise ValueError(f"expected one runtime LLM bundle, found {len(matches)}")
@@ -68,7 +74,10 @@ def apply(root: Path, *, check: bool) -> bool:
     path = target(root)
     original_bytes = path.read_bytes()
     source = original_bytes.decode("utf-8")
-    original_count, patched_count = source.count(ORIGINAL), source.count(PATCHED)
+    original, patched = ORIGINAL, PATCHED
+    if source.count(ORIGINAL) == 0 and source.count(PATCHED) == 0:
+        original, patched = ORIGINAL_2026_9_5, PATCHED_2026_9_5
+    original_count, patched_count = source.count(original), source.count(patched)
     if patched_count == 1:
         if original_count != 1:
             raise ValueError("provider output endpoint patch anchor is ambiguous")
@@ -85,7 +94,7 @@ def apply(root: Path, *, check: bool) -> bool:
                                          dir=path.parent, prefix=f".{path.name}.",
                                          delete=False) as handle:
             candidate = Path(handle.name)
-            handle.write(source.replace(ORIGINAL, PATCHED, 1))
+            handle.write(source.replace(original, patched, 1))
         checked = subprocess.run(["node", "--check", str(candidate)], text=True,
                                  capture_output=True, check=False)
         if checked.returncode:

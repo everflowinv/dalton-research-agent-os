@@ -16,7 +16,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 
-SUPPORTED_VERSION = "2026.9.3"
+SUPPORTED_VERSIONS = ("2026.9.3", "2026.9.5", "2026.9.6")
 ORIGINAL = '''\t\tif (params.providerControls && !providerControlProof) throw new Error("Plugin LLM completion failed: provider controls were not enforced by the selected transport.");
 \t\tconst text = result.content.filter((c) => c.type === "text").map((c) => c.text).join("");'''
 PREVIOUS = '''\t\tif (params.providerControls && !providerControlProof) throw new Error("Plugin LLM completion failed: provider controls were not enforced by the selected transport.");
@@ -63,8 +63,8 @@ PATCHED = '''\t\tconst providerAdmissionStatus = result.stopReason === "error" &
 
 def target(root: Path) -> Path:
     package = json.loads((root / "package.json").read_text(encoding="utf-8"))
-    if package.get("version") != SUPPORTED_VERSION:
-        raise ValueError(f"provider failure bridge supports OpenClaw {SUPPORTED_VERSION}")
+    if package.get("version") not in SUPPORTED_VERSIONS:
+        raise ValueError(f"provider failure bridge supports OpenClaw {', '.join(SUPPORTED_VERSIONS)}")
     matches = sorted((root / "dist").glob("runtime-llm.runtime-*.mjs"))
     if len(matches) != 1:
         raise ValueError(f"expected one runtime LLM bundle, found {len(matches)}")

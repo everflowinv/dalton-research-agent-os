@@ -44,6 +44,24 @@ class ProviderFailureBridgePatchTests(unittest.TestCase):
         checked = subprocess.run(["node", "--check", str(target(self.root))], check=False)
         self.assertEqual(checked.returncode, 0)
 
+    def test_2026_9_6_bundle_fixture_is_patched_once_and_remains_valid_javascript(self):
+        fixture = (Path(__file__).parent / "fixtures" / "openclaw_host_patches" /
+                   "openclaw-2026.9.6")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "dist").mkdir()
+            shutil.copy2(fixture / "package.json", root / "package.json")
+            source = next((fixture / "dist").glob("runtime-llm.runtime-*.mjs"))
+            shutil.copy2(source, root / "dist" / source.name)
+            self.assertTrue(apply(root, check=False))
+            self.assertFalse(apply(root, check=False))
+            self.assertFalse(apply(root, check=True))
+            patched = target(root).read_text(encoding="utf-8")
+            self.assertEqual(patched.count(PATCHED), 1)
+            self.assertEqual(patched.count(ORIGINAL), 0)
+            checked = subprocess.run(["node", "--check", str(target(root))], check=False)
+            self.assertEqual(checked.returncode, 0)
+
     def test_partial_or_wrong_version_refuses(self):
         path = target(self.root)
         path.write_text(path.read_text().replace(ORIGINAL, PATCHED + ORIGINAL, 1), encoding="utf-8")
