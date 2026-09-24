@@ -8,8 +8,12 @@ import tempfile
 import unittest
 
 from integrations.openclaw_host_patches.patch_controlled_completion_transport import (
-    ORIGINAL, ORIGINAL_BIND, PATCHED, PATCHED_BIND, SUPPORTED_VERSION, apply,
+    ORIGINAL, ORIGINAL_BIND, PATCHED, PATCHED_BIND, SUPPORTED_VERSIONS, apply,
 )
+
+SUPPORTED_VERSION = SUPPORTED_VERSIONS[0]
+FIXTURE_2026_9_6 = (Path(__file__).parent / "fixtures" / "openclaw_host_patches" /
+                    "openclaw-2026.9.6")
 from integrations.openclaw_host_patches.patch_provider_output_control_endpoint import (
     apply as check_provider_output_endpoint,
 )
@@ -142,6 +146,24 @@ class ControlledTransportPatchTests(unittest.TestCase):
                                 encoding="utf-8")
                 with self.assertRaisesRegex(ValueError, "partial|duplicate"):
                     apply(root, check=True)
+
+    def test_2026_9_6_bundle_fixture_is_patched_once_and_stays_valid(self):
+        source = next((FIXTURE_2026_9_6 / "dist").glob("simple-completion-execution-*.mjs"))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "dist").mkdir()
+            (root / "package.json").write_bytes((FIXTURE_2026_9_6 / "package.json").read_bytes())
+            module = root / "dist" / source.name
+            module.write_bytes(source.read_bytes())
+            self.assertTrue(apply(root, check=False))
+            self.assertFalse(apply(root, check=False))
+            self.assertFalse(apply(root, check=True))
+            patched = module.read_text(encoding="utf-8")
+            self.assertEqual(patched.count(PATCHED), 1)
+            self.assertEqual(patched.count(PATCHED_BIND), 1)
+            self.assertNotIn(ORIGINAL, patched)
+            self.assertEqual(subprocess.run(
+                ["node", "--check", str(module)], check=False).returncode, 0)
 
     def test_copied_installed_module_uses_native_seam_for_controls(self):
         installed = sorted((installed_openclaw_root(self) / "dist").glob(

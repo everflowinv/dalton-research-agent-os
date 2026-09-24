@@ -983,15 +983,21 @@ if [[ -n "${DALTON_CLAIM_INDEX_MODEL_PROFILE:-}" || -n "${DALTON_CLAIM_INDEX_MOD
 else
   print "note: set DALTON_CLAIM_INDEX_MODEL_TIER to install the claim-index lane."
 fi
-# Quality scoring remains explicitly operator-invoked. Installing this file
-# enables the optional second verifier call but does not schedule one.
+# Q3: the quality verifier. An explicit DALTON_QUALITY_VERIFIER_MODEL_* pin
+# still installs a dedicated route; otherwise the file is derived, once, from
+# the dossier verifier's configuration (same routing policy, broker and budget
+# ledger; purpose quality_verifier capped at $1.00 a call) -- the same thing
+# the quality scoring lane does itself when the writer starts, so a deploy
+# that never runs this script gets the stage too. Never overwritten.
 if [[ -n "${DALTON_QUALITY_VERIFIER_MODEL_PROFILE:-}" || -n "${DALTON_QUALITY_VERIFIER_MODEL_TIER:-}" ]]; then
   install_role_model_config \
     "model-routing-policy:dalton-openclaw-quality-verifier" \
     "quality-verifier-model-config.json" \
     "${DALTON_QUALITY_VERIFIER_MODEL_PROFILE:-}" "${DALTON_QUALITY_VERIFIER_MODEL_TIER:-}"
 else
-  print "note: set DALTON_QUALITY_VERIFIER_MODEL_TIER to install optional independent quality verification."
+  "$venv_dir/bin/python" -c 'import json, sys
+from dalton_core.mission_quality_score_lane import ensure_quality_verifier_config
+print(json.dumps(ensure_quality_verifier_config(sys.argv[1]), sort_keys=True))' "$state_dir"
 fi
 # Registered annual-report plans inherit the currently installed drafting and
 # independent-verifier authorities on first install. The dedicated files then

@@ -283,6 +283,7 @@ REGISTRY_LANE_LABELS = {
     "mission_claim_index": "构建研究论点与证据索引库",
     "research_plan": "制定下一步研究计划",
     "initial_screen": "起草初步研究筛查报告",
+    "quality_scoring": "为初步筛查报告评分并独立核验",
     "event_judgement": "评估最新市场动态对投资观点的影响",
     "mission_event_judgement": "评估最新市场动态对投资观点的影响",
     "earnings_season": "财报前瞻与业绩对标复盘",

@@ -1,4 +1,5 @@
 import json
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -6,9 +7,15 @@ from pathlib import Path
 
 from integrations.openclaw_host_patches.patch_provider_output_control_endpoint import (
     CODEX_SANITIZER_MARKERS,
+    ORIGINAL_2026_9_5,
     PATCHED,
+    PATCHED_2026_9_5,
     apply,
+    target,
 )
+
+FIXTURE_2026_9_6 = (Path(__file__).parent / "fixtures" / "openclaw_host_patches" /
+                    "openclaw-2026.9.6")
 
 
 class ProviderOutputControlEndpointPatchTests(unittest.TestCase):
@@ -41,14 +48,46 @@ class ProviderOutputControlEndpointPatchTests(unittest.TestCase):
                 check=False,
             ).returncode)
 
+    def test_2026_9_6_bundle_fixture_is_patched_once_and_syntax_valid(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "openclaw"
+            shutil.copytree(FIXTURE_2026_9_6, root)
+            self.assertTrue(apply(root, check=False))
+            self.assertFalse(apply(root, check=False))
+            self.assertFalse(apply(root, check=True))
+            patched = target(root).read_text(encoding="utf-8")
+            self.assertEqual(patched.count(PATCHED_2026_9_5), 1)
+            self.assertEqual(patched.count(ORIGINAL_2026_9_5), 1)
+            # The endpoint guard must run after the disposable binding and before
+            # the provider-controls transport check.
+            self.assertLess(patched.index(PATCHED_2026_9_5),
+                            patched.index("if (params.providerControls) {"))
+            self.assertFalse(subprocess.run(
+                ["node", "--check", str(target(root))], check=False,
+            ).returncode)
+
+    def test_2026_9_6_refuses_missing_codex_sanitizer_chunk(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "openclaw"
+            shutil.copytree(FIXTURE_2026_9_6, root)
+            for chunk in (root / "node_modules" / "@openclaw" / "ai" / "dist").glob("*.mjs"):
+                chunk.unlink()
+            with self.assertRaisesRegex(ValueError, "Codex sanitizer bundle"):
+                apply(root, check=False)
+
     def test_patch_refuses_changed_codex_sanitizer_contract(self):
         from integrations.openclaw_host_patches.patch_provider_output_control_endpoint import ORIGINAL
 
         temp, root = self._root(f"async function f(params, prepared) {{\n{ORIGINAL}\n}}\n")
         with temp:
             transports = root / "node_modules" / "@openclaw" / "ai" / "dist" / "transports.mjs"
-            transports.write_text("contract changed", encoding="utf-8")
+            # The sanitizer chunk is located by its first marker (2026.9.5+ hashes
+            # its filename); dropping any later marker is a contract change.
+            transports.write_text(CODEX_SANITIZER_MARKERS[0], encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "sanitizer contract changed"):
+                apply(root, check=False)
+            transports.write_text("contract changed", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "Codex sanitizer bundle, found 0"):
                 apply(root, check=False)
 
     def test_resolved_endpoint_matrix(self):

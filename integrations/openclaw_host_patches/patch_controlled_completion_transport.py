@@ -16,7 +16,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 
-SUPPORTED_VERSION = "2026.9.3"
+SUPPORTED_VERSIONS = ("2026.9.3", "2026.9.5", "2026.9.6")
 ORIGINAL = """\tlet completionModel = getModelCompletionTransport(params.model) ?? prepareModelForSimpleCompletion({
 \t\tapiRegistry: runtime?.registry ?? defaultApiRegistry,
 \t\tmodel: params.model,
@@ -36,9 +36,9 @@ PATCHED_BIND = "\tif (runtime && !controlledTransport) completionModel = bindMod
 
 def target(root: Path) -> Path:
     package = json.loads((root / "package.json").read_text(encoding="utf-8"))
-    if package.get("version") != SUPPORTED_VERSION:
+    if package.get("version") not in SUPPORTED_VERSIONS:
         raise ValueError(
-            f"controlled transport patch supports OpenClaw {SUPPORTED_VERSION}, "
+            f"controlled transport patch supports OpenClaw {', '.join(SUPPORTED_VERSIONS)}, "
             f"found {package.get('version')!r}"
         )
     matches = sorted((root / "dist").glob("simple-completion-execution-*.mjs"))

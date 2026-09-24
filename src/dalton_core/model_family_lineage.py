@@ -78,6 +78,11 @@ LINEAGE_RULES: tuple[tuple[str, frozenset[str], re.Pattern[str]], ...] = (
     ("qwen-3.8", frozenset({"qwen"}), re.compile(r"qwen3\.8-(?:max|plus|flash)")),
     ("deepseek-v4", frozenset({"deepseek", "qwen"}),
      re.compile(r"deepseek-v4-(?:flash|pro)(?:-[0-9]{4})?")),
+    # Meta Superintelligence Labs' Muse Spark 1.x through the Muse gateway:
+    # muse-spark-1.3, muse-spark-1.4, and their training-eligible
+    # "-contributor" twins.  Not Muse Glimmer or any other Muse line.
+    ("meta-muse", frozenset({"muse-cli-gateway"}),
+     re.compile(r"muse-spark-1\.[0-9]{1,2}(?:-contributor)?")),
 )
 
 

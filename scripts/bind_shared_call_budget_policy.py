@@ -5,7 +5,7 @@ import argparse, json, shutil, sqlite3, sys
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]; sys.path.insert(0,str(ROOT/'src'))
 from dalton_core.shared_call_budget_policy import load_shared_call_budget_policy
-from dalton_core.workspace_model_setup import EXPECTED_CONFIG_NAMES, export_runtime_template
+from dalton_core.workspace_model_setup import ACCEPTED_CONFIG_SETS, export_runtime_template
 from dalton_core.workspace_service_setup import export_service_template
 
 
@@ -15,13 +15,13 @@ def _copy_db(source: Path, target: Path):
 def prepare(source_state: Path, source_service: Path, policy: Path, stage: Path|None):
     load_shared_call_budget_policy(policy)
     files={p.name for p in source_state.glob('*model-config.json')}
-    if files != EXPECTED_CONFIG_NAMES: raise SystemExit('source must contain exact model config set')
+    if files not in ACCEPTED_CONFIG_SETS: raise SystemExit('source must contain exact model config set')
     plan={'status':'planned' if stage is None else 'staged','source_files':len(files),
           'shared_call_budget_policy_path':str(policy.resolve()),'live_modified':False}
     if stage is None: return plan
     if stage.exists(): raise SystemExit('stage directory must not exist')
     state=stage/'state'/'dalton-core'; config=stage/'config'; state.mkdir(parents=True); config.mkdir()
-    for name in EXPECTED_CONFIG_NAMES:
+    for name in sorted(files):
         wire=json.loads((source_state/name).read_text()); wire['shared_call_budget_policy_path']=str(policy.resolve())
         wire['model_router_db']=str(state/'model-router.sqlite')
         wire['budget_db']=str(state/'thesis-impact-budget.sqlite')

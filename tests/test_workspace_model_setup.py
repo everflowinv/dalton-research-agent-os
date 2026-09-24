@@ -80,7 +80,8 @@ class WorkspaceModelSetupTest(unittest.TestCase):
         workspace = self._workspace()
         receipt = install_runtime_template(workspace.manifest_path, self.bundle_path)
         self.assertEqual(receipt["model_calls"], 0)
-        self.assertEqual(len(receipt["configs"]), 21)
+        self.assertEqual(len(receipt["configs"]), 22)
+        self.assertEqual(bundle["source"], {"config_count": 22})
         config = json.loads((workspace.state_dir / "claim-index-model-config.json").read_text())
         self.assertEqual(config["model_router_db"], str(workspace.state_dir / "model-router.sqlite"))
         self.assertEqual(config["budget_db"], str(workspace.state_dir / "thesis-impact-budget.sqlite"))
@@ -111,6 +112,24 @@ class WorkspaceModelSetupTest(unittest.TestCase):
         config["budget_db"] = str(self.root / "foreign" / "budget.sqlite")
         config_path.write_text(json.dumps(config))
         with self.assertRaisesRegex(WorkspaceModelSetupError, "inside source state"):
+            export_runtime_template(self.source, self.bundle_path)
+
+    def test_a_source_without_the_quality_verifier_still_exports_and_installs(self):
+        """Q3: a state exported before the lane derived the file holds 21."""
+
+        (self.source / "quality-verifier-model-config.json").unlink()
+        bundle = export_runtime_template(self.source, self.bundle_path)
+        self.assertEqual(bundle["source"], {"config_count": 21})
+        receipt = install_runtime_template(self._workspace().manifest_path, self.bundle_path)
+        self.assertEqual(len(receipt["configs"]), 21)
+
+    def test_any_other_config_set_is_refused(self):
+        (self.source / "claim-index-model-config.json").unlink()
+        with self.assertRaisesRegex(WorkspaceModelSetupError, "exactly the 22"):
+            export_runtime_template(self.source, self.bundle_path)
+        (self.source / "claim-index-model-config.json").write_text("{}")
+        (self.source / "stray-model-config.json").write_text("{}")
+        with self.assertRaisesRegex(WorkspaceModelSetupError, "exactly the 22"):
             export_runtime_template(self.source, self.bundle_path)
 
 
