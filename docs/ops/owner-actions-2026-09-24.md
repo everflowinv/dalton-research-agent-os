@@ -112,3 +112,9 @@ unset DALTON_WORKSPACE_MANIFEST
 # 约 10–20 分钟后复查
 $PY -m dalton_core.document_recovery_cli holds --state-dir "$L"
 ```
+
+## 2026-09-24T12:49Z 孤儿 cockpit 预留回收：第二次
+
+- 背景：批次 2026-09-24a 部署后，用户执行了第一次回收（114 条中结算 101 条以上）。按 runbook，当时还在 lease 期内的预留要在约 2 小时后再跑一次。
+- 命令：`.venv/bin/python scripts/settle_orphan_cockpit_reservations.py --budget-db "$L/thesis-impact-budget.sqlite" --scheduler-db "$L/scheduler.sqlite" --broker-journal ~/.openclaw/dalton-model-broker.sock.journal.json --apply`
+- 结果：event_judgement 12 条，全部按 broker journal 的实测费用结算（预留 $1.33，实际 $3.33）；跳过 1 条（attempt_in_flight）。复跑 dry-run 显示待结算为 0。
