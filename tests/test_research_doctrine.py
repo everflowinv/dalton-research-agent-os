@@ -38,6 +38,9 @@ from tests.agenda_fixtures import register_perception
 NOW = "2026-08-23T12:00:00+00:00"
 ACTIVE = "2026-08-24T12:00:00+00:00"
 EXPIRED = "2026-09-24T12:00:00+00:00"
+# Coverage admission checks the mandate against the wall clock, so the
+# mandate itself must outlive the day the suite runs.
+MANDATE_UNTIL = "2099-01-01T00:00:00+00:00"
 
 
 def agenda_policy() -> dict:
@@ -93,7 +96,7 @@ class ResearchDoctrineTests(unittest.TestCase):
             scope_refs=["acme", "industry:lease-analysis"],
             constraints={"mode": "development_candidate"},
             success_criteria={"formal_negative_claim_requires_human": True},
-            effective_from=NOW, effective_until=EXPIRED, actor_ref="human:owner",
+            effective_from=NOW, effective_until=MANDATE_UNTIL, actor_ref="human:owner",
             version_id="mandate-version:doctrine:1",
             idempotency_key="doctrine:mandate:1",
         )
