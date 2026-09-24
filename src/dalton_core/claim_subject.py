@@ -15,11 +15,13 @@ under -- CoreWeave's customer concentration as an AMZN Claim, automakers'
 power-generation plans as a META Claim.  The whole-document check could not see
 them: a morning digest names every hyperscaler somewhere.
 
-Matching is a lowercase substring test on purpose, the same bluntness as the
-original ``claim_retirement.subject_absent_from_source``: it is lenient towards
-presence ("googl" is found inside "Google", a Chinese alias inside Chinese
-prose), so a check built on it errs towards keeping a Claim, never towards
-retiring or holding one on a technicality of spelling.
+Matching was a lowercase substring test, the same bluntness as the original
+``claim_retirement.subject_absent_from_source``.  Since 2026-09-24b both the
+retirement rule and the admission check match a Latin name as a whole word
+(:func:`text_names_word`) and never on a weak token: with the hyperscaler
+aliases the substring test found Amazon in every "website" and "laws", and
+"Red Hat" would have found IBM in "reduced".  A Chinese name is still a
+substring -- Chinese has no word boundaries to respect.
 
 The one exemption is a document that *is* the subject's own -- its earnings
 call, its filing, a note whose title names it.  There "we", "management" and
@@ -119,9 +121,11 @@ def document_is_subjects(
 
     if issuer_document:
         return True
-    if text_names_any(title, needles):
+    # Whole words (2026-09-24b): "meta" is in "metadata" and "metals", which
+    # the head of many a digest contains.
+    if text_names_word(title, needles):
         return True
-    if isinstance(text, str) and text_names_any(text[:HEAD_CHARS], needles):
+    if isinstance(text, str) and text_names_word(_cut(text, HEAD_CHARS), needles):
         return True
     return False
 
@@ -178,8 +182,9 @@ def subject_absent_from_citation(
 
 # -- retirement-only rules (2026-09-24 audit) --------------------------------
 #
-# The admission check (``span_names_subject_for_admission``) is untouched: a
-# held candidate waits for a person, so it may be strict.  A retirement takes
+# The admission check (``span_names_subject_for_admission``) shares only the
+# whole-word match: a held candidate waits for a person, so it may be strict
+# about *where* the name is.  A retirement takes
 # a Claim out of every deliverable, so the patrol keeps a Claim whenever the
 # text gives a reasonable reading under which it is the subject's.  Everything
 # below is used only by the retirement rule and by the re-review of past
@@ -278,8 +283,11 @@ def _cut(text: str, limit: int) -> str:
 
 
 def _usable(needles: Iterable[str]) -> list[str]:
+    # A Chinese name is two characters as often as not (谷歌, 微软, 脸书):
+    # the three-letter floor is for Latin tokens only.
     return [needle for needle in needles
-            if isinstance(needle, str) and len(needle) >= MIN_TOKEN_CHARS
+            if isinstance(needle, str) and needle
+            and (len(needle) >= MIN_TOKEN_CHARS or _CJK_RE.search(needle))
             and needle not in WEAK_CONTEXT_NEEDLES]
 
 
@@ -442,13 +450,18 @@ def span_names_subject_for_admission(
     candidate waits in staging for a person -- while retirement is not, so
     the statement (which the model wrote, knowing the subject) does not count
     here.  An issuer's own document is exempt for the reason given above.
+
+    The name is matched as the retirement rule matches it (2026-09-24b,
+    :func:`text_names_word`): a whole Latin word, never a weak token, a
+    Chinese name as a substring.  A span saying only "website" or "laws" does
+    not name Amazon.
     """
 
     if document_is_own:
         return True
     if not needles:
         return True
-    return text_names_any(span, needles)
+    return text_names_word(span, needles)
 
 
 def mission_subject_needles(
