@@ -82,7 +82,9 @@ def git_state(repo: Path) -> dict[str, Any]:
     commit = run(["git", "rev-parse", "HEAD"], cwd=repo)
     if re.fullmatch(r"[0-9a-f]{40}", commit) is None:
         raise BuildError("HEAD 不是一个完整的提交哈希")
-    dirty = run(["git", "status", "--porcelain"], cwd=repo)
+    # Not run(): its strip() would eat the leading status column of line one.
+    dirty = subprocess.run(["git", "status", "--porcelain"], cwd=str(repo),
+                           capture_output=True, text=True, check=True).stdout.rstrip("\n")
     src_tree = run(["git", "rev-parse", f"{commit}:src"], cwd=repo)
     return {"source_commit": commit, "git_src_tree": src_tree,
             "clean_tree": dirty == "",
