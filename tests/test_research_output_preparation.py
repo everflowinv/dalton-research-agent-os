@@ -117,9 +117,12 @@ class PreparationTests(unittest.TestCase):
         second = prep.prepare_ui_batch(args, {}, product)
         self.assertEqual(second["status"], "completed")
         self.assertEqual(len(self.calls), 4)
+        # 0.2: the index lists batch refs and each batch is its own record.
         restored = json.loads(mapping_path.read_text("utf-8"))
-        self.assertEqual(len(restored["batches"]), 1)
-        self.assertEqual(restored["batches"][0]["source"], product)
+        self.assertEqual(restored["schema_version"], "cockpit-ui-texts:0.2")
+        self.assertEqual(len(restored["batch_refs"]), 1)
+        record = args.output_directory / "ui-records" / (restored["batch_refs"][0] + ".json")
+        self.assertEqual(json.loads(record.read_text("utf-8"))["source"], product)
 
     def test_a_source_that_repeats_a_section_is_refused_before_any_model_call(self):
         # Live 2026-09-24: judgement localizations whose second section was the

@@ -167,8 +167,26 @@ def localize_library(connection: sqlite3.Connection, library: Mapping[str, Any])
     return result
 
 
+UI_TEXTS_LEGACY_SCHEMA = 'cockpit-ui-texts:0.1'
+UI_TEXTS_SCHEMA = 'cockpit-ui-texts:0.2'
+UI_RECORDS_DIRECTORY = 'ui-records'
+
+
 def publish_ui_texts(directory: str | Path, batches: list[dict[str, Any]]) -> Path:
-    """Merge exact-string mappings so one new product cannot erase other pages."""
+    """Merge exact-string mappings so one new product cannot erase other pages.
+
+    0.2 stores one file per batch under ``ui-records/<source hash>.json`` and
+    keeps ``ui-texts.json`` as the ordered list of batch refs.  The 0.1 layout
+    held every batch in that one file; on 2026-09-22 it reached 16,775,691 of
+    its 16,777,216 permitted bytes (836 batches), and from then on every
+    publication that had to merge a UI batch failed with "display attachment
+    exceeds the size limit" -- 28 of 31 products after the next deploy.  The
+    per-file limit stays as it is: no single batch comes near it, and a limit
+    that is raised instead of split is only hit again later.
+
+    A 0.1 file is migrated on the first publish, in its own order, so the
+    first-approved-translation-wins rule of ``_load_ui_cached`` is unchanged.
+    """
     import fcntl
     for batch in batches:
         validate_localization(batch['source'],batch['localization'])
@@ -176,28 +194,71 @@ def publish_ui_texts(directory: str | Path, batches: list[dict[str, Any]]) -> Pa
     if root.is_symlink():raise ValueError('unsafe display directory')
     root.mkdir(parents=True,exist_ok=True,mode=0o700)
     target=root/'ui-texts.json'
+    records=root/UI_RECORDS_DIRECTORY
     fd=os.open(root/'.index.lock',os.O_CREAT|os.O_RDWR|getattr(os,'O_NOFOLLOW',0),0o600)
     with os.fdopen(fd,'a+') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX)
-        existing=_read_json(target) if target.exists() else {'schema_version':'cockpit-ui-texts:0.1','batches':[]}
-        if existing.get('schema_version')!='cockpit-ui-texts:0.1':raise ValueError('invalid UI mapping schema')
-        merged={source_content_hash(batch['source']):batch for batch in existing['batches']}
-        for batch in batches:merged[source_content_hash(batch['source'])]=batch
+        if records.is_symlink():raise ValueError('unsafe display directory')
+        records.mkdir(exist_ok=True,mode=0o700)
+        existing=_read_json(target) if target.exists() else {'schema_version':UI_TEXTS_SCHEMA,'batch_refs':[]}
+        if existing.get('schema_version')==UI_TEXTS_LEGACY_SCHEMA:
+            order=[]
+            for batch in existing['batches']:
+                ref=source_content_hash(batch['source'])
+                _atomic_json(records/(ref+'.json'),batch)
+                if ref not in order:order.append(ref)
+        elif existing.get('schema_version')==UI_TEXTS_SCHEMA:
+            order=list(existing.get('batch_refs') or [])
+            if any(not isinstance(ref,str) or not _SHA.fullmatch(ref) for ref in order):
+                raise ValueError('invalid UI mapping index')
+        else:
+            raise ValueError('invalid UI mapping schema')
+        for batch in batches:
+            ref=source_content_hash(batch['source'])
+            _atomic_json(records/(ref+'.json'),batch)
+            if ref not in order:order.append(ref)
         # A repeated exact string is intentionally one display entry; preserve
         # the first approved translation instead of making page context change it.
-        _atomic_json(target,{'schema_version':'cockpit-ui-texts:0.1','batches':list(merged.values())})
+        _atomic_json(target,{'schema_version':UI_TEXTS_SCHEMA,'batch_refs':order})
     return target
+
+
+def _ui_batches(path: Path, payload: Mapping[str, Any]) -> list[Any]:
+    if payload.get("schema_version") == UI_TEXTS_LEGACY_SCHEMA:
+        return list(payload.get("batches", []))
+    if payload.get("schema_version") != UI_TEXTS_SCHEMA:
+        return []
+    records = path.parent / UI_RECORDS_DIRECTORY
+    if records.is_symlink():
+        return []
+    batches = []
+    for ref in payload.get("batch_refs") or []:
+        if not isinstance(ref, str) or not _SHA.fullmatch(ref):
+            continue
+        try:
+            batches.append(_read_json(records / (ref + ".json")))
+        except (OSError, ValueError):
+            # One unreadable record costs its own strings, not every page's.
+            continue
+    return batches
 
 
 @functools.lru_cache(maxsize=8)
 def _load_ui_cached(path_string: str, inode: int, modified_ns: int, size: int) -> dict[str, str]:
-    payload = _read_json(Path(path_string))
-    if payload.get("schema_version") != "cockpit-ui-texts:0.1":
-        return {}
+    path = Path(path_string)
+    payload = _read_json(path)
     entries = {}
-    for batch in payload.get("batches", []):
-        source = batch["source"]
-        valid = validate_localization(source, batch["localization"])
+    legacy = payload.get("schema_version") == UI_TEXTS_LEGACY_SCHEMA
+    for batch in _ui_batches(path, payload):
+        try:
+            source = batch["source"]
+            valid = validate_localization(source, batch["localization"])
+        except (KeyError, TypeError, ValueError):
+            if legacy:
+                # 0.1 behaviour, unchanged: one bad batch in the single file
+                # invalidates the file.
+                raise
+            continue
         for original, localized in zip(source["sections"], valid["sections"]):
             old, new = original["body"], localized["body"]
             if old not in entries:
