@@ -8,12 +8,14 @@ repo=~/Projects/dalton-research-agent-os
 venv=~/.dalton/runtime/releases/<sha>/venv
 state="$HOME/Library/Application Support/Dalton/state/dalton-core"
 logs="$HOME/Library/Logs/Dalton"
+dalton_home="$HOME/.dalton"
 
 for name in com.dalton.research-publication-worker com.dalton.log-rotate; do
   sed -e "s#@@RELEASE_VENV@@#$venv#g" \
       -e "s#@@STATE_DIR@@#$state#g" \
       -e "s#@@LOG_DIR@@#$logs#g" \
       -e "s#@@REPO@@#$repo#g" \
+      -e "s#@@DALTON_HOME@@#$dalton_home#g" \
       "$repo/deploy/macos/launchagents/$name.plist.template" \
       > "$HOME/Library/LaunchAgents/$name.plist"
   plutil -lint "$HOME/Library/LaunchAgents/$name.plist"

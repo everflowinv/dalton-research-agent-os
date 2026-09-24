@@ -13,6 +13,7 @@ import plistlib
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -289,6 +290,92 @@ class LogRotationTests(unittest.TestCase):
             import time
             time.sleep(1.01)
         self.assertLessEqual(len(list(self.logs.glob("writer.stderr.log.*.gz"))), 2)
+
+
+    def test_workspace_subdirectory_logs_are_rotated_too(self):
+        # 过去只扫顶层 *.log：~/Library/Logs/Dalton/workspaces/<ws>/ 和
+        # ~/.dalton/workspace-logs/<ws>/ 下的日志从来没有被轮转过。
+        nested = self.logs / "workspaces" / "ws-abc" / "writer.stderr.log"
+        nested.parent.mkdir(parents=True)
+        nested.write_bytes(b"z" * 4096)
+        top = self.logs / "writer.stderr.log"
+        top.write_bytes(b"z" * 4096)
+        result = rotate_dalton_logs.rotate(self.args())
+        self.assertEqual(result["rotated_count"], 2)
+        self.assertEqual(nested.stat().st_size, 0)
+        self.assertEqual(len(list(nested.parent.glob("writer.stderr.log.*.gz"))), 1)
+
+    def test_extra_log_dirs_are_rotated_and_missing_ones_are_reported(self):
+        other = Path(self.tmp.name) / "dalton-home" / "workspace-logs"
+        (other / "ws-1").mkdir(parents=True)
+        (other / "ws-1" / "control.stderr.log").write_bytes(b"q" * 4096)
+        missing = Path(self.tmp.name) / "absent"
+        result = rotate_dalton_logs.rotate(
+            self.args(log_dir=[self.logs, other, missing]))
+        self.assertEqual(result["rotated_count"], 1)
+        self.assertEqual(result["missing_log_dirs"], [str(missing.resolve())])
+        self.assertEqual((other / "ws-1" / "control.stderr.log").stat().st_size, 0)
+        with self.assertRaises(RuntimeError):
+            rotate_dalton_logs.rotate(self.args(log_dir=[missing]))
+
+    def test_symlinks_are_never_followed_out_of_the_log_tree(self):
+        outside = Path(self.tmp.name) / "outside"
+        outside.mkdir()
+        (outside / "precious.log").write_bytes(b"p" * 4096)
+        logs = self.logs / "logs"
+        logs.mkdir()
+        (logs / "linked-dir").symlink_to(outside, target_is_directory=True)
+        (logs / "linked.log").symlink_to(outside / "precious.log")
+        result = rotate_dalton_logs.rotate(self.args(log_dir=[logs]))
+        self.assertEqual(result["rotated_count"], 0)
+        self.assertEqual((outside / "precious.log").stat().st_size, 4096)
+
+
+class LogRotateLaunchAgentTemplateTests(unittest.TestCase):
+    """4fa8e771 把 ProgramArguments 里的 --apply 批量替换成了 apply，
+    轮转从 2026-09-17 起每天都以 "unrecognized arguments: apply" 失败。
+    这里按 README 的方式渲染模板，再交给脚本自己的 argparse 解析。"""
+
+    TEMPLATE = REPO / "deploy/macos/launchagents/com.dalton.log-rotate.plist.template"
+    README = REPO / "deploy/macos/launchagents/README.md"
+
+    def render(self):
+        import re
+        readme = self.README.read_text(encoding="utf-8")
+        documented = set(re.findall(r"s#(@@[A-Z_]+@@)#", readme))
+        text = self.TEMPLATE.read_text(encoding="utf-8")
+        used = set(re.findall(r"@@[A-Z_]+@@", text))
+        self.assertLessEqual(used, documented,
+                             "模板里有 README 安装命令不会替换的占位符")
+        values = {
+            "@@RELEASE_VENV@@": "/r/venv", "@@STATE_DIR@@": "/s",
+            "@@LOG_DIR@@": "/l/Logs/Dalton", "@@REPO@@": "/repo",
+            "@@DALTON_HOME@@": "/h/.dalton",
+        }
+        for key, value in values.items():
+            text = text.replace(key, value)
+        self.assertNotIn("@@", text)
+        return plistlib.loads(text.encode("utf-8"))
+
+    def test_rendered_arguments_parse_with_the_scripts_own_parser(self):
+        arguments = self.render()["ProgramArguments"]
+        self.assertEqual(arguments[0], "/r/venv/bin/python")
+        self.assertEqual(arguments[1], "/repo/scripts/rotate_dalton_logs.py")
+        parser = rotate_dalton_logs.build_parser()
+        # argparse exits (SystemExit 2) on an unknown argument such as "apply".
+        parsed = parser.parse_args(arguments[2:])
+        self.assertTrue(parsed.apply, "模板必须真正轮转，而不是每天 dry-run")
+        self.assertEqual(parsed.log_dir, [Path("/l/Logs/Dalton"),
+                                          Path("/h/.dalton/workspace-logs")])
+        self.assertEqual(parsed.keep, 5)
+        self.assertEqual(parsed.max_bytes, 16 * 1024 * 1024)
+
+    def test_the_old_bare_apply_is_rejected(self):
+        parser = rotate_dalton_logs.build_parser()
+        with self.assertRaises(SystemExit), \
+                open(os.devnull, "w") as sink, \
+                unittest.mock.patch("sys.stderr", sink):
+            parser.parse_args(["--log-dir", "/l", "apply"])
 
 
 class MigrationPlanTests(unittest.TestCase):

@@ -12,6 +12,13 @@ StandardOutPath/StandardErrorPath，并且在服务重启之前一直持有那�
 
 代价是截断和复制之间的极少量新字节可能丢失。对 stderr 日志来说这个代价是对的。
 
+范围：每个 --log-dir（可重复）下递归的全部 *.log，包括各 workspace 子目录
+（~/Library/Logs/Dalton/workspaces/<ws>/、~/.dalton/workspace-logs/<ws>/ 等）。
+过去只扫顶层，workspace 子目录里的日志从来没有轮转过。符号链接（文件或目录）
+一律不跟随，避免轮转到日志目录以外的文件；同一文件经不同目录重复出现只处理一次。
+不存在的目录记入 missing_log_dirs 并跳过（新机器上 workspace-logs 可能还没有），
+只有全部目录都不存在才算失败。
+
 默认 dry-run：只打印会做什么。--apply 才动文件。
 """
 
@@ -63,34 +70,84 @@ def rotate_one(path: Path, *, keep: int, apply: bool) -> dict[str, Any]:
     return action
 
 
+def _log_dirs(value: Any) -> list[Path]:
+    if value is None:
+        return [DEFAULT_LOG_DIR]
+    if isinstance(value, (str, Path)):
+        return [Path(value)]
+    return [Path(item) for item in value]
+
+
+def discover_logs(directory: Path) -> list[Path]:
+    """Every regular ``*.log`` under ``directory``, never through a symlink."""
+
+    found: list[Path] = []
+    for root, dirnames, filenames in os.walk(directory, followlinks=False):
+        # os.walk does not descend into symlinked directories when
+        # followlinks=False, but it still lists them; prune for clarity.
+        dirnames[:] = sorted(
+            name for name in dirnames if not (Path(root) / name).is_symlink()
+        )
+        for name in sorted(filenames):
+            if not name.endswith(".log"):
+                continue
+            path = Path(root) / name
+            if path.is_symlink() or not path.is_file():
+                continue
+            found.append(path)
+    return found
+
+
 def rotate(args: argparse.Namespace) -> dict[str, Any]:
-    directory = args.log_dir.expanduser().resolve()
-    if not directory.is_dir():
-        raise RuntimeError(f"日志目录不存在：{directory}")
+    directories: list[Path] = []
+    missing: list[str] = []
+    for raw in _log_dirs(args.log_dir):
+        directory = raw.expanduser().resolve()
+        if not directory.is_dir():
+            missing.append(str(directory))
+            continue
+        if directory not in directories:
+            directories.append(directory)
+    if not directories:
+        raise RuntimeError(f"日志目录不存在：{', '.join(missing)}")
     actions = []
-    for path in sorted(directory.glob("*.log")):
-        if path.is_symlink() or not path.is_file():
-            continue
-        size = path.stat().st_size
-        if size < args.max_bytes:
-            actions.append({"log": str(path), "size_bytes": size,
-                            "rotated": False, "reason": "未达到轮转阈值"})
-            continue
-        actions.append(rotate_one(path, keep=args.keep, apply=args.apply))
+    seen: set[Path] = set()
+    for directory in directories:
+        for path in discover_logs(directory):
+            identity = path.resolve()
+            if identity in seen:
+                continue
+            seen.add(identity)
+            size = path.stat().st_size
+            if size < args.max_bytes:
+                actions.append({"log": str(path), "size_bytes": size,
+                                "rotated": False, "reason": "未达到轮转阈值"})
+                continue
+            actions.append(rotate_one(path, keep=args.keep, apply=args.apply))
     return {"schema_version": SCHEMA, "writes_performed": bool(args.apply),
-            "log_dir": str(directory), "max_bytes": args.max_bytes,
+            "log_dir": str(directories[0]),
+            "log_dirs": [str(item) for item in directories],
+            "missing_log_dirs": missing,
+            "max_bytes": args.max_bytes,
             "keep": args.keep, "actions": actions,
             "rotated_count": sum(1 for row in actions if row.get("rotated"))}
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--log-dir", type=Path, default=DEFAULT_LOG_DIR)
+    parser.add_argument("--log-dir", type=Path, action="append", default=None,
+                        help="要轮转的日志根目录，可重复；递归包含子目录"
+                             "（缺省 ~/Library/Logs/Dalton）")
     parser.add_argument("--max-bytes", type=int, default=DEFAULT_MAX_BYTES,
                         help="超过这个大小才轮转（默认 16 MiB）")
     parser.add_argument("--keep", type=int, default=DEFAULT_KEEP,
                         help="每个日志保留多少个历史归档（默认 5）")
     parser.add_argument("--apply", action="store_true", help="真正轮转；缺省只打印计划")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
     args = parser.parse_args(argv)
     if args.keep < 1 or args.max_bytes < 1:
         parser.error("--keep 和 --max-bytes 都必须为正")
