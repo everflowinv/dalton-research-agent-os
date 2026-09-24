@@ -52,7 +52,7 @@ from .research_planner import (
     project_state_for_prompt,
     prompt_size_report,
 )
-from .research_state import build_research_state, state_digest
+from .research_state import build_research_state, planning_hash as state_planning_hash, state_digest
 from .service_config_location import service_config_path
 from .store import DaltonStore, canonical_json
 
@@ -77,6 +77,18 @@ TERMINAL_PLAN_STATUSES: frozenset[str] = frozenset({
 # -- but not every five minutes, because each one mints a WorkOrder and the
 # scheduler database grew 76MB on them.
 TRANSIENT_RETRY_SECONDS = 1_800
+# The last state the planner model was actually asked about (a call that
+# returned, paid or replayed).  Separate from the attempt ledger, which is
+# keyed by exact state and bounded to the last few: this is one record, and
+# it must outlive a run of held ticks.
+PLAN_LAST_DECISION = "research-plan-last-decision.json"
+# The shortest gap between two paid plans when nothing material moved.  Live
+# 2026-09-24 the planner asked Opus every five minutes on both workspaces
+# (~$0.44 each, $100+/day) while adjacent prompts differed only in spend and
+# pipeline counters.  A material change (``research_state.planning_hash``)
+# still re-plans on the next tick; everything else is folded into the next
+# plan at most this often.
+MIN_REPLAN_SECONDS = 7_200
 # What one planner WorkOrder may carry.  The prompt *is* the work order's
 # question, and the state is inlined into it, so a 266KB prompt is a 266KB row
 # in scheduler.sqlite for every tick.  The projection is therefore fitted to
@@ -391,6 +403,55 @@ def attempt_hold(
     return None
 
 
+def read_last_decision(state_dir: Path) -> dict[str, Any]:
+    try:
+        value = json.loads((state_dir / PLAN_LAST_DECISION).read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 - absent or unreadable is "no memory"
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def record_decision(state_dir: Path, *, state_hash: str, planning_hash: str,
+                    at: str) -> None:
+    try:
+        _write_owner_only(state_dir / PLAN_LAST_DECISION, {
+            "schema_version": "0.1", "at": at, "state_hash": state_hash,
+            "planning_hash": planning_hash,
+        })
+    except Exception:  # noqa: BLE001 - a record we cannot write is still no crash
+        return
+
+
+def replan_pacing_hold(
+    last: Mapping[str, Any], planning_hash: str, *, now: datetime,
+) -> dict[str, Any] | None:
+    """Hold a re-plan whose state moved, but not in any way a plan is about.
+
+    Asked before the model is built, like :func:`attempt_hold`.  A different
+    ``planning_hash`` from the last decision is a material change and is
+    never held; the same one is held until ``MIN_REPLAN_SECONDS`` have passed
+    since that decision, after which the accumulated small changes (new
+    documents readable, counters moved) are worth one fresh plan.
+    """
+
+    if not last.get("at") or last.get("planning_hash") != planning_hash:
+        return None
+    try:
+        since = (now - datetime.fromisoformat(str(last["at"]))).total_seconds()
+    except (TypeError, ValueError):
+        return None
+    if since < 0 or since >= MIN_REPLAN_SECONDS:
+        return None
+    return {
+        "plan_status": "held",
+        "failure_reason": (
+            "研究状态没有实质变化：与上一次规划相比，只有花费、计数这类不影响规划的字段变了；"
+            f"上一次规划在 {int(since)} 秒前，{MIN_REPLAN_SECONDS} 秒内不重新规划"),
+        "held_reason": "no_material_change",
+        "held_attempts": 0,
+    }
+
+
 def run_planner(
     *,
     state_dir: Path,
@@ -469,6 +530,12 @@ def run_planner(
         if held is not None and not dry_run:
             summary.update({"status": "held", **held})
             return summary
+        summary["planning_hash"] = state_planning_hash(state)
+        paced = replan_pacing_hold(
+            read_last_decision(state_dir), summary["planning_hash"], now=now)
+        if paced is not None and not dry_run:
+            summary.update({"status": "held", **paced})
+            return summary
         if dry_run or model_config_path is None:
             prompt_report = prompt_size_report(state)
             summary["prompt_input"] = prompt_report
@@ -537,6 +604,9 @@ def run_planner(
             return summary
         summary["replayed"] = bool(call.get("replayed"))
         summary["cost_micros"] = int(call.get("cost_micros") or 0)
+        record_decision(state_dir, state_hash=state["content_hash"],
+                        planning_hash=summary["planning_hash"],
+                        at=now.isoformat(timespec="microseconds"))
         try:
             plan = plan_from_response(
                 state, call["text"], created_at=now.isoformat(timespec="microseconds"))
@@ -607,4 +677,7 @@ if __name__ == "__main__":  # pragma: no cover - exercised as a subprocess
     sys.exit(main())
 
 
-__all__ = ["MAX_COST_USD", "build_state", "main", "run_planner"]
+__all__ = [
+    "MAX_COST_USD", "MIN_REPLAN_SECONDS", "build_state", "main",
+    "replan_pacing_hold", "run_planner",
+]
