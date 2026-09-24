@@ -466,13 +466,17 @@ class PromptTests(unittest.TestCase):
         full = len(build_prompt(built).encode("utf-8"))
         with self.assertRaises(ResearchPlanInputTooLarge) as caught:
             # Far below every floor: the refusal must name every stage this
-            # small inventory can engage (four documents per company never
-            # reaches the readable-aggregation stage).
+            # inventory can engage.  Four documents per company still reach
+            # the tighter readable rungs (the ladder no longer stops at the
+            # first rung that aggregates nothing), and with no directed-reading
+            # feedback neither feedback stage engages.
             project_state_for_prompt(built, max_input_bytes=1)
         self.assertEqual(
             caught.exception.report["stages_applied"],
             ["drop_preview_triplets", "aggregate_unavailable_documents",
-             "slim_readable_document_identity", "digest_financial_models"])
+             "slim_readable_document_identity", "digest_financial_models",
+             "aggregate_readable_document_inventory", "compact_company_detail",
+             "aggregate_companies"])
 
     def test_stage_five_keeps_the_newest_documents_and_aggregates_the_rest(self):
         # 2026-09-16: the identity inventory grows with every document the
@@ -578,6 +582,173 @@ class PromptTests(unittest.TestCase):
             report["largest_companies"][0]["largest_fields"][0]["field"],
             "readable_documents",
         )
+
+
+def feedback_observation(company_ref, number, *, outcome="query_miss", text_bytes=600):
+    """One directed-reading observation shaped like the live store's rows."""
+
+    digest = f"{number:064x}"
+    row = {
+        "schema_version": "0.1",
+        "id": f"mission-document-research-feedback:{digest[:32]}",
+        "mission_version_ref": MISSION["id"], "company_ref": company_ref,
+        "created_at": f"2026-09-{(number % 28) + 1:02d}T{number % 24:02d}:00:00+00:00",
+        "outcome": outcome, "stage": "registered_document_retrieval",
+        "document_ref": f"sec:filing:{number % 5}",
+        "question": "资本开支拆分" * (text_bytes // 18),
+        "wants": "segment capex " * (text_bytes // 14),
+        "tried_query_terms": [f"term {number} {n}" for n in range(7)],
+        "missing_evidence": [], "recovery": None,
+        "meaning": "The bounded query found no matching excerpt.",
+        "suggested_actions": ["revise_query_terms", "bounded_document_read"],
+        "producer_ref": "worker:mission-document-research",
+        "content_hash": digest,
+    }
+    for key in ("admission", "plan", "inquiry", "question_version", "document_authority",
+                "search_proof", "draft_proof", "work_order", "result_envelope",
+                "candidate_evidence", "candidate_claim"):
+        row[f"{key}_ref"] = f"{key}:{digest[:32]}"
+        row[f"{key}_hash"] = digest
+    return row
+
+
+class FeedbackProjectionTests(unittest.TestCase):
+    """2026-09-24: directed-reading feedback grew without bound and the
+    planner refused every tick for six days (AMZN's field alone was 51KB, the
+    prompt 82.6KB against 64KB)."""
+
+    BOUND = 64_000
+
+    @staticmethod
+    def rebind(built):
+        from dalton_core.store import content_hash
+        built.pop("content_hash", None)
+        built["content_hash"] = content_hash(built)
+        return built
+
+    def amzn_like(self, rows=28):
+        built = state()
+        built["companies"][0]["document_research_feedback"] = [
+            feedback_observation(ACN, n, outcome=("query_miss", "no_verified_claim",
+                                                  "candidate_staged")[n % 3])
+            for n in range(rows)
+        ]
+        return self.rebind(built)
+
+    def test_the_live_shape_that_stalled_the_planner_now_fits(self):
+        built = self.amzn_like()
+        company = built["companies"][0]
+        self.assertGreater(len(canonical_json(company["document_research_feedback"])), 51_000)
+        self.assertGreater(len(build_prompt(built).encode("utf-8")), self.BOUND)
+
+        projected = project_state_for_prompt(built, max_input_bytes=self.BOUND)
+        prompt = build_prompt(projected)
+        meta = projected["prompt_projection"]
+        self.assertLessEqual(len(prompt.encode("utf-8")), self.BOUND)
+        self.assertEqual(meta["projected_prompt_bytes"], len(prompt.encode("utf-8")))
+        self.assertIn("slim_document_research_feedback", meta["stages_applied"])
+        self.assertNotIn("aggregate_companies", meta["stages_applied"])
+        # Every company is still listed.
+        self.assertEqual([c["company_ref"] for c in projected["companies"]], [ACN, IBM])
+        for row in projected["companies"][0]["document_research_feedback"]:
+            self.assertNotIn("admission_hash", row)
+            self.assertIn("tried_query_terms", row)
+
+    def test_aggregated_feedback_keeps_the_newest_and_accounts_for_every_row(self):
+        from dalton_core.research_planner import FEEDBACK_KEEP_LADDER
+        built = self.amzn_like(rows=60)
+        rows = built["companies"][0]["document_research_feedback"]
+        newest = sorted(rows, key=lambda row: (row["created_at"], row["id"]))[-1]["id"]
+        # A bound that the slim stage alone cannot reach.
+        projected = project_state_for_prompt(built, max_input_bytes=30_000)
+        meta = projected["prompt_projection"]
+        self.assertIn("aggregate_document_research_feedback", meta["stages_applied"])
+        keep = meta["document_research_feedback_keep_per_company"]
+        self.assertIn(keep, FEEDBACK_KEEP_LADDER)
+        company = projected["companies"][0]
+        summary = company["document_research_feedback_summary"]
+        self.assertEqual(len(company["document_research_feedback"]), keep)
+        self.assertEqual(summary["retained_recent"] + summary["aggregated"], 60)
+        self.assertEqual(sum(summary["by_outcome"].values()), summary["aggregated"])
+        self.assertTrue(summary["omitted_rows_hash"])
+        if keep:
+            self.assertEqual(company["document_research_feedback"][-1]["id"], newest)
+        self.assertIn("summary is not a finding", build_prompt(projected))
+
+    def worst_case(self, companies):
+        """Every term that grows per company, at its bound or far past it."""
+
+        built = state()
+        template = built["companies"][0]
+        rows = []
+        for index in range(companies):
+            ref = f"company:sec-cik:{index:010d}"
+            company = json.loads(canonical_json(template))
+            company.update({
+                "company_ref": ref, "ticker": f"T{index}",
+                "document_research_feedback": [
+                    feedback_observation(ref, n, text_bytes=1500) for n in range(40)],
+                "readable_documents": [
+                    dict(PromptTests.document(ref, index * 100 + n, preview_bytes=1200),
+                         doc_date=f"2026-08-{(n % 28) + 1:02d}")
+                    for n in range(30)],
+                "unavailable_documents": [
+                    {"document_ref": f"document:{ref}:u{n}", "reason": "source_not_readable"}
+                    for n in range(45)],
+                "financial_model": {"status": "projected", "rows": [
+                    {"line": f"line_{n}", "value": str(n)} for n in range(40)]},
+                "metrics_contested": [{"metric_ref": f"metric:{n}", "label": "x" * 80,
+                                       "units": ["usd", "pct", "count"]} for n in range(5)],
+                "dossier_feedback": {
+                    "feedback_ref": "dossier-repair-feedback:" + "a" * 32,
+                    "dossier_status": "insufficient_evidence",
+                    "repair_targets": [
+                        {"id": f"dossier-repair-target:{n:032x}", "detail": "缺" * 1000,
+                         "section": "s" * 1000, "check": "c" * 1000}
+                        for n in range(12)],
+                },
+            })
+            rows.append(company)
+        built["companies"] = rows
+        return self.rebind(built)
+
+    def test_any_number_of_companies_converges_under_the_bound(self):
+        for companies, bound in ((12, self.BOUND), (60, self.BOUND), (300, self.BOUND),
+                                 (300, 24_000)):
+            with self.subTest(companies=companies, bound=bound):
+                built = self.worst_case(companies)
+                projected = project_state_for_prompt(built, max_input_bytes=bound)
+                size = len(build_prompt(projected).encode("utf-8"))
+                meta = projected["prompt_projection"]
+                self.assertLessEqual(size, bound)
+                self.assertEqual(meta["projected_prompt_bytes"], size)
+                self.assertEqual(meta["companies_total"], companies)
+                carried = meta["companies_carried"]
+                self.assertEqual(len(projected["companies"]), carried)
+                self.assertGreaterEqual(carried, 1)
+                if carried < companies:
+                    summary = projected["companies_omitted_summary"]
+                    self.assertEqual(summary["count"], companies - carried)
+                    self.assertIn("aggregate_companies", meta["stages_applied"])
+                    self.assertIn("companies_omitted_summary", meta["notice"])
+                    # The leading companies are the ones carried.
+                    self.assertEqual(
+                        [c["company_ref"] for c in projected["companies"]],
+                        [c["company_ref"] for c in built["companies"][:carried]])
+                for company in projected["companies"]:
+                    # A repair target can still be cited by its exact id.
+                    self.assertEqual(
+                        len(company["dossier_feedback"]["repair_target_ids"]), 12)
+                    self.assertLessEqual(len(company["readable_documents"]), 1)
+
+    def test_twelve_companies_are_all_carried_at_the_live_bound(self):
+        projected = project_state_for_prompt(self.worst_case(12), max_input_bytes=self.BOUND)
+        self.assertEqual(projected["prompt_projection"]["companies_carried"], 12)
+        self.assertNotIn("companies_omitted_summary", projected)
+
+    def test_only_the_fixed_prompt_itself_can_still_refuse(self):
+        with self.assertRaises(ResearchPlanInputTooLarge):
+            project_state_for_prompt(self.worst_case(3), max_input_bytes=1)
 
 
 class PlanTests(unittest.TestCase):

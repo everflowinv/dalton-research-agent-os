@@ -42,6 +42,7 @@ from .mission_stage import (
     planned_spec_refs_from_directory,
 )
 from .research_planner import (
+    PROMPT_PROJECTION_REF,
     ResearchPlanInputTooLarge,
     ResearchPlanError,
     build_prompt,
@@ -327,6 +328,9 @@ def record_attempt(state_dir: Path, state_hash: str, summary: Mapping[str, Any])
         "attempts": int(previous.get("attempts") or 0) + 1,
         "reason": (str(summary.get("failure_reason"))[:300]
                    if summary.get("failure_reason") else None),
+        # A prompt that did not fit is a verdict of this projection rule, not
+        # of the state alone; a new rule may fit the same state.
+        "projection_rule_ref": PROMPT_PROJECTION_REF,
     }
     ordered = sorted(ledger.items(), key=lambda item: str(item[1].get("at") or ""),
                      reverse=True)[:MAX_LEDGER_ENTRIES]
@@ -353,6 +357,11 @@ def attempt_hold(
         return None
     plan_status = str(record.get("plan_status") or "")
     reason = record.get("reason")
+    if (plan_status == "input_too_large"
+            and record.get("projection_rule_ref") != PROMPT_PROJECTION_REF):
+        # Decided under an older projection rule (or before the ledger named
+        # one).  The same state may fit now, so it is asked once more.
+        return None
     if plan_status in TERMINAL_PLAN_STATUSES:
         return {
             "plan_status": "held",

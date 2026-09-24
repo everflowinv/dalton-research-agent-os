@@ -192,6 +192,28 @@ class PublishingTests(ChildTestCase):
         self.assertIsNone(summary["change_reason"])
         self.assertEqual(summary["moved_entry_refs"], [])
 
+    def test_a_duplicate_run_reports_the_next_date_as_of_the_run(self):
+        # 2026-09-24: META's duplicate run reported 2026-09-20 on 09-24 -- the
+        # field of the version it matched, fixed when that version was made.
+        first = run(self.args())
+        self.assertEqual(first["next_catalyst_date"], "2026-10-01")
+        summary = run(self.args(as_of="2026-10-02"))
+        self.assertEqual(summary["calendar_status"], "duplicate")
+        self.assertIsNone(summary["next_catalyst_date"])
+        self.assertIsNone(self.summary_on_disk()["next_catalyst_date"])
+        # The version itself is history and is not rewritten.
+        store = DaltonStore(str(self.state / "core.sqlite"))
+        self.addCleanup(store.close)
+        latest = CatalystCalendarAuthority(store).latest_version(COMPANY)
+        self.assertEqual(latest["id"], summary["calendar_version_ref"])
+        self.assertEqual(latest["next_catalyst_date"], "2026-10-01")
+
+    def test_a_duplicate_run_before_the_date_still_names_it(self):
+        run(self.args())
+        summary = run(self.args(as_of="2026-10-01"))
+        self.assertEqual(summary["calendar_status"], "duplicate")
+        self.assertEqual(summary["next_catalyst_date"], "2026-10-01")
+
     def test_a_moved_date_publishes_a_driver_event_and_names_what_moved(self):
         run(self.args())
         moved = json.loads(self.fixture.read_text(encoding="utf-8"))
