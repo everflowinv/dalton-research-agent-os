@@ -5332,7 +5332,8 @@ class WriterServer:
         return self._claim_retirement_challenges
 
     def _claim_review_driver(self) -> Any:
-        from .claim_review import ClaimReviewDriver, needles_from_plans
+        from .claim_review import ClaimReviewDriver, needles_from_plans, review_spool
+        from .claim_subject import writer_feed_plans
 
         plans = []
         for coordinator in (
@@ -5342,9 +5343,23 @@ class WriterServer:
         ):
             if coordinator is not None:
                 plans.append(coordinator.plan)
+        # W7: the feed plans carry what each company is called.
+        plans.extend(writer_feed_plans(self))
+        # 2026-09-24: the originals of feed, wiki and Guidepoint Claims are in
+        # whichever root their child wrote to -- ``<state>/connector-spool``
+        # unless told otherwise -- never in the transcript spool alone.  Read
+        # every root the acquisition path reads; every object is re-hashed.
+        extra_roots = []
+        for launcher in self._lane_launchers.values():
+            configured = getattr(launcher, "spool_dir", None)
+            if configured is not None:
+                extra_roots.append(configured)
+        spool = review_spool(
+            self.state_dir, primary=self._transcript_spool, extra_roots=extra_roots,
+        )
         return ClaimReviewDriver(
             store=self.store, missions=self.coverage_mission,
-            challenges=self.claim_retirement_challenges, spool=self._transcript_spool,
+            challenges=self.claim_retirement_challenges, spool=spool,
             needles=needles_from_plans(plans),
         )
 

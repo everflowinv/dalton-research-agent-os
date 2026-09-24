@@ -11,6 +11,7 @@ is read, and is only withdrawn if the retirement lane happens to get to it.
 from __future__ import annotations
 
 import tempfile
+from contextlib import ExitStack
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -308,9 +309,18 @@ class MultiSubjectAdmissionTests(unittest.TestCase):
         self.rule_ref = DOCUMENT_QUALITATIVE_RULE_REF
 
     def _plan(self, subjects):
-        return patch.object(type(self.h.service), "statement_subjects",
-                            return_value=lambda statement: {"subjects": list(subjects),
-                                                            "basis": "test"})
+        # These tests are about candidate identity, so the span-names-subject
+        # hold (2026-09-24) is switched off: the fixture quote is from an
+        # Accenture call and would, rightly, hold the second subject's Claim.
+        # The hold itself is covered by test_document_extraction_claim_quality.
+        stack = ExitStack()
+        stack.enter_context(patch.object(
+            type(self.h.service), "statement_subjects",
+            return_value=lambda statement: {"subjects": list(subjects), "basis": "test"}))
+        stack.enter_context(patch.object(
+            type(self.h.service), "admission_subject_check",
+            return_value=lambda subject_ref, span: None))
+        return stack
 
     def admit(self):
         review = self.h.missions.document_review(self.review["review_id"])
@@ -354,6 +364,23 @@ class MultiSubjectAdmissionTests(unittest.TestCase):
         self.assertEqual([entry["candidate_claim_ref"] for entry in again["admitted"]],
                          [entry["candidate_claim_ref"] for entry in first["admitted"]])
         self.assertEqual(self.h.counts(), settled)
+
+    def test_a_second_subject_the_span_never_names_is_held_not_minted(self):
+        # 2026-09-24: the real check, unpatched.  The quote is from Accenture's
+        # own call (its title names Accenture), so Accenture's Claim is
+        # admitted; nothing in the span names the other vendor, so its Claim
+        # is staged for a person and the Ledger gains one Claim, not two.
+        primary, other = self.review["company_ref"], next(
+            ref for ref in self.members if ref != self.review["company_ref"])
+        before = self.h.counts()
+        with patch.object(type(self.h.service), "statement_subjects",
+                          return_value=lambda statement: {"subjects": [primary, other],
+                                                          "basis": "test"}):
+            result = self.admit()
+        self.assertEqual([entry["status"] for entry in result["admitted"]], ["admitted", "held"])
+        self.assertIn("held for human review", result["admitted"][1]["reason"])
+        self.assertTrue(result["admitted"][1]["candidate_claim_ref"].startswith("candidate-claim-version:"))
+        self.assertEqual(self.h.counts()["claim_versions"] - before["claim_versions"], 1)
 
     def test_the_single_subject_key_is_the_one_it_has_always_been(self):
         # B3: the review's own company must keep byte-identical identity, or

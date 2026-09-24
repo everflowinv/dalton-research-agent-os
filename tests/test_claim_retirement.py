@@ -78,7 +78,9 @@ class ClaimRetirementHarness(unittest.TestCase):
         self.missions.create_mission(self.mission_ref, **params)
 
     def claim(self, *, subject: str = EPAM, statement: str = "Management described LED demand.",
-              source: str | None = OFF_TOPIC, kind: str = "qualitative", value=None) -> dict[str, str]:
+              source: str | None = OFF_TOPIC, kind: str = "qualitative", value=None,
+              span: tuple[int, int] = (0, 10), document_ref: str | None = None,
+              store_source: bool = True) -> dict[str, str]:
         """One Claim with the citation chain that binds it to an exact original."""
 
         self._seq += 1
@@ -97,7 +99,8 @@ class ClaimRetirementHarness(unittest.TestCase):
         if source is not None:
             body = source.encode("utf-8")
             digest = hashlib.sha256(body).hexdigest()
-            self.objects[digest] = body
+            if store_source:
+                self.objects[digest] = body
         with self.store._transaction() as cur:
             cur.execute(
                 "INSERT INTO claim_versions(claim_version_id,claim_ref,version_number,claim_json,content_hash,created_at) "
@@ -129,14 +132,14 @@ class ClaimRetirementHarness(unittest.TestCase):
                     (correction, f"transcript-correction-set:test:{n}", 1,
                      f"manifest:{n}", "0" * 64, digest,
                      json.dumps({"id": correction, "source_content_hash": digest,
-                                 "document_ref": f"alphaengine-doc:{n}"}, sort_keys=True),
+                                 "document_ref": document_ref or f"alphaengine-doc:{n}"}, sort_keys=True),
                      "0" * 64, AUTOMATION, claim["created_at"]),
                 )
                 cur.execute(
                     "INSERT INTO transcript_claim_citation_bindings(binding_id,correction_set_version_ref,"
                     "source_manifest_ref,source_manifest_hash,source_content_hash,source_start,source_end,"
                     "claim_eligible,record_json,content_hash,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                    (binding, correction, f"manifest:{n}", "0" * 64, digest, 0, 10, 1,
+                    (binding, correction, f"manifest:{n}", "0" * 64, digest, span[0], span[1], 1,
                      json.dumps({"id": binding, "correction_set_version_ref": correction}, sort_keys=True),
                      "0" * 64, claim["created_at"]),
                 )
@@ -186,7 +189,7 @@ class AuthorityTests(ClaimRetirementHarness):
             reason_code="subject_absent_from_source", rationale="原文里没有 epam", actor_ref=AUTOMATION)
         self.assertEqual(record["status"], "fresh")
         self.assertEqual(record["subject_ref"], EPAM)
-        self.assertEqual(record["detector_ref"], "claim-detector:subject-absent-from-source:v1")
+        self.assertEqual(record["detector_ref"], "claim-detector:subject-absent-from-source:v2")
         again = self.authority.challenge(
             claim_version_ref=claim["ref"], claim_version_hash=claim["hash"],
             reason_code="subject_absent_from_source", rationale="再来一次", actor_ref=AUTOMATION)

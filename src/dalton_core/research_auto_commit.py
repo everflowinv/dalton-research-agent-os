@@ -219,6 +219,41 @@ def document_qualitative_content_rejection(
     return None
 
 
+def document_qualitative_subject_rejection(
+    *, subject_ref: Any, cited_span: Any, needles: Any, document_is_own: bool,
+) -> str | None:
+    """Why the document qualitative rule holds a candidate for its subject, or None.
+
+    2026-09-24 audit: the extraction prompt invited findings about "its
+    industry, its customers or its named competitors" and every one was filed
+    under the window's company -- CoreWeave's customer concentration as an
+    AMZN Claim.  The rule now admits a statement only against a cited span that
+    names the company it is filed under (a name, the ticker or a known alias),
+    unless the document is the company's own (filing by accession, or a title
+    or head that names it), where "we" is the company.  An industry subject is
+    about no company and is not checked.
+
+    Like ``document_qualitative_content_rejection`` this is asked by the caller
+    before the commit, because it needs the cited bytes and the gate below
+    sees only Core rows.  Unlike it, the answer is a hold: the candidate stays
+    staged for a person rather than being refused.
+    """
+
+    from .claim_subject import span_names_subject_for_admission
+
+    if str(subject_ref).startswith("industry:"):
+        return None
+    needles = [str(item) for item in (needles or ())]
+    if span_names_subject_for_admission(
+        span=cited_span, needles=needles, document_is_own=document_is_own,
+    ):
+        return None
+    return ("held for human review: the cited span never names the subject "
+            f"({', '.join(needles[:4])}) and the document is not its own; the "
+            "document qualitative rule admits a statement only against a span "
+            "that names the company it is filed under")
+
+
 def _authorize_document_qualitative(
     *, connection: sqlite3.Connection, policy_version: Mapping[str, Any],
     evidence_wire: Mapping[str, Any], claim_wire: Mapping[str, Any],

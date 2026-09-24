@@ -27,7 +27,12 @@ the detector at retirement time rather than trusting the caller:
 
 - ``subject_absent_from_source``: the subject's ticker and name never appear
   in the exact original the Claim cites.  Not a judgment about the statement;
-  a fact about the bytes that were read.
+  a fact about the bytes that were read.  Since v2 it also fires at span
+  level: the exact span the Claim cites *and* the Claim's own statement both
+  never name the subject, in a document that is not the subject's own (see
+  ``claim_subject``).  A morning digest names every covered company somewhere,
+  so the whole-document test alone let an industry fact filed under one of
+  them through.
 - ``boilerplate_disclaimer``: the shared boilerplate filter the drafting path
   already applies, applied retroactively to Claims admitted before it existed.
 
@@ -57,14 +62,15 @@ REASON_CODES: tuple[str, ...] = (
     "human_judgment",
 )
 DETERMINISTIC_REASONS = frozenset({"subject_absent_from_source", "boilerplate_disclaimer"})
-SUBJECT_DETECTOR_REF = "claim-detector:subject-absent-from-source:v1"
+# v2: span level as well as document level (claim_subject.subject_absent_from_citation).
+SUBJECT_DETECTOR_REF = "claim-detector:subject-absent-from-source:v2"
 BOILERPLATE_DETECTOR_REF = "claim-detector:boilerplate-disclaimer:v1"
 DETECTOR_REFS = {
     "subject_absent_from_source": SUBJECT_DETECTOR_REF,
     "boilerplate_disclaimer": BOILERPLATE_DETECTOR_REF,
 }
 REASON_LABELS = {
-    "subject_absent_from_source": "引用的原文里从头到尾没有出现这家公司",
+    "subject_absent_from_source": "引用的原文（或所引片段及结论本身）没有提到这家公司",
     "boilerplate_disclaimer": "这是免责声明或套话，不是研究结论",
     "human_judgment": "你的判断",
 }
@@ -139,22 +145,64 @@ def subject_absent_from_source(text: str, needles: Sequence[str]) -> bool:
     return not any(needle in lowered for needle in needles)
 
 
+def subject_absent(
+    *,
+    statement: str,
+    source_text: str | None,
+    needles: Sequence[str],
+    cited_span: str | None = None,
+    document_is_own: bool = False,
+) -> str | None:
+    """Which form of the subject-absent rule fires: "document", "span" or None."""
+
+    from .claim_subject import subject_absent_from_citation
+
+    if source_text is None:
+        return None
+    if subject_absent_from_source(source_text, needles):
+        return "document"
+    if cited_span is not None and subject_absent_from_citation(
+        span=cited_span, statement=statement, needles=needles,
+        document_is_own=document_is_own,
+    ):
+        return "span"
+    return None
+
+
 def detect(
     *,
     statement: str,
     source_text: str | None,
     needles: Sequence[str],
+    cited_span: str | None = None,
+    document_is_own: bool = False,
 ) -> tuple[str, str] | None:
-    """The first deterministic reason this Claim should be retired, or None."""
+    """The first deterministic reason this Claim should be retired, or None.
+
+    ``cited_span`` is the exact text the Claim's citation binds.  Without it
+    only the whole-document rule can fire, which is how every caller behaved
+    before the span rule existed.
+    """
 
     if statement_is_boilerplate(statement):
         return ("boilerplate_disclaimer", "这条陈述命中了免责声明/套话过滤器，没有断言任何研究观点。")
-    if source_text is not None and subject_absent_from_source(source_text, needles):
-        names = "、".join(needles)
+    which = subject_absent(
+        statement=statement, source_text=source_text, needles=needles,
+        cited_span=cited_span, document_is_own=document_is_own,
+    )
+    names = "、".join(needles)
+    if which == "document":
         return (
             "subject_absent_from_source",
-            f"引用的原文全文（{len(source_text):,} 字）里没有出现 {names} 中的任何一个，"
+            f"引用的原文全文（{len(source_text or ''):,} 字）里没有出现 {names} 中的任何一个，"
             "这份原文不是关于这家公司的。",
+        )
+    if which == "span":
+        return (
+            "subject_absent_from_source",
+            f"这条结论所引的原文片段（{len(cited_span or ''):,} 字）和结论本身都没有出现 "
+            f"{names} 中的任何一个，且这份原文不是该公司自己的文件（标题/开头未提到它）；"
+            "它说的是别的公司或行业，被挂在了这家公司名下。",
         )
     return None
 
@@ -328,6 +376,8 @@ class ClaimRetirementAuthority:
         rationale: str,
         subject_needles: Sequence[str] = (),
         source_text: str | None = None,
+        cited_span: str | None = None,
+        document_is_own: bool = False,
     ) -> dict[str, Any]:
         """Retire or keep a challenged Claim.
 
@@ -368,7 +418,11 @@ class ClaimRetirementAuthority:
                     raise ClaimRetirementConflict(
                         "the original cannot be read; a Claim is never retired unverified"
                     )
-                if not subject_absent_from_source(source_text, list(subject_needles)):
+                if subject_absent(
+                    statement=claim["normalized_statement"], source_text=source_text,
+                    needles=list(subject_needles), cited_span=cited_span,
+                    document_is_own=document_is_own,
+                ) is None:
                     raise ClaimRetirementConflict("detector no longer fires for this Claim")
         wire = {
             "schema_version": SCHEMA_VERSION,
@@ -416,6 +470,7 @@ __all__ = [
     "REASON_LABELS",
     "SUBJECT_DETECTOR_REF",
     "detect",
+    "subject_absent",
     "subject_absent_from_source",
     "subject_needles",
 ]

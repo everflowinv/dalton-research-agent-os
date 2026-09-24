@@ -79,10 +79,14 @@ class ReadingLimitsTests(unittest.TestCase):
             first = h.service._source_context(**h.params)
             second = h.service._source_context(**{**h.params, "offset": 6000})
             self.assertEqual(first["end"], 6000)
-            self.assertEqual(first["quotes"][0]["source_end"], 600)
+            # At most the configured quote length, cut at a sentence or word.
+            self.assertLessEqual(first["quotes"][0]["source_end"], 600)
+            self.assertGreaterEqual(first["quotes"][0]["source_end"], 300)
+            self.assertEqual(first["quotes"][-1]["source_end"], 6000)
             self.assertEqual(first["next_offset"], second["offset"])
             self.assertNotEqual(content_hash(before), content_hash(first))
-            self.assertEqual(h.service._document_text(first)[:600], first["quotes"][0]["raw_text"])
+            head = first["quotes"][0]
+            self.assertEqual(h.service._document_text(first)[:head["source_end"]], head["raw_text"])
             with self.assertRaisesRegex(Exception, "differs from the bound source context"):
                 h.service._document_text({**first, "source_content_hash": "0" * 64})
             # Config must also reach receipt verification, not just slicing.

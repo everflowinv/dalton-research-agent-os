@@ -304,7 +304,12 @@ class DocumentExtractionTests(unittest.TestCase):
         first = h.generate()
         self.assertEqual(first['status'], 'succeeded', first)
         suggestion = first['suggestions'][0]
-        self.assertEqual(suggestion['citation']['raw_text'], ORIGINAL[:1200])
+        # Sentence-aligned quotes (2026-09-24): the first quote is a prefix of
+        # the original of at most 1,200 characters that ends a sentence.
+        raw = suggestion['citation']['raw_text']
+        self.assertEqual(raw, ORIGINAL[:len(raw)])
+        self.assertLessEqual(len(raw), 1200)
+        self.assertRegex(raw, r'[.!?;\n]["\')\]]*\s*$')
         self.assertEqual(suggestion['source_content_hash'], h.manifest['declared_content_sha256'])
         self.assertEqual(suggestion['citation_status'], 'pending_human_citation_admission')
         self.assertTrue(suggestion['hermetic_fixture'])
