@@ -295,6 +295,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 list(published.get("changes") or [])
                 if published["status"] == "fresh" else []
             )
+            # As of this run, not as of the version.  A version's own
+            # ``next_catalyst_date`` is fixed when it was published; a
+            # ``duplicate`` run hands back that older version, and reporting its
+            # field put 2026-09-20 in front of a reader on 2026-09-24.  The
+            # reader the rest of the system uses answers for today.
+            upcoming = authority.next_catalyst(args.company_ref, today)
             summary.update({
                 # A run whose filed half published while Yahoo was broken did
                 # its job and lost its forward-looking half. Neither
@@ -309,7 +315,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 "calendar_version_ref": published["id"],
                 "calendar_version_hash": published["content_hash"],
                 "entry_count": published["entry_count"],
-                "next_catalyst_date": published["next_catalyst_date"],
+                "next_catalyst_date": (
+                    upcoming["expected_date"] if upcoming is not None else None),
                 "change_reason": (
                     published["change_reason"] if published["status"] == "fresh"
                     else None
