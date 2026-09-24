@@ -1068,5 +1068,181 @@ class MissionDocumentResearchLaneTests(unittest.TestCase):
         self.assertEqual(lane_configuration(config), configured)
 
 
+    # -- 2026-09-24: one admission must not stop the lane -------------------
+
+    def _started_hold(self, admission: dict, ticket_ref: str | None = None) -> None:
+        from dalton_core.mission_document_research_lane import _read_holds
+
+        self.store.started(admission["id"])
+        holds = (
+            _read_holds(self.lane.holds_path)
+            if self.lane.holds_path.is_file() else {}
+        )
+        self.lane._hold(
+            holds, admission, reason="started_without_owned_live_ticket",
+            ticket_ref=ticket_ref, disposition="recovery_required",
+        )
+
+    def _owned_ticket(
+        self, admission: dict, suffix: str, status: str, started_at: str,
+    ) -> str:
+        ticket_ref = "mission-document-research:" + suffix
+        self.launcher.tickets[ticket_ref] = {
+            "id": ticket_ref, "status": status,
+            "summary": {"status": "complete" if status == "succeeded" else "failed"},
+            "admission_ref": admission["id"],
+            "admission_hash": admission["content_hash"],
+            "started_at": started_at,
+            "completed_at": started_at,
+        }
+        ticket_dir = self.launcher.tickets_dir / suffix
+        ticket_dir.mkdir()
+        (ticket_dir / "ticket.json").write_text("{}\n", encoding="utf-8")
+        return ticket_ref
+
+    def _resumable(self) -> None:
+        self.lane._execution_state = lambda _admission: {
+            "action": "resume", "reason": "outcome_commit_not_yet_finished",
+            "work_order_ref": None,
+        }
+
+    def test_several_owned_terminal_tickets_pick_newest_success_deterministically(self):
+        # The live shape of ...ca9bac39 on 2026-09-24: four owned terminal
+        # tickets, two succeeded and two failed, and a hold with no ticket.
+        admission = self.store.add(1)
+        self._started_hold(admission)
+        self._owned_ticket(admission, "1" * 24, "succeeded",
+                           "2026-09-12T00:14:27.425555+00:00")
+        newest_success = self._owned_ticket(
+            admission, "2" * 24, "succeeded", "2026-09-22T15:34:28.917873+00:00")
+        self._owned_ticket(admission, "3" * 24, "failed",
+                           "2026-09-18T13:25:46.522898+00:00")
+        self._owned_ticket(admission, "4" * 24, "failed",
+                           "2026-09-23T10:07:48.051431+00:00")
+        # A ticket of another admission hash is never a candidate.
+        other = dict(admission, content_hash="f" * 64)
+        self._owned_ticket(other, "5" * 24, "succeeded",
+                           "2026-09-23T23:00:00.000000+00:00")
+        self._resumable()
+
+        self.assertEqual(self.lane._owned_terminal_ticket_ref(admission),
+                         newest_success)
+        result = self.lane.dispatch_once()
+
+        self.assertEqual(result["status"], "resumed")
+        self.assertEqual(self.launcher.resumed[0]["prior_ticket_ref"],
+                         newest_success)
+
+    def test_owned_terminal_tickets_without_success_pick_the_newest(self):
+        admission = self.store.add(1)
+        self._owned_ticket(admission, "1" * 24, "failed",
+                           "2026-09-12T00:00:00.000000+00:00")
+        newest = self._owned_ticket(admission, "2" * 24, "orphaned",
+                                    "2026-09-20T00:00:00.000000+00:00")
+        self._owned_ticket(admission, "3" * 24, "failed",
+                           "2026-09-18T00:00:00.000000+00:00")
+        for _ in range(3):
+            self.assertEqual(self.lane._owned_terminal_ticket_ref(admission), newest)
+
+    def test_one_admissions_error_holds_it_and_the_tick_goes_on(self):
+        broken = self.store.add(1)
+        healthy = self.store.add(2)
+        self._started_hold(broken)
+        self._started_hold(healthy)
+        healthy_ticket = self._owned_ticket(
+            healthy, "2" * 24, "succeeded", "2026-09-22T00:00:00.000000+00:00")
+
+        def state(admission):
+            if admission["id"] == broken["id"]:
+                raise MissionDocumentResearchLaneError("unreadable recovery chain")
+            return {"action": "resume", "reason": "outcome_commit_not_yet_finished",
+                    "work_order_ref": None}
+
+        self.lane._execution_state = state
+        result = self.lane.dispatch_once()
+
+        self.assertEqual(result["status"], "resumed")
+        self.assertEqual(result["admission_ref"], healthy["id"])
+        self.assertEqual(self.launcher.resumed[0]["prior_ticket_ref"], healthy_ticket)
+        self.assertEqual(result["admission_errors"][0]["admission_ref"], broken["id"])
+        held = json.loads(self.lane.holds_path.read_text(encoding="utf-8"))["holds"]
+        # The broken admission keeps the hold it had: its reason is what an
+        # owner door keys on.
+        self.assertEqual(held[broken["id"]]["reason"],
+                         "started_without_owned_live_ticket")
+        self.assertNotIn(healthy["id"], held)
+
+    def test_an_unexpected_error_on_a_fresh_admission_holds_only_it(self):
+        first = self.store.add(1)
+        second = self.store.add(2)
+        original = self.launcher.start
+
+        def start(*, admission_ref, admission_hash):
+            if admission_ref == first["id"]:
+                raise OSError("disk full")
+            return original(admission_ref=admission_ref, admission_hash=admission_hash)
+
+        self.launcher.start = start
+        result = self.lane.dispatch_once()
+
+        self.assertEqual(result["status"], "launched")
+        self.assertEqual(result["admission_ref"], second["id"])
+        held = json.loads(self.lane.holds_path.read_text(encoding="utf-8"))["holds"]
+        self.assertTrue(held[first["id"]]["reason"].startswith("dispatch_error:OSError"))
+        self.assertEqual(held[first["id"]]["disposition"], "recovery_required")
+
+    def _finish_latest(self) -> None:
+        pointer = json.loads(self.lane.latest_path.read_text(encoding="utf-8"))
+        ticket = self.launcher.tickets.setdefault(pointer["ticket_ref"], {
+            "id": pointer["ticket_ref"],
+        })
+        ticket.update({"status": "succeeded", "summary": {"status": "complete"}})
+
+    def test_recoveries_and_fresh_admissions_take_turns_for_the_one_slot(self):
+        first = self.store.add(1)
+        second = self.store.add(2)
+        fresh = self.store.add(3)
+        self._started_hold(first)
+        self._started_hold(second)
+        self._owned_ticket(first, "1" * 24, "failed", "2026-09-20T00:00:00+00:00")
+        self._owned_ticket(second, "2" * 24, "failed", "2026-09-20T00:00:00+00:00")
+        self._resumable()
+
+        one = self.lane.dispatch_once()
+        self.assertEqual((one["status"], one["admission_ref"]),
+                         ("resumed", first["id"]))
+        self.assertEqual(one["recoveries_queued"], 1)
+        self._finish_latest()
+        self.store.completed(first["id"])
+        two = self.lane.dispatch_once()
+        self.assertEqual((two["status"], two["admission_ref"]),
+                         ("launched", fresh["id"]))
+        self._finish_latest()
+        self.store.completed(fresh["id"])
+        three = self.lane.dispatch_once()
+        self.assertEqual((three["status"], three["admission_ref"]),
+                         ("resumed", second["id"]))
+
+    def test_recovery_sweep_is_capped_per_tick_and_resumes_where_it_stopped(self):
+        admissions = [self.store.add(ordinal) for ordinal in range(1, 6)]
+        for admission in admissions:
+            self._started_hold(admission)
+        seen: list[str] = []
+
+        def state(admission):
+            seen.append(admission["id"])
+            return {"action": "recovery_required", "reason": "send_state_unproved",
+                    "work_order_ref": None}
+
+        self.lane._execution_state = state
+        with patch("dalton_core.mission_document_research_lane."
+                   "MAX_RECOVERY_EVALUATIONS_PER_TICK", 2):
+            self.lane.dispatch_once()
+            self.lane.dispatch_once()
+            self.lane.dispatch_once()
+        refs = [admission["id"] for admission in admissions]
+        self.assertEqual(seen, refs[0:2] + refs[2:4] + [refs[4], refs[0]])
+
+
 if __name__ == "__main__":
     unittest.main()

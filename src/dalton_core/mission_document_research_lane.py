@@ -35,6 +35,20 @@ HOLDS_FILE = "holds.json"
 # in ``holds.json``: the hold ledger's shape is closed and content-sealed, and
 # an installed writer must be able to read the file it already has.
 ESCAPES_FILE = "recovery-escapes.json"
+# The lane's memory of whose turn the one child slot is, and where a capped
+# recovery sweep stopped.  Advisory: an unreadable file means "no memory",
+# which is the pre-existing order (recoveries first, oldest first).
+TURN_FILE = "dispatch-turn.json"
+# How many held admissions one tick re-classifies (reads their typed recovery
+# state and rewrites their hold).  Every one of them is read-only bookkeeping;
+# the cap only bounds a tick's latency when the hold ledger is long.  When it
+# is hit the next tick starts after the last admission this one looked at, so
+# every hold is reached.  Live on 2026-09-24 the ledgers held 20 (legacy) and
+# 6 (ws-7d) admissions, so one tick covers all of them.
+MAX_RECOVERY_EVALUATIONS_PER_TICK = 25
+# Prefix of the hold reason written for an admission whose own evaluation
+# raised.  The tick goes on for every other admission.
+DISPATCH_ERROR_REASON = "dispatch_error"
 # The hold reason for a controlled re-entry that failed again *after* the lane
 # had already rebound this admission onto a new ticket identity by itself.
 # Automatic once, then a person -- the same rule the two retry doors follow.
@@ -489,7 +503,30 @@ class MissionDocumentResearchCoordinator:
     def _owned_terminal_ticket_ref(
         self, admission: Mapping[str, Any],
     ) -> str | None:
-        matches = []
+        """The one terminal ticket a ``ticket_ref: None`` hold re-enters from.
+
+        An admission that has been re-entered (or rebound after a release
+        renamed its ticket identity) owns several terminal tickets; live on
+        2026-09-24 ``...ca9bac39`` owned four -- two succeeded, two failed,
+        09-12 to 09-22 -- and raising here stopped the whole lane every tick.
+        Several owned tickets are the expected history, not a conflict, so the
+        lane picks one by a fixed rule:
+
+        1. the newest ticket whose child exited cleanly (``succeeded``): its
+           summary is complete and written by the child itself, which is what
+           the launcher archives and checks before a controlled re-entry;
+        2. otherwise the newest terminal ticket of any status.
+
+        "Newest" is ``started_at`` then ``completed_at``, ties broken by the
+        ticket ref.  The rule must be deterministic, not just reasonable: the
+        re-entry authorization names the prior ticket, and the launcher's
+        one-shot claim ledger is keyed on it, so a choice that could differ
+        between ticks would hand the same admission one fresh paid attempt per
+        ticket it owns.  Tickets of a different admission hash are never
+        candidates.
+        """
+
+        matches: list[tuple[bool, str, str, str]] = []
         for path in self.launcher.tickets_dir.glob("*/ticket.json"):
             ticket_ref = "mission-document-research:" + path.parent.name
             try:
@@ -501,12 +538,63 @@ class MissionDocumentResearchCoordinator:
                 and ticket.get("admission_ref") == admission["id"]
                 and ticket.get("admission_hash") == admission["content_hash"]
             ):
-                matches.append(ticket_ref)
-        if len(matches) > 1:
-            raise MissionDocumentResearchLaneError(
-                "document research admission has multiple owned terminal tickets"
+                matches.append((
+                    ticket.get("status") == "succeeded",
+                    str(ticket.get("started_at") or ""),
+                    str(ticket.get("completed_at") or ""),
+                    ticket_ref,
+                ))
+        if not matches:
+            return None
+        return max(matches)[3]
+
+    def _read_turn(self) -> dict[str, Any]:
+        empty = {"schema_version": "0.1", "last_spawn": None,
+                 "recovery_cursor": None}
+        path = self.launcher.tickets_dir / TURN_FILE
+        if not path.is_file():
+            return empty
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return empty
+        if not isinstance(value, Mapping):
+            return empty
+        last = value.get("last_spawn")
+        cursor = value.get("recovery_cursor")
+        return {
+            "schema_version": "0.1",
+            "last_spawn": last if last in {"recovery", "fresh"} else None,
+            "recovery_cursor": cursor if isinstance(cursor, str) else None,
+        }
+
+    def _write_turn(self, previous: Mapping[str, Any], **changes: Any) -> None:
+        record = {**previous, **changes, "schema_version": "0.1"}
+        if record != dict(previous):
+            write_owner_only(self.launcher.tickets_dir / TURN_FILE, record)
+
+    def _isolate_admission_error(
+        self, holds: dict[str, dict[str, Any]], admission: Mapping[str, Any],
+        exc: BaseException, errors: list[dict[str, Any]],
+    ) -> None:
+        """One admission's failure is that admission's hold, not the tick's.
+
+        An admission with no hold yet is held ``recovery_required`` under a
+        ``dispatch_error:`` reason, which the recovery sweep evaluates again
+        next tick.  An admission already held keeps its hold untouched: its
+        reason is what the owner's doors key on, and an escalation must not be
+        downgraded into a generic error.  Either way the error is in the tick's
+        result.  Integrity failures of the lane's own ledgers (hold, latest
+        pointer, admission hash drift) are raised before this is reached.
+        """
+
+        reason = f"{DISPATCH_ERROR_REASON}:{type(exc).__name__}:{exc}"[:300]
+        errors.append({"admission_ref": admission["id"], "error": reason})
+        if admission["id"] not in holds:
+            self._hold(
+                holds, admission, reason=reason, ticket_ref=None,
+                disposition="recovery_required",
             )
-        return matches[0] if matches else None
 
     def _admissions(self) -> list[dict[str, Any]]:
         try:
@@ -1563,6 +1651,7 @@ class MissionDocumentResearchCoordinator:
             _write_holds(self.holds_path, holds)
         latest = self._latest()
         settled = None
+        errors: list[dict[str, Any]] = []
         if latest is not None and latest["admission_ref"] in by_ref:
             admission = by_ref[latest["admission_ref"]]
             if latest["admission_hash"] != admission["content_hash"]:
@@ -1593,6 +1682,10 @@ class MissionDocumentResearchCoordinator:
                     # This admission's chain is a person's errand; the tick
                     # continues for every other admission below.
                     recovery = _hint_drift_recovery(exc)
+                except Exception as exc:  # noqa: BLE001 - isolated to this admission
+                    reason = f"{DISPATCH_ERROR_REASON}:{type(exc).__name__}:{exc}"[:300]
+                    errors.append({"admission_ref": admission["id"], "error": reason})
+                    recovery = {"action": "recovery_required", "reason": reason}
                 settled["recovery"] = recovery
                 if recovery["action"] == "waiting":
                     self._hold(
@@ -1609,9 +1702,13 @@ class MissionDocumentResearchCoordinator:
                         )
                     except LaneChildConflict as exc:
                         return {"status": "busy", "reason": str(exc), "last": settled}
-                    except LaneChildRejected as exc:
-                        reason = self._reentry_hold_reason(
-                            admission, ticket["id"], recovery, exc)
+                    except Exception as exc:  # noqa: BLE001 - held, tick goes on
+                        reason = (
+                            self._reentry_hold_reason(
+                                admission, ticket["id"], recovery, exc)
+                            if isinstance(exc, LaneChildRejected) else
+                            f"{DISPATCH_ERROR_REASON}:{type(exc).__name__}:{exc}"[:300]
+                        )
                         self._hold(
                             holds, admission, reason=reason,
                             ticket_ref=ticket["id"],
@@ -1624,6 +1721,7 @@ class MissionDocumentResearchCoordinator:
                     else:
                         if holds.pop(admission["id"], None) is not None:
                             _write_holds(self.holds_path, holds)
+                        self._write_turn(self._read_turn(), last_spawn="recovery")
                         return result
                 if recovery is not None:
                     disposition = (
@@ -1637,10 +1735,21 @@ class MissionDocumentResearchCoordinator:
                     )
 
         now = self.clock().astimezone(timezone.utc)
+        turn = self._read_turn()
+        # The launcher runs one child at a time (a second spawn is a
+        # LaneChildConflict), so a tick can start at most one run.  What a
+        # tick can do for many admissions is everything short of the spawn:
+        # re-classify every held admission, and line up every one that is
+        # ready to re-enter.  Only then is the one slot handed out -- and it
+        # alternates between a recovery and a fresh admission whenever both
+        # are waiting, so twenty owner-authorized recoveries no longer keep
+        # every new admission out for twenty runs.
+        recoveries: list[dict[str, Any]] = []
+
         # A model-policy/profile outage can fail the child before it writes a
-        # start or any model Work.  Re-enter at most one exact sealed failure
-        # per tick through the launcher's existing one-shot claim ledger.  No
-        # paid recovery authority is created, and every broader terminal hold
+        # start or any model Work.  Re-enter such an exact sealed failure
+        # through the launcher's existing one-shot claim ledger.  No paid
+        # recovery authority is created, and every broader terminal hold
         # continues through the ordinary hold path below.
         for admission in admissions:
             held = holds.get(admission["id"])
@@ -1650,37 +1759,33 @@ class MissionDocumentResearchCoordinator:
                 raise MissionDocumentResearchLaneError(
                     "document research hold admission hash drifted"
                 )
-            recovery = self._preexecution_model_authority_revalidation(
-                admission, held
-            )
+            try:
+                recovery = self._preexecution_model_authority_revalidation(
+                    admission, held
+                )
+            except Exception as exc:  # noqa: BLE001 - isolated to this admission
+                self._isolate_admission_error(holds, admission, exc, errors)
+                continue
             if recovery is None:
                 continue
-            try:
-                result = self._resume(
-                    admission, ticket_ref=held["ticket_ref"],
-                    recovery=recovery, settled=settled,
-                )
-            except LaneChildConflict as exc:
-                return {"status": "busy", "reason": str(exc), "last": settled}
-            except LaneChildRejected as exc:
-                self._hold(
-                    holds, admission,
-                    reason=self._reentry_hold_reason(
-                        admission, held["ticket_ref"], recovery, exc),
-                    ticket_ref=held["ticket_ref"], disposition="terminal_hold",
-                )
-                continue
-            holds.pop(admission["id"], None)
-            _write_holds(self.holds_path, holds)
-            return result
+            recoveries.append({
+                "admission": admission, "ticket_ref": held["ticket_ref"],
+                "recovery": recovery, "held_ticket_ref": held["ticket_ref"],
+                "rejected_disposition": "terminal_hold",
+            })
 
-        for admission in admissions:
+        queued = {item["admission"]["id"] for item in recoveries}
+        cursor = turn["recovery_cursor"]
+        order = list(admissions)
+        if cursor is not None:
+            refs = [admission["id"] for admission in order]
+            if cursor in refs:
+                split = refs.index(cursor) + 1
+                order = order[split:] + order[:split]
+        evaluated = deferred = 0
+        last_evaluated = None
+        for admission in order:
             held = holds.get(admission["id"])
-            legacy_day_hold = (
-                held is not None
-                and held["disposition"] == "recovery_required"
-                and held["reason"] == "fresh_work_recovery_deadline_exceeded"
-            )
             if held is None or held["disposition"] not in {
                 "recovery_wait", "recovery_required",
             }:
@@ -1700,6 +1805,13 @@ class MissionDocumentResearchCoordinator:
                     ) from exc
                 if now < retry_at:
                     continue
+            if admission["id"] in queued:
+                continue
+            if evaluated >= MAX_RECOVERY_EVALUATIONS_PER_TICK:
+                deferred += 1
+                continue
+            evaluated += 1
+            last_evaluated = admission["id"]
             try:
                 recovery = self._execution_state(admission)
             except MissionDocumentResearchHintDrift:
@@ -1709,6 +1821,9 @@ class MissionDocumentResearchCoordinator:
                     holds, admission, reason=HINT_DRIFT_HOLD_REASON,
                     ticket_ref=held["ticket_ref"], disposition="recovery_required",
                 )
+                continue
+            except Exception as exc:  # noqa: BLE001 - isolated to this admission
+                self._isolate_admission_error(holds, admission, exc, errors)
                 continue
             if recovery["action"] == "waiting":
                 self._hold(
@@ -1726,35 +1841,27 @@ class MissionDocumentResearchCoordinator:
                                  else "terminal_hold"),
                 )
                 continue
-            ticket_ref = held["ticket_ref"] or self._owned_terminal_ticket_ref(
-                admission
-            )
+            try:
+                ticket_ref = held["ticket_ref"] or self._owned_terminal_ticket_ref(
+                    admission
+                )
+            except Exception as exc:  # noqa: BLE001 - isolated to this admission
+                self._isolate_admission_error(holds, admission, exc, errors)
+                continue
             if ticket_ref is None:
                 self._hold(
                     holds, admission, reason="controlled_reentry_ticket_unavailable",
                     ticket_ref=None, disposition="recovery_required",
                 )
                 continue
-            try:
-                result = self._resume(
-                    admission, ticket_ref=ticket_ref,
-                    recovery=recovery, settled=settled,
-                )
-            except LaneChildConflict as exc:
-                return {"status": "busy", "reason": str(exc), "last": settled}
-            except LaneChildRejected as exc:
-                self._hold(
-                    holds, admission,
-                    reason=self._reentry_hold_reason(
-                        admission, ticket_ref, recovery, exc),
-                    ticket_ref=held["ticket_ref"],
-                    disposition="recovery_required",
-                )
-                continue
-            holds.pop(admission["id"], None)
-            _write_holds(self.holds_path, holds)
-            return result
+            recoveries.append({
+                "admission": admission, "ticket_ref": ticket_ref,
+                "recovery": recovery, "held_ticket_ref": held["ticket_ref"],
+                "rejected_disposition": "recovery_required",
+            })
+        next_cursor = last_evaluated if deferred else None
 
+        fresh: list[Mapping[str, Any]] = []
         for admission in admissions:
             held = holds.get(admission["id"])
             if held is not None:
@@ -1763,38 +1870,99 @@ class MissionDocumentResearchCoordinator:
                         "document research hold admission hash drifted"
                     )
                 continue
-            if self._started(admission["id"]):
+            try:
+                started = self._started(admission["id"])
+            except Exception as exc:  # noqa: BLE001 - isolated to this admission
+                self._isolate_admission_error(holds, admission, exc, errors)
+                continue
+            if started:
                 self._hold(
                     holds, admission,
                     reason="started_without_owned_live_ticket",
                     ticket_ref=None, disposition="recovery_required",
                 )
                 continue
-            try:
-                ticket = self.launcher.start(
-                    admission_ref=admission["id"],
-                    admission_hash=admission["content_hash"],
+            fresh.append(admission)
+
+        def spawn_recovery() -> dict[str, Any] | None:
+            for index, item in enumerate(recoveries):
+                admission = item["admission"]
+                try:
+                    result = self._resume(
+                        admission, ticket_ref=item["ticket_ref"],
+                        recovery=item["recovery"], settled=settled,
+                    )
+                except LaneChildConflict as exc:
+                    return {"status": "busy", "reason": str(exc), "last": settled}
+                except LaneChildRejected as exc:
+                    self._hold(
+                        holds, admission,
+                        reason=self._reentry_hold_reason(
+                            admission, item["ticket_ref"], item["recovery"], exc),
+                        ticket_ref=item["held_ticket_ref"],
+                        disposition=item["rejected_disposition"],
+                    )
+                    continue
+                except Exception as exc:  # noqa: BLE001 - isolated to this admission
+                    self._isolate_admission_error(holds, admission, exc, errors)
+                    continue
+                holds.pop(admission["id"], None)
+                _write_holds(self.holds_path, holds)
+                self._write_turn(turn, last_spawn="recovery",
+                                 recovery_cursor=next_cursor)
+                result["recoveries_queued"] = len(recoveries) - index - 1
+                return result
+            return None
+
+        def spawn_fresh() -> dict[str, Any] | None:
+            for admission in fresh:
+                try:
+                    ticket = self.launcher.start(
+                        admission_ref=admission["id"],
+                        admission_hash=admission["content_hash"],
+                    )
+                except LaneChildConflict as exc:
+                    return {"status": "busy", "reason": str(exc), "last": settled}
+                except LaneChildRejected as exc:
+                    self._hold(
+                        holds, admission, reason=str(exc), ticket_ref=None
+                    )
+                    continue
+                except Exception as exc:  # noqa: BLE001 - isolated to this admission
+                    self._isolate_admission_error(holds, admission, exc, errors)
+                    continue
+                pointer = {
+                    "ticket_ref": ticket["id"],
+                    "admission_ref": admission["id"],
+                    "admission_hash": admission["content_hash"],
+                }
+                write_owner_only(
+                    self.latest_path,
+                    {**pointer, "content_hash": content_hash(pointer)},
                 )
-            except LaneChildConflict as exc:
-                return {"status": "busy", "reason": str(exc), "last": settled}
-            except LaneChildRejected as exc:
-                self._hold(
-                    holds, admission, reason=str(exc), ticket_ref=None
-                )
-                continue
-            pointer = {
-                "ticket_ref": ticket["id"],
-                "admission_ref": admission["id"],
-                "admission_hash": admission["content_hash"],
-            }
-            write_owner_only(
-                self.latest_path,
-                {**pointer, "content_hash": content_hash(pointer)},
-            )
-            return {
-                "status": "launched", "ticket_ref": ticket["id"],
-                "admission_ref": admission["id"], "last": settled,
-            }
+                self._write_turn(turn, last_spawn="fresh",
+                                 recovery_cursor=next_cursor)
+                return {
+                    "status": "launched", "ticket_ref": ticket["id"],
+                    "admission_ref": admission["id"], "last": settled,
+                    "recoveries_queued": len(recoveries),
+                }
+            return None
+
+        # Recoveries go first unless the previous run this lane started was
+        # itself a recovery and a fresh admission is waiting: then the fresh
+        # one gets this slot and the recoveries the next.
+        prefer_fresh = bool(fresh) and bool(recoveries) and (
+            turn["last_spawn"] == "recovery"
+        )
+        for spawn in ((spawn_fresh, spawn_recovery) if prefer_fresh
+                      else (spawn_recovery, spawn_fresh)):
+            spawned = spawn()
+            if spawned is not None:
+                if errors:
+                    spawned["admission_errors"] = errors
+                return spawned
+        self._write_turn(turn, recovery_cursor=next_cursor)
         detail = self._hold_detail(holds, admissions)
         status = (
             "recovery_required"
@@ -1844,7 +2012,7 @@ class MissionDocumentResearchCoordinator:
                 f"最早的一条的原因是「{needs_owner[0]['reason']}」。"
                 + (needs_owner[0]["owner_action"] or OWNER_AUTHORIZATION_NOTE)
             )
-        return {
+        result = {
             "status": status,
             "reason": reason,
             "held": len(holds),
@@ -1853,6 +2021,9 @@ class MissionDocumentResearchCoordinator:
             "plan_next_steps": next_steps,
             "last": settled,
         }
+        if errors:
+            result["admission_errors"] = errors
+        return result
 
 
 def authorize_reentry(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
