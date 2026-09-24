@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import stat
 import tempfile
@@ -11,6 +12,7 @@ from pathlib import Path
 
 from dalton_core.thesis_impact_budget import (
     ALERT_MAX_DELIVERY_ATTEMPTS,
+    SETTLED_OVERRUN_REASON,
     ThesisImpactBudgetConflict,
     ThesisImpactBudgetStore,
     ThesisImpactBudgetValidationError,
@@ -162,10 +164,48 @@ class DayAdmissionTests(unittest.TestCase):
             1_000_000,
         )
 
-    def test_settlement_cannot_exceed_admitted_reservation(self) -> None:
+    def test_settlement_above_the_reservation_is_booked_and_alerted(self) -> None:
+        # 2026-09-24: refusing this settlement left the admission open and
+        # threw out of the caller before it released its Scheduler lease --
+        # nineteen hours of "this request is already running" on the event
+        # lane.  The paid cost is booked, counts against the cap, and alerts.
         opened = admit(self.authority, work="work:over-settle", reserved=10_000)
-        with self.assertRaisesRegex(ThesisImpactBudgetConflict, "reservation"):
-            self.authority.settle(opened["admission_id"], actual_micros=10_001)
+        settled = self.authority.settle(
+            opened["admission_id"], actual_micros=274_000, usage_entry_ref="usage:o")
+        self.assertEqual(settled["status"], "fresh")
+        self.assertEqual(settled["actual_micros"], 274_000)
+        self.assertEqual(settled["overrun_micros"], 264_000)
+        self.assertEqual(self.authority.day_summary(
+            policy_version_id="budget-policy:day:1", day="2026-08-22",
+        )["committed_micros"], 274_000)
+        # Idempotent, and the alert is written once, in the same transaction.
+        self.assertEqual(self.authority.settle(
+            opened["admission_id"], actual_micros=274_000,
+            usage_entry_ref="usage:o")["status"], "duplicate")
+        with self.assertRaises(ThesisImpactBudgetConflict):
+            self.authority.settle(opened["admission_id"], actual_micros=10_000)
+        alerts = self.authority.pending_alerts()
+        self.assertEqual(len(alerts), 1)
+        self.assertEqual(alerts[0]["kind"], "day_budget_exceeded")
+        self.assertEqual(alerts[0]["work_order_ref"], "work:over-settle")
+        detail = json.loads(alerts[0]["detail_json"])
+        self.assertEqual(detail["reason"], SETTLED_OVERRUN_REASON)
+        self.assertEqual(
+            (detail["reserved_micros"], detail["actual_micros"],
+             detail["overrun_micros"]), (10_000, 274_000, 264_000))
+        # Not the reason that freezes every later admission: the next call is
+        # admitted, and what it may reserve already reflects the overrun.
+        self.assertNotEqual(detail["reason"], "model_reservation_overrun")
+        later = admit(self.authority, work="work:after-overrun", reserved=700_000)
+        self.assertEqual(later["status"], "fresh")
+        with self.assertRaises(ThesisImpactDayBudgetExceeded):
+            admit(self.authority, work="work:over-cap", reserved=30_000)
+
+    def test_settlement_within_the_reservation_raises_no_alert(self) -> None:
+        opened = admit(self.authority, work="work:in-budget", reserved=10_000)
+        settled = self.authority.settle(opened["admission_id"], actual_micros=10_000)
+        self.assertNotIn("overrun_micros", settled)
+        self.assertEqual(self.authority.pending_alerts(), [])
 
     def test_uncertain_historical_settlement_is_corrected_append_only(self) -> None:
         opened = admit(self.authority, work="work:unknown", reserved=100_000)

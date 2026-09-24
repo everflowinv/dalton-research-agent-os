@@ -7,7 +7,8 @@ durable decisions the owner can be alerted from.  It owns its own disposable
 owner-only SQLite: no Research Ledger, Scheduler, or broker handle.
 
 Reservations are per (work order, attempt, phase) and are settled to actual
-accounted cost after the call.  An admission without a settlement keeps
+accounted cost after the call -- including a cost above the reservation, which
+is settled as-is and raised as an owner alert.  An admission without a settlement keeps
 counting its full reservation, so a crash between the paid call and the
 settlement stays conservative instead of silently freeing budget.  Rejections
 are durable append-only decisions: the same admission identity can never be
@@ -38,6 +39,12 @@ SCHEMA_VERSION = "0.1"
 ALERT_KINDS = frozenset({"day_budget_exceeded", "work_order_failed"})
 ALERT_SEVERITIES = frozenset({"high", "medium"})
 ALERT_MAX_DELIVERY_ATTEMPTS = 5
+# A paid call that cost more than its reservation is settled at what it cost
+# and reported under this reason.  It must never be spelled
+# ``model_reservation_overrun``: that reason freezes every later admission
+# (see ``admit``) and is matched by ``lane_failure_class`` as a budget outage.
+SETTLED_OVERRUN_REASON = "settled_above_reservation"
+SETTLED_OVERRUN_ALERT_PREFIX = "thesis-impact-settled-overrun:"
 # C2's additions to a mission binding, named so a replay can tell "this
 # admission gained a dimension" from "this admission changed".
 _POOL_BINDING_KEYS = frozenset({"pool", "pool_caps_micros", "pool_lane"})
@@ -842,7 +849,23 @@ class ThesisImpactBudgetStore:
         actual_micros: int,
         usage_entry_ref: str | None = None,
     ) -> dict[str, Any]:
-        """Bind one admission to its actual accounted cost (idempotent)."""
+        """Bind one admission to its actual accounted cost (idempotent).
+
+        2026-09-24: an actual cost above the reservation is *settled*, not
+        refused.  The call has already been paid for; refusing the settlement
+        only left the admission open (charged at its reservation, against
+        every later day) and threw out of the caller before it released its
+        Scheduler lease -- which is how the event-judgement lane stood still
+        for nineteen hours behind "this request is already running".  The
+        overrun is booked at the actual cost, so it counts against the day
+        cap, the mission cap and the pool exactly like any other spend and
+        shrinks what later admissions may reserve.  It is recorded as an owner
+        alert in the same transaction (reason ``settled_above_reservation``),
+        deliberately *not* the ``model_reservation_overrun`` reason that
+        freezes every later admission: that freeze is for lanes that chose to
+        leave an overrun unsettled pending reconciliation, and there is
+        nothing left to reconcile once the actual cost is on the ledger.
+        """
 
         admission_id = _text(admission_id, "admission_id")
         actual_micros = _micros(actual_micros, "actual_micros")
@@ -860,16 +883,13 @@ class ThesisImpactBudgetStore:
         wire["content_hash"] = content_hash(wire)
         with self._transaction() as cur:
             admission = cur.execute(
-                "SELECT reserved_micros,pool FROM thesis_impact_day_admissions "
-                "WHERE admission_id=?",
+                "SELECT reserved_micros,pool,work_order_ref,attempt_number,phase,day "
+                "FROM thesis_impact_day_admissions WHERE admission_id=?",
                 (admission_id,),
             ).fetchone()
             if admission is None:
                 raise ThesisImpactBudgetConflict("settlement references no admission")
-            if actual_micros > int(admission["reserved_micros"]):
-                raise ThesisImpactBudgetConflict(
-                    "actual cost exceeds the admitted reservation"
-                )
+            overrun_micros = max(0, actual_micros - int(admission["reserved_micros"]))
             existing = cur.execute(
                 "SELECT record_json FROM thesis_impact_day_settlements "
                 "WHERE admission_id=?",
@@ -906,9 +926,35 @@ class ThesisImpactBudgetStore:
                     admission["pool"],
                 ),
             )
-        if admission["pool"] is None:
-            return {**wire, "status": "fresh"}
-        return {**wire, "status": "fresh", "pool": admission["pool"]}
+            if overrun_micros:
+                self._append_alert(
+                    cur,
+                    alert_id=SETTLED_OVERRUN_ALERT_PREFIX
+                    + content_hash({"admission_id": admission_id})[:32],
+                    kind="day_budget_exceeded",
+                    severity="medium",
+                    work_order_ref=admission["work_order_ref"],
+                    phase=admission["phase"],
+                    detail_json=canonical_json({
+                        "reason": SETTLED_OVERRUN_REASON,
+                        "admission_id": admission_id,
+                        "settlement_id": wire["settlement_id"],
+                        "attempt_number": admission["attempt_number"],
+                        "day": admission["day"],
+                        "pool": admission["pool"],
+                        "reserved_micros": int(admission["reserved_micros"]),
+                        "actual_micros": actual_micros,
+                        "overrun_micros": overrun_micros,
+                        "usage_entry_ref": usage_entry_ref,
+                    }),
+                    created_at=wire["created_at"],
+                )
+        extra: dict[str, Any] = {}
+        if admission["pool"] is not None:
+            extra["pool"] = admission["pool"]
+        if overrun_micros:
+            extra["overrun_micros"] = overrun_micros
+        return {**wire, "status": "fresh", **extra}
 
     def correct_uncertain_settlement(
         self, admission_id: str, *, settlement_id: str, corrected_micros: int,
@@ -1008,39 +1054,59 @@ class ThesisImpactBudgetStore:
         detail_json = canonical_json(dict(detail or {}))
         created_at = _utc(self.clock())
         with self._transaction() as cur:
-            row = cur.execute(
-                "SELECT kind,severity,work_order_ref,phase,detail_json "
-                "FROM thesis_impact_alerts WHERE alert_id=?",
-                (alert_id,),
-            ).fetchone()
-            if row is not None:
-                expected = (kind, severity, work_order_ref, phase, detail_json)
-                actual = tuple(row[field] for field in (
-                    "kind", "severity", "work_order_ref", "phase", "detail_json"
-                ))
-                if actual != expected:
-                    raise ThesisImpactBudgetConflict(
-                        "alert identity was reused with different semantics"
-                    )
-                return {"alert_id": alert_id, "status": "duplicate"}
-            cur.execute(
-                "INSERT INTO thesis_impact_alerts("
-                "alert_id,kind,severity,work_order_ref,phase,detail_json,created_at"
-                ") VALUES(?,?,?,?,?,?,?)",
-                (alert_id, kind, severity, work_order_ref, phase, detail_json, created_at),
+            return self._append_alert(
+                cur, alert_id=alert_id, kind=kind, severity=severity,
+                work_order_ref=work_order_ref, phase=phase,
+                detail_json=detail_json, created_at=created_at,
             )
-            cur.execute(
-                "INSERT INTO thesis_impact_alert_events("
-                "event_id,alert_id,state,actor_ref,created_at) VALUES(?,?,?,?,?)",
-                (
-                    "thesis-impact-alert-event:"
-                    + content_hash({"alert_id": alert_id, "state": "pending"})[:32],
-                    alert_id,
-                    "pending",
-                    "system:thesis-impact-budget",
-                    created_at,
-                ),
-            )
+
+    @staticmethod
+    def _append_alert(
+        cur: sqlite3.Cursor,
+        *,
+        alert_id: str,
+        kind: str,
+        severity: str,
+        work_order_ref: str | None,
+        phase: str | None,
+        detail_json: str,
+        created_at: str,
+    ) -> dict[str, Any]:
+        """Insert one alert and its pending event on the caller's transaction."""
+
+        row = cur.execute(
+            "SELECT kind,severity,work_order_ref,phase,detail_json "
+            "FROM thesis_impact_alerts WHERE alert_id=?",
+            (alert_id,),
+        ).fetchone()
+        if row is not None:
+            expected = (kind, severity, work_order_ref, phase, detail_json)
+            actual = tuple(row[field] for field in (
+                "kind", "severity", "work_order_ref", "phase", "detail_json"
+            ))
+            if actual != expected:
+                raise ThesisImpactBudgetConflict(
+                    "alert identity was reused with different semantics"
+                )
+            return {"alert_id": alert_id, "status": "duplicate"}
+        cur.execute(
+            "INSERT INTO thesis_impact_alerts("
+            "alert_id,kind,severity,work_order_ref,phase,detail_json,created_at"
+            ") VALUES(?,?,?,?,?,?,?)",
+            (alert_id, kind, severity, work_order_ref, phase, detail_json, created_at),
+        )
+        cur.execute(
+            "INSERT INTO thesis_impact_alert_events("
+            "event_id,alert_id,state,actor_ref,created_at) VALUES(?,?,?,?,?)",
+            (
+                "thesis-impact-alert-event:"
+                + content_hash({"alert_id": alert_id, "state": "pending"})[:32],
+                alert_id,
+                "pending",
+                "system:thesis-impact-budget",
+                created_at,
+            ),
+        )
         return {"alert_id": alert_id, "status": "fresh"}
 
     def pending_alerts(self, *, limit: int = 100) -> list[dict[str, Any]]:

@@ -360,8 +360,11 @@ class CockpitChainTests(unittest.TestCase):
             ).fetchall()
         served = json.loads(admissions[0][0])["reserved_micros"]
         settled = [json.loads(row[0])["actual_micros"] for row in settlements]
-        # The served link settles what it reserved; the wall settles nothing.
-        self.assertEqual(settled.count(0), len(settled) - settled.count(served))
+        # The served link settles its own cost; the wall adds nothing to it.
+        # (Before 2026-09-24 the reservation happened to equal the served
+        # link's estimate; it now also covers a CLI gateway's hidden system
+        # prompt, so it is only an upper bound.)
+        self.assertEqual(settled, [answer["cost_micros"]])
         self.assertLessEqual(sum(settled), served)
 
     def test_a_rate_limited_link_falls_back_and_moves_nothing_on_the_ledger(self) -> None:
@@ -2756,6 +2759,180 @@ class CockpitChainTests(unittest.TestCase):
         self.assertEqual(replay_adapter.served, [])
         self.assertEqual(self._links(), links)
         self.assertEqual(self._decisions(), decisions)
+
+
+
+class MeteredChainAdapter(ChainAdapter):
+    """Serve every call with provider telemetry reporting ``usd``."""
+
+    def __init__(self, usd: float, script: dict | None = None) -> None:
+        super().__init__(script or {})
+        self.usd = usd
+
+    def execute(self, work, route, profile):
+        invocation, envelope = super().execute(work, route, profile)
+        return replace(invocation, usage={
+            "raw_provider_telemetry": {"cost": {"available": True, "usd": self.usd}},
+        }), envelope
+
+
+class ExplodingAdapter(ChainAdapter):
+    """A fault nobody anticipated, raised from inside the claimed attempt."""
+
+    def execute(self, work, route, profile):
+        self.served.append(profile["id"])
+        raise RuntimeError("synthetic fault after claim")
+
+
+class CockpitSettlementLeaseTests(unittest.TestCase):
+    """2026-09-24: the event-judgement lane stood still for ~19 hours.
+
+    A CLI-gateway call cost more than its chain ceiling (the ceiling did not
+    count the CLI's own system prompt), ``budget.settle`` refused the overrun,
+    and the exception escaped before ``scheduler.complete``.  The lease stayed
+    held for its frozen 2h10m, and every re-ask of the request was told "this
+    request is already running" while the admission stayed open.
+    """
+
+    setUp = CockpitChainTests.setUp
+    _model = CockpitChainTests._model
+
+    def _ledger(self):
+        with ThesisImpactBudgetStore(self.root / "budget.sqlite") as ledger:
+            admissions = [json.loads(row[0]) for row in ledger.connection.execute(
+                "SELECT record_json FROM thesis_impact_day_admissions")]
+            settlements = [json.loads(row[0]) for row in ledger.connection.execute(
+                "SELECT record_json FROM thesis_impact_day_settlements")]
+            alerts = ledger.pending_alerts()
+        return admissions, settlements, alerts
+
+    def test_a_call_that_costs_more_than_its_reservation_still_completes(self) -> None:
+        adapter = MeteredChainAdapter(usd=2.0)
+        answer = self._model(adapter, policy_version_ref=self.chain_policy).call(
+            purpose="event_judgement", request_id="overrun", prompt="judge",
+            mission=self.mission)
+        self.assertEqual(answer["cost_micros"], 2_000_000)
+        self.assertEqual(answer["cost_status"], "actual")
+        admissions, settlements, alerts = self._ledger()
+        self.assertEqual(len(admissions), 1)
+        self.assertLess(admissions[0]["reserved_micros"], 2_000_000)
+        # Booked at what it cost, so the overrun counts against the day.
+        self.assertEqual([s["actual_micros"] for s in settlements], [2_000_000])
+        self.assertEqual(len(alerts), 1)
+        self.assertEqual(alerts[0]["detail"]["reason"], "settled_above_reservation")
+        self.assertEqual(alerts[0]["detail"]["overrun_micros"],
+                         2_000_000 - admissions[0]["reserved_micros"])
+        with ThesisImpactBudgetStore(self.root / "budget.sqlite") as ledger:
+            summary = ledger.day_summary(
+                policy_version_id=BUDGET_POLICY, day=NOW.date().isoformat())
+        self.assertEqual(summary["committed_micros"], 2_000_000)
+        # The attempt completed: the same request replays instead of being
+        # "already running", and nothing is paid for twice.
+        with Scheduler(self.root / "scheduler.sqlite") as scheduler:
+            self.assertEqual(
+                scheduler.status(answer["work_order_ref"])["state"], "succeeded")
+        again_adapter = MeteredChainAdapter(usd=2.0)
+        again = self._model(again_adapter, policy_version_ref=self.chain_policy).call(
+            purpose="event_judgement", request_id="overrun", prompt="judge",
+            mission=self.mission)
+        self.assertTrue(again["replayed"])
+        self.assertEqual(again_adapter.served, [])
+
+    def test_an_overrun_does_not_freeze_later_admissions(self) -> None:
+        self._model(MeteredChainAdapter(usd=1.0), policy_version_ref=self.chain_policy
+                    ).call(purpose="plan", request_id="first-overrun",
+                           prompt="draft", mission=self.mission)
+        later = self._model(ChainAdapter({}), policy_version_ref=self.chain_policy
+                            ).call(purpose="plan", request_id="after-overrun",
+                                   prompt="draft", mission=self.mission)
+        self.assertFalse(later["replayed"])
+
+    def test_a_ledger_that_refuses_the_settlement_cannot_strand_the_lease(self) -> None:
+        from dalton_core.thesis_impact_budget import ThesisImpactBudgetConflict
+
+        import io
+        from contextlib import redirect_stderr
+
+        stderr = io.StringIO()
+        with patch.object(ThesisImpactBudgetStore, "settle",
+                          side_effect=ThesisImpactBudgetConflict("synthetic refusal")), \
+                redirect_stderr(stderr):
+            answer = self._model(ChainAdapter({}), policy_version_ref=self.chain_policy
+                                 ).call(purpose="event_judgement",
+                                        request_id="settle-refused", prompt="judge",
+                                        mission=self.mission)
+        self.assertIn("answered by", answer["text"])
+        self.assertIn("reservation stays open", stderr.getvalue())
+        admissions, settlements, _ = self._ledger()
+        # The admission stays open -- charged at its full reservation, the
+        # conservative state -- and the attempt is completed all the same.
+        self.assertEqual(len(admissions), 1)
+        self.assertEqual(settlements, [])
+        with Scheduler(self.root / "scheduler.sqlite") as scheduler:
+            self.assertEqual(
+                scheduler.status(answer["work_order_ref"])["state"], "succeeded")
+
+    def test_an_unexpected_fault_releases_the_attempt_for_the_next_ask(self) -> None:
+        exploding = ExplodingAdapter({})
+        with self.assertRaisesRegex(RuntimeError, "synthetic fault"):
+            self._model(exploding, policy_version_ref=self.chain_policy).call(
+                purpose="event_judgement", request_id="fault", prompt="judge",
+                mission=self.mission)
+        self.assertTrue(exploding.served)
+        with Scheduler(self.root / "scheduler.sqlite") as scheduler:
+            row = scheduler.connection.execute(
+                "SELECT work_order_id FROM scheduler_work_orders").fetchone()
+            status = scheduler.status(row["work_order_id"])
+            history = scheduler.attempt_history(row["work_order_id"])
+        self.assertEqual(status["state"], "ready")
+        self.assertEqual(status["attempt_number"], 2)
+        self.assertIn("retryable", [event["state"] for event in history])
+        # The next ask gets a fresh attempt instead of "already running".
+        answer = self._model(ChainAdapter({}), policy_version_ref=self.chain_policy
+                             ).call(purpose="event_judgement", request_id="fault",
+                                    prompt="judge", mission=self.mission)
+        self.assertIn("answered by", answer["text"])
+
+    def test_the_chain_ceiling_counts_a_cli_gateways_system_prompt(self) -> None:
+        from decimal import Decimal
+
+        from dalton_core.cockpit_model import (
+            CLI_GATEWAY_SYSTEM_PROMPT_TOKENS, is_cli_gateway_profile,
+            profile_call_ceiling_usd,
+        )
+
+        # The live call this was measured from: claude-cli-gateway opus on a
+        # 4 / 20 USD card, a 21,567-byte event prompt, 1,500 output tokens,
+        # metered at 0.2772822 USD.  The old ceiling reserved 0.1163 USD.
+        gateway = {"provider": "claude-cli-gateway",
+                   "cost": {"input_per_million_usd": 4.0,
+                            "output_per_million_usd": 20.0}}
+        direct = {**gateway, "provider": "anthropic"}
+        self.assertTrue(is_cli_gateway_profile(gateway))
+        self.assertFalse(is_cli_gateway_profile(direct))
+        measured = Decimal("0.2772822")
+        self.assertLess(profile_call_ceiling_usd(
+            direct, prompt_bytes=21_567, max_output_tokens=1_500), measured)
+        self.assertGreater(profile_call_ceiling_usd(
+            gateway, prompt_bytes=21_567, max_output_tokens=1_500), measured)
+        # And the smallest prompt still pays the CLI's fixed prompt.
+        self.assertGreater(profile_call_ceiling_usd(
+            gateway, prompt_bytes=0, max_output_tokens=0),
+            Decimal(4 * CLI_GATEWAY_SYSTEM_PROMPT_TOKENS) / 1_000_000)
+        # Wired into the reservation of a chain that can reach a gateway link.
+        self._model(ChainAdapter({}), policy_version_ref=self.chain_policy).call(
+            purpose="event_judgement", request_id="ceiling", prompt="judge",
+            mission=self.mission)
+        admissions, _, _ = self._ledger()
+        with ModelRouter(self.router_db) as router:
+            chain_profiles = [p for p in router.latest_profiles()
+                              if p["id"] in set(tier_chain("brain"))]
+        gateways = [p for p in chain_profiles if is_cli_gateway_profile(p)]
+        self.assertTrue(gateways)
+        floor = max(profile_call_ceiling_usd(
+            p, prompt_bytes=0, max_output_tokens=0) for p in gateways)
+        self.assertGreaterEqual(
+            admissions[0]["reserved_micros"], int(floor * 1_000_000))
 
 
 if __name__ == "__main__":  # pragma: no cover
