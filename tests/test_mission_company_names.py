@@ -53,7 +53,8 @@ class NameTableTests(unittest.TestCase):
         self.assertEqual(subject_names("MSFT", table),
                          ("Microsoft", "微软", "Azure", "Microsoft Azure", "MSFT"))
         self.assertEqual(subject_names("GOOGL", table),
-                         ("Alphabet", "Google", "Alphabet Inc.", "谷歌", "GOOGL"))
+                         ("Alphabet", "Google", "Alphabet Inc.", "谷歌", "GOOG", "Gemini",
+                          "YouTube", "GOOGL"))
         self.assertIn("Microsoft", subject_label("MSFT", table))
         named = document_names_subject(
             "Microsoft Azure capacity is tightening again", "MSFT", table)

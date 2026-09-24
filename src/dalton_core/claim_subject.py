@@ -48,15 +48,27 @@ HEAD_CHARS = 400
 #: The shortest token accepted as a name on its own.  Tickers of three letters
 #: (IBM, DXC, ACN) are real names; two letters match inside ordinary words.
 MIN_TOKEN_CHARS = 3
+#: The shortest word taken on its own out of a name of several distinctive
+#: words.  Three- and four-letter words ("red", "hat", "web") are ordinary
+#: English inside a substring test; a whole name of that length still counts.
+MIN_SPLIT_TOKEN_CHARS = 5
 _TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9&-]*")
 _CJK_RE = re.compile(r"[㐀-鿿]")
 
 
 def name_needles(names: Iterable[Any]) -> list[str]:
-    """Lowercased names plus their distinctive words, generic words dropped.
+    """Lowercased names plus their distinctive word, generic words dropped.
 
     "Amazon.com" yields ``amazon.com`` and ``amazon``; "Meta Platforms"
     yields ``meta platforms`` and ``meta``; a CJK alias is kept whole.
+
+    A name with one distinctive word left once the legal-form and industry
+    words are dropped yields that word.  A name with several yields them
+    joined, and on their own only the words of ``MIN_SPLIT_TOKEN_CHARS`` or
+    more (2026-09-24b): "Microsoft Copilot" still yields ``copilot``, but "Red
+    Hat" is one name, not "red" and "hat" -- matched as substrings those two
+    would find IBM in "reduced" and "that" -- and "Amazon Web Services" no
+    longer finds Amazon in every "website".
     """
 
     found: set[str] = set()
@@ -71,10 +83,17 @@ def name_needles(names: Iterable[Any]) -> list[str]:
             continue
         if len(text) >= MIN_TOKEN_CHARS and text not in GENERIC_NAME_TOKENS:
             found.add(text)
-        for token in _TOKEN_RE.findall(text):
-            token = token.strip("-&")
-            if len(token) >= MIN_TOKEN_CHARS and token not in GENERIC_NAME_TOKENS:
-                found.add(token)
+        tokens = [raw.strip("-&") for raw in _TOKEN_RE.findall(text)]
+        distinctive = list(dict.fromkeys(
+            token for token in tokens
+            if len(token) >= MIN_TOKEN_CHARS and token not in GENERIC_NAME_TOKENS))
+        if len(distinctive) == 1:
+            found.update(distinctive)
+        elif len(distinctive) > 1:
+            # "Grid Dynamics Holdings" is still found as "grid dynamics".
+            kept = [token for token in tokens if token and token not in GENERIC_NAME_TOKENS]
+            found.add(" ".join(kept))
+            found.update(token for token in distinctive if len(token) >= MIN_SPLIT_TOKEN_CHARS)
     return sorted(found)
 
 

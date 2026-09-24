@@ -60,9 +60,11 @@ class ClaimSubjectRuleTests(unittest.TestCase):
         feed = {"companies": {"company:ticker:googl": {"names": ["Alphabet", "GOOGL"]}}}
         search = {"companies": {"company:ticker:googl": {"search_terms": "GOOGL Google"}}}
         table = mission_subject_needles(universe, plans=[feed, search])
-        # The packaged names (2026-09-24: GOOGL has some) are part of the union.
+        # The packaged names (2026-09-24: GOOGL has some; 2026-09-24b: GOOG,
+        # Gemini and YouTube too) are part of the union.
         self.assertEqual(table["company:ticker:googl"],
-                         ["alphabet", "alphabet inc.", "googl", "google", "谷歌"])
+                         ["alphabet", "alphabet inc.", "gemini", "goog", "googl", "google",
+                          "youtube", "谷歌"])
         # The packaged COMPANY_NAMES answers for the legacy tickers.
         self.assertIn("accenture", table["company:sec-cik:0001467373"])
 
