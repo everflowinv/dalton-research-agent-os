@@ -485,6 +485,102 @@ class ReadersTests(LadderHarness):
         self.assertNotEqual(acn["stage_status_label"], "还没开始")
 
 
+class SupersededProposalTests(LadderHarness):
+    """2026-09-24: a proposal about a superseded version cannot re-open the current one."""
+
+    def stale_after_reissue(self):
+        # A second proposal against v1, written before anyone answered the first.
+        self.thicken(lines=400)
+        stale = self.reopens.propose(
+            assessment=reopen_assessment(self.store.connection, company_ref=ACN),
+            mission=self.mission, actor_ref=AUTOMATION,
+        )
+        self.assertEqual(stale["status"], "fresh")
+        self.assertEqual(stale["passed_version_ref"], self.version_one["id"])
+        self.approve()
+        version_two = self.reissue()
+        self.decide_again(version_two)
+        self.assertEqual(
+            passed_version(self.store.connection, company_ref=ACN)["version_id"],
+            version_two["id"])
+        return stale, version_two
+
+    def test_approving_a_proposal_for_a_superseded_version_is_refused_with_the_reason(self):
+        stale, version_two = self.stale_after_reissue()
+        markers = self.store.connection.execute(
+            "SELECT COUNT(*) FROM coverage_mission_stage_reopens").fetchone()[0]
+        with self.assertRaisesRegex(DeliverableReopenConflict,
+                                    "no longer the passed initial_screen") as caught:
+            self.reopens.decide(
+                proposal_ref=stale["id"], proposal_hash=stale["content_hash"],
+                verdict="approve", reason="旧提案", actor_ref=OWNER)
+        self.assertIn(version_two["id"], str(caught.exception))
+        # Nothing was written: no decision, no marker, the gate still passed.
+        self.assertIsNone(self.reopens.decision_for(stale["id"]))
+        self.assertEqual(self.store.connection.execute(
+            "SELECT COUNT(*) FROM coverage_mission_stage_reopens").fetchone()[0], markers)
+        self.assertEqual(self.ladder()["stages"][STAGE]["status"], "gate_passed")
+        # Declining it is still an answer a person may give.
+        declined = self.reopens.decide(
+            proposal_ref=stale["id"], proposal_hash=stale["content_hash"],
+            verdict="decline", reason="目标版本已被取代", actor_ref=OWNER)
+        self.assertEqual(declined["status"], "fresh")
+
+    def test_the_ladder_refuses_a_marker_for_a_version_that_is_not_the_passed_one(self):
+        stale, version_two = self.stale_after_reissue()
+        with self.assertRaisesRegex(CoverageMissionConflict, "currently passed against"):
+            self.missions.record_stage_reopen(
+                mission_version_ref=self.mission["id"],
+                mission_version_hash=self.mission["content_hash"],
+                company_ref=ACN, stage_ref=STAGE,
+                reopen_decision_ref="gate-reopen-decision:forged",
+                reopen_proposal_ref=stale["id"],
+                reopened_version_ref=self.version_one["id"],
+                rationale="stale", actor_ref=OWNER, idempotency_key="stale-marker",
+            )
+        self.assertEqual(self.ladder()["stages"][STAGE]["status"], "gate_passed")
+
+    def test_the_proposer_withdraws_superseded_proposals_once(self):
+        stale, version_two = self.stale_after_reissue()
+        self.assertEqual([p["id"] for p in self.reopens.undecided(ACN)], [stale["id"]])
+        withdrawn = self.reopens.withdraw_superseded(
+            mission=self.mission, actor_ref=AUTOMATION)
+        self.assertEqual([item["proposal_ref"] for item in withdrawn], [stale["id"]])
+        self.assertEqual(withdrawn[0]["reason_code"], "target_superseded")
+        self.assertEqual(withdrawn[0]["superseded_by_version_ref"], version_two["id"])
+        self.assertEqual(self.reopens.undecided(ACN), [])
+        self.assertEqual(self.reopens.withdraw_superseded(
+            mission=self.mission, actor_ref=AUTOMATION), [])
+        with self.assertRaisesRegex(DeliverableReopenConflict, "withdrawn"):
+            self.reopens.decide(
+                proposal_ref=stale["id"], proposal_hash=stale["content_hash"],
+                verdict="approve", reason="旧提案", actor_ref=OWNER)
+        with self.assertRaises(sqlite3.DatabaseError):
+            with self.store._transaction() as cur:
+                cur.execute("DELETE FROM gate_reopen_withdrawals")
+
+    def test_a_proposal_for_the_current_version_is_not_withdrawn(self):
+        self.assertEqual(self.reopens.withdraw_superseded(
+            mission=self.mission, actor_ref=AUTOMATION), [])
+        self.assertEqual(len(self.reopens.undecided(ACN)), 1)
+        with self.assertRaisesRegex(DeliverableReopenConflict, "mission principal"):
+            self.reopens.withdraw_superseded(
+                mission=self.mission, actor_ref="automation:someone-else")
+
+    def test_the_weekly_lane_withdraws_on_its_own(self):
+        from dalton_core.deliverable_reopen import GateReopenAuthority
+        from dalton_core.mission_reopen_lane import MissionReopenLaneCoordinator
+
+        stale, _version_two = self.stale_after_reissue()
+        coordinator = MissionReopenLaneCoordinator(
+            mission=lambda: self.mission, connection=self.store.connection,
+            authority=GateReopenAuthority(self.store))
+        result = coordinator.dispatch_once()
+        self.assertEqual(result["withdrawn"],
+                         [self.reopens.withdrawal_for(stale["id"])["id"]])
+        self.assertEqual(coordinator.dispatch_once()["withdrawn"], [])
+
+
 class ExistingRowsTests(LadderHarness):
     def test_opening_the_authority_again_moves_no_hash(self):
         """The live check, run against a Core rather than described.

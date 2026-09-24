@@ -17,7 +17,7 @@ from dalton_core.company_dossier_draft import (
     parse_unit_output,
 )
 from dalton_core.store import canonical_json, content_hash
-from tests.test_company_dossier import body, drafted
+from tests.test_company_dossier import body, drafted, unavailable
 from tests.test_claim_index_entries import LedgerFixture
 from tests.test_company_dossier_draft import STRUCTURE, material, reply, one_sentence
 from tests.test_dossier_lane import bootstrap_method_authorities, mission_params
@@ -427,6 +427,75 @@ class DossierUnitProvenanceTests(unittest.TestCase):
         forged["unit_provenance"]["business_model"]["producer_prior_version_ref"]=None
         with self.assertRaisesRegex(Exception,"exact predecessor"):
             authority.publish_verified(forged,scheduler_db=self.scheduler_path,
+                                       router_db=self.router_path)
+
+    def _proved_first_version(self, fixture):
+        mission=self._install_mission(fixture)
+        authority=CompanyDossierAuthority(fixture.store)
+        first=body(drafted_sections={self.unit:self.block},company_ref="company:acn")
+        first["bindings"]["mission_version_ref"]=mission["id"]
+        first["input_fingerprints"]={unit:None for unit in UNITS}
+        first["input_fingerprints"][self.unit]=content_hash(self.producer_input)
+        first["unit_provenance"]={unit:None for unit in UNITS}
+        first["unit_provenance"][self.unit]=self.provenance[self.unit]
+        published=authority.publish_verified(first,scheduler_db=self.scheduler_path,
+                                             router_db=self.router_path)
+        return mission,authority,published
+
+    def test_a_proved_unit_withdrawn_to_unavailable_publishes_with_null_proof(self):
+        # IBM 2026-09-24 02:27/08:32, ACN 11:00: the lane dropped a carried
+        # unit whose cited Claim was retired (refused_by_verification) and set
+        # its proof to null, as the schema requires; publish_verified then
+        # demanded the prior's proof back and refused every run.
+        fixture=LedgerFixture();self.addCleanup(fixture.close)
+        mission,authority,published=self._proved_first_version(fixture)
+        second_mission=self._next_mission(fixture,mission)
+        new_block,new_proof=self._additional_unit_proof(
+            unit="business_model",mission=second_mission,prior_ref=published["id"])
+        second=body(drafted_sections={"business_model":new_block},company_ref="company:acn",
+                    prior_ref=published["id"])
+        second["sections"]=[unavailable(row["aspect"],"refused_by_verification")
+                            if row["aspect"]==self.unit else row
+                            for row in second["sections"]]
+        second["bindings"]["mission_version_ref"]=second_mission["id"]
+        second["input_fingerprints"]=dict(published["input_fingerprints"])
+        second["unit_provenance"]=dict(published["unit_provenance"])
+        second["input_fingerprints"][self.unit]=None
+        second["unit_provenance"][self.unit]=None
+        second["input_fingerprints"]["business_model"]=new_proof["input_fingerprint"]
+        second["unit_provenance"]["business_model"]=new_proof
+        carried=authority.publish_verified(second,scheduler_db=self.scheduler_path,
+                                           router_db=self.router_path)
+        self.assertEqual((carried["status"],carried["version"]),("fresh",2))
+        self.assertIsNone(carried["unit_provenance"][self.unit])
+        withdrawn=next(row for row in carried["sections"] if row["aspect"]==self.unit)
+        self.assertEqual((withdrawn["status"],withdrawn["reason"]),
+                         ("unavailable","refused_by_verification"))
+
+        # Keeping the prior's proof on the withdrawn unit is still refused.
+        stale=json.loads(json.dumps(second))
+        stale["unit_provenance"][self.unit]=published["unit_provenance"][self.unit]
+        stale["input_fingerprints"][self.unit]=published["input_fingerprints"][self.unit]
+        with self.assertRaisesRegex(Exception,"cannot describe an unavailable unit"):
+            authority.publish_verified(stale,scheduler_db=self.scheduler_path,
+                                       router_db=self.router_path)
+
+    def test_a_carried_drafted_unit_still_cannot_change_its_proof(self):
+        fixture=LedgerFixture();self.addCleanup(fixture.close)
+        mission,authority,published=self._proved_first_version(fixture)
+        second_mission=self._next_mission(fixture,mission)
+        new_block,new_proof=self._additional_unit_proof(
+            unit="business_model",mission=second_mission,prior_ref=published["id"])
+        second=body(drafted_sections={self.unit:self.block,"business_model":new_block},
+                    company_ref="company:acn",prior_ref=published["id"])
+        second["bindings"]["mission_version_ref"]=second_mission["id"]
+        second["input_fingerprints"]=dict(published["input_fingerprints"])
+        second["unit_provenance"]=json.loads(json.dumps(published["unit_provenance"]))
+        second["input_fingerprints"]["business_model"]=new_proof["input_fingerprint"]
+        second["unit_provenance"]["business_model"]=new_proof
+        second["unit_provenance"][self.unit]["resolved_classification"]={"forged":True}
+        with self.assertRaisesRegex(Exception,"changed without redrafting"):
+            authority.publish_verified(second,scheduler_db=self.scheduler_path,
                                        router_db=self.router_path)
 
 

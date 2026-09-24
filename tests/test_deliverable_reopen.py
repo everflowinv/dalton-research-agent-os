@@ -402,7 +402,8 @@ class HumanRevisionSchemaMigrationTests(unittest.TestCase):
                     "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' "
                     "AND name LIKE 'gate_reopen_%'"
                 ).fetchone()[0]
-                self.assertEqual(triggers, 6)
+                # Six for proposals/decisions, three for the withdrawal ledger.
+                self.assertEqual(triggers, 9)
                 self.assertEqual(store.connection.execute(
                     "PRAGMA foreign_keys"
                 ).fetchone()[0], 1)

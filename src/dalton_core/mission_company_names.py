@@ -17,9 +17,11 @@ order, and the order is the order of authority:
    carries what each covered issuer is called.  It is written once when the
    mission is published and it travels with the plan, so a lane reading a
    document never has to reach for a shared dict at all.
-2. **the mission universe member**, when it carries a ``name``.  Mission
-   authority's universe shape does not require one today; when it has one it
-   is the owner's own word and outranks anything derived.
+2. **the mission universe member**, when it carries a ``name``.  Note that
+   ``coverage_mission`` validates universe members as a closed shape
+   (``company_ref/ticker/coverage_tier/bootstrap_priority``), so a published
+   mission cannot carry one today; the branch stays for records built in
+   memory, and the owner's way to name a company is (4).
 3. **the packaged fallbacks.**  ``COMPANY_NAMES`` for the legacy Core, and the
    SEC company resolver for everything else -- the resolver is already called
    once per company when a first mission is published, and it returns the
@@ -31,6 +33,18 @@ almost never says the ticker, so a company known only as "MSFT" would be
 silently attributed nothing for the whole run -- the failure this refusal
 exists to make visible.  What changed is where the fix goes: the mission's feed
 plan, which the owner's own workspace owns, rather than a dict in this package.
+
+2026-09-24: sources (1)-(3) no longer *replace* the packaged names, they come
+first and the packaged ``COMPANY_NAMES`` are added after them.  A workspace
+whose plan said "Amazon.com" could otherwise never learn "AWS" or "亚马逊"
+from a deploy, and there was no sanctioned way to edit its plan.  And a fourth
+source closes the loop:
+
+4. **the owner's alias ledger** (``company_aliases``): append-only, one
+   audited revision per change, kept in the environment's own state
+   directory.  ``load_feed_discovery_plan`` attaches its current overlay to
+   the plan as ``company_aliases``; names it adds are appended here, names it
+   retires are removed, including packaged ones.
 """
 
 from __future__ import annotations
@@ -85,6 +99,7 @@ def mission_name_table(
     plan: Mapping[str, Any] | None = None,
     *,
     extra: Mapping[str, Sequence[str]] | None = None,
+    union_packaged: bool = True,
 ) -> dict[str, tuple[str, ...]]:
     """The ticker-to-names table one mission's lanes run on.
 
@@ -92,9 +107,15 @@ def mission_name_table(
     ticker itself: a caller that wants to refuse those asks
     :func:`unnamed_tickers`, so the refusal is one explicit decision rather
     than an empty dict entry nobody notices.
+
+    ``union_packaged=False`` is the pre-2026-09-24 precedence (packaged names
+    only when the mission supplied none).  Only the plan *generator* wants it,
+    so a generated plan records what the owner said rather than a copy of the
+    package, which every lane adds at run time anyway.
     """
 
     by_ref = names_from_plan(plan)
+    overlay = alias_overlay(plan)
     table: dict[str, tuple[str, ...]] = {}
     for item in universe or ():
         if not isinstance(item, Mapping):
@@ -103,15 +124,48 @@ def mission_name_table(
         if not ticker:
             continue
         company_ref = str(item.get("company_ref") or "")
-        names = (_clean(item.get("name") or item.get("names"))
+        owned = (_clean(item.get("name") or item.get("names"))
                  or by_ref.get(company_ref, ())
-                 or _clean((extra or {}).get(ticker))
-                 or COMPANY_NAMES.get(ticker, ()))
-        if ticker not in {name.upper() for name in names} \
-                and len(ticker) >= MIN_TICKER_CHARS:
-            names = names + (ticker,)
+                 or _clean((extra or {}).get(ticker)))
+        retired = {name.casefold() for name in overlay["retired"].get(ticker, ())}
+        packaged = COMPANY_NAMES.get(ticker, ()) if union_packaged or not owned else ()
+        names = _union(owned, packaged, overlay["added"].get(ticker, ()))
+        names = tuple(name for name in names if name.casefold() not in retired
+                      or name.upper() == ticker)
+        # The ticker last, however it was spelled, so a label leads with a name.
+        others = tuple(name for name in names if name.upper() != ticker)
+        if len(others) != len(names) or len(ticker) >= MIN_TICKER_CHARS:
+            names = others + (ticker,)
         table[ticker] = names
     return table
+
+
+def _union(*groups: Sequence[str]) -> tuple[str, ...]:
+    """Names in first-seen order, one per spelling regardless of case."""
+
+    seen: dict[str, str] = {}
+    for group in groups:
+        for name in _clean(group):
+            seen.setdefault(name.casefold(), name)
+    return tuple(seen.values())
+
+
+def alias_overlay(plan: Mapping[str, Any] | None) -> dict[str, dict[str, tuple[str, ...]]]:
+    """The owner's alias ledger as the plan carries it: ``{added, retired}`` by ticker."""
+
+    empty: dict[str, dict[str, tuple[str, ...]]] = {"added": {}, "retired": {}}
+    value = plan.get("company_aliases") if isinstance(plan, Mapping) else None
+    if not isinstance(value, Mapping):
+        return empty
+    out: dict[str, dict[str, tuple[str, ...]]] = {"added": {}, "retired": {}}
+    for key in ("added", "retired"):
+        entries = value.get(key)
+        if isinstance(entries, Mapping):
+            for ticker, names in entries.items():
+                cleaned = _clean(names)
+                if cleaned:
+                    out[key][str(ticker).strip().upper()] = cleaned
+    return out
 
 
 def unnamed_tickers(table: Mapping[str, Sequence[str]]) -> list[str]:
@@ -151,7 +205,7 @@ def resolve_universe_names(
     if resolve is None:
         return {}
     found: dict[str, tuple[str, ...]] = {}
-    for ticker in unnamed_tickers(mission_name_table(universe)):
+    for ticker in unnamed_tickers(mission_name_table(universe, union_packaged=False)):
         try:
             answer = resolve(ticker)
         except Exception:  # noqa: BLE001 - a missing name is reported, not raised
@@ -180,6 +234,7 @@ def require_named(table: Mapping[str, Sequence[str]], *, where: str) -> None:
 
 __all__ = [
     "MissionCompanyNamesError",
+    "alias_overlay",
     "mission_name_table",
     "names_from_plan",
     "require_named",

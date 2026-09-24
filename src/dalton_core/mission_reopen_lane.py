@@ -126,6 +126,20 @@ class MissionReopenLaneCoordinator:
                     f"{CHECKPOINT_KIND}；提案没人裁决就不提（ADR-0008）"
                 ),
             }
+        # 2026-09-24: the proposer retires its own stale questions.  A proposal
+        # names one passed version; once a newer version has passed, nobody
+        # can usefully answer it, and approving it would re-open the current
+        # screen on evidence the re-issue already used.  Every tick, because it
+        # is one ladder read per company with an undecided proposal.
+        withdrawn: list[str] = []
+        withdraw = getattr(self.authority, "withdraw_superseded", None)
+        if callable(withdraw):
+            try:
+                withdrawn = [item["id"] for item in withdraw(
+                    mission=mission,
+                    actor_ref=mission["autonomy"]["automation_principal"])]
+            except DeliverableReopenError:
+                withdrawn = []
         week = self.week_ref(mission)
         companies = passed_companies(self.connection, mission)
         looked: list[dict[str, Any]] = []
@@ -199,6 +213,7 @@ class MissionReopenLaneCoordinator:
             "companies": len(companies),
             "held": held,
             "proposed": proposed,
+            "withdrawn": withdrawn,
             "looked": looked,
         }
 

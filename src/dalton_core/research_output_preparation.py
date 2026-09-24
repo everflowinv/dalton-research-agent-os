@@ -204,18 +204,35 @@ def selected_identity(config, call):
     return {"provider": profile["provider"], "model": profile["provider"]+"/"+profile["model"]}
 
 
+def redraft_identity(identity, redraft_generation):
+    """The stage identity of one explicit redraft generation.
+
+    Generation 0 is the ordinary identity, so every existing cache keeps its
+    key.  A later generation is a new identity: a new ``stages/`` file, and new
+    request ids for the draft, checker, brain and verifier calls, because the
+    scheduler replays a completed work order by request id -- a redraft that
+    reused them would be handed the same draft and the same route decision.
+    """
+    if type(redraft_generation) is not int or redraft_generation < 0:
+        raise ValueError('redraft_generation must be a non-negative integer')
+    if redraft_generation == 0:
+        return identity
+    return hashlib.sha256(f'{identity}:redraft:{redraft_generation}'.encode()).hexdigest()
+
+
 def run_chunk(task, *, mission, draft_config, verifier_config, checker_config,
               brain_config, scheduler_db, work_dir, max_cost, attempts,
               legacy_verifier_config=None, repair_reviewed=False,
-              extra_brain_repair=False):
+              extra_brain_repair=False, redraft_generation=0):
     if not isinstance(extra_brain_repair, bool) or (extra_brain_repair and not repair_reviewed):
         raise ValueError('one extra brain repair requires reviewed repair mode')
     product_index, start, product = task
-    identity = style_stage_identity(product, draft_config=draft_config,
-        checker_config=checker_config, brain_config=brain_config)
+    identity = redraft_identity(style_stage_identity(product, draft_config=draft_config,
+        checker_config=checker_config, brain_config=brain_config), redraft_generation)
     stage_path = work_dir / 'stages' / (identity + '.json')
     resolve = router_family_resolver(draft_config)
-    evidence = read_json(stage_path) if stage_path.exists() else _migrate_legacy_style(
+    evidence = read_json(stage_path) if stage_path.exists() else None if redraft_generation \
+        else _migrate_legacy_style(
         product=product, work_dir=work_dir, draft_config=draft_config,
         checker_config=checker_config, brain_config=brain_config,
         legacy_verifier_config=legacy_verifier_config, style_identity=identity)
@@ -545,7 +562,8 @@ def build(args, data=None):
             work_dir=work_dir,max_cost=args.max_cost_per_call,attempts=args.attempts,
             legacy_verifier_config=legacy_verifier_config,
             repair_reviewed=getattr(args,'repair_reviewed',False),
-            extra_brain_repair=getattr(args,'extra_brain_repair',False)):t for t in tasks}
+            extra_brain_repair=getattr(args,'extra_brain_repair',False),
+            redraft_generation=getattr(args,'redraft_generation',0)):t for t in tasks}
         for future in concurrent.futures.as_completed(futures):
             task = futures[future]
             try:
@@ -584,18 +602,50 @@ def build(args, data=None):
     return 0 if not failures else 1
 
 
-def prepare_ui_batch(args, mission, product):
+def prepare_ui_batch(args, mission, product, *, redraft_generation=0):
     """Replay one sealed UI batch through publication, including its mapping.
 
     An existing reviewed attachment is not enough: its UI dictionary entry
     may still need merging after an interrupted publication.
+    ``redraft_generation`` > 0 prepares it from a fresh draft (see
+    ``redraft_identity``); the discovery poll asks for it after a formal retry.
     """
     from types import SimpleNamespace
     result_path = args.work_dir / 'ui-text-build-results' / (source_content_hash(product) + '.json')
-    ui_args = SimpleNamespace(**{**vars(args), 'result_output': result_path})
+    ui_args = SimpleNamespace(**{**vars(args), 'result_output': result_path,
+                                 'redraft_generation': redraft_generation})
     code = build(ui_args, {'mission': mission, 'products': [product]})
     return {'status': 'completed' if code == 0 else 'pending',
             'receipt': read_json(result_path)}
+
+
+def model_route_fingerprint(config_paths):
+    """What the routers these configs use would decide families by, as one hash.
+
+    Every profile's current family and every policy's current version.  A
+    UI text batch that failed on routing or model family is retried from a
+    fresh draft when this changes -- a family reclassified, a chain edited --
+    and not otherwise, because nothing else can make it pass.
+    """
+    rows = []
+    for db in sorted({str(read_json(Path(path))['model_router_db']) for path in config_paths}):
+        connection = sqlite3.connect(Path(db).resolve().as_uri() + '?mode=ro', uri=True)
+        try:
+            profiles = connection.execute(
+                'SELECT v.profile_id,v.family FROM model_endpoint_profile_versions v '
+                'JOIN (SELECT profile_id,MAX(version) AS version FROM '
+                'model_endpoint_profile_versions GROUP BY profile_id) latest '
+                'ON latest.profile_id=v.profile_id AND latest.version=v.version '
+                'ORDER BY v.profile_id').fetchall()
+            policies = connection.execute(
+                'SELECT policy_id,MAX(version) FROM model_routing_policy_versions '
+                'GROUP BY policy_id ORDER BY policy_id').fetchall()
+        finally:
+            connection.close()
+        rows.append({'profiles': [list(row) for row in profiles],
+                     'policies': [list(row) for row in policies]})
+    return hashlib.sha256(json.dumps(rows, sort_keys=True,
+                                     separators=(',', ':')).encode()).hexdigest()
 
 
 def validate_worker_config(cfg):
@@ -734,11 +784,15 @@ def run_worker(config_path):
                 from .research_localization_store import load_ui_texts
                 ui_result=poll_ui_texts(connection,mission,state_dir=root/'ui-text-products',
                     mapping=load_ui_texts(core),
-                    prepare=lambda product:prepare_ui_batch(args,mission,product),
+                    prepare=lambda product,redraft_generation=0:prepare_ui_batch(
+                        args,mission,product,redraft_generation=redraft_generation),
                     batches_per_run=int(cfg.get('ui_text_batches_per_run',
                                                 DEFAULT_BATCHES_PER_RUN)),
                     max_attempts=int(cfg.get('ui_text_max_attempts',
-                                             DEFAULT_MAX_ATTEMPTS)))
+                                             DEFAULT_MAX_ATTEMPTS)),
+                    route_fingerprint=lambda:model_route_fingerprint([
+                        args.model_config,args.verifier_config,
+                        args.checker_config,args.brain_config]))
                 result['ui_texts']=ui_result
                 result['pending']+=ui_result['pending']
                 result['blocked']=ui_result.get('blocked',0)

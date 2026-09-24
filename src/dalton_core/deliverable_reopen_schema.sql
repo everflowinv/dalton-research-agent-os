@@ -71,3 +71,37 @@ CREATE TRIGGER IF NOT EXISTS gate_reopen_decisions_no_delete
 BEFORE DELETE ON gate_reopen_decisions BEGIN
     SELECT RAISE(ABORT, 'gate reopen decisions are immutable');
 END;
+
+-- 2026-09-24: a proposal whose target version stopped being the passed one.
+--
+-- Proposals and decisions are both immutable, and a decision is a person's.
+-- So "this question no longer applies" is neither: it is its own append-only
+-- row, written by the proposer (the mission's automation principal) once the
+-- version the proposal names has been superseded by a newer passed version.
+-- A withdrawn proposal leaves the undecided list and can no longer be
+-- approved; the decision ledger still proves only what humans decided.
+CREATE TABLE IF NOT EXISTS gate_reopen_withdrawals (
+    withdrawal_id TEXT PRIMARY KEY,
+    proposal_ref TEXT NOT NULL UNIQUE,
+    proposal_hash TEXT NOT NULL,
+    company_ref TEXT NOT NULL,
+    reason_code TEXT NOT NULL CHECK(reason_code IN ('target_superseded')),
+    superseded_by_version_ref TEXT NOT NULL,
+    record_json TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    actor_ref TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE TRIGGER IF NOT EXISTS gate_reopen_withdrawals_insert_guard
+BEFORE INSERT ON gate_reopen_withdrawals WHEN dalton_authorized() = 0 BEGIN
+    SELECT RAISE(ABORT, 'gate reopen withdrawal insert requires DaltonStore');
+END;
+CREATE TRIGGER IF NOT EXISTS gate_reopen_withdrawals_no_update
+BEFORE UPDATE ON gate_reopen_withdrawals BEGIN
+    SELECT RAISE(ABORT, 'gate reopen withdrawals are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS gate_reopen_withdrawals_no_delete
+BEFORE DELETE ON gate_reopen_withdrawals BEGIN
+    SELECT RAISE(ABORT, 'gate reopen withdrawals are immutable');
+END;

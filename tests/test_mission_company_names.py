@@ -48,14 +48,18 @@ class NameTableTests(unittest.TestCase):
     def test_the_four_hyperscalers_get_usable_subject_terms(self):
         table = mission_name_table(HYPERSCALERS, PLAN)
         self.assertEqual(unnamed_tickers(table), [])
-        self.assertEqual(subject_names("MSFT", table), ("Microsoft", "MSFT"))
-        self.assertEqual(subject_names("GOOGL", table), ("Alphabet", "Google", "GOOGL"))
+        # The plan's own names first, then the packaged ones, the ticker last
+        # (2026-09-24: the packaged names are a union now, not a fallback).
+        self.assertEqual(subject_names("MSFT", table),
+                         ("Microsoft", "微软", "Azure", "Microsoft Azure", "MSFT"))
+        self.assertEqual(subject_names("GOOGL", table),
+                         ("Alphabet", "Google", "Alphabet Inc.", "谷歌", "GOOGL"))
         self.assertIn("Microsoft", subject_label("MSFT", table))
         named = document_names_subject(
             "Microsoft Azure capacity is tightening again", "MSFT", table)
         self.assertTrue(named["checked"])
         self.assertTrue(named["names_subject"])
-        self.assertEqual(named["matched"], ["Microsoft"])
+        self.assertEqual(named["matched"], ["Microsoft", "Azure", "Microsoft Azure"])
 
     def test_a_document_about_another_covered_company_is_not_attributed(self):
         table = mission_name_table(HYPERSCALERS, PLAN)
@@ -66,16 +70,21 @@ class NameTableTests(unittest.TestCase):
         universe = [{"company_ref": "company:ticker:msft", "ticker": "MSFT",
                      "name": "Microsoft Corporation"}]
         table = mission_name_table(universe, PLAN)
-        self.assertEqual(table["MSFT"], ("Microsoft Corporation", "MSFT"))
+        self.assertEqual(table["MSFT"][0], "Microsoft Corporation")
+        self.assertEqual(table["MSFT"][-1], "MSFT")
 
     def test_the_plan_outranks_the_resolver_and_the_packaged_dict(self):
         universe = [{"company_ref": "company:sec-cik:0001467373", "ticker": "ACN"}]
         plan = {"companies": {"company:sec-cik:0001467373": {
             "search_terms": "ACN", "names": ["Accenture plc"]}}}
         self.assertEqual(mission_name_table(universe, plan)["ACN"],
+                         ("Accenture plc", "Accenture", "埃森哲", "ACN"))
+        # The generator's precedence is the old one: the owner's names only.
+        self.assertEqual(mission_name_table(universe, plan, union_packaged=False)["ACN"],
                          ("Accenture plc", "ACN"))
-        # And with no plan, the legacy Core's packaged answer is unchanged.
-        self.assertEqual(mission_name_table(universe)["ACN"], ("Accenture", "ACN"))
+        # And with no plan, the legacy Core gets the packaged answer.
+        self.assertEqual(mission_name_table(universe)["ACN"],
+                         COMPANY_NAMES["ACN"] + ("ACN",))
 
     def test_the_ticker_is_always_appended_but_never_counts_as_a_name(self):
         table = mission_name_table([{"company_ref": "c:zzz", "ticker": "ZZZZ"}])
@@ -106,9 +115,12 @@ class NameTableTests(unittest.TestCase):
                 raise RuntimeError("SEC is unreachable")
             return {"ticker": ticker, "cik": "1", "name": f"{ticker} Inc"}
 
-        found = resolve_universe_names(HYPERSCALERS, resolve=resolve)
-        self.assertEqual(sorted(calls), ["AMZN", "GOOGL", "META", "MSFT"])
-        self.assertEqual(found["MSFT"], ("MSFT Inc",))
+        unknown = [{"company_ref": f"company:ticker:{t.lower()}", "ticker": t}
+                   for t in ("ORCL", "GOOGL", "NVDA", "CRM", "SNOW")]
+        found = resolve_universe_names(unknown, resolve=resolve)
+        # GOOGL is packaged since 2026-09-24, so it is not asked about either.
+        self.assertEqual(sorted(calls), ["CRM", "NVDA", "ORCL", "SNOW"])
+        self.assertEqual(found["ORCL"], ("ORCL Inc",))
         self.assertNotIn("GOOGL", found)
         # A ticker the packaged dict already knows is never asked about.
         self.assertEqual(resolve_universe_names(
@@ -123,10 +135,12 @@ class LegacyFallbackTests(unittest.TestCase):
     """The legacy Core passes no table and must get exactly its old answers."""
 
     def test_packaged_answers_are_unchanged_without_a_table(self):
-        self.assertEqual(subject_names("ACN"), ("Accenture", "ACN"))
+        self.assertEqual(subject_names("ACN"), COMPANY_NAMES["ACN"] + ("ACN",))
+        self.assertEqual(subject_names("ACN")[0], "Accenture")
         self.assertEqual(subject_names("IBM"),
                          COMPANY_NAMES["IBM"])
-        self.assertEqual(subject_names("MSFT"), ("MSFT",))
+        self.assertEqual(subject_names("MSFT"), COMPANY_NAMES["MSFT"] + ("MSFT",))
+        self.assertEqual(subject_names("ZZZZ"), ("ZZZZ",))
         self.assertIn("IT services", subject_names("industry:us-it-services"))
 
     def test_an_industry_may_be_renamed_by_the_mission_too(self):

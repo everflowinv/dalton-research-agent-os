@@ -317,11 +317,14 @@ class AuditTests(unittest.TestCase):
         self.assertTrue(crowd["owner_inputs"])
 
     def test_a_company_nobody_has_named_is_reported_and_skips_only_its_plan(self):
-        """The feed plan cannot be built, and the other 29 actions still are."""
+        """The feed plan cannot be built, and the other 29 actions still are.
+
+        ORCL rather than MSFT: since 2026-09-24 the hyperscalers are packaged.
+        """
 
         other = {**MISSION, "universe": [
-            {"company_ref": "company:ticker:msft", "ticker": "MSFT"}]}
-        self.assertEqual(unknown_universe_tickers(other), ["MSFT"])
+            {"company_ref": "company:ticker:orcl", "ticker": "ORCL"}]}
+        self.assertEqual(unknown_universe_tickers(other), ["ORCL"])
         _write_mission_db(self.state, other)
         performed = apply_parity_actions(
             plan_parity_actions(self.state, actor_ref="human:owner@example.com",
@@ -329,11 +332,11 @@ class AuditTests(unittest.TestCase):
             actor_ref="human:owner@example.com", mission=other)
         skipped = [row for row in performed if row["result"] == "skipped"]
         self.assertEqual([row["kind"] for row in skipped], ["mission_plan"])
-        self.assertIn("MSFT", skipped[0]["detail"])
+        self.assertIn("ORCL", skipped[0]["detail"])
         self.assertTrue(any(row["result"] == "approved" for row in performed))
         report = audit_lanes(self.state, host_sources=self.sources)
         wiki = next(row for row in report["lanes"] if row["key"] == "company_wiki")
-        self.assertTrue(any("MSFT" in blocker for blocker in wiki["blockers"]))
+        self.assertTrue(any("ORCL" in blocker for blocker in wiki["blockers"]))
 
     def test_a_named_universe_produces_a_plan_and_clears_the_blocker(self):
         """The four hyperscalers, named, run the feed lanes end to end."""
