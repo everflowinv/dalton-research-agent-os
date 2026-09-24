@@ -114,6 +114,10 @@ class DerivationRuleTests(unittest.TestCase):
             ("antigravity-cli-gateway", "gemini-3.8-flash"): "google-gemini-3",
             ("zai", "glm-5.3-flash"): "zhipu-glm-5.3",
             ("qwen", "deepseek-v4-pro-0901"): "deepseek-v4",
+            ("muse-cli-gateway", "muse-spark-1.3"): "meta-muse",
+            ("muse-cli-gateway", "muse-spark-1.3-contributor"): "meta-muse",
+            ("muse-cli-gateway", "muse-spark-1.4"): "meta-muse",
+            ("muse-cli-gateway", "muse-spark-1.4-contributor"): "meta-muse",
         }
         for (provider, model), family in cases.items():
             with self.subTest(model=model):
@@ -121,7 +125,10 @@ class DerivationRuleTests(unittest.TestCase):
 
     def test_uncertain_lineage_stays_unclassified(self):
         for provider, model in (
-            ("muse-cli-gateway", "muse-spark-1.3"),          # no curated lineage
+            ("muse-cli-gateway", "muse-glimmer-1"),          # another Muse line
+            ("muse-cli-gateway", "muse-spark-2.0"),          # next generation
+            ("muse-cli-gateway", "muse-spark-1.3-preview"),  # unknown suffix
+            ("openrouter", "muse-spark-1.3"),                # provider never curated for it
             ("claude-cli-gateway", "claude-opus-6"),        # next generation
             ("openai", "gpt-6.1-sol"),                      # OpenAI minor = new family
             ("openai", "gpt-7"),
@@ -167,7 +174,10 @@ class CatalogProjectionTests(unittest.TestCase):
             "google-gemini-3")
         self.assertEqual(
             families["profile:auto-muse-cli-gateway-muse-spark-1-3-27804db256e4"],
-            "unclassified:muse-cli-gateway")
+            "meta-muse")
+        self.assertEqual(
+            families["profile:auto-muse-cli-gateway-muse-spark-1-3-contributor-f91fd8808c9f"],
+            "meta-muse")
 
     def test_owner_declaration_still_wins(self):
         config = _live_drift()
@@ -210,13 +220,80 @@ class CatalogProjectionTests(unittest.TestCase):
                 self.assertEqual(after["profile:grok-4-7"]["family"], "xai-grok-4")
                 self.assertEqual(
                     after["profile:auto-muse-cli-gateway-muse-spark-1-3-27804db256e4"]["family"],
-                    "unclassified:muse-cli-gateway")
+                    "meta-muse")
                 # History is append-only: the reset version is still readable.
                 self.assertEqual(router.get_profile(reset_ref), frozen)
                 again = reconcile.sync_openclaw_model_catalog(router, config, checked_at=NOW)
                 self.assertEqual(again["updated_profile_ids"], [])
                 self.assertTrue(again["catalog_in_sync"])
 
+
+class MuseSparkCurationTests(unittest.TestCase):
+    """Live 2026-09-24: both Muse Spark routes were ``unclassified`` everywhere.
+
+    They had been admitted by the allow patch as dynamic profiles, and no
+    curated endpoint or lineage rule named Muse, so the document lane's
+    verifier-independence preflight failed in all three environments.
+    """
+
+    MUSE = "profile:auto-muse-cli-gateway-muse-spark-1-3-27804db256e4"
+    CONTRIBUTOR = "profile:auto-muse-cli-gateway-muse-spark-1-3-contributor-f91fd8808c9f"
+
+    def test_both_routes_are_curated_under_the_broker_ids(self):
+        curated = {f"profile:{e['name']}": e for e in _ENDPOINTS}
+        for profile_id, model in ((self.MUSE, "muse-spark-1.3"),
+                                  (self.CONTRIBUTOR, "muse-spark-1.3-contributor")):
+            with self.subTest(profile_id=profile_id):
+                self.assertEqual(curated[profile_id]["provider"], "muse-cli-gateway")
+                self.assertEqual(curated[profile_id]["model"], model)
+                self.assertEqual(curated[profile_id]["family"], "meta-muse")
+        # The allow patch reuses the curated id instead of minting another.
+        from dalton_core.openclaw_allow_patch import _curated_profile_id
+        self.assertEqual(_curated_profile_id("muse-cli-gateway/muse-spark-1.3"), self.MUSE)
+        self.assertEqual(_curated_profile_id("muse-cli-gateway/muse-spark-1.3-contributor"),
+                         self.CONTRIBUTOR)
+
+    def test_muse_is_independent_of_other_labs_but_not_of_itself(self):
+        muse = family_for_route("muse-cli-gateway", "muse-spark-1.3")
+        contributor = family_for_route("muse-cli-gateway", "muse-spark-1.3-contributor")
+        self.assertFalse(independent_families(muse, contributor))
+        for provider, model in (("claude-cli-gateway", "claude-opus-5"),
+                                ("openai", "gpt-6-astra"),
+                                ("google", "gemini-3.8-flash"),
+                                ("zai", "glm-5.3")):
+            with self.subTest(model=model):
+                self.assertTrue(independent_families(muse, derive_model_family(provider, model)))
+
+    def test_live_unclassified_rows_are_reclassified_by_the_next_sync(self):
+        config = _config()
+        with tempfile.TemporaryDirectory() as directory:
+            with ModelRouter(Path(directory) / "router.sqlite") as router:
+                # What the pre-curation code registered live: dynamic profiles
+                # with no lineage.
+                static = reconcile._static_routes
+                with patch.object(reconcile, "_static_routes", lambda checked_at: {
+                        key: value for key, value in static(checked_at).items()
+                        if "muse" not in key}), \
+                     patch.object(reconcile, "family_for_route",
+                                  lambda provider, model: f"unclassified:{provider}"):
+                    reconcile.sync_openclaw_model_catalog(
+                        router, config, checked_at=NOW - timedelta(days=1))
+                before = {p["id"]: p for p in router.latest_profiles()}
+                self.assertEqual(before[self.MUSE]["family"], "unclassified:muse-cli-gateway")
+                self.assertTrue(before[self.MUSE]["profile_version_ref"].startswith(
+                    "model-profile-version:dynamic-"))
+                result = reconcile.sync_openclaw_model_catalog(router, config, checked_at=NOW)
+                self.assertIn(self.MUSE, result["updated_profile_ids"])
+                self.assertIn(self.CONTRIBUTOR, result["updated_profile_ids"])
+                self.assertEqual(result["retired_profile_ids_this_run"], [])
+                self.assertTrue(result["catalog_in_sync"])
+                after = {p["id"]: p for p in router.latest_profiles()}
+                for profile_id in (self.MUSE, self.CONTRIBUTOR):
+                    self.assertEqual(after[profile_id]["family"], "meta-muse")
+                    self.assertEqual(after[profile_id]["prior_version_ref"],
+                                     before[profile_id]["profile_version_ref"])
+                self.assertFalse(any(p["family"].startswith("unclassified:")
+                                     for p in after.values()))
 
 
 class ReadOnlyCheckScriptTests(unittest.TestCase):
@@ -256,6 +333,8 @@ class ReadOnlyCheckScriptTests(unittest.TestCase):
                           "projected": "anthropic-claude-5"})
         self.assertNotIn("profile:auto-muse-cli-gateway-muse-spark-1-3-27804db256e4",
                          report["family_drift"])
+        self.assertNotIn("profile:auto-muse-cli-gateway-muse-spark-1-3-27804db256e4",
+                         report["unclassified_profile_ids"])
         # No document model configs in this fixture: reported, never raised.
         self.assertEqual(report["document_verifier_preflight"]["status"], "failed")
 

@@ -84,6 +84,10 @@ class ModelDeploymentTests(unittest.TestCase):
                 ("antigravity-cli-gateway", "gemini-3.8-flash"),
                 ("zai", "glm-5.3"),
                 ("zai", "glm-5.3-flash"),
+                # Meta's Muse Spark through the Muse gateway, curated so its
+                # family is meta-muse rather than unclassified.
+                ("muse-cli-gateway", "muse-spark-1.3"),
+                ("muse-cli-gateway", "muse-spark-1.3-contributor"),
             },
         )
         # The 0731 route appears twice, once per calibrated thinking level, so

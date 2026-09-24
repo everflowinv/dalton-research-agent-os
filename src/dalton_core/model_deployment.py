@@ -511,6 +511,47 @@ _ENDPOINTS: tuple[dict[str, Any], ...] = (
         "input_cost": 0.075,
         "output_cost": 0.25,
     },
+    # Muse Spark is Meta Superintelligence Labs' proprietary model line (first
+    # released April 2026; not a Llama derivative), served here through the
+    # host's Muse Code subscription gateway.  Both routes are one model: the
+    # "-contributor" variant is the same Muse Spark 1.3 under a training-
+    # eligible data policy, so it can never be independent of the plain one.
+    #
+    # Curated under the broker's own profile ids, not a tidier invented name.
+    # The OpenClaw allow patch minted these ids when the owner let the models
+    # through, and the catalog sync only projects ids the broker offers: a
+    # curated "profile:muse-spark-1-3" would never be registered by the sync,
+    # would make the static catalog report a profile the broker lacks, and
+    # would make the next allow patch mint that name instead and retire these.
+    # Before this entry the two routes had no curated lineage at all, so they
+    # stayed ``unclassified:muse-cli-gateway`` and the document lane's
+    # verifier-independence preflight failed in every environment.
+    {
+        "name": "auto-muse-cli-gateway-muse-spark-1-3-27804db256e4",
+        "provider": "muse-cli-gateway",
+        "model": "muse-spark-1.3",
+        "family": "meta-muse",
+        "credential_slot_ref": "credential-slot:openclaw:muse-cli-gateway",
+        "capabilities": ["research", "verify", "code", "summarize", "extract"],
+        "max_context_tokens": 384_000,
+        "max_output_tokens": 128_000,
+        "max_input_tokens": 256_000,
+        "input_cost": 1.25,
+        "output_cost": 4.25,
+    },
+    {
+        "name": "auto-muse-cli-gateway-muse-spark-1-3-contributor-f91fd8808c9f",
+        "provider": "muse-cli-gateway",
+        "model": "muse-spark-1.3-contributor",
+        "family": "meta-muse",
+        "credential_slot_ref": "credential-slot:openclaw:muse-cli-gateway",
+        "capabilities": ["research", "verify", "code", "summarize", "extract"],
+        "max_context_tokens": 384_000,
+        "max_output_tokens": 128_000,
+        "max_input_tokens": 256_000,
+        "input_cost": 0.1,
+        "output_cost": 0.2,
+    },
 )
 
 
