@@ -375,8 +375,14 @@ def claims_retired(core: sqlite3.Connection, window: Mapping[str, Any]) -> dict[
     decisions = _rows(core, (
         "SELECT claim_version_ref, decision, created_at FROM claim_retirement_decisions"
     ))
+    # 2026-09-24: a retirement a later record withdrew is not "taken back";
+    # the withdrawals are counted on their own.
+    from .claim_retirement import reinstated_claim_version_refs
+
+    reinstated = reinstated_claim_version_refs(core)
     retired = [row for row in decisions
-               if row["decision"] == "retired" and _in_window(row["created_at"], window)]
+               if row["decision"] == "retired" and _in_window(row["created_at"], window)
+               and str(row["claim_version_ref"]) not in reinstated]
     kept = [row for row in decisions
             if row["decision"] == "kept" and _in_window(row["created_at"], window)]
     challenges_raised = 0
@@ -393,6 +399,7 @@ def claims_retired(core: sqlite3.Connection, window: Mapping[str, Any]) -> dict[
     return {
         "available": True,
         "retired": len(retired),
+        "reinstated": len(reinstated),
         "kept": len(kept),
         "challenges_raised": challenges_raised,
         "challenges_open_at_end": open_challenges,

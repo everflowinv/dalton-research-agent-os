@@ -348,17 +348,16 @@ def evidence_items(
 
 
 def _retired_claim_refs(connection: sqlite3.Connection) -> set[str]:
-    if not _has_table(connection, "claim_retirement_decisions"):
-        return set()
+    # 2026-09-24: this used to ask for ``d.verdict='retire'``, a column the
+    # decisions table never had, so the OperationalError branch answered
+    # "nothing is retired" on every Core.  The shared read is retired less
+    # reinstated.
+    from .claim_retirement import retired_claim_version_refs
+
     try:
-        rows = connection.execute(
-            "SELECT c.claim_version_ref FROM claim_retirement_decisions d "
-            "JOIN claim_retirement_challenges c ON c.challenge_id=d.challenge_ref "
-            "WHERE d.verdict='retire'"
-        ).fetchall()
+        return retired_claim_version_refs(connection)
     except sqlite3.OperationalError:  # pragma: no cover - older shape
         return set()
-    return {row[0] for row in rows}
 
 
 def folded_stage_history(

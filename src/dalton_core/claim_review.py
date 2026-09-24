@@ -38,14 +38,23 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .claim_retirement import (
+    REREVIEW_RULE_REF,
+    SPAN_RATIONALE_PREFIX,
+    SPAN_V2_DETECTOR_REF,
     ClaimRetirementAuthority,
     ClaimRetirementError,
     DETERMINISTIC_REASONS,
     detect,
+    subject_absent,
     subject_needles,
 )
-from .claim_subject import document_is_subjects, mission_subject_needles, name_needles
-from .store import authorization_flag
+from .claim_subject import (
+    CONTEXT_CHARS,
+    mission_subject_needles,
+    name_needles,
+    own_document_evidence,
+)
+from .store import authorization_flag, content_hash
 
 SCHEMA_VERSION = "0.1"
 _SCHEMA = Path(__file__).with_name("claim_review_schema.sql")
@@ -74,6 +83,9 @@ DEFAULT_UNREADABLE_RETRIES = 4
 # The lane runs inside the writer tick, so renders are bounded per run the same
 # way distinct originals are; the rest wait for the next tick.
 DEFAULT_MAX_RENDERS = 6
+# The re-review of past span retirements (2026-09-24 audit) reads originals
+# too, under its own bound so it never starves the patrol's first look.
+DEFAULT_REREVIEW_DOCUMENTS = 20
 WRITE_SCOPE = "claim_challenge"
 #: The state-directory spools an acquired original can be in, in the order the
 #: other readers of acquired bytes already use (``mission_sec_quarters``).
@@ -198,6 +210,32 @@ class ClaimReviewDriver:
         self._authorization = authorization_flag(
             self.connection, "dalton_claim_review_authorized")
         self.connection.executescript(_SCHEMA.read_text(encoding="utf-8"))
+
+    @classmethod
+    def read_only(
+        cls, *, connection: Any, missions: Any, spool: Any,
+        needles: Mapping[str, Sequence[str]] | None = None,
+        clock: Callable[[], datetime] | None = None,
+    ) -> "ClaimReviewDriver":
+        """A driver over a ``mode=ro`` connection, for dry runs only.
+
+        Creates no schema and holds no write authority: ``run_once`` must not
+        be called on it; ``rereview_retirements(dry_run=True)`` may.
+        """
+
+        driver = cls.__new__(cls)
+        driver.store = type("_ReadOnlyStore", (), {"connection": connection})()
+        driver.connection = connection
+        driver.missions = missions
+        driver.challenges = None
+        driver.spool = spool
+        driver.needles = {ref: list(values) for ref, values in (needles or {}).items()}
+        driver._document_refs = {}
+        driver._renders_left = 10 ** 6
+        driver._render_deferred = False
+        driver.clock = clock or (lambda: datetime.now(timezone.utc))
+        driver._authorization = None
+        return driver
 
     # -- resolution ----------------------------------------------------------
 
@@ -378,23 +416,42 @@ class ClaimReviewDriver:
 
     def _span_inputs(
         self, citation: Mapping[str, Any] | None, text: str | None,
-        needles: Sequence[str],
+        needles: Sequence[str], *, subject_ref: Any = None,
+        peer_needles: Sequence[str] = (),
     ) -> dict[str, Any]:
-        """The cited span and whether the document is the subject's own."""
+        """Everything the span rule reads: the span, the text around it,
+        whether the document is the subject's own, and the other covered
+        companies' names (v3, see ``claim_subject``)."""
 
         if citation is None or text is None:
             return {"cited_span": None, "document_is_own": False}
         start, end = citation.get("start"), citation.get("end")
         span = None
+        before = after = None
         if (isinstance(start, int) and isinstance(end, int)
                 and 0 <= start < end <= len(text)):
             span = text[start:end]
+            before = text[max(0, start - CONTEXT_CHARS):start]
+            after = text[end:end + CONTEXT_CHARS]
         facts = self._document_facts(citation.get("document_ref"))
-        own = document_is_subjects(
+        own = own_document_evidence(
             title=facts["title"], text=text, needles=needles,
-            issuer_document=facts["issuer_document"],
-        )
-        return {"cited_span": span, "document_is_own": own}
+            issuer_document=facts["issuer_document"], subject_ref=subject_ref,
+            peer_needles=peer_needles,
+        ) is not None
+        return {"cited_span": span, "document_is_own": own,
+                "context_before": before, "context_after": after,
+                "peer_needles": list(peer_needles)}
+
+    def _peer_needles(self, subject_ref: Any, roster: Mapping[str, Sequence[str]]) -> list[str]:
+        """Every other covered company's names: what "another company" means."""
+
+        mine = set(self._needles_for(subject_ref, roster))
+        found: set[str] = set()
+        for ref in set(self.needles) | set(roster):
+            if ref != subject_ref:
+                found.update(self._needles_for(ref, roster))
+        return sorted(found - mine)
 
     # -- the pass ------------------------------------------------------------
 
@@ -605,7 +662,10 @@ class ClaimReviewDriver:
             hit = detect(
                 statement=claim["normalized_statement"], source_text=text,
                 needles=needles,
-                **self._span_inputs(citations.get(row["ref"]), text, needles),
+                **self._span_inputs(
+                    citations.get(row["ref"]), text, needles,
+                    subject_ref=claim["subject_ref"],
+                    peer_needles=self._peer_needles(claim["subject_ref"], roster)),
             )
             if hit is None:
                 outcomes.append((row["ref"], row["hash"], digest, "clear"))
@@ -636,6 +696,11 @@ class ClaimReviewDriver:
         ]
         if principal is None:
             summary["status"] = "held" if detections else "idle"
+            # Report-only: what the re-review would withdraw under a grant.
+            summary["rereview"] = self.rereview_retirements(
+                principal=None, roster=roster, citations=citations, texts=texts)
+            if summary["rereview"]["would_reinstate"]:
+                summary["status"] = "held"
             return summary
         for item in detections:
             try:
@@ -666,7 +731,9 @@ class ClaimReviewDriver:
                 if citation is not None:
                     digest = citation["digest"]
                     text = texts.get(digest) or self.source_text(digest)
-                    span_inputs = self._span_inputs(citation, text, needles)
+                    span_inputs = self._span_inputs(
+                        citation, text, needles, subject_ref=challenge["subject_ref"],
+                        peer_needles=self._peer_needles(challenge["subject_ref"], roster))
             try:
                 self.challenges.decide(
                     challenge_ref=challenge["id"], challenge_hash=challenge["content_hash"],
@@ -681,14 +748,184 @@ class ClaimReviewDriver:
                 "claim_version_ref": challenge["claim_version_ref"],
                 "reason_code": challenge["reason_code"], "subject_ref": challenge["subject_ref"],
             })
-        if summary["challenged"] or summary["retired"]:
+        summary["rereview"] = self.rereview_retirements(
+            principal=principal, roster=roster, citations=citations, texts=texts)
+        if summary["challenged"] or summary["retired"] or summary["rereview"]["reinstated"]:
             summary["status"] = "acted"
+        return summary
+
+    # -- re-review of past span retirements (2026-09-24 audit) ---------------
+
+    def _rereviews(self) -> dict[str, dict[str, Any]]:
+        try:
+            return {
+                row["claim_version_ref"]: dict(row)
+                for row in self.connection.execute(
+                    "SELECT * FROM claim_review_rereviews").fetchall()
+            }
+        except sqlite3.Error:
+            return {}
+
+    def _record_rereview(self, claim_version_ref: str, needles_hash: str, outcome: str) -> None:
+        at = self.clock().astimezone(timezone.utc).isoformat(timespec="microseconds")
+        self._authorization.authorized = True
+        try:
+            self.connection.execute(
+                "INSERT INTO claim_review_rereviews(claim_version_ref,rule_ref,needles_hash,"
+                "outcome,attempts,reviewed_at) VALUES(?,?,?,?,1,?) "
+                "ON CONFLICT(claim_version_ref) DO UPDATE SET rule_ref=excluded.rule_ref, "
+                "needles_hash=excluded.needles_hash, outcome=excluded.outcome, "
+                "attempts=claim_review_rereviews.attempts+1, reviewed_at=excluded.reviewed_at",
+                (claim_version_ref, REREVIEW_RULE_REF, needles_hash, outcome, at),
+            )
+            self.connection.commit()
+        except Exception:  # noqa: BLE001 - a marker failure must not lose the pass
+            self.connection.rollback()
+        finally:
+            self._authorization.authorized = False
+
+    def span_retirements_to_rereview(self) -> list[dict[str, Any]]:
+        """Span retirements made before the v3 rule and not yet withdrawn.
+
+        Exactly one class: reason ``subject_absent_from_source``, detector v2,
+        and the span form of the rationale.  Whole-document retirements, the
+        boilerplate filter, human judgments and model verdicts are never
+        re-judged here.
+        """
+
+        reinstated = (
+            "AND NOT EXISTS (SELECT 1 FROM claim_retirement_reinstatements r "
+            "WHERE r.decision_ref=d.decision_id) "
+        )
+        try:
+            self.connection.execute("SELECT 1 FROM claim_retirement_reinstatements LIMIT 1")
+        except sqlite3.Error:
+            reinstated = ""
+        rows = self.connection.execute(
+            "SELECT c.claim_version_ref AS ref, c.subject_ref AS subject_ref, "
+            "d.content_hash AS decision_hash, v.claim_json AS claim_json "
+            "FROM claim_retirement_challenges c "
+            "JOIN claim_retirement_decisions d ON d.challenge_ref=c.challenge_id "
+            "JOIN claim_versions v ON v.claim_version_id=c.claim_version_ref "
+            "WHERE d.decision='retired' AND c.reason_code='subject_absent_from_source' "
+            "AND c.detector_ref=? AND substr(c.rationale,1,?)=? " + reinstated +
+            "ORDER BY d.created_at, c.claim_version_ref",
+            (SPAN_V2_DETECTOR_REF, len(SPAN_RATIONALE_PREFIX), SPAN_RATIONALE_PREFIX),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def rereview_retirements(
+        self,
+        *,
+        principal: str | None,
+        roster: Mapping[str, Sequence[str]] | None = None,
+        citations: Mapping[str, Mapping[str, Any]] | None = None,
+        texts: dict[str, str | None] | None = None,
+        max_documents: int = DEFAULT_REREVIEW_DOCUMENTS,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Re-judge the pre-audit span retirements under today's rule.
+
+        The v2 detector ran before the alias table named AWS, Gemini or an
+        issuer's products, and before the rule looked past the span; the audit
+        found retirements it made that the current rule would not.  Each
+        still-standing v2 span retirement is re-read against its exact
+        original with the current needles and the v3 rule; when the rule no
+        longer fires, the automation principal appends a reinstatement (the
+        authority re-runs the rule before writing).  Without a principal --
+        or on ``dry_run`` -- it only reports what it would withdraw.
+
+        Idempotent: a reinstated retirement leaves the query; a still-retired
+        one is marked with the rule ref and the hash of the needles it was
+        judged with, and is looked at again only when either changes.
+        """
+
+        roster = self._roster_needles() if roster is None else roster
+        summary: dict[str, Any] = {
+            "rule_ref": REREVIEW_RULE_REF, "candidates": 0, "examined": 0,
+            "reinstated": [], "would_reinstate": [], "still_retired": 0,
+            "unreadable": 0, "deferred": 0, "already_reviewed": 0, "skipped": [],
+        }
+        try:
+            candidates = self.span_retirements_to_rereview()
+        except sqlite3.Error as exc:
+            summary["skipped"].append({"reason": f"{type(exc).__name__}: {exc}"})
+            return summary
+        summary["candidates"] = len(candidates)
+        if not candidates:
+            return summary
+        markers = self._rereviews()
+        # The patrol's pass only resolves the Claims it examined; a retired
+        # Claim was examined long ago, so resolve the whole chain once here.
+        if not citations or any(row["ref"] not in citations for row in candidates):
+            citations = {**self._citations(), **(citations or {})}
+        texts = {} if texts is None else texts
+        read_here = 0
+        for row in candidates:
+            needles = self._needles_for(row["subject_ref"], roster)
+            peers = self._peer_needles(row["subject_ref"], roster)
+            needles_hash = content_hash({"needles": needles, "peers": peers})
+            marker = markers.get(row["ref"])
+            if (marker is not None and marker["rule_ref"] == REREVIEW_RULE_REF
+                    and marker["needles_hash"] == needles_hash
+                    and marker["outcome"] == "still_retired"):
+                summary["already_reviewed"] += 1
+                continue
+            citation = citations.get(row["ref"])
+            text = None
+            if citation is not None:
+                digest = citation["digest"]
+                if digest not in texts:
+                    if read_here >= max(1, int(max_documents)):
+                        summary["deferred"] += 1
+                        continue
+                    read_here += 1
+                    texts[digest] = self.source_text(digest)
+                text = texts[digest]
+            summary["examined"] += 1
+            if text is None:
+                summary["unreadable"] += 1
+                if not dry_run:
+                    self._record_rereview(row["ref"], needles_hash, "unreadable")
+                continue
+            claim = json.loads(row["claim_json"])
+            inputs = self._span_inputs(citation, text, needles,
+                                       subject_ref=row["subject_ref"], peer_needles=peers)
+            if subject_absent(
+                statement=claim["normalized_statement"], source_text=text,
+                needles=needles, **inputs,
+            ) is not None:
+                summary["still_retired"] += 1
+                if not dry_run:
+                    self._record_rereview(row["ref"], needles_hash, "still_retired")
+                continue
+            item = {"claim_version_ref": row["ref"], "subject_ref": row["subject_ref"],
+                    "statement": claim["normalized_statement"][:160]}
+            if dry_run or principal is None:
+                summary["would_reinstate"].append(item)
+                continue
+            try:
+                record = self.challenges.reinstate(
+                    claim_version_ref=row["ref"], decision_hash=row["decision_hash"],
+                    actor_ref=principal,
+                    rationale=(
+                        "按当前别名表和 v3 退役规则重判：所引片段、结论本身、紧邻上下文或"
+                        "文档本身（封面/标题/密度）其实指向这家公司，当初的退役不成立。"),
+                    subject_needles=needles, source_text=text, **inputs,
+                )
+            except ClaimRetirementError as exc:
+                summary["skipped"].append({"claim_version_ref": row["ref"], "reason": str(exc)})
+                continue
+            self._record_rereview(row["ref"], needles_hash, "reinstated")
+            summary["reinstated"].append({**item, "reinstatement_ref": record["id"],
+                                          "status": record["status"]})
         return summary
 
 
 __all__ = [
     "ClaimReviewDriver",
     "DEFAULT_MAX_DOCUMENTS",
+    "DEFAULT_REREVIEW_DOCUMENTS",
     "DEFAULT_MAX_RENDERS",
     "DEFAULT_UNREADABLE_RETRIES",
     "DETECTOR_SET_REF",

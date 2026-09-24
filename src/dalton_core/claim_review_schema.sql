@@ -39,3 +39,31 @@ CREATE TRIGGER IF NOT EXISTS claim_review_examinations_no_delete
 BEFORE DELETE ON claim_review_examinations BEGIN
     SELECT RAISE(ABORT, 'claim review examinations cannot be deleted');
 END;
+
+-- 2026-09-24: which past span retirements the re-review has already re-judged,
+-- under which rule and which alias table.  A cache, like the examinations
+-- above: the authority is ``claim_retirement_reinstatements``; this only
+-- keeps a still-retired Claim from being re-read every tick.  A new rule ref
+-- or a changed alias table (``needles_hash``) re-judges it once.
+CREATE TABLE IF NOT EXISTS claim_review_rereviews (
+    claim_version_ref TEXT PRIMARY KEY,
+    rule_ref TEXT NOT NULL,
+    needles_hash TEXT NOT NULL,
+    outcome TEXT NOT NULL CHECK (outcome IN ('still_retired', 'reinstated', 'unreadable')),
+    attempts INTEGER NOT NULL DEFAULT 1 CHECK (attempts >= 1),
+    reviewed_at TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS claim_review_rereviews_authorized_insert
+BEFORE INSERT ON claim_review_rereviews
+WHEN dalton_claim_review_authorized() = 0 BEGIN
+    SELECT RAISE(ABORT, 'claim review re-review insert requires authority');
+END;
+CREATE TRIGGER IF NOT EXISTS claim_review_rereviews_authorized_update
+BEFORE UPDATE ON claim_review_rereviews
+WHEN dalton_claim_review_authorized() = 0 BEGIN
+    SELECT RAISE(ABORT, 'claim review re-review update requires authority');
+END;
+CREATE TRIGGER IF NOT EXISTS claim_review_rereviews_no_delete
+BEFORE DELETE ON claim_review_rereviews BEGIN
+    SELECT RAISE(ABORT, 'claim review re-reviews cannot be deleted');
+END;

@@ -206,6 +206,9 @@ def company_change_keys(
     dossiers = head_change_keys(connection, "company_dossier_versions", "company_ref")
     shared = [
         append_probe(connection, "claim_retirement_decisions"),
+        # 2026-09-24: a reinstatement moves the live Claim set as surely as a
+        # retirement does, so a withdrawn retirement re-drafts the dossier.
+        append_probe(connection, "claim_retirement_reinstatements"),
         append_probe(connection, "evidence_relations"),
         append_probe(connection, "coverage_mission_statement_lines"),
         *[str(item) for item in control],

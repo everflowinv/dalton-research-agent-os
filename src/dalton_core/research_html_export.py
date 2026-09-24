@@ -347,19 +347,10 @@ def _typed_claims(
             else None
         )
         status = adjudication[0] if adjudication is not None else "proposed"
-        retired = False
-        if _has_table(connection, "claim_retirement_decisions") and _has_table(
-            connection, "claim_retirement_challenges"
-        ):
-            retired = (
-                connection.execute(
-                    "SELECT 1 FROM claim_retirement_decisions d "
-                    "JOIN claim_retirement_challenges c ON c.challenge_id=d.challenge_ref "
-                    "WHERE c.claim_version_ref=? AND d.decision='retired' LIMIT 1",
-                    (ref,),
-                ).fetchone()
-                is not None
-            )
+        from .claim_retirement import retired_claim_version_refs
+
+        # Retired less reinstated (2026-09-24).
+        retired = ref in retired_claim_version_refs(connection)
         if (
             claim.get("id") == ref
             and claim.get("content_hash") == row["content_hash"]
