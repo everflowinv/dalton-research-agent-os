@@ -644,16 +644,10 @@ def check_claim_refs_resolve(art: Mapping[str, Any], context: CheckContext) -> d
             f"({','.join('?' * len(window))})", window,
         ).fetchall()
         known.update(row[0] for row in rows)
-    retired: set[str] = set()
-    try:
-        retired = {
-            row[0] for row in core.execute(
-                "SELECT claim_version_ref FROM claim_retirement_decisions WHERE decision='retired'"
-            ).fetchall()
-        }
-    except sqlite3.OperationalError as exc:  # the table is optional
-        if "no such table" not in str(exc):
-            raise
+    from .claim_retirement import retired_claim_version_refs
+
+    # Retired less reinstated (2026-09-24); empty when the table is absent.
+    retired: set[str] = retired_claim_version_refs(core)
     findings = []
     for ref in unique:
         if ref not in known:

@@ -4972,6 +4972,22 @@ class CockpitPlane:
                 "detail": record["rationale"], "state": "done" if retired else "skipped",
                 "company": None,
             })
+        # 2026-09-24: a retirement withdrawn by a later record is shown as its
+        # own event; the retirement above stays in the feed as it happened.
+        for row in self._rows_from(self.config.core_db,
+            "SELECT record_json FROM claim_retirement_reinstatements "
+            "ORDER BY created_at DESC LIMIT ?", (limit,),
+        ):
+            record = json.loads(row["record_json"])
+            events.append({
+                "id": f"claim-reinstatement:{record['id']}", "at": record["created_at"],
+                "kind": "claim_decision", "lane": "账本更正",
+                "title": "撤销了一次退役，结论恢复使用：" + (
+                    "你的判断" if record["reason_code"] == "human_judgment"
+                    else "按当前规则重判，原文其实提到了这家公司"),
+                "detail": record["rationale"], "state": "done",
+                "company": None,
+            })
         for row in self.journal.rows("SELECT * FROM cockpit_events ORDER BY event_id DESC LIMIT ?", (limit,)):
             shown = self._journal_event_view(row)
             events.append({"id": f"cockpit:{row['event_id']}", "at": row["at"], "kind": row["kind"],

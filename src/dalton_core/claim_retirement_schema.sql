@@ -69,3 +69,39 @@ BEFORE UPDATE ON claim_retirement_decisions BEGIN
 CREATE TRIGGER IF NOT EXISTS claim_retirement_decisions_no_delete
 BEFORE DELETE ON claim_retirement_decisions BEGIN
     SELECT RAISE(ABORT, 'claim challenge decisions are append-only'); END;
+
+-- 2026-09-24: a retirement shown to be wrong is withdrawn by a further record,
+-- never by editing or deleting the decision.  ``claim_retirement_decisions``
+-- keeps one row per Claim for ever; a reinstatement names that exact decision
+-- (and its hash) and says who withdrew it and why.  Every read path treats a
+-- Claim as retired when it has a ``retired`` decision and no reinstatement of
+-- that decision (``claim_retirement.retired_claim_version_refs``).
+CREATE TABLE IF NOT EXISTS claim_retirement_reinstatements (
+    reinstatement_id TEXT PRIMARY KEY,
+    claim_version_ref TEXT NOT NULL REFERENCES claim_versions(claim_version_id),
+    decision_ref TEXT NOT NULL UNIQUE REFERENCES claim_retirement_decisions(decision_id),
+    decision_hash TEXT NOT NULL,
+    reason_code TEXT NOT NULL CHECK(reason_code IN (
+        'human_judgment',
+        'subject_named_under_current_rule'
+    )),
+    rule_ref TEXT,
+    actor_ref TEXT NOT NULL,
+    rationale TEXT NOT NULL,
+    record_json TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_claim_retirement_reinstatements_claim
+ON claim_retirement_reinstatements(claim_version_ref, created_at);
+
+CREATE TRIGGER IF NOT EXISTS claim_retirement_reinstatements_authorized_insert
+BEFORE INSERT ON claim_retirement_reinstatements WHEN dalton_claim_retirement_authorized() = 0 BEGIN
+    SELECT RAISE(ABORT, 'claim reinstatement insert requires ClaimRetirementAuthority'); END;
+CREATE TRIGGER IF NOT EXISTS claim_retirement_reinstatements_no_update
+BEFORE UPDATE ON claim_retirement_reinstatements BEGIN
+    SELECT RAISE(ABORT, 'claim reinstatements are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS claim_retirement_reinstatements_no_delete
+BEFORE DELETE ON claim_retirement_reinstatements BEGIN
+    SELECT RAISE(ABORT, 'claim reinstatements are append-only'); END;

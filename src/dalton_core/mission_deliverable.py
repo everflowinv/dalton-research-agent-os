@@ -744,18 +744,10 @@ class MissionDeliverableAuthority:
             row["claim_version_id"]
             for row in self.connection.execute("SELECT claim_version_id FROM claim_versions").fetchall()
         }
-        try:
-            retired = {
-                row["claim_version_ref"]
-                for row in self.connection.execute(
-                    "SELECT claim_version_ref FROM claim_retirement_decisions WHERE decision='retired'"
-                ).fetchall()
-            }
-        except sqlite3.OperationalError as exc:
-            if "no such table" not in str(exc):
-                raise
-            retired = set()
-        return refs - retired
+        from .claim_retirement import retired_claim_version_refs
+
+        # Retired less reinstated (2026-09-24).
+        return refs - retired_claim_version_refs(self.connection)
 
     def cell_resolver(self) -> Callable[[Mapping[str, Any]], bool]:
         """Whether a computed cell a figure cites still exists in this Core.

@@ -522,13 +522,10 @@ def unresolved_refs(
         for row in (block or {}).get("sources") or []:
             kinds[row["ref"]] = row["kind"]
     missing: list[dict[str, str]] = []
-    retired: set[str] = set()
-    if table_exists(connection, "claim_retirement_decisions"):
-        retired = {
-            str(row[0]) for row in connection.execute(
-                "SELECT claim_version_ref FROM claim_retirement_decisions "
-                "WHERE decision='retired'").fetchall()
-        }
+    from .claim_retirement import retired_claim_version_refs
+
+    # Retired less reinstated (2026-09-24).
+    retired = retired_claim_version_refs(connection)
     for ref, kind in sorted(kinds.items()):
         if kind == "claim":
             row = connection.execute(

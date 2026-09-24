@@ -280,8 +280,162 @@ def build_research_state(
     # state -- which would have paid an expensive model for a fresh plan on
     # every tick while nothing had changed. A test caught it; live it would
     # have looked like the planner simply being costly.
-    state["content_hash"] = content_hash({k: v for k, v in state.items() if k != "as_of"})
+    state["content_hash"] = state_content_hash(state)
     return state
+
+
+# How close to a cap counts as "near" it.  A plan should be told when a source
+# or the day's model budget is about to run out; it does not need to know the
+# third decimal of what has been spent.
+NEAR_CAP_RATIO = 0.8
+
+
+def _band(spent: Any, cap: Any) -> str:
+    try:
+        spent_value, cap_value = float(spent or 0), float(cap or 0)
+    except (TypeError, ValueError):
+        return "unknown"
+    if cap_value <= 0:
+        return "uncapped"
+    ratio = spent_value / cap_value
+    if ratio >= 1:
+        return "exhausted"
+    if ratio >= NEAR_CAP_RATIO:
+        return "near_cap"
+    return "normal"
+
+
+def budget_bands(spend: Mapping[str, Any] | None) -> dict[str, str]:
+    """What the spend means for a plan: normal, near its cap, or exhausted.
+
+    The raw spend moves every time any lane settles a call -- live
+    2026-09-24 the model-today block changed between every pair of adjacent
+    planner prompts (130 -> 139 calls, $4.91 -> $5.35, ...), and since it was
+    hashed, every tick was a "new" state and every tick paid Opus again.  A
+    band changes only when it matters to what the plan should ask for.  Only
+    capped spends are banded; an uncapped counter (web searches) says nothing
+    a plan could act on and is left out.
+    """
+
+    spend = spend or {}
+    bands: dict[str, str] = {}
+    model_today = spend.get("model_today")
+    if isinstance(model_today, Mapping):
+        cost = _band(model_today.get("cost_usd"), model_today.get("cost_cap_usd"))
+        calls = _band(model_today.get("calls"), model_today.get("call_cap"))
+        order = ("unknown", "uncapped", "normal", "near_cap", "exhausted")
+        bands["model_today"] = max(cost, calls, key=order.index)
+    alphaengine = spend.get("alphaengine_24h")
+    if isinstance(alphaengine, Mapping):
+        bands["alphaengine_24h"] = _band(alphaengine.get("spent"), alphaengine.get("cap"))
+    return bands
+
+
+def state_content_hash(state: Mapping[str, Any]) -> str:
+    """The exact state a plan binds to, minus when it was read and the raw spend.
+
+    ``spend`` is replaced by its :func:`budget_bands`: still in the hash, so a
+    budget running out is a new state, but no longer a new state every time
+    some lane settles a cent.  ``content_hash`` and ``prompt_projection`` are
+    derived from the state and never part of it.
+    """
+
+    body = {
+        key: value for key, value in state.items()
+        if key not in {"as_of", "spend", "content_hash", "prompt_projection"}
+    }
+    body["spend_bands"] = budget_bands(state.get("spend"))
+    return content_hash(body)
+
+
+_ITEM_MATERIAL = ("item_ref", "source_ref", "status", "required", "deficit")
+
+
+def _material_subject(subject: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(subject, Mapping):
+        return None
+    dossier = subject.get("dossier_feedback")
+    financial = subject.get("financial_model")
+    return {
+        "subject": subject.get("company_ref") or subject.get("industry_ref"),
+        "ticker": subject.get("ticker"),
+        "priority": subject.get("priority"),
+        "stage": subject.get("stage"),
+        "stage_status": subject.get("stage_status"),
+        "source_base_ready": bool(subject.get("source_base_ready")),
+        "gaps": sorted(str(item) for item in subject.get("gaps") or ()),
+        "blocked_on": sorted(
+            content_hash(item) for item in subject.get("blocked_on") or ()
+        ),
+        "items": sorted(
+            ({key: item.get(key) for key in _ITEM_MATERIAL}
+             for item in subject.get("items") or ()),
+            key=lambda item: (str(item["item_ref"]), str(item["source_ref"])),
+        ),
+        "financial_model": None if not isinstance(financial, Mapping) else {
+            "status": financial.get("status"), "reason": financial.get("reason"),
+            "model_version_ref": financial.get("model_version_ref"),
+        },
+        "metrics_contested": sorted(
+            str(item.get("metric_ref")) for item in subject.get("metrics_contested") or ()
+        ),
+        "dossier_feedback": None if not isinstance(dossier, Mapping) else {
+            "dossier_status": dossier.get("dossier_status"),
+            "repair_targets": content_hash(list(dossier.get("repair_targets") or ())),
+        },
+    }
+
+
+def planning_hash(state: Mapping[str, Any]) -> str:
+    """Whether the state moved in a way that should change the plan.
+
+    Narrower than :func:`state_content_hash` on purpose.  Live on 2026-09-24
+    adjacent planner prompts on both workspaces differed only in fields that
+    move every tick without changing what is worth doing: the spend, how many
+    documents are readable or unavailable (45 -> 46), how many are queued or
+    read or failed in a pipeline that is already running (queued 0 -> 1 -> 0),
+    how many documents cite a measure -- and so which five measures are the
+    "most cited" (legacy 12:51: EPS and adjusted operating margin swapped
+    places on one citation) -- and the hashes over omitted rows.  What is
+    kept is what a plan is *about*: the goal and sources, each subject's gaps,
+    stage, blockers and item status/deficits, the contested measures, the
+    financial model's status, the dossier's status and repair targets,
+    document-research policy and availability, and the budget bands.  A change here is material and asks
+    the planner again at once; a change only outside it waits for the
+    planner's minimum re-plan interval.
+
+    Works on the full state and on its prompt projection alike, so a recorded
+    prompt can be checked after the fact.
+    """
+
+    totals = dict(state.get("totals") or {})
+    totals.pop("figures_held", None)
+    availability = dict(state.get("document_research_availability") or {})
+    policy = state.get("document_research_policy")
+    feedback_status = dict(state.get("document_research_feedback_status") or {})
+    return content_hash({
+        "schema_version": state.get("schema_version"),
+        "document_research_contract_ref": state.get("document_research_contract_ref"),
+        "document_research_policy": (
+            None if not isinstance(policy, Mapping)
+            else policy.get("content_hash") or content_hash(dict(policy))
+        ),
+        "document_research_availability": {
+            key: availability.get(key)
+            for key in ("status", "reason", "config_hash", "unavailable_sources")
+        },
+        "document_research_feedback_status": feedback_status.get("status"),
+        "goal": state.get("goal"),
+        "sources": state.get("sources"),
+        "industry": _material_subject(state.get("industry")),
+        "companies": sorted(
+            (_material_subject(company) for company in state.get("companies") or ()),
+            key=lambda company: str(company["subject"]),
+        ),
+        "totals": totals,
+        "budget": state.get("budget"),
+        "spend_bands": budget_bands(state.get("spend")),
+    })
 
 
 def state_digest(state: Mapping[str, Any]) -> str:
@@ -310,9 +464,13 @@ def state_digest(state: Mapping[str, Any]) -> str:
 
 __all__ = [
     "MAX_EXAMPLES",
+    "NEAR_CAP_RATIO",
     "SCHEMA_VERSION",
+    "budget_bands",
     "build_research_state",
     "company_state",
     "industry_state",
+    "planning_hash",
+    "state_content_hash",
     "state_digest",
 ]

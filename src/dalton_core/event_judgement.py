@@ -1978,17 +1978,10 @@ def recent_claims(
 ) -> list[dict[str, Any]]:
     """The company's newest live Claims, as citable one-liners."""
 
-    try:
-        retired = {
-            row["claim_version_ref"]
-            for row in connection.execute(
-                "SELECT claim_version_ref FROM claim_retirement_decisions WHERE decision='retired'"
-            ).fetchall()
-        }
-    except sqlite3.OperationalError as exc:
-        if "no such table" not in str(exc):
-            raise
-        retired = set()
+    from .claim_retirement import retired_claim_version_refs
+
+    # Retired less reinstated (2026-09-24).
+    retired = retired_claim_version_refs(connection)
     rows = connection.execute(
         "SELECT claim_version_id AS id, claim_json FROM claim_versions "
         "WHERE json_extract(claim_json,'$.subject_ref')=? "

@@ -204,6 +204,9 @@ class InitialScreenCoordinator:
             "claims": count("SELECT COUNT(*) FROM claim_versions"),
             "retirements": count(
                 "SELECT COUNT(*) FROM claim_retirement_decisions WHERE decision='retired'"),
+            # 2026-09-24: a withdrawn retirement puts a Claim back.
+            "reinstatements": count(
+                "SELECT COUNT(*) FROM claim_retirement_reinstatements"),
             "stages": count("SELECT COUNT(*) FROM coverage_mission_stage_records"),
             "deliverables": count("SELECT COUNT(*) FROM mission_deliverable_versions"),
         }

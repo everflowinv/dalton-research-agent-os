@@ -131,14 +131,10 @@ def _table_exists(connection: sqlite3.Connection, name: str) -> bool:
 
 
 def _excluded_claim_versions(connection: sqlite3.Connection) -> set[str]:
-    excluded: set[str] = set()
-    if _table_exists(connection, "claim_retirement_decisions"):
-        excluded.update(
-            row[0] for row in connection.execute(
-                "SELECT claim_version_ref FROM claim_retirement_decisions "
-                "WHERE decision='retired'"
-            )
-        )
+    from .claim_retirement import retired_claim_version_refs
+
+    # Retired less reinstated (2026-09-24).
+    excluded: set[str] = set(retired_claim_version_refs(connection))
     if _table_exists(connection, "adjudication_versions"):
         latest: dict[str, tuple[int, str]] = {}
         for row in connection.execute(

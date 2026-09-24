@@ -189,7 +189,7 @@ class AuthorityTests(ClaimRetirementHarness):
             reason_code="subject_absent_from_source", rationale="原文里没有 epam", actor_ref=AUTOMATION)
         self.assertEqual(record["status"], "fresh")
         self.assertEqual(record["subject_ref"], EPAM)
-        self.assertEqual(record["detector_ref"], "claim-detector:subject-absent-from-source:v2")
+        self.assertEqual(record["detector_ref"], "claim-detector:subject-absent-from-source:v3")
         again = self.authority.challenge(
             claim_version_ref=claim["ref"], claim_version_hash=claim["hash"],
             reason_code="subject_absent_from_source", rationale="再来一次", actor_ref=AUTOMATION)

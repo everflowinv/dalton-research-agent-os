@@ -743,6 +743,10 @@ HUMAN_GOVERNANCE_OPERATIONS = frozenset({
     "authorize_mission_document_paid_recovery",
     "authorize_mission_document_unproved_recovery",
     "mission_stage_checklist", "claim_retirement_challenges", "decide_claim_retirement",
+    # 2026-09-24: withdraw a wrong retirement by appending a record.  A
+    # person's door; the review patrol's automatic re-review writes through
+    # the authority directly under the mission's claim_challenge grant.
+    "reinstate_claim_retirement",
     "mission_deliverables",
     "mission_document_evidence", "generate_document_extraction", "stage_document_extraction",
     "document_extraction_preflight",
@@ -1175,6 +1179,9 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     "decide_claim_retirement": frozenset({
         "challenge_ref", "challenge_hash", "decision", "rationale", "actor_ref",
     }),
+    "reinstate_claim_retirement": frozenset({
+        "claim_version_ref", "decision_hash", "rationale", "actor_ref",
+    }),
     "run_mission_source_discovery": frozenset({
         "requested_by", "company_ref", "spec_ref", "as_of", "source_ref",
         "variant_index", "missing_periods",
@@ -1456,6 +1463,7 @@ OPERATION_ACTOR_FIELDS: dict[str, str] = {
     "decide_forecast_overturn": "actor_ref",
     "run_mission_source_discovery": "requested_by",
     "decide_claim_retirement": "actor_ref",
+    "reinstate_claim_retirement": "actor_ref",
 }
 
 
@@ -5423,6 +5431,12 @@ class WriterServer:
 
     def _op_decide_claim_retirement(self, p: Mapping[str, Any]) -> Any:
         return self.claim_retirement_challenges.decide(**dict(p))
+
+    def _op_reinstate_claim_retirement(self, p: Mapping[str, Any]) -> Any:
+        values = dict(p)
+        if not str(values.get("actor_ref") or "").startswith("human:"):
+            raise WriterServerError("a retirement is withdrawn by hand only by a person")
+        return self.claim_retirement_challenges.reinstate(**values)
 
     def _op_dispatch_mission_stage(self, p: Mapping[str, Any]) -> Any:
         # Controller tick (P10a).  Enters the Playbook's first stage for any
