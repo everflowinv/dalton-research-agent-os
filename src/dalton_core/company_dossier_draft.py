@@ -76,7 +76,16 @@ from .driver_template import (
     prompt_block,
     template_for,
 )
+from .draft_contract_repair import STRAY_TAIL_RULE_VERSION, stray_tail_fragment
 from .store import content_hash
+
+# The free-text fields of a unit reply, in the contract's path language.  A
+# stray fragment after the last sentence ("...的能力。中") is a format defect in
+# any of them, not only in ``gaps`` where it was first seen: the same model
+# writes all three in the same reply.
+STRAY_TAIL_PATHS: tuple[str, ...] = (
+    "slots[].sentences[].text", "slots[].unknown", "gaps[]",
+)
 
 # P14-0's registry: a lane names its own purpose from its own module rather
 # than editing a set in ``cockpit_model``.  Registered at import because
@@ -111,6 +120,8 @@ def draft_contract_fingerprint() -> str:
         "section_sentence_cap": SECTION_SENTENCE_CAP,
         "variant_conclusion_rule": VARIANT_CONCLUSION_RULE_VERSION,
         "variant_conclusion_patterns": _CONCLUSION_PATTERNS,
+        "stray_tail_rule": STRAY_TAIL_RULE_VERSION,
+        "stray_tail_paths": list(STRAY_TAIL_PATHS),
     })
 
 
@@ -539,6 +550,35 @@ def _resolve_tags(
     return resolved, sources
 
 
+def _refuse_stray_tails(unit: str, slots: Sequence[Mapping[str, Any]],
+                        gaps: Sequence[Any]) -> None:
+    """Refuse a reply whose free text ends in a raw-output fragment.
+
+    Checked on the model's own text, before the driver-template gaps are
+    appended: those are ours, and a defect in them is not the model's to
+    repair.  A refusal here goes down the same road as every other contract
+    violation -- ``unit_contract`` names the exact path, the reply is repaired
+    once, and a repair that keeps the fragment is refused.
+    """
+
+    found: list[str] = []
+    for index, slot in enumerate(slots):
+        if not isinstance(slot, Mapping):
+            continue
+        for position, row in enumerate(slot.get("sentences") or ()):
+            if isinstance(row, Mapping) and stray_tail_fragment(row.get("text")):
+                found.append(f"slots[{index}].sentences[{position}].text")
+        if stray_tail_fragment(slot.get("unknown")):
+            found.append(f"slots[{index}].unknown")
+    for index, gap in enumerate(gaps):
+        if stray_tail_fragment(gap):
+            found.append(f"gaps[{index}]")
+    if found:
+        raise DossierDraftRefused(
+            f"{unit}: {', '.join(found)} end with a stray one- or two-character "
+            "fragment after the final punctuation; delete the fragment")
+
+
 def parse_unit_output(
     text: str,
     *,
@@ -569,6 +609,7 @@ def parse_unit_output(
             f"{sorted(expected)}")
     slots, sources = _resolve_tags(value["slots"], material, unit=unit)
     gaps = list(value.get("gaps") or [])
+    _refuse_stray_tails(unit, slots, gaps)
     if slots and all(set(slot) == {"slot_id", "unknown"} for slot in slots):
         # This is the answer the prompt explicitly asks for when the material
         # does not answer the question. Validate its exact closed shape before
@@ -1114,6 +1155,7 @@ def unit_contract(
             if unit == CLASSIFICATION_UNIT else {}),
         allowed_refs={"slots[].sentences[].refs": frozenset(tags)},
         nonempty=("slots",),
+        clean_tails=STRAY_TAIL_PATHS,
     )
 
 
@@ -1145,6 +1187,8 @@ def unit_contract_reminder(
         f"Each sentence text is at most {MAX_SENTENCE_CHARS} characters.",
         f"gaps is a list of at most {MAX_GAPS} strings of at most "
         f"{MAX_GAP_CHARS} characters; send [] when there are none.",
+        ("Every sentence text, unknown and gap ends at its final punctuation: "
+         "no stray character or two after the last 。, ！ or ？."),
     ]
     if unit == CLASSIFICATION_UNIT:
         lines.append(f"classification is one of {list(INDUSTRY_CLASSIFICATIONS)}.")

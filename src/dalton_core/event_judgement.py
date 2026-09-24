@@ -44,7 +44,7 @@ import json
 import re
 import sqlite3
 from collections.abc import Mapping, Sequence
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from types import MappingProxyType
@@ -137,6 +137,22 @@ POOL_SHARE = Decimal("0.15")
 MAX_BECAUSE_CHARS = 1200
 MAX_NOTE_CHARS = 1200
 MAX_NOTE_SENTENCES = 4
+
+# A NO_CHANGE judgement is, by definition, the view staying where it was.  Live
+# (2026-09-23) ACN's event_note chain gained nine versions in four hours, every
+# one NO_CHANGE and each a paraphrase of the last; across the ledger 99.8% of
+# judgements are NO_CHANGE.  So a NO_CHANGE never mints a note of its own: the
+# judgement is recorded exactly as before and carries this marker, and once
+# the UTC day has closed the company's NO_CHANGE inputs are rolled into at most
+# one digest version on the same event_note chain.  Every other decision still
+# publishes at once.  The marker is what the digest selects on, which is also
+# why a deploy does not backfill a digest for every historical day.
+DAILY_DIGEST_MARKER = "event-note-daily-digest:v1"
+DAILY_DIGEST_TEMPLATE_REF = "template:event-note-daily-digest:v1"
+DAILY_DIGEST_LOOKBACK_DAYS = 7
+DAILY_DIGEST_MAX_ENTRIES = 22
+DAILY_DIGEST_FIGURE_ELIDED = "〔数字见研判记录〕"
+DAILY_DIGEST_FIGURE_FALLBACK = "研判理由含未经 Claim 溯源的数字，正文从略；完整理由见当日研判记录。"
 MAX_REFS = 12
 MAX_RECENT_JUDGEMENTS = 5
 MAX_CLAIMS_IN_PROMPT = 12
@@ -2247,6 +2263,39 @@ def apply_effect(
     research_admitter: Callable[[Mapping[str, Any], Mapping[str, Any]], dict[str, Any]] | None,
     actor_ref: str,
 ) -> dict[str, Any]:
+    """Do what the decision said; a NO_CHANGE note waits for the daily digest."""
+
+    if judgement["decision"] == "NO_CHANGE" and judgement["action"] == "note":
+        effect: dict[str, Any] = {
+            "kind": "note", "status": "deferred",
+            "reason": "NO_CHANGE: rolled into the company's daily event_note digest "
+                      "instead of a version of its own",
+        }
+    else:
+        effect = _apply_effect(
+            event=event, judgement=judgement, context=context, mission=mission,
+            playbook=playbook, deliverables=deliverables,
+            forecast_models=forecast_models, model_version=model_version,
+            research_admitter=research_admitter, actor_ref=actor_ref,
+        )
+    if judgement["decision"] == "NO_CHANGE":
+        effect = {**effect, "daily_digest": DAILY_DIGEST_MARKER}
+    return effect
+
+
+def _apply_effect(
+    *,
+    event: Mapping[str, Any],
+    judgement: Mapping[str, Any],
+    context: Mapping[str, Any],
+    mission: Mapping[str, Any],
+    playbook: Mapping[str, Any] | None,
+    deliverables: Any | None,
+    forecast_models: Any | None,
+    model_version: Mapping[str, Any] | None,
+    research_admitter: Callable[[Mapping[str, Any], Mapping[str, Any]], dict[str, Any]] | None,
+    actor_ref: str,
+) -> dict[str, Any]:
     """Do what the decision said, or say precisely why it could not be done.
 
     Nothing here decides anything.  Every branch either calls one existing
@@ -2363,8 +2412,195 @@ def apply_effect(
                       "dossier lane will read it when it exists"}
 
 
+def _figure_free(text: Any, *, limit: int = 1200) -> str:
+    """The judgement's own words, less any figure no Claim in the digest carries.
+
+    The digest is published through the same authority as every note and is
+    held to the same rule: a figure with nothing behind it is refused.  A
+    NO_CHANGE ``because`` routinely quotes the forecast it left alone, so the
+    figure is elided in place rather than letting one sentence refuse the day.
+    """
+
+    from .mission_deliverable import unsourced_numbers
+
+    cleaned = " ".join(str(text or "").split())[:limit]
+    for token in sorted(set(unsourced_numbers(cleaned, [])), key=len, reverse=True):
+        cleaned = cleaned.replace(token, DAILY_DIGEST_FIGURE_ELIDED)
+    if not cleaned or unsourced_numbers(cleaned, []):
+        return DAILY_DIGEST_FIGURE_FALLBACK
+    return cleaned
+
+
+def build_daily_digest(
+    company_ref: str,
+    day: str,
+    judgements: Sequence[Mapping[str, Any]],
+    *,
+    live_claim_refs: set[str] | None = None,
+) -> dict[str, Any] | None:
+    """One company's closed UTC day of judgements as event_note sections.
+
+    Pure and ordered by ``(created_at, id)``, so the same ledger always renders
+    the same document.  ``None`` when the day holds no NO_CHANGE judgement
+    carrying the digest marker: everything else was already published.
+    """
+
+    rows = sorted(
+        (row for row in judgements
+         if row.get("company_ref") == company_ref
+         and str(row.get("created_at") or "")[:10] == day),
+        key=lambda row: (str(row.get("created_at") or ""), str(row.get("id") or "")),
+    )
+    deferred = [
+        row for row in rows
+        if row.get("decision") == "NO_CHANGE"
+        and (row.get("effect") or {}).get("daily_digest") == DAILY_DIGEST_MARKER
+    ]
+    if not deferred:
+        return None
+    no_change = sum(1 for row in rows if row.get("decision") == "NO_CHANGE")
+    if no_change == len(rows):
+        opening = ("当日考察的输入全部研判为 NO_CHANGE，未改变现行判断；"
+                   "下面逐条列出输入与结论，不另发单条事件笔记。")
+    else:
+        opening = ("当日研判为 NO_CHANGE 的输入未改变现行判断，逐条列出输入与结论；"
+                   "其余研判已即时发布为独立事件笔记，一并列出以便对照。")
+    sections: list[dict[str, Any]] = [{
+        "title": f"{day} 事件研判日汇总（UTC）· 考察输入 {len(rows)} 条 · "
+                 f"NO_CHANGE {no_change} 条",
+        "body": opening, "claim_refs": [], "numbers": [], "gaps": [],
+    }]
+    for row in rows[:DAILY_DIGEST_MAX_ENTRIES]:
+        effect = row.get("effect") or {}
+        if effect.get("kind") == "grouped_judgement":
+            body = "与同组主事件一并研判，结论与主事件相同。"
+        elif effect.get("deliverable_version_ref"):
+            body = "结论已即时发布为独立事件笔记。"
+        else:
+            body = _figure_free(row.get("note") or row.get("because"))
+            question = row.get("research_question")
+            if question:
+                body += "\n待研究：" + _figure_free(question, limit=400)
+        claims = [
+            ref for ref in dict.fromkeys(row.get("citations") or ())
+            if isinstance(ref, str) and ref.startswith("claim-version:")
+            and (live_claim_refs is None or ref in live_claim_refs)
+        ][:200]
+        sections.append({
+            "title": (f"{row.get('event_kind')} · {row.get('decision')}/"
+                      f"{row.get('action')} · {row.get('event_ref')}")[:200],
+            "body": body, "claim_refs": claims, "numbers": [], "gaps": [],
+        })
+    if len(rows) > DAILY_DIGEST_MAX_ENTRIES:
+        sections.append({
+            "title": f"另有 {len(rows) - DAILY_DIGEST_MAX_ENTRIES} 条输入未逐条展开",
+            "body": "其研判记录照常留存于事件研判账本，可按公司与日期查询。",
+            "claim_refs": [], "numbers": [], "gaps": [],
+        })
+    summary = (
+        f"daily digest {company_ref} {day}: {len(rows)} inputs, "
+        f"{no_change} NO_CHANGE; judgements: "
+        + ",".join(str(row.get("id")) for row in rows)
+    )
+    if len(summary) > 2000:
+        summary = summary[:1997] + "..."
+    invocations = [
+        ref for ref in dict.fromkeys(
+            (row.get("model") or {}).get("invocation_ref") for row in rows
+        ) if ref
+    ][:40]
+    return {
+        "company_ref": company_ref, "day": day,
+        "judgement_refs": [row.get("id") for row in rows],
+        "sections": sections, "summary": summary,
+        "model_invocation_refs": invocations,
+        "idempotency_key": f"event-note-daily-digest:{company_ref}:{day}",
+    }
+
+
+def publish_daily_digests(
+    deliverables: Any,
+    *,
+    mission: Mapping[str, Any],
+    playbook: Mapping[str, Any],
+    actor_ref: str,
+    today: date,
+    lookback_days: int = DAILY_DIGEST_LOOKBACK_DAYS,
+) -> list[dict[str, Any]]:
+    """Publish the digest for every closed UTC day that still owes one.
+
+    ``today`` is a ``date``; only days strictly before it are closed, so a day
+    is digested once, after its last judgement.  The idempotency key is
+    checked before anything is rendered, so a tick with nothing owed is one
+    query per owed pair and no write; a replay after a crash returns the
+    existing version through the authority's own idempotency.
+    """
+
+    connection = deliverables.connection
+    start = (today - timedelta(days=max(1, int(lookback_days)))).isoformat()
+    end = today.isoformat()
+    owed = connection.execute(
+        "SELECT DISTINCT company_ref, substr(created_at, 1, 10) AS day "
+        "FROM event_judgements WHERE created_at >= ? AND created_at < ? "
+        "AND decision='NO_CHANGE' "
+        "AND json_extract(record_json, '$.effect.daily_digest') = ? "
+        "ORDER BY day, company_ref",
+        (start, end, DAILY_DIGEST_MARKER),
+    ).fetchall()
+    results: list[dict[str, Any]] = []
+    live: set[str] | None = None
+    for pair in owed:
+        company_ref, day = pair["company_ref"], pair["day"]
+        key = f"event-note-daily-digest:{company_ref}:{day}"
+        deliverable_ref = f"mission-deliverable:event_note:{company_ref.rsplit(':', 1)[-1]}"
+        if connection.execute(
+            "SELECT 1 FROM mission_deliverable_versions WHERE deliverable_ref=? "
+            "AND json_extract(record_json, '$.idempotency_key')=?",
+            (deliverable_ref, key),
+        ).fetchone() is not None:
+            continue
+        next_day = (date.fromisoformat(day) + timedelta(days=1)).isoformat()
+        rows = [
+            json.loads(row["record_json"]) for row in connection.execute(
+                "SELECT record_json FROM event_judgements WHERE company_ref=? "
+                "AND created_at >= ? AND created_at < ? "
+                "ORDER BY created_at, judgement_id",
+                (company_ref, day, next_day),
+            ).fetchall()
+        ]
+        if live is None:
+            live = deliverables.live_claim_version_refs()
+        digest = build_daily_digest(company_ref, day, rows, live_claim_refs=live)
+        if digest is None:
+            continue
+        try:
+            published = deliverables.publish(
+                kind="event_note", subject_ref=company_ref, mission=mission,
+                playbook=playbook, template_ref=DAILY_DIGEST_TEMPLATE_REF,
+                sections=digest["sections"], summary=digest["summary"], gaps=[],
+                model_invocation_refs=digest["model_invocation_refs"],
+                actor_ref=actor_ref, idempotency_key=digest["idempotency_key"],
+            )
+        except Exception as exc:  # noqa: BLE001 - one refused company is not the tick's
+            results.append({"company_ref": company_ref, "day": day, "status": "refused",
+                            "reason": f"{type(exc).__name__}: {exc}"[:500]})
+            continue
+        results.append({
+            "company_ref": company_ref, "day": day,
+            "status": published.get("status", "fresh"),
+            "deliverable_ref": published.get("deliverable_ref"),
+            "deliverable_version_ref": published.get("id"),
+            "judgements": len(digest["judgement_refs"]),
+        })
+    return results
+
+
 __all__ = [
     "ACTION_VOCABULARY",
+    "DAILY_DIGEST_MARKER",
+    "DAILY_DIGEST_TEMPLATE_REF",
+    "build_daily_digest",
+    "publish_daily_digests",
     "DECISION_ACTIONS",
     "DERIVED_CONTEXT_KINDS",
     "EventJudgementAuthority",

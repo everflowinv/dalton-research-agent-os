@@ -30,9 +30,12 @@ from dalton_core.company_dossier import (
     CLASSIFICATION_UNIT, MAX_GAPS, MAX_SENTENCE_CHARS, SLOT_SENTENCE_CAP,
 )
 from dalton_core.company_dossier_draft import (
+    DossierDraftRefused, draft_contract_fingerprint, parse_unit_output,
     unit_contract, unit_contract_reminder,
 )
-from dalton_core.draft_contract_repair import check_contract
+from dalton_core.draft_contract_repair import (
+    Contract, check_contract, stray_tail_fragment,
+)
 from tests import test_dossier_lane as _lane
 
 ACN = _lane.ACN
@@ -120,6 +123,95 @@ class UnitContractTests(unittest.TestCase):
         self.assertIn("Never both", reminder)
 
 
+# EPAM's demand_drivers gap, versions 7-9 of company:sec-cik:0001352010,
+# carried the drafter's abandoned next sentence into the published file.
+EPAM_GAP = ("缺少托管服务合同占比、年度合同金额、平均合同期限和续约率数据，"
+            "无法评估其平抑收入波动的能力。中")
+
+
+class StrayTailTests(unittest.TestCase):
+    def test_the_live_epam_gap_is_caught(self):
+        self.assertEqual(stray_tail_fragment(EPAM_GAP), "中")
+
+    def test_one_or_two_characters_after_final_punctuation_are_a_fragment(self):
+        for text, fragment in (
+                ("能力。中", "中"), ("能力！中国", "中国"), ("能力？中 ", "中"),
+                ("能力。 中", "中"), ("他说“到此为止。”中", "中"),
+                ("能力）。中", "中"), ("能力.中", "中")):
+            self.assertEqual(stray_tail_fragment(text), fragment, text)
+
+    def test_what_is_not_this_defect_is_left_alone(self):
+        for text in (
+                "无法评估其平抑收入波动的能力。",  # clean
+                "能力。中国市场",                   # a tail of three is a sentence
+                "收入下降；待查",                   # ； is not sentence-final
+                "收入下降……待查",                   # nor is an ellipsis
+                "来自U.S.市场",                     # an abbreviation, not a stop
+                "升级到v2.中",                      # a version string
+                "The capability. 中",               # half-width stop after Latin
+                "能力。3", "能力。Q3", "。中", "中", "", None, 7):
+            self.assertIsNone(stray_tail_fragment(text), repr(text))
+
+    def test_the_unit_contract_names_every_path_that_carries_one(self):
+        contract = unit_contract("business_model", structure=STRUCTURE,
+                                 material=material_rows())
+        found = check_contract(
+            {"slots": [{"slot_id": "state",
+                        "sentences": [{"text": "一句话。中", "refs": ["C1"]}]},
+                       {"slot_id": "why", "unknown": "材料没有回答。中国"}],
+             "gaps": ["干净的缺口。", EPAM_GAP]}, contract)
+        self.assertEqual(
+            [(item.path, item.rule) for item in found],
+            [("slots[0].sentences[0].text", "clean_tail"),
+             ("slots[1].unknown", "clean_tail"),
+             ("gaps[1]", "clean_tail")])
+        self.assertIn("'中'", found[-1].detail)
+
+    def test_a_contract_that_does_not_ask_keeps_its_fingerprint(self):
+        # Other lanes share the evaluator; their contracts must not move.
+        from dalton_core.store import content_hash
+
+        plain = Contract(name="x", max_chars={"a": 30})
+        self.assertEqual(plain.fingerprint(), content_hash({
+            "name": "x", "keys": {}, "shapes": {}, "max_items": {},
+            "min_items": {}, "max_chars": {"a": 30}, "enums": {},
+            "allowed_ref_paths": [], "nonempty": [],
+        }))
+        self.assertNotEqual(
+            plain.fingerprint(),
+            Contract(name="x", max_chars={"a": 30}, clean_tails=("a",)).fingerprint())
+        self.assertEqual(check_contract({"a": "能力。中"}, plain), [])
+
+    def test_the_parser_refuses_it_so_the_repair_path_sees_it(self):
+        reply = json.dumps({
+            "slots": [{"slot_id": "state",
+                       "sentences": [{"text": "一句话。", "refs": ["C1"]}]},
+                      {"slot_id": "why", "unknown": "材料没有回答"}],
+            "gaps": [EPAM_GAP]}, ensure_ascii=False)
+        with self.assertRaises(DossierDraftRefused) as caught:
+            parse_unit_output(reply, unit="business_model", structure=STRUCTURE,
+                              material=material_rows())
+        self.assertIn("gaps[0]", str(caught.exception))
+        clean = reply.replace("能力。中", "能力。")
+        parsed = parse_unit_output(clean, unit="business_model",
+                                   structure=STRUCTURE, material=material_rows())
+        self.assertEqual(parsed["gaps"][-1][-3:], "能力。")
+
+    def test_an_all_unknown_reply_is_checked_too(self):
+        reply = json.dumps({
+            "slots": [{"slot_id": "state", "unknown": "材料没有回答。中"},
+                      {"slot_id": "why", "unknown": "材料没有回答"}],
+            "gaps": []}, ensure_ascii=False)
+        with self.assertRaises(DossierDraftRefused):
+            parse_unit_output(reply, unit="business_model", structure=STRUCTURE,
+                              material=material_rows())
+
+    def test_the_rule_is_part_of_the_reminder_and_the_fingerprint(self):
+        self.assertIn("final punctuation",
+                      unit_contract_reminder("business_model", structure=STRUCTURE))
+        self.assertIsInstance(draft_contract_fingerprint(), str)
+
+
 class RepairingModel(_lane.FakeModel):
     """Breaks the shape once per unit, then answers correctly."""
 
@@ -160,6 +252,20 @@ def both_keys(prompt):
     }, ensure_ascii=False)
 
 
+def stray_gap(prompt):
+    slots = re.findall(r"^  (\S+)\t", prompt, flags=re.MULTILINE)
+    tag = "C1" if "\nC1\t" in prompt else "N1"
+    payload = {
+        "slots": [{"slot_id": slots[0],
+                   "sentences": [{"text": "这一节的判断由所引材料支撑。", "refs": [tag]}]}]
+        + [{"slot_id": slot, "unknown": "材料没有回答这一点"} for slot in slots[1:]],
+        "gaps": [EPAM_GAP],
+    }
+    if "Part: industry_classification" in prompt:
+        payload["classification"] = "contract_compounder"
+    return json.dumps(payload, ensure_ascii=False)
+
+
 class DossierRepairTests(unittest.TestCase):
     def setUp(self):
         self.harness = _lane.Harness()
@@ -177,6 +283,26 @@ class DossierRepairTests(unittest.TestCase):
         self.assertTrue(repaired)
         self.assertEqual(repaired[0]["repair_attempts"], 1)
         self.assertTrue(repaired[0]["violations"])
+
+    def test_a_stray_tail_is_repaired_not_published(self):
+        model = None
+
+        def factory():
+            nonlocal model
+            model = RepairingModel(stray_gap)
+            return model
+
+        summary = self.harness.run(model_factory=factory, max_units=2)
+        self.assertEqual(summary["status"], "succeeded")
+        repaired = [row for row in summary["contract_repair"]
+                    if row["status"] == "repaired"]
+        self.assertTrue(repaired)
+        rules = {item["rule"] for row in repaired for item in row["violations"]}
+        self.assertIn("clean_tail", rules)
+        self.assertTrue(model.repair_prompts)
+        self.assertIn("stray fragment", model.repair_prompts[0])
+        self.assertNotIn("能力。中", json.dumps(
+            summary, ensure_ascii=False))
 
     def test_a_reply_that_holds_the_contract_buys_no_repair(self):
         summary = self.harness.run(

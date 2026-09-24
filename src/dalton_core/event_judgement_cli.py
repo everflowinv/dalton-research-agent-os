@@ -37,6 +37,7 @@ from .call_budget import resolve_run_budget
 from .cockpit_model import CockpitModel
 from .coverage_mission import CoverageMissionAuthority
 from .event_judgement import (
+    DAILY_DIGEST_MARKER,
     EVENT_PROMPT_CONTRACT_VERSION,
     MAX_PROMPT_BYTES,
     PURPOSE,
@@ -703,7 +704,11 @@ def run_judgement(
                     event=grouped_event, judgement=alias_judgement,
                     verification=alias_verification,
                     effect={"kind": "grouped_judgement", "status": "recorded",
-                            "primary_event_ref": event["id"]},
+                            "primary_event_ref": event["id"],
+                            # A grouped input is an input examined that day;
+                            # the digest lists it beside its primary.
+                            **({"daily_digest": DAILY_DIGEST_MARKER}
+                               if decided["decision"] == "NO_CHANGE" else {})},
                     mission=mission, actor_ref=actor,
                 )
             # The owner's third instruction: when we changed our mind, or when

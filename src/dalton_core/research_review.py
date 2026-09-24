@@ -26,6 +26,7 @@ from functools import wraps
 from pathlib import Path
 from typing import Any
 
+from .sqlite_path import sqlite_path
 from .research_verification import (
     validate_candidate_claim,
     validate_candidate_evidence,
@@ -407,7 +408,7 @@ class HumanReviewAuthority:
     """Append-only human decisions over an owner-only candidate staging DB."""
 
     def __init__(self, path: str | Path = ":memory:") -> None:
-        self.path = str(path)
+        self.path = sqlite_path(path)
         self._connection_lock = threading.RLock()
         if self.path != ":memory:":
             target = Path(self.path)

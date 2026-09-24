@@ -39,6 +39,7 @@ evaluator serves a dossier unit, a debate map and a model specification.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -66,6 +67,7 @@ __all__ = [
     "repair_with_findings",
     "run_with_contract_repair",
     "single_json_object",
+    "stray_tail_fragment",
     "violations_from_findings",
     "violations_of",
 ]
@@ -210,6 +212,43 @@ class Violation:
         return f"{self.path}: {self.detail} [{self.rule}]"
 
 
+# A raw-output fragment left after the last sentence: "...的能力。中".  The
+# drafting models occasionally emit the first character or two of a sentence
+# they then abandon, and a length cap or a key-set check cannot see it.  The
+# rule is deliberately narrow -- sentence-final punctuation, then *only* one or
+# two CJK characters to the end of the text -- because a longer tail is a
+# sentence (possibly a bad one, but not this defect) and anything else after
+# the punctuation (a digit, a Latin word, a closing bracket) is not it either.
+#
+# Full-width 。！？ always end a sentence.  ASCII . ! ? count only when the
+# character before them is CJK: "能力.中" is a Chinese sentence ended with a
+# half-width stop, while "U.S.市场" and "v2.中" are an abbreviation and a
+# version string whose tail is ordinary text.  ； and … are not terminal:
+# "收入下降；待查" is two clauses, not a stray fragment.
+STRAY_TAIL_RULE_VERSION = "stray-cjk-tail-after-final-punctuation:1"
+_CJK = "\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff"
+_CLOSERS = "\"'\u201d\u2019\u300d\u300f\uff09)\u3011\u300b"
+_STRAY_TAIL_RE = re.compile(
+    "(?:[\u3002\uff01\uff1f]|(?<=[" + _CJK + "])[.!?])"
+    "[" + _CLOSERS + "]*\\s*([" + _CJK + "]{1,2})\\s*\\Z"
+)
+
+
+def stray_tail_fragment(text: Any) -> str | None:
+    """The one or two CJK characters dangling after a text's last sentence.
+
+    ``None`` when there is none, or when nothing precedes the punctuation --
+    a text that *is* one character is not a sentence with a tail.
+    """
+
+    if not isinstance(text, str):
+        return None
+    match = _STRAY_TAIL_RE.search(text)
+    if match is None or not text[:match.start()].strip():
+        return None
+    return match.group(1)
+
+
 def _render(path: str) -> str:
     return path or "(root)"
 
@@ -281,9 +320,19 @@ class Contract:
     # path -> the exact set of reference ids that were shown
     allowed_refs: Mapping[str, Collection[str]] = field(default_factory=dict)
     nonempty: Collection[str] = ()
+    # text paths that must not end in a stray fragment after their last
+    # sentence (see ``stray_tail_fragment``)
+    clean_tails: Collection[str] = ()
 
     def fingerprint(self) -> str:
+        extra: dict[str, Any] = {}
+        if self.clean_tails:
+            # Only when used, so every contract that does not name one keeps
+            # the fingerprint it had before the rule existed.
+            extra = {"clean_tails": sorted(self.clean_tails),
+                     "clean_tail_rule": STRAY_TAIL_RULE_VERSION}
         return content_hash({
+            **extra,
             "name": self.name,
             "keys": {path: [sorted(required), sorted(optional)]
                      for path, (required, optional) in sorted(self.keys.items())},
@@ -419,6 +468,14 @@ def check_contract(value: Any, contract: Contract) -> list[Violation]:
         for shown, node in _walk(value, path):
             if isinstance(node, (str, list, dict)) and not node:
                 found.append(Violation(_render(shown), "nonempty", "must not be empty"))
+    for path in contract.clean_tails:
+        for shown, node in _walk(value, path):
+            fragment = stray_tail_fragment(node)
+            if fragment is not None:
+                found.append(Violation(
+                    _render(shown), "clean_tail",
+                    f"ends with the stray fragment {fragment!r} after its final "
+                    "punctuation; delete the fragment and keep the sentence"))
     return found
 
 

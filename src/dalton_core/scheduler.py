@@ -20,6 +20,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
+from .sqlite_path import sqlite_path
 from .contracts import ResultEnvelope, WorkOrder
 from .recorded_completion import (
     build_recorded_parent_response,
@@ -147,7 +148,7 @@ class Scheduler:
         trusted_journal_reader: Any | None = None,
         trusted_completion_reader: Any | None = None,
     ) -> None:
-        self.path = str(path)
+        self.path = sqlite_path(path)
         self.clock = clock or _utc_now
         self.max_attempts = _positive_int(max_attempts, "max_attempts")
         self.default_lease_seconds = _positive_seconds(

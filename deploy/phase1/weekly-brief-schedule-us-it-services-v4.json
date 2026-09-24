@@ -1,0 +1,25 @@
+{
+  "schema_version": "0.2",
+  "plan_ref": "weekly-brief-plan:us-it-services:v4",
+  "brief_ref": "weekly-brief:us-it-services",
+  "timezone": "America/New_York",
+  "weekday": 3,
+  "hour": 7,
+  "minute": 0,
+  "effective_from": "2026-09-24T12:00:00.000000+00:00",
+  "evidence_refresh": {
+    "evidence_pack_ref": "industry-evidence-pack:us-it-services",
+    "company_overlay_refs": [
+      "company-overlay:acn",
+      "company-overlay:ctsh",
+      "company-overlay:epam",
+      "company-overlay:ibm",
+      "company-overlay:dxc"
+    ],
+    "claim_window_days": 200
+  },
+  "company_thesis_refs": {
+    "company:sec-cik:0001467373": "thesis:acn:ai-reinvention-growth"
+  },
+  "destination_ref": "openclaw:discord:default:channel:1481256083589697566"
+}

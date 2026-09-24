@@ -15,6 +15,8 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Iterator
+
+from .sqlite_path import sqlite_path
 from .contracts import (
     AdjudicatedStatus,
     AdjudicationVersion,
@@ -347,7 +349,7 @@ class DaltonStore:
     _authorized = authorized_flag()
 
     def __init__(self, path: str | Path = ":memory:", *, connection: sqlite3.Connection | None = None):
-        self.path = str(path)
+        self.path = sqlite_path(path)
         self.connection = connection or sqlite3.connect(self.path, isolation_level=None)
         if connection is None and self.path != ":memory:":
             os.chmod(self.path, 0o600)

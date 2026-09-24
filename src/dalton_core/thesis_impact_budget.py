@@ -27,6 +27,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
+from .sqlite_path import sqlite_path
 from .budget_pools import (
     apply_pool_migration,
     pool_decision,
@@ -128,7 +129,7 @@ class ThesisImpactBudgetStore:
         read_only: bool = False,
         shared_daily_budget: Mapping[str, Any] | None = None,
     ) -> None:
-        self.path = str(path)
+        self.path = sqlite_path(path)
         self.read_only = read_only
         # 2026-09-17: the host's shared day cap. Normally discovered from the
         # binding file beside this ledger, so the cap applies to every lane on

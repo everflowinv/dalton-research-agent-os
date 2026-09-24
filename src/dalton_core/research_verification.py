@@ -21,6 +21,7 @@ from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_DOWN, ROUND_
 from pathlib import Path
 from typing import Any, Callable
 
+from .sqlite_path import sqlite_path
 from .connector_inventory import load_packaged_connector_inventory
 from .recorded_alphaengine_adapter import load_recorded_alphaengine_fixture
 from .recorded_source_adapter import load_recorded_source_fixture
@@ -1585,7 +1586,7 @@ class CandidateStagingStore:
         *,
         fault_hook: Callable[[str, Mapping[str, Any]], None] | None = None,
     ) -> None:
-        self.path = str(path)
+        self.path = sqlite_path(path)
         if self.path != ":memory:":
             target = Path(self.path)
             target.parent.mkdir(parents=True, exist_ok=True)

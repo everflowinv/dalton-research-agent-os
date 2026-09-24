@@ -21,6 +21,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
+from .sqlite_path import sqlite_path
 from .lane_failure_class import (
     CONTENT_REFUSED,
     DEPENDENCY_UNAVAILABLE,
@@ -99,7 +100,7 @@ class LaneFailureLedger:
         self, path: str | Path = ":memory:", *, read_only: bool = False,
         clock: Any | None = None,
     ) -> None:
-        self.path = str(path)
+        self.path = sqlite_path(path)
         self.read_only = read_only
         if not read_only and self.path != ":memory:":
             target = Path(self.path)
