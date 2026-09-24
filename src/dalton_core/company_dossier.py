@@ -1561,8 +1561,20 @@ class CompanyDossierAuthority:
             if item is None or item.get("producer_prior_version_ref") != prior_ref:
                 raise CompanyDossierValidationError(
                     f"unit_provenance.{unit} does not bind the exact predecessor")
-        for unit in set(UNITS) - changed_units:
+        # Sorted so the unit a refusal names does not depend on set order.
+        for unit in sorted(set(UNITS) - changed_units):
             old = None if prior is None else (prior.get("unit_provenance") or {}).get(unit)
+            if not _unit_was_drafted(body, unit):
+                # 2026-09-24: a unit this version does not carry -- never
+                # drafted, or drafted before and now withdrawn because a ref it
+                # cited no longer resolves -- has nothing to prove.  Holding it
+                # to the prior's proof made every withdrawal unpublishable (the
+                # wire schema forbids a proof on an unavailable unit), which
+                # froze IBM at v9 and ACN at v20.  Null is the only legal value.
+                if provenance.get(unit) is not None:
+                    raise CompanyDossierValidationError(
+                        f"unit_provenance.{unit} cannot describe an unavailable unit")
+                continue
             if provenance.get(unit) != old:
                 raise CompanyDossierValidationError(
                     f"unit_provenance.{unit} changed without redrafting its unit")
