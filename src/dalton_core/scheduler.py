@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .sqlite_path import sqlite_path
+from .sqlite_contention import SQLITE_BUSY_TIMEOUT_MS
 from .contracts import ResultEnvelope, WorkOrder
 from .recorded_completion import (
     build_recorded_parent_response,
@@ -193,7 +194,7 @@ class Scheduler:
             os.chmod(self.path, 0o600)
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys = ON")
-        self.connection.execute("PRAGMA busy_timeout = 5000")
+        self.connection.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
         if connection is None and self.path != ":memory:":
             # The controller, writer and child workers share this file. A
             # read snapshot must not block a completion from committing.
@@ -535,7 +536,8 @@ class Scheduler:
         return latest
 
     def _expire_one(
-        self, cur: sqlite3.Cursor, event: sqlite3.Row, lease: sqlite3.Row, now: str
+        self, cur: sqlite3.Cursor, event: sqlite3.Row, lease: sqlite3.Row, now: str,
+        *, reason: str = "lease_expired",
     ) -> dict[str, Any]:
         expired = self._append_event(
             cur,
@@ -544,7 +546,7 @@ class Scheduler:
             state="expired",
             now=now,
             lease_revision_id=lease["lease_revision_id"],
-            reason="lease_expired",
+            reason=reason,
         )
         next_event = self._new_ready_or_exhausted(
             cur,
@@ -602,6 +604,51 @@ class Scheduler:
                 attempt_number=attempt_number,state="leased",now=now,
                 lease_revision_id=lease_revision_ref,reason=reason)
             return {"status":"fresh",**exact,"reservation_hash":reservation_hash,"event":event}
+
+    def expire_orphaned_lease(
+        self,
+        work_order_id: str,
+        attempt_number: int,
+        lease_revision_ref: str,
+        *,
+        reason: str,
+    ) -> dict[str, Any]:
+        """Expire one lease early because its holder is proved gone.
+
+        The same transition as a lease running out -- an ``expired`` event and
+        then a new ready attempt or retry exhaustion -- taken before the
+        lease's ``expires_at`` because the caller has proof nobody will ever
+        complete it: the holder recorded that it gave up, or its process no
+        longer exists.  It is a compare-and-set on the exact claimed lease
+        revision under ``BEGIN IMMEDIATE``: if the attempt has moved on (it was
+        completed, renewed into another claim, or already expired) nothing is
+        written and ``not_current`` is returned.  Once it has run, the old
+        holder's token no longer names the current leased attempt, so a late
+        completion from it is rejected exactly as after a natural expiry and
+        the work never has two attempts in flight.
+        """
+
+        work_order_id = _nonempty(work_order_id, "work_order_id")
+        attempt_number = _positive_int(attempt_number, "attempt_number")
+        lease_revision_ref = _nonempty(lease_revision_ref, "lease_revision_ref")
+        reason = _nonempty(reason, "reason")
+        now = _timestamp(self._now())
+        with self._transaction() as cur:
+            event = self._latest_event(cur, work_order_id)
+            if event is None:
+                raise WorkNotFound(work_order_id)
+            if (event["state"] != "leased"
+                    or event["attempt_number"] != attempt_number
+                    or event["lease_revision_id"] != lease_revision_ref
+                    or str(event["reason"]).startswith(
+                        "operator_model_recovery_reserved:")):
+                return {"status": "not_current", "work_order_id": work_order_id,
+                        "attempt_number": attempt_number}
+            lease = self._latest_lease_for_event(cur, event)
+            transition = self._expire_one(
+                cur, event, lease, now, reason=f"lease_holder_gone:{reason}"[:200])
+        return {"status": "expired", "work_order_id": work_order_id,
+                "attempt_number": attempt_number, **transition}
 
     def sweep_expired(self) -> list[dict[str, Any]]:
         """Expire all overdue leases and create bounded retries atomically."""

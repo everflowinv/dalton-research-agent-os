@@ -1,0 +1,260 @@
+"""2026-09-24: a locked SQLite file must not strand a cockpit attempt's lease.
+
+Legacy ``work:cockpit-event_judgement-e8200806…`` was claimed at 10:55:17 and
+answered by the broker at 10:55:22 ($0.272); ``scheduler.complete`` lost to
+``database is locked``, the backstop's own completion lost to the same lock
+and only printed it, and the lease hung until 13:05:57 -- every re-ask in
+between was "this request is already running".  ``c25dbb7c…``'s second
+attempt was claimed at 12:40:56 and never completed at all.
+
+These tests keep module-level imports to what already existed before the fix
+so the lock tests can be run against the old code and seen to fail there.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from dalton_core.cockpit_model import CockpitModelError, _ReleaseLeaseOnError
+from dalton_core.scheduler import Scheduler
+# The module, not its classes: a TestCase imported by name would be collected
+# and run a second time as part of this module.
+from tests import test_cockpit_model_fallback as fallback
+
+
+class _LockedCompletions:
+    """``Scheduler.complete`` that loses to a writer for its first ``n`` calls."""
+
+    def __init__(self, failures: int) -> None:
+        self.remaining = failures
+        self.calls = 0
+        self.original = Scheduler.complete
+
+    def install(self):
+        def complete(scheduler, *args, **kwargs):
+            return self(scheduler, *args, **kwargs)
+        return patch.object(Scheduler, "complete", complete)
+
+    def __call__(self, scheduler, *args, **kwargs):
+        self.calls += 1
+        if self.remaining is None or self.remaining > 0:
+            if self.remaining is not None:
+                self.remaining -= 1
+            raise sqlite3.OperationalError("database is locked")
+        return self.original(scheduler, *args, **kwargs)
+
+
+class LockedAdapter(fallback.ChainAdapter):
+    """The route fails the way the traceback did: locked mid-attempt."""
+
+    def execute(self, work, route, profile):
+        self.served.append(profile["id"])
+        raise sqlite3.OperationalError("database is locked")
+
+
+class CockpitLeaseLockContentionTests(unittest.TestCase):
+    setUp = fallback.CockpitChainTests.setUp
+    _model = fallback.CockpitChainTests._model
+
+    def _ask(self, adapter, request_id="locked"):
+        return self._model(adapter, policy_version_ref=self.chain_policy).call(
+            purpose="event_judgement", request_id=request_id, prompt="judge",
+            mission=self.mission)
+
+    def _work_id(self) -> str:
+        with Scheduler(self.root / "scheduler.sqlite") as scheduler:
+            return scheduler.connection.execute(
+                "SELECT work_order_id FROM scheduler_work_orders").fetchone()[0]
+
+    def _history(self, work_id):
+        with Scheduler(self.root / "scheduler.sqlite") as scheduler:
+            return ([(e["attempt_number"], e["state"], e["reason"])
+                     for e in scheduler.attempt_history(work_id)],
+                    scheduler.status(work_id))
+
+    def test_a_locked_completion_is_retried_and_the_answer_is_kept(self) -> None:
+        locked = _LockedCompletions(3)
+        with locked.install(), \
+                patch("time.sleep"):
+            answer = self._ask(fallback.ChainAdapter({}))
+        self.assertIn("answered by", answer["text"])
+        self.assertEqual(locked.calls, 4)
+        history, status = self._history(answer["work_order_ref"])
+        self.assertEqual(status["state"], "succeeded")
+        self.assertEqual([state for _, state, _ in history],
+                         ["ready", "leased", "succeeded"])
+
+    def test_a_backstop_completion_lost_to_the_lock_does_not_strand_the_lease(self) -> None:
+        # The c25dbb7c shape: the attempt dies of the lock, and while the lock
+        # is held every completion -- the backstop's included -- fails too.
+        adapter = LockedAdapter({})
+        with _LockedCompletions(None).install(), \
+                patch("dalton_core.cockpit_model.LEASE_RELEASE_RETRY_SECONDS", 0.05,
+                      create=True), \
+                patch("time.sleep"), \
+                self.assertRaisesRegex(sqlite3.OperationalError, "database is locked"):
+            self._ask(adapter)
+        self.assertTrue(adapter.served)
+        work_id = self._work_id()
+        _, status = self._history(work_id)
+        self.assertEqual(status["state"], "leased")  # nothing could be written
+        # The lock is gone. The next ask must not be "already running" for
+        # the rest of a 2h10m lease.
+        again = fallback.ChainAdapter({})
+        answer = self._ask(again)
+        self.assertIn("answered by", answer["text"])
+        history, status = self._history(work_id)
+        self.assertEqual(status["state"], "succeeded")
+        states = [(attempt, state) for attempt, state, _ in history]
+        # Attempt 1 is settled with the holder's own abandon envelope, then
+        # exactly one fresh attempt runs: never two in flight.
+        self.assertEqual(states, [(1, "ready"), (1, "leased"), (1, "retryable"),
+                                  (2, "ready"), (2, "leased"), (2, "succeeded")])
+
+    def test_an_answer_whose_completion_was_lost_is_committed_not_paid_again(self) -> None:
+        # The e8200806 shape: the broker answered, the completion lost.
+        first = fallback.ChainAdapter({})
+        with _LockedCompletions(None).install(), \
+                patch("dalton_core.cockpit_model.LEASE_RELEASE_RETRY_SECONDS", 0.05), \
+                patch("time.sleep"), \
+                self.assertRaisesRegex(sqlite3.OperationalError, "database is locked"):
+            self._ask(first)
+        self.assertEqual(len(first.served), 1)
+        work_id = self._work_id()
+        records = list((self.root / "scheduler.sqlite.lease-holders").glob("*.json"))
+        self.assertEqual(len(records), 1)
+        record = json.loads(records[0].read_text(encoding="utf-8"))
+        self.assertEqual(record["status"], "abandoned")
+        self.assertEqual(record["pending_completion"]["result_envelope"]["status"],
+                         "succeeded")
+        self.assertEqual(records[0].stat().st_mode & 0o777, 0o600)
+        failures = (self.root / "scheduler.sqlite.lease-holders"
+                    / "release-failures.jsonl").read_text(encoding="utf-8").splitlines()
+        entry = json.loads(failures[-1])
+        self.assertEqual(entry["work_order_id"], work_id)
+        self.assertIn("database is locked", entry["error"])
+        self.assertNotIn("pending_completion", entry)  # no token in the log
+        self.assertTrue(entry["traceback"])
+
+        again = fallback.ChainAdapter({})
+        answer = self._ask(again)
+        self.assertEqual(again.served, [])  # nothing paid for twice
+        self.assertIn("answered by", answer["text"])
+        history, status = self._history(work_id)
+        self.assertEqual(status["state"], "succeeded")
+        self.assertEqual([s for _, s, _ in history], ["ready", "leased", "succeeded"])
+        self.assertEqual(list((self.root / "scheduler.sqlite.lease-holders")
+                              .glob("*.json")), [])
+
+    def _strand_a_lease(self) -> tuple[str, Path]:
+        """A holder that vanished without completing: no backstop ran."""
+
+        with patch.object(_ReleaseLeaseOnError, "__exit__", return_value=False), \
+                self.assertRaisesRegex(RuntimeError, "crash"):
+            class Crash(fallback.ChainAdapter):
+                def execute(self, work, route, profile):
+                    raise RuntimeError("crash")
+            self._ask(Crash({}))
+        records = list((self.root / "scheduler.sqlite.lease-holders").glob("*.json"))
+        self.assertEqual(len(records), 1)
+        return self._work_id(), records[0]
+
+    def _rewrite_pid(self, record_path: Path, pid: int) -> None:
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+        self.assertEqual(record["status"], "held")
+        record["pid"] = pid
+        record_path.write_text(json.dumps(record), encoding="utf-8")
+
+    def test_a_lease_whose_holder_process_exited_is_reclaimed(self) -> None:
+        work_id, record_path = self._strand_a_lease()
+        gone = subprocess.Popen([sys.executable, "-c", "pass"])
+        gone.wait()
+        self._rewrite_pid(record_path, gone.pid)
+        answer = self._ask(fallback.ChainAdapter({}))
+        self.assertIn("answered by", answer["text"])
+        history, status = self._history(work_id)
+        self.assertEqual(status["state"], "succeeded")
+        self.assertIn((1, "expired", "lease_holder_gone:process_exited"), history)
+
+    def test_a_lease_whose_holder_may_be_alive_is_left_alone(self) -> None:
+        work_id, record_path = self._strand_a_lease()
+        alive = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        self.addCleanup(alive.wait)
+        self.addCleanup(alive.kill)
+        self._rewrite_pid(record_path, alive.pid)
+        with self.assertRaisesRegex(CockpitModelError, "already running"):
+            self._ask(fallback.ChainAdapter({}))
+        # And a holder that is this very process is never presumed gone.
+        self._rewrite_pid(record_path, os.getpid())
+        with self.assertRaisesRegex(CockpitModelError, "already running"):
+            self._ask(fallback.ChainAdapter({}))
+        _, status = self._history(work_id)
+        self.assertEqual(status["state"], "leased")
+
+    def test_the_abandon_envelope_names_the_locked_database(self) -> None:
+        from dalton_core import model_router
+
+        blocker = sqlite3.connect(str(self.router_db), isolation_level=None)
+        self.addCleanup(blocker.close)
+        blocker.execute("BEGIN IMMEDIATE")
+        self.addCleanup(blocker.rollback)
+        with patch.object(model_router, "SQLITE_BUSY_TIMEOUT_MS", 50), \
+                self.assertRaisesRegex(sqlite3.OperationalError, "locked"):
+            self._ask(fallback.ChainAdapter({}))
+        work_id = self._work_id()
+        with Scheduler(self.root / "scheduler.sqlite") as scheduler:
+            envelope = json.loads(scheduler.connection.execute(
+                "SELECT result_envelope_json FROM scheduler_result_envelopes "
+                "WHERE work_order_id=?", (work_id,)).fetchone()[0])
+        self.assertEqual(envelope["error"]["code"], "COCKPIT_ATTEMPT_ABANDONED")
+        self.assertIn(str(self.router_db), envelope["error"]["message"])
+        diagnostics = envelope["metadata"]["failure_diagnostics"]
+        self.assertEqual(diagnostics["database_path"], str(self.router_db))
+        self.assertEqual(diagnostics["exception_type"], "OperationalError")
+        self.assertTrue(any("model_router.py" in frame
+                            for frame in diagnostics["traceback"]))
+
+
+class OrphanedLeaseSchedulerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.scheduler = Scheduler(Path(self.directory.name) / "s.sqlite", max_attempts=2)
+        self.addCleanup(self.scheduler.close)
+
+    def test_expiry_is_a_compare_and_set_on_the_claimed_revision(self) -> None:
+        from dalton_core.scheduler import LeaseRejected
+        from tests.test_scheduler import result, work_order
+
+        self.scheduler.enqueue(work_order())
+        lease = self.scheduler.claim("worker:a")
+        revision = lease["lease"]["id"]
+        stale = self.scheduler.expire_orphaned_lease(
+            "work-1", 1, "lease-revision-other", reason="process_exited")
+        self.assertEqual(stale["status"], "not_current")
+        done = self.scheduler.expire_orphaned_lease(
+            "work-1", 1, revision, reason="process_exited")
+        self.assertEqual(done["status"], "expired")
+        self.assertEqual(done["expired"]["reason"], "lease_holder_gone:process_exited")
+        self.assertEqual(done["next"]["state"], "ready")
+        # The old holder can no longer complete: exactly one attempt in flight.
+        with self.assertRaises(LeaseRejected):
+            self.scheduler.complete("work-1", 1, "worker:a", lease["lease_token"],
+                                    result("r1"), idempotency_key="late")
+        again = self.scheduler.expire_orphaned_lease(
+            "work-1", 1, revision, reason="process_exited")
+        self.assertEqual(again["status"], "not_current")
+        second = self.scheduler.claim("worker:b")
+        self.assertEqual(second["attempt"]["attempt_number"], 2)
+
+
+if __name__ == "__main__":  # pragma: no cover
+    unittest.main()

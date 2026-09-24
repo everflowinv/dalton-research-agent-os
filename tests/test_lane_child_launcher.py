@@ -317,6 +317,44 @@ class LauncherTests(unittest.TestCase):
         self.assertIn("hello from the child", log.read_text(encoding="utf-8"))
         self.assertEqual(log.stat().st_mode & 0o777, 0o600)
 
+    def test_a_rerun_of_the_same_ticket_keeps_the_earlier_runs_log(self):
+        # 2026-09-24: the event-judgement ticket is named by its batch, so a
+        # rerun of the batch reopened the same run.log with O_TRUNC and erased
+        # the run whose lease had hung -- the only record of what it did.
+        for generation in range(1, 4):
+            launcher = self.launcher(f"print('run {generation}')")
+            ticket = launcher.spawn(digest="3" * 24, record={})
+            launcher.wait(timeout=30)
+            launcher.status(ticket["id"])
+        directory = launcher._ticket_path(ticket["id"]).parent
+        self.assertIn("run 3", (directory / "run.log").read_text(encoding="utf-8"))
+        self.assertIn("run 1", (directory / "run.1.log").read_text(encoding="utf-8"))
+        self.assertIn("run 2", (directory / "run.2.log").read_text(encoding="utf-8"))
+        self.assertEqual((directory / "run.1.log").stat().st_mode & 0o777, 0o600)
+
+    def test_kept_run_logs_are_bounded_in_count_and_size(self):
+        from dalton_core import lane_child_launcher as module
+
+        directory = self.state / "bounded"
+        directory.mkdir()
+        with patch.object(module, "RUN_LOG_ARCHIVE_MAX_BYTES", 64):
+            for generation in range(1, module.RUN_LOG_ARCHIVES_KEPT + 4):
+                (directory / "run.log").write_bytes(
+                    f"generation {generation}\n".encode() + b"x" * 200
+                    + f"\ntail of {generation}\n".encode())
+                module.preserve_prior_run_log(directory)
+        kept = sorted(path.name for path in directory.glob("run.*.log"))
+        self.assertEqual(len(kept), module.RUN_LOG_ARCHIVES_KEPT)
+        newest = module.RUN_LOG_ARCHIVES_KEPT + 3
+        self.assertIn(f"run.{newest}.log", kept)
+        self.assertNotIn("run.1.log", kept)
+        text = (directory / f"run.{newest}.log").read_text(encoding="utf-8")
+        self.assertTrue(text.startswith("[run log trimmed:"))
+        self.assertIn(f"tail of {newest}", text)
+        self.assertLess(len(text.encode()), 64 + 80)
+        # Nothing to keep is not an archive.
+        self.assertIsNone(module.preserve_prior_run_log(directory))
+
 
 class OwnerOnlyWriteTests(unittest.TestCase):
     """INT1 / S3: a child writing its refusal must not die writing it."""

@@ -46,6 +46,13 @@ CREATE TABLE IF NOT EXISTS model_route_decisions (
     decision_json TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+-- route() reads "the latest decision of this work and capability" while it
+-- holds BEGIN IMMEDIATE. Without this index that read scanned every decision
+-- ever made (52,749 rows, 1.6 GB on legacy by 2026-09-24) -- worst for a
+-- work order's first route, which has no row to stop at -- and every other
+-- router writer waited behind the scan.
+CREATE INDEX IF NOT EXISTS model_route_decisions_by_work
+    ON model_route_decisions(work_order_id, capability, decision_sequence);
 
 CREATE TABLE IF NOT EXISTS model_route_idempotency (
     idempotency_key TEXT PRIMARY KEY,

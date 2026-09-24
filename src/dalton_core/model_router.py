@@ -29,6 +29,7 @@ from .model_profile_bounds import (
 )
 from .model_profile_health import COOLDOWN_SKIP_REASON
 from .store import authorization_flag, authorized_flag
+from .sqlite_contention import SQLITE_BUSY_TIMEOUT_MS
 
 
 SCHEMA_VERSION = "0.1"
@@ -832,7 +833,7 @@ class ModelRouter:
             os.chmod(self.path, 0o600)
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys = ON")
-        self.connection.execute("PRAGMA busy_timeout = 5000")
+        self.connection.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
         if not read_only and connection is None and self.path != ":memory:":
             self._ensure_wal()
         self._authorization_flag = authorization_flag(

@@ -23,6 +23,7 @@ import json
 import re
 import sqlite3
 import sys
+import time
 from importlib import resources
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
@@ -43,7 +44,15 @@ from .openclaw_model_adapter import (
     OpenClawModelAdapter,
     OpenClawModelAdapterError,
 )
-from .scheduler import Scheduler, SchedulerConflict
+from .lease_holder_registry import LeaseHolderRegistry, holder_gone
+from .scheduler import LeaseRejected, Scheduler, SchedulerConflict
+from .sqlite_contention import (
+    LEASE_RELEASE_RETRY_SECONDS,
+    is_sqlite_lock_error,
+    retry_on_sqlite_lock,
+    sqlite_failure_location,
+    traceback_digest,
+)
 from .store import canonical_json, content_hash
 from .budget_pools import POOL_EXHAUSTED_STATUS, mission_pool_scope
 from .thesis_impact_budget import ThesisImpactBudgetError, ThesisImpactBudgetStore
@@ -575,43 +584,117 @@ def settle_day_ledger(budget: Any, admission: Mapping[str, Any], *,
 
 
 class _ReleaseLeaseOnError:
-    """Complete a claimed attempt that an exception is about to abandon.
+    """Own one claimed attempt's lease until a completion of it commits.
 
     Every normal path through :meth:`CockpitModel.call` completes its attempt
-    before it returns or raises.  This is the backstop for the paths nobody
-    wrote down: if anything escapes while the attempt is still leased to this
-    call, the attempt is completed ``retryable`` with a control-plane envelope
-    whose dispatch state is ``unknown`` -- the same outcome the lease's expiry
-    would produce two hours later, produced now, so the next ask of the same
-    request gets a fresh attempt instead of "this request is already running".
-    The original exception always propagates.
+    before it returns or raises, and does so through :meth:`complete`, which
+    retries a locked scheduler for up to ``LEASE_RELEASE_RETRY_SECONDS``.  If
+    it still cannot commit, the exact completion is written to the lease-holder
+    registry (:mod:`.lease_holder_registry`) before the lock error propagates,
+    so the next ask of the same request commits it on the holder's behalf
+    instead of waiting 2h10m for the lease to expire.
+
+    This is also the backstop for the paths nobody wrote down: if anything
+    escapes while the attempt is still leased to this call, the attempt is
+    completed ``retryable`` with a control-plane envelope whose dispatch state
+    is ``unknown`` -- the same outcome the lease's expiry would produce two
+    hours later, produced now, so the next ask of the same request gets a
+    fresh attempt instead of "this request is already running".  That
+    completion goes through the same bounded retry and the same durable
+    record; 2026-09-24 it only printed its own ``database is locked`` and the
+    lease stayed held.  The original exception always propagates.
     """
 
     def __init__(self, scheduler: Scheduler, work: WorkOrder, attempt: int,
-                 lease: Mapping[str, Any]) -> None:
+                 lease: Mapping[str, Any],
+                 holders: LeaseHolderRegistry | None = None) -> None:
         self.scheduler = scheduler
         self.work = work
         self.attempt = attempt
         self.lease = lease
+        self.holders = holders or LeaseHolderRegistry(getattr(scheduler, "path", ":memory:"))
+        self.lease_revision_ref = str((lease.get("lease") or {}).get("id") or "")
+        # Set once a completion committed or was handed to the registry: the
+        # lease is then no longer this call's to release.
+        self.settled = False
 
     def __enter__(self) -> "_ReleaseLeaseOnError":
+        if self.lease_revision_ref:
+            self.holders.record(
+                work_order_id=self.work.id, attempt_number=self.attempt,
+                lease_revision_ref=self.lease_revision_ref, owner_ref=WORKER_REF)
         return self
 
+    def complete(self, result: ResultEnvelope, *, idempotency_key: str,
+                 retry_at: datetime | None = None) -> dict[str, Any]:
+        """``scheduler.complete`` for this attempt, surviving a locked file."""
+
+        def attempt() -> dict[str, Any]:
+            return self.scheduler.complete(
+                self.work.id, self.attempt, WORKER_REF, self.lease["lease_token"],
+                result, idempotency_key=idempotency_key, retry_at=retry_at)
+
+        try:
+            completion = retry_on_sqlite_lock(
+                attempt, deadline_seconds=LEASE_RELEASE_RETRY_SECONDS,
+                sleep=_lock_retry_sleep,
+                on_retry=lambda n, exc, wait: print(
+                    f"cockpit-model: completing {self.work.id} attempt {self.attempt} "
+                    f"hit {exc}; retry {n} in {wait:.2f}s", file=sys.stderr))
+        except sqlite3.OperationalError as exc:
+            if not is_sqlite_lock_error(exc):
+                raise
+            self._abandon(result, idempotency_key=idempotency_key,
+                          retry_at=retry_at, error=exc)
+            raise
+        self.settled = True
+        if self.lease_revision_ref:
+            self.holders.release(self.work.id, self.lease_revision_ref)
+        return completion
+
+    def _abandon(self, result: ResultEnvelope, *, idempotency_key: str,
+                 retry_at: datetime | None, error: BaseException) -> None:
+        self.settled = True
+        database = sqlite_failure_location(error.__traceback__) or getattr(
+            self.scheduler, "path", None)
+        digest = traceback_digest(error)
+        recorded = self.lease_revision_ref and self.holders.abandon(
+            work_order_id=self.work.id, attempt_number=self.attempt,
+            lease_revision_ref=self.lease_revision_ref, owner_ref=WORKER_REF,
+            lease_token=self.lease["lease_token"],
+            result_envelope=result.to_dict(), idempotency_key=idempotency_key,
+            retry_at=None if retry_at is None else retry_at.isoformat(),
+            error=f"{type(error).__name__}: {error}",
+            database_path=database, traceback=digest)
+        print(
+            f"cockpit-model: gave up completing {self.work.id} attempt "
+            f"{self.attempt} after {LEASE_RELEASE_RETRY_SECONDS:.0f}s of "
+            f"{type(error).__name__}: {error} (database {database}); "
+            + ("the completion is recorded for the next ask to commit"
+               if recorded else "no durable record could be written; the lease "
+               "is held until it expires"),
+            file=sys.stderr,
+        )
+
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
-        if exc_type is None:
+        if exc_type is None or self.settled:
             return False
         try:
-            status = self.scheduler.status(self.work.id)
+            status = retry_on_sqlite_lock(
+                lambda: self.scheduler.status(self.work.id),
+                deadline_seconds=LEASE_RELEASE_RETRY_SECONDS, sleep=_lock_retry_sleep)
             if (status["state"] != "leased"
                     or status["attempt_number"] != self.attempt):
+                if self.lease_revision_ref:
+                    self.holders.release(self.work.id, self.lease_revision_ref)
                 return False
             envelope = _failure(
                 self.work, "COCKPIT_ATTEMPT_ABANDONED", None,
-                message=f"{exc_type.__name__}: {exc}",
+                message=_abandon_message(exc_type, exc, tb),
                 status="retryable", dispatch_state="unknown",
+                diagnostics=_failure_diagnostics(exc, tb),
             )
-            self.scheduler.complete(
-                self.work.id, self.attempt, WORKER_REF, self.lease["lease_token"],
+            self.complete(
                 envelope,
                 idempotency_key=f"cockpit-abandon:{self.work.id}:{self.attempt}",
             )
@@ -623,6 +706,99 @@ class _ReleaseLeaseOnError:
                 file=sys.stderr,
             )
         return False
+
+
+# _call_once's answer when it freed an attempt whose holder is gone: ask again.
+_RECLAIMED_LEASE = "_reclaimed_orphaned_lease"
+
+
+def _lock_retry_sleep(seconds: float) -> None:
+    """Indirection so a test can run the bounded retry without waiting."""
+
+    time.sleep(seconds)
+
+
+def _failure_diagnostics(exc: BaseException | None, tb: Any) -> dict[str, Any] | None:
+    """Which database and which frames an escaped error came from."""
+
+    if exc is None:
+        return None
+    diagnostics: dict[str, Any] = {
+        "exception_type": type(exc).__name__,
+        "traceback": traceback_digest(exc),
+    }
+    database = sqlite_failure_location(tb)
+    if database is not None:
+        diagnostics["database_path"] = database
+    return diagnostics
+
+
+def _abandon_message(exc_type: Any, exc: BaseException | None, tb: Any) -> str:
+    message = f"{exc_type.__name__}: {exc}"
+    database = sqlite_failure_location(tb)
+    if database is not None:
+        message += f" [database: {database}]"
+    return message
+
+
+def _reclaim_orphaned_lease(scheduler: Scheduler, work: WorkOrder) -> str | None:
+    """Free the current attempt of ``work`` if its holder is proved gone.
+
+    Called only when a claim found the attempt already leased.  Two proofs
+    are accepted, both from :mod:`.lease_holder_registry`:
+
+    * the holder recorded an abandoned completion -- it is committed now,
+      verbatim, under the holder's own lease token and idempotency key, which
+      is exactly the completion the holder would have committed itself;
+    * the holder's process no longer exists -- the attempt is expired through
+      ``Scheduler.expire_orphaned_lease``, the same transition lease expiry
+      makes, as a compare-and-set on the exact claimed lease revision.
+
+    Returns what was done, or ``None`` when nothing could be proved and the
+    request stays "already running".
+    """
+
+    holders = LeaseHolderRegistry(getattr(scheduler, "path", ":memory:"))
+    for record in holders.holders_for(work.id):
+        reason = holder_gone(record)
+        if reason is None:
+            continue
+        revision = str(record.get("lease_revision_ref") or "")
+        attempt = record.get("attempt_number")
+        if not revision or not isinstance(attempt, int):
+            continue
+        pending = record.get("pending_completion") if reason == "abandoned" else None
+        if isinstance(pending, Mapping):
+            try:
+                completion = retry_on_sqlite_lock(
+                    lambda: scheduler.complete(
+                        work.id, attempt, str(record.get("owner_ref") or WORKER_REF),
+                        str(pending["lease_token"]), pending["result_envelope"],
+                        idempotency_key=str(pending["idempotency_key"]),
+                        retry_at=pending.get("retry_at")),
+                    deadline_seconds=LEASE_RELEASE_RETRY_SECONDS,
+                    sleep=_lock_retry_sleep)
+            except LeaseRejected:
+                # Not (or no longer) the current leased attempt: it expired,
+                # or a sweep got there first. Either way it is not held.
+                holders.release(work.id, revision)
+                continue
+            holders.release(work.id, revision)
+            if completion.get("status") in {"fresh", "duplicate"}:
+                print(f"cockpit-model: committed the abandoned completion of "
+                      f"{work.id} attempt {attempt}", file=sys.stderr)
+                return "committed_abandoned_completion"
+            continue
+        outcome = retry_on_sqlite_lock(
+            lambda: scheduler.expire_orphaned_lease(
+                work.id, attempt, revision, reason=reason),
+            deadline_seconds=LEASE_RELEASE_RETRY_SECONDS, sleep=_lock_retry_sleep)
+        holders.release(work.id, revision)
+        if outcome["status"] == "expired":
+            print(f"cockpit-model: expired {work.id} attempt {attempt}; its holder "
+                  f"is gone ({reason})", file=sys.stderr)
+            return f"expired_orphaned_lease:{reason}"
+    return None
 
 
 def _settle_without_losing_the_lease(budget: Any, admission: Mapping[str, Any], *,
@@ -640,7 +816,11 @@ def _settle_without_losing_the_lease(budget: Any, admission: Mapping[str, Any], 
     """
 
     try:
-        return settle_day_ledger(budget, admission, actual_micros=actual_micros)
+        # A locked ledger is waited out (bounded) rather than left open: an
+        # open admission keeps charging its whole reservation to the day.
+        return retry_on_sqlite_lock(
+            lambda: settle_day_ledger(budget, admission, actual_micros=actual_micros),
+            deadline_seconds=LEASE_RELEASE_RETRY_SECONDS, sleep=_lock_retry_sleep)
     except (ThesisImpactBudgetError, sqlite3.Error) as exc:
         print(
             "cockpit-model: settlement of "
@@ -1309,7 +1489,8 @@ def _failure(work: WorkOrder, code: str, route_ref: str | None,
              *, message: str | None = None,
              chain_failures: Sequence[Mapping[str, Any]] = (),
              status: str = "failed",
-             dispatch_state: str = "not_started") -> ResultEnvelope:
+             dispatch_state: str = "not_started",
+             diagnostics: Mapping[str, Any] | None = None) -> ResultEnvelope:
     if dispatch_state not in {"not_started", "unknown"}:
         raise CockpitModelError("failure dispatch state is not recognized")
     identity = {"work_order_ref": work.id, "code": code, "route_ref": route_ref}
@@ -1322,6 +1503,11 @@ def _failure(work: WorkOrder, code: str, route_ref: str | None,
                 "chain_failures": list(chain_failures)[:12]}
     if dispatch_state != "not_started":
         metadata["dispatch_state"] = dispatch_state
+    if diagnostics:
+        # Which database file and which frames: the exception type alone
+        # ("OperationalError: database is locked") names none of the three
+        # SQLite files a cockpit call writes.
+        metadata["failure_diagnostics"] = dict(diagnostics)
     return ResultEnvelope(
         schema_version=SCHEMA_VERSION, id=f"result:cockpit-control-{content_hash(identity)[:32]}",
         created_at=_now(), work_order_ref=work.id,
@@ -1652,6 +1838,8 @@ class CockpitModel:
                 _model_spec_request_identity=_model_spec_request_identity,
                 _structured_output_repair=_structured_output_repair,
             )
+            if outcome.get(_RECLAIMED_LEASE):
+                continue
             if "_provider_retry_backoff_seconds" not in outcome:
                 return outcome
             backoff = outcome["_provider_retry_backoff_seconds"]
@@ -2101,12 +2289,18 @@ class CockpitModel:
             if formal is None:
                 lease = scheduler.claim(WORKER_REF, work_order_id=work.id,
                                         lease_seconds=lease_seconds)
+                if lease is None and _reclaim_orphaned_lease(scheduler, work) is not None:
+                    # The holder was proved gone and its attempt is settled:
+                    # its abandoned completion may have been the answer itself,
+                    # or a fresh attempt is ready. Ask again from the top so
+                    # replay, recovery and claiming all run exactly as usual.
+                    return {_RECLAIMED_LEASE: True}
                 if lease is None:
                     raise CockpitModelError("this request is already running")
                 attempt = lease["attempt"]["attempt_number"]
                 # First in the list so it also covers the two stores failing
                 # to open, and exits last, after they are closed.
-                with _ReleaseLeaseOnError(scheduler, work, attempt, lease), \
+                with _ReleaseLeaseOnError(scheduler, work, attempt, lease) as guard, \
                         ModelRouter(self.config["model_router_db"]) as router, \
                         ThesisImpactBudgetStore(self.config["budget_db"]) as budget:
                     prompt_bytes = len(prompt.encode("utf-8"))
@@ -2118,18 +2312,16 @@ class CockpitModel:
                             served_family(router, ref) for ref in producer_refs}
                     except Exception as exc:  # noqa: BLE001 - unknown is not independent
                         result = _failure(work, "PRODUCER_ROUTE_UNRESOLVED", None)
-                        scheduler.complete(
-                            work.id, attempt, WORKER_REF, lease["lease_token"], result,
-                            idempotency_key=f"cockpit-complete:{work.id}:{attempt}")
+                        guard.complete(
+                            result, idempotency_key=f"cockpit-complete:{work.id}:{attempt}")
                         raise CockpitModelError(
                             "a producer route decision could not prove its model family"
                         ) from exc
                     if any(family.startswith("unclassified:")
                            for family in producer_families):
                         result = _failure(work, "MODEL_ROUTE_REJECTED", None)
-                        scheduler.complete(
-                            work.id, attempt, WORKER_REF, lease["lease_token"], result,
-                            idempotency_key=f"cockpit-complete:{work.id}:{attempt}")
+                        guard.complete(
+                            result, idempotency_key=f"cockpit-complete:{work.id}:{attempt}")
                         raise CockpitModelError("verifier_not_independent")
                     provider_retry_state = self._provider_retry_state(
                         scheduler, router, work
@@ -2159,9 +2351,8 @@ class CockpitModel:
                             )
                             if paid_retry is not None:
                                 result = paid_retry
-                        completion = scheduler.complete(
-                            work.id, attempt, WORKER_REF, lease["lease_token"], result,
-                            idempotency_key=f"cockpit-complete:{work.id}:{attempt}",
+                        completion = guard.complete(
+                            result, idempotency_key=f"cockpit-complete:{work.id}:{attempt}",
                             retry_at=(
                                 self.clock() + timedelta(
                                     seconds=self.config["provider_retry"][
@@ -2232,8 +2423,8 @@ class CockpitModel:
                             ) for producer_family in producer_families):
                                 result = _failure(work, "MODEL_ROUTE_REJECTED", route["id"])
                                 failure = "verifier_not_independent"
-                                completion = scheduler.complete(
-                                    work.id, attempt, WORKER_REF, lease["lease_token"], result,
+                                completion = guard.complete(
+                                    result,
                                     idempotency_key=f"cockpit-complete:{work.id}:{attempt}")
                                 _raise_failure(
                                     failure, None,
@@ -2324,16 +2515,16 @@ class CockpitModel:
                                 failure = f"the model call failed: {exc}"
                             _settle_without_losing_the_lease(
                                 budget, admission, actual_micros=cost_micros)
-                    completion = scheduler.complete(work.id, attempt, WORKER_REF, lease["lease_token"], result,
-                                                    idempotency_key=f"cockpit-complete:{work.id}:{attempt}",
-                                                    retry_at=(
-                                                        self.clock() + timedelta(
-                                                            seconds=self.config["provider_retry"][
-                                                                "retry_backoff_seconds"])
-                                                        if result.status == "retryable"
-                                                        and result.metadata.get("provider_retry_proof") is not None
-                                                        else None
-                                                    ))
+                    completion = guard.complete(
+                        result, idempotency_key=f"cockpit-complete:{work.id}:{attempt}",
+                        retry_at=(
+                            self.clock() + timedelta(
+                                seconds=self.config["provider_retry"][
+                                    "retry_backoff_seconds"])
+                            if result.status == "retryable"
+                            and result.metadata.get("provider_retry_proof") is not None
+                            else None
+                        ))
                     if completion["status"] == "conflict":
                         raise CockpitModelError("the request completion conflicted; ask again")
                     if (
