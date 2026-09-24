@@ -121,6 +121,54 @@ class PreparationTests(unittest.TestCase):
         self.assertEqual(len(restored["batches"]), 1)
         self.assertEqual(restored["batches"][0]["source"], product)
 
+    def test_a_source_that_repeats_a_section_is_refused_before_any_model_call(self):
+        # Live 2026-09-24: judgement localizations whose second section was the
+        # first one cut at 400 characters, passed by the verifier.
+        long = "Revenue was 123 USD and the bookings pipeline stayed flat. " * 10
+        product = {"kind": "surface_event_judgement", "version_ref": "judgement:1",
+                   "subject_ref": "company:a", "status": "available", "sections": [
+                       {"title": "Judgement", "body": long, "gaps": []},
+                       {"title": "Judgement", "body": long[:400], "gaps": []}]}
+        root = Path(self.temp.name)
+        for name in ("model", "verifier", "checker", "brain"):
+            (root / f"{name}.json").write_text("{}", encoding="utf-8")
+        args = SimpleNamespace(
+            work_dir=root / "work", output_directory=root / "published",
+            scheduler_db=Path("unused"), model_config=root / "model.json",
+            verifier_config=root / "verifier.json", checker_config=root / "checker.json",
+            brain_config=root / "brain.json", workers=1, chunk_chars=4500,
+            max_cost_per_call=.2, attempts=3, only=None, repair_reviewed=True,
+            result_output=root / "result.json")
+        code = prep.build(args, {"mission": {}, "products": [product]})
+        self.assertEqual(code, 1)
+        self.assertEqual(self.calls, [])
+        result = json.loads((root / "result.json").read_text("utf-8"))
+        self.assertIn("truncated copy", result["failures"][0]["error"])
+
+    def test_a_draft_that_copies_a_section_is_repaired_not_verified(self):
+        long = ("The bookings pipeline stayed flat and management kept its view. " * 3
+                + "Revenue was 123 USD.")
+        other = "Margins held because utilisation rose while wage inflation eased."
+        source = {"kind": "dossier", "version_ref": "dossier:1", "status": "available",
+                  "sections": [{"title": "A", "body": long, "gaps": []},
+                               {"title": "B", "body": other, "gaps": []}]}
+        first = "订单储备持平，管理层维持对需求的判断。" * 4 + "收入为 123 USD。"
+        # The copy carries no number, so only the duplicate check can refuse it.
+        copied = {"sections": [
+            {"index": 0, "title": "甲", "body": first, "gaps": []},
+            {"index": 1, "title": "乙", "body": first[:50], "gaps": []}]}
+        fixed = {"sections": [
+            {"index": 0, "title": "甲", "body": first, "gaps": []},
+            {"index": 1, "title": "乙", "body": "利用率上升、工资通胀放缓，利润率得以维持。", "gaps": []}]}
+        self.responses["research_localization"] = [copied, fixed]
+        self.responses[prep.CHECKER_PURPOSE] = {"overall": "清楚。", "suggestions": []}
+        self.responses[prep.BRAIN_PURPOSE] = {"decisions": [], "sections": fixed["sections"]}
+        prep.run_chunk((0, 0, source), **self.args)
+        self.assertEqual(self.calls[:2], ["research_localization", "research_localization"])
+        failures = json.loads(next((Path(self.temp.name) / "attempts").glob("*-0.json"))
+                              .read_text("utf-8"))["draft_failures"]
+        self.assertIn("truncated copy", failures[0]["error"])
+
     def test_route_failure_does_not_redraft_or_call_checker(self):
         self.responses['research_localization']=CockpitModelError('model unavailable')
         with self.assertRaises(CockpitModelError):self.run_one()

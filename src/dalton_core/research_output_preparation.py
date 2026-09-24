@@ -21,7 +21,8 @@ from dalton_core.company_dossier_draft import independence, router_family_resolv
 from dalton_core.cockpit_research_library import research_library
 from dalton_core.model_fallback_chain import register_purpose_tier
 from dalton_core.research_localization import (build_prompt, build_verifier_prompt,
-    build_localization, validate_localized_text, source_content_hash, ResearchLocalizationError)
+    build_localization, validate_localized_text, source_content_hash, ResearchLocalizationError,
+    validate_no_truncated_copies)
 from dalton_core.research_localization_store import publish_attachment, publish_ui_texts, publish_reviewed_attachment, has_reviewed_attachment
 from dalton_core.final_text_contract import FINAL_TEXT_RULES_VERSION
 from dalton_core.research_language_review import (run_language_review, parse_stage_output, CHECKER_PURPOSE,
@@ -269,6 +270,7 @@ def run_chunk(task, *, mission, draft_config, verifier_config, checker_config,
                 evidence['draft'] = call
                 localized = parse_stage_output(call['text'], stage='draft')
                 validate_localized_text(product, localized)
+                validate_no_truncated_copies(product, localized)
                 evidence['draft_localized'] = localized
                 write_json(stage_path, evidence)
                 break
@@ -551,10 +553,20 @@ def build(args, data=None):
     register_purpose_tier(BRAIN_PURPOSE, 'brain')
     work_dir = args.work_dir.resolve()
     work_dir.mkdir(parents=True, exist_ok=True)
-    tasks = [(i,start,part) for i,p in enumerate(products) for start,part in chunks(p,args.chunk_chars)]
+    # Refused before a single call is bought: a source whose sections repeat
+    # each other is translated faithfully into a document that repeats itself.
+    duplicated = {}
+    for i, product in enumerate(products):
+        try:
+            validate_no_truncated_copies(product)
+        except ResearchLocalizationError as exc:
+            duplicated[i] = str(exc)
+    tasks = [(i,start,part) for i,p in enumerate(products) if i not in duplicated
+             for start,part in chunks(p,args.chunk_chars)]
     legacy_verifier_config = (read_json(args.legacy_verifier_config)
         if getattr(args, 'legacy_verifier_config', None) else None)
-    found, failures = {}, []
+    found = {}
+    failures = [{'product':i,'section_start':0,'error':error} for i,error in duplicated.items()]
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
         futures = {pool.submit(run_chunk,t,mission=data['mission'],draft_config=read_json(args.model_config),
             verifier_config=read_json(args.verifier_config),checker_config=read_json(args.checker_config),

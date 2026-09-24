@@ -136,9 +136,13 @@ class FinalSurfaceProductsTests(unittest.TestCase):
                         ("cycle:1","cycle-hash",json.dumps(body),MISSION["mission_ref"],"2026-W36",1))
         product=next(row for row in final_surface_products(self.db,MISSION,COMPANY)
                      if row["kind"]=="surface_cycle_reflection")
+        # The pool and lane cells are identifiers the Cockpit shows through
+        # displayText, not gated prose; sent for translation they came back as
+        # the same English tokens, one section each (the mixed-language,
+        # repetitive reflection localizations of 2026-09-24).
         self.assertEqual([row["body"] for row in product["sections"]],
                          ["Exact title","Exact prose","Exact suggestion","Exact authority",
-                          "agenda","research_plan","Exact question","Exact because"])
+                          "Exact question","Exact because"])
 
     def test_pending_zero_base_review_discovers_titles_sections_and_authority(self):
         self.db.executescript("""

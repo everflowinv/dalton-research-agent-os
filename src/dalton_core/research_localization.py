@@ -538,6 +538,62 @@ def validate_localized_text(product: Mapping[str, Any], localized: Mapping[str, 
     return checked
 
 
+def truncated_copy_pairs(bodies: Sequence[str]) -> list[tuple[int, int]]:
+    """``(copy, original)`` index pairs where one body repeats or cuts another."""
+
+    from .final_surface_products import MIN_TRUNCATED_COPY_CHARS, truncated_copy_of
+
+    pairs = []
+    for index, body in enumerate(bodies):
+        # A short line repeated ("尚未形成判断" under four debate positions)
+        # is a label, not a copied paragraph.
+        if len(body.strip()) < MIN_TRUNCATED_COPY_CHARS:
+            continue
+        for other, original in enumerate(bodies):
+            if other != index and truncated_copy_of(body, original):
+                # An exact duplicate is reported once, against the earlier one.
+                if len(body.strip()) == len(original.strip()) and other > index:
+                    continue
+                pairs.append((index, other))
+                break
+    return pairs
+
+
+def validate_no_truncated_copies(product: Mapping[str, Any],
+                                 localized: Mapping[str, Any] | None = None) -> None:
+    """Refuse sections that are copies, or truncated copies, of each other.
+
+    Deterministic and free, and run where money is about to be spent: before
+    a source is sent for drafting, and on each draft before it is verified.
+    The verifier cannot catch a duplicate the source itself carries -- it is
+    asked whether the translation is faithful, and a faithful translation of a
+    repeated paragraph repeats it (live 2026-09-24, 15 of 17 judgements).
+
+    With ``localized`` the check is on the draft, and a pair is only refused
+    when the corresponding *source* sections are not already such a pair, so
+    that a legitimately repeated short line cannot make a product untranslatable.
+    Offsets are relative: ``localized`` covers the same sections as ``product``.
+    """
+
+    sources = [str((section or {}).get("body") or "") for section in product.get("sections") or []]
+    source_pairs = set(truncated_copy_pairs(sources))
+    if localized is None:
+        if source_pairs:
+            copy, original = sorted(source_pairs)[0]
+            raise ResearchLocalizationError(
+                f"source section {copy} is a copy or truncated copy of section {original}; "
+                "the product must be rebuilt without the duplicate before it is localized")
+        return
+    rows = localized.get("sections") if isinstance(localized, Mapping) else None
+    bodies = [str((row or {}).get("body") or "") for row in rows or []]
+    for copy, original in truncated_copy_pairs(bodies):
+        if (copy, original) in source_pairs or (original, copy) in source_pairs:
+            continue
+        raise ResearchLocalizationError(
+            f"localized section {copy} is a copy or truncated copy of localized section "
+            f"{original}; translate each source section on its own")
+
+
 def build_localization(product: Mapping[str, Any], localized: Mapping[str, Any],
                        verifier: Mapping[str, Any]) -> dict[str, Any]:
     checked = validate_localized_text(product, localized)
@@ -617,4 +673,5 @@ def select_localized(product: Mapping[str, Any], candidate: Mapping[str, Any] | 
 __all__ = ["ResearchLocalizationError", "SCHEMA_VERSION", "TARGET_LOCALE", "VERIFIER_PURPOSE",
            "build_prompt", "build_verifier_prompt", "build_localization",
            "validate_localized_text", "validate_localization", "select_localized",
+           "truncated_copy_pairs", "validate_no_truncated_copies",
            "source_content_hash"]
