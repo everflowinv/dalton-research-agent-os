@@ -21,6 +21,8 @@ import hashlib
 import inspect
 import json
 import re
+import sqlite3
+import sys
 from importlib import resources
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
@@ -187,6 +189,63 @@ _LOCAL_NOT_SENT_PROOF = {
     "state": "definitely_not_sent",
     "version": "0.1",
 }
+# 2026-09-24: what a CLI-gateway call costs that its prompt does not show.
+# A ``*-cli-gateway`` provider runs a vendor CLI behind the broker, and the CLI
+# wraps Dalton's prompt in its own system prompt and tool definitions on every
+# call.  Measured from the live broker journal (2026-09-24, last 1,000 calls):
+#
+# * claude-cli-gateway: cacheWriteTokens ~= 24,300 + 0.4 x prompt bytes
+#   (25,534 at 3,068 bytes; 33,924 at 23,686 bytes), plus a constant 2,991
+#   cacheReadTokens and 2 uncached input tokens.  Metered cost 0.2739862 USD
+#   for 32,250 written + 2,991 read + 769 output tokens on a 4 / 20 USD per
+#   million card: the cache write is billed at twice the input rate (the
+#   one-hour cache-write price), within 0.3 %.
+# * antigravity-cli-gateway: ~13,500 input tokens beyond the prompt.
+# * muse-cli-gateway: ~26,000 input tokens beyond the prompt.
+#
+# The old ceiling, ``input_rate * prompt_bytes + output_rate * max_output``,
+# reserved 0.1128 USD for event judgements that cost 0.27-0.28 USD, and every
+# one overran.  The profile schema is closed and content-hashed and has no
+# field for this, so the provider name -- already on every profile -- selects
+# the overhead and these constants carry it: 32,000 tokens covers the largest
+# fixed part seen (claude, ~27,300 including the cache read) with headroom,
+# the prompt's bytes are counted on top (a byte over-counts a token), and all
+# of the input is priced at the cache-write multiplier, which is exact for
+# claude and conservative for the gateways that bill it as plain input.
+CLI_GATEWAY_PROVIDER_SUFFIX = "-cli-gateway"
+CLI_GATEWAY_SYSTEM_PROMPT_TOKENS = 32_000
+CLI_GATEWAY_CACHE_WRITE_MULTIPLIER = Decimal(2)
+
+
+def is_cli_gateway_profile(profile: Mapping[str, Any]) -> bool:
+    """True when the profile is served by a vendor CLI behind the broker."""
+
+    provider = profile.get("provider")
+    return isinstance(provider, str) and provider.endswith(CLI_GATEWAY_PROVIDER_SUFFIX)
+
+
+def profile_call_ceiling_usd(profile: Mapping[str, Any], *, prompt_bytes: int,
+                             max_output_tokens: int) -> Decimal:
+    """The most one call on this profile can cost, in USD.
+
+    Prompt bytes stand in for input tokens (a token is never shorter than a
+    byte).  A CLI-gateway profile also pays for the CLI's hidden system prompt,
+    and pays for all of its input at the cache-write rate; see
+    ``CLI_GATEWAY_SYSTEM_PROMPT_TOKENS``.
+    """
+
+    cost = profile["cost"]
+    input_rate = Decimal(str(cost["input_per_million_usd"]))
+    input_tokens = Decimal(prompt_bytes)
+    if is_cli_gateway_profile(profile):
+        input_rate *= CLI_GATEWAY_CACHE_WRITE_MULTIPLIER
+        input_tokens += CLI_GATEWAY_SYSTEM_PROMPT_TOKENS
+    return (
+        input_rate * input_tokens
+        + Decimal(str(cost["output_per_million_usd"])) * max_output_tokens
+    ) / Decimal(1_000_000)
+
+
 # WP-A/A1. The broker's own word that the provider ran and returned a failure.
 # Its protocol also requires such a response to carry null usage and
 # ``cost: {"available": false}`` -- a failed broker response that claimed usage
@@ -513,6 +572,85 @@ def settle_day_ledger(budget: Any, admission: Mapping[str, Any], *,
     """
 
     return budget.settle(admission["admission_id"], actual_micros=actual_micros)
+
+
+class _ReleaseLeaseOnError:
+    """Complete a claimed attempt that an exception is about to abandon.
+
+    Every normal path through :meth:`CockpitModel.call` completes its attempt
+    before it returns or raises.  This is the backstop for the paths nobody
+    wrote down: if anything escapes while the attempt is still leased to this
+    call, the attempt is completed ``retryable`` with a control-plane envelope
+    whose dispatch state is ``unknown`` -- the same outcome the lease's expiry
+    would produce two hours later, produced now, so the next ask of the same
+    request gets a fresh attempt instead of "this request is already running".
+    The original exception always propagates.
+    """
+
+    def __init__(self, scheduler: Scheduler, work: WorkOrder, attempt: int,
+                 lease: Mapping[str, Any]) -> None:
+        self.scheduler = scheduler
+        self.work = work
+        self.attempt = attempt
+        self.lease = lease
+
+    def __enter__(self) -> "_ReleaseLeaseOnError":
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+        if exc_type is None:
+            return False
+        try:
+            status = self.scheduler.status(self.work.id)
+            if (status["state"] != "leased"
+                    or status["attempt_number"] != self.attempt):
+                return False
+            envelope = _failure(
+                self.work, "COCKPIT_ATTEMPT_ABANDONED", None,
+                message=f"{exc_type.__name__}: {exc}",
+                status="retryable", dispatch_state="unknown",
+            )
+            self.scheduler.complete(
+                self.work.id, self.attempt, WORKER_REF, self.lease["lease_token"],
+                envelope,
+                idempotency_key=f"cockpit-abandon:{self.work.id}:{self.attempt}",
+            )
+        except Exception as release_error:  # noqa: BLE001 - never mask the cause
+            print(
+                f"cockpit-model: could not release {self.work.id} attempt "
+                f"{self.attempt} after {exc_type.__name__}: "
+                f"{type(release_error).__name__}: {release_error}",
+                file=sys.stderr,
+            )
+        return False
+
+
+def _settle_without_losing_the_lease(budget: Any, admission: Mapping[str, Any], *,
+                                     actual_micros: int) -> dict[str, Any] | None:
+    """Settle, and never let the ledger stop the Scheduler completion after it.
+
+    2026-09-24: a settlement that raised used to escape before
+    ``scheduler.complete``, so the attempt's lease stayed held for its whole
+    frozen lifetime (2h10m) and every re-ask of the same request was told
+    "this request is already running".  An overrun no longer raises (the
+    ledger books it and alerts); anything else the ledger refuses leaves the
+    admission *open*, which keeps charging its full reservation -- the same
+    conservative state a crash between the call and the settlement leaves --
+    and is reported here instead of being allowed to strand the lease.
+    """
+
+    try:
+        return settle_day_ledger(budget, admission, actual_micros=actual_micros)
+    except (ThesisImpactBudgetError, sqlite3.Error) as exc:
+        print(
+            "cockpit-model: settlement of "
+            f"{admission.get('admission_id')} for {actual_micros} micros was not "
+            f"recorded ({type(exc).__name__}: {exc}); the reservation stays open "
+            "and the attempt is completed anyway",
+            file=sys.stderr,
+        )
+        return None
+
 
 def register_purpose(name: str) -> str:
     """Name one more thing a cockpit-shaped model call may be for.
@@ -1966,7 +2104,10 @@ class CockpitModel:
                 if lease is None:
                     raise CockpitModelError("this request is already running")
                 attempt = lease["attempt"]["attempt_number"]
-                with ModelRouter(self.config["model_router_db"]) as router, \
+                # First in the list so it also covers the two stores failing
+                # to open, and exits last, after they are closed.
+                with _ReleaseLeaseOnError(scheduler, work, attempt, lease), \
+                        ModelRouter(self.config["model_router_db"]) as router, \
                         ThesisImpactBudgetStore(self.config["budget_db"]) as budget:
                     prompt_bytes = len(prompt.encode("utf-8"))
                     pool_rejection: dict[str, Any] | None = None
@@ -2181,7 +2322,8 @@ class CockpitModel:
                                 else:
                                     cost_micros, cost_status = reserved, "reserved"
                                 failure = f"the model call failed: {exc}"
-                            settle_day_ledger(budget, admission, actual_micros=cost_micros)
+                            _settle_without_losing_the_lease(
+                                budget, admission, actual_micros=cost_micros)
                     completion = scheduler.complete(work.id, attempt, WORKER_REF, lease["lease_token"], result,
                                                     idempotency_key=f"cockpit-complete:{work.id}:{attempt}",
                                                     retry_at=(
@@ -2314,11 +2456,9 @@ class CockpitModel:
         for profile in profiles:
             if profile["id"] not in wanted or profile.get("status") == "retired":
                 continue
-            cost = profile["cost"]
-            ceiling = max(ceiling, (
-                Decimal(str(cost["input_per_million_usd"])) * prompt_bytes
-                + Decimal(str(cost["output_per_million_usd"])) * call_budget["max_output_tokens"]
-            ) / Decimal(1_000_000))
+            ceiling = max(ceiling, profile_call_ceiling_usd(
+                profile, prompt_bytes=prompt_bytes,
+                max_output_tokens=call_budget["max_output_tokens"]))
         if ceiling <= 0:
             ceiling = Decimal(str(call_budget["max_cost_usd"]))
         return int((ceiling * 1_000_000).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
@@ -2544,7 +2684,8 @@ class CockpitModel:
             # may still have completed and charged the call.
             if admission is not None:
                 settlement = ceiling if uncertain_spend else served_micros
-                budget.settle(admission["admission_id"], actual_micros=settlement)
+                _settle_without_losing_the_lease(
+                    budget, admission, actual_micros=settlement)
 
         route_ref = outcome.get("route_decision_ref") or first_route_ref
         if outcome["status"] == "served" or (
