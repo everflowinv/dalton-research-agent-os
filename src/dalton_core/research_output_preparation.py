@@ -626,6 +626,51 @@ def validate_worker_config(cfg):
         raise ValueError('publication worker cost bound is invalid')
 
 
+_STDOUT_TEXT_LIMIT = 200
+WORKER_STDOUT_SUMMARY_SCHEMA = 'research-publication-worker-stdout-summary:0.1'
+
+
+def _stdout_scalars(value):
+    """Scalars kept (long text clipped), collections reduced to their size."""
+    summary = {}
+    for key, item in value.items():
+        if item is None or isinstance(item, (bool, int, float)):
+            summary[key] = item
+        elif isinstance(item, str):
+            summary[key] = (item if len(item) <= _STDOUT_TEXT_LIMIT
+                            else item[:_STDOUT_TEXT_LIMIT] + '…')
+        elif isinstance(item, (list, tuple, dict)):
+            summary[key + '_count'] = len(item)
+    return summary
+
+
+def worker_stdout_summary(result, checkpoint_path):
+    """The one line the scheduled worker prints: counts, never payloads.
+
+    launchd appends stdout to publication-worker.stdout.log every five minutes.
+    Printing the whole checkpoint (every product identity, every UI-text batch
+    and every blocked reason) made each line about 415 KB and the log about
+    300 MB. The full checkpoint is still written to worker-last-run.json, which
+    is where the cockpit and the operator scripts read it; this line names that
+    file so the details are one step away.
+    """
+    summary = _stdout_scalars(result)
+    products = result.get('products')
+    if isinstance(products, list):
+        statuses = {}
+        for product in products:
+            status = product.get('status') if isinstance(product, dict) else None
+            statuses[str(status)] = statuses.get(str(status), 0) + 1
+        summary['product_statuses'] = dict(sorted(statuses.items()))
+    ui_texts = result.get('ui_texts')
+    if isinstance(ui_texts, dict):
+        summary.pop('ui_texts_count', None)
+        summary['ui_texts'] = _stdout_scalars(ui_texts)
+    summary['schema_version'] = WORKER_STDOUT_SUMMARY_SCHEMA
+    summary['checkpoint'] = str(checkpoint_path)
+    return summary
+
+
 def run_worker(config_path):
     """One scheduled preparation pass; all model calls use the existing ledger."""
     import fcntl
@@ -642,7 +687,8 @@ def run_worker(config_path):
         result={'schema_version':'research-publication-worker-checkpoint:0.1',**gate,
                 'checked_at':datetime.now(timezone.utc).isoformat()}
         write_json(root/'worker-last-run.json',result)
-        print(json.dumps(result,ensure_ascii=False))
+        print(json.dumps(worker_stdout_summary(result,root/'worker-last-run.json'),
+                         ensure_ascii=False),flush=True)
         return 0 if gate['status']=='waiting_for_release_publication' else 1
     fd=os.open(root/'.worker.lock',os.O_CREAT|os.O_RDWR|getattr(os,'O_NOFOLLOW',0),0o600)
     with os.fdopen(fd,'a+') as lock:
@@ -705,7 +751,8 @@ def run_worker(config_path):
         result['schema_version']='research-publication-worker-checkpoint:0.1'
         result['checked_at']=datetime.now(timezone.utc).isoformat()
         write_json(root/'worker-last-run.json',result)
-        print(json.dumps(result,ensure_ascii=False))
+        print(json.dumps(worker_stdout_summary(result,root/'worker-last-run.json'),
+                         ensure_ascii=False),flush=True)
         # A backlog is not a fault. This returned 1 whenever anything was still
         # pending, so launchd recorded a failing service every five minutes for
         # a worker that was doing exactly what it is supposed to do. A real

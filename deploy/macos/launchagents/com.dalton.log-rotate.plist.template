@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  每天 04:10 轮转一次 ~/Library/Logs/Dalton/*.log。
+  每天 04:10 轮转一次 ~/Library/Logs/Dalton 与 ~/.dalton/workspace-logs 下
+  （含各 workspace 子目录）的全部 .log。
 
   为什么不用 newsyslog：/etc/newsyslog.d 需要 root，而 Dalton 全套是用户级
   LaunchAgent，装一个需要 sudo 的组件就意味着以后每次安装都要 sudo。
@@ -13,6 +14,11 @@
     @@RELEASE_VENV@@  形如 ~/.dalton/runtime/releases/<sha>/venv
     @@REPO@@          仓库根目录（rotate_dalton_logs.py 所在处的上一级）
     @@LOG_DIR@@       形如 ~/Library/Logs/Dalton
+    @@DALTON_HOME@@   形如 ~/.dalton（其下 workspace-logs 存各 workspace 的日志）
+
+  注意：XML 注释里不能出现连续两个减号，但 ProgramArguments 里的选项必须
+  保留双减号前缀；tests/test_release_tooling.py 会渲染本模板并用脚本自己的
+  argparse 解析参数，防止再被批量替换误伤。
 -->
 <plist version="1.0">
 <dict>
@@ -28,7 +34,9 @@
 		<string>16777216</string>
 		<string>--keep</string>
 		<string>5</string>
-		<string>apply</string>
+		<string>--log-dir</string>
+		<string>@@DALTON_HOME@@/workspace-logs</string>
+		<string>--apply</string>
 	</array>
 	<key>StartCalendarInterval</key>
 	<dict>
