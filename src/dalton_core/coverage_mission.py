@@ -3524,6 +3524,120 @@ class CoverageMissionAuthority:
                 raise CoverageMissionConflict("document review changed concurrently")
         return {"status": "fresh", **record}
 
+    def reopen_unattributed_document_review(
+        self, review_id: str, *, expected_review_hash: str, actor_ref: str,
+        rule_ref: str, matched: Sequence[str],
+    ) -> dict[str, Any]:
+        """Reopen a P13i dismissal that an older subject rule decided wrongly.
+
+        2026-09-24b.  A P13i dismissal says "this document never names the
+        company", which is a deterministic fact about the document's bytes
+        *and the name table it was checked against*.  When the table was
+        wrong -- a deploy with no AMZN row refused Amazon pages saying
+        "Amazon" 255 times -- the dismissal was not a judgement anybody made,
+        and the human reopen (which exists for failed formal windows) is the
+        wrong door for it.  This is the narrow automated one:
+
+        * only a ``dismissed`` review whose rationale is a P13i refusal, in the
+          mission version currently pointed at;
+        * only when that rationale was not already decided under ``rule_ref``
+          (a dismissal under the current rule is final);
+        * only with the names the current rule found (``matched``), which the
+          caller got by re-reading the same pinned bytes.
+
+        The prior decision is kept in the append-only reopen ledger (the same
+        one the human reopen writes, ``failed_windows`` empty and
+        ``decision_ref`` the rule), and the review re-enters the ordinary
+        queue, so what it costs to read again is metered exactly like any
+        other document.
+        """
+
+        review_id = _text(review_id, "review_id")
+        expected_review_hash = _sha256(expected_review_hash, "expected_review_hash")
+        actor_ref = _actor(actor_ref, "actor_ref")
+        rule_ref = _text(rule_ref, "rule_ref")
+        if (isinstance(matched, (str, bytes)) or not isinstance(matched, Sequence)
+                or not matched or any(not isinstance(name, str) or not name for name in matched)):
+            raise CoverageMissionValidationError(
+                "a subject re-evaluation reopen requires the names the current rule matched")
+        now = _now()
+        with self._transaction() as cur:
+            row = cur.execute(
+                "SELECT * FROM coverage_mission_document_reviews WHERE review_id=?", (review_id,)
+            ).fetchone()
+            if row is None:
+                raise CoverageMissionNotFound("document review was not found")
+            if _HUMAN_RE.fullmatch(actor_ref) is None:
+                principal = self.mission(row["mission_version_ref"])["autonomy"]["automation_principal"]
+                if actor_ref != principal:
+                    raise CoverageMissionValidationError(
+                        "a subject re-evaluation reopen requires a human or the review's mission principal")
+            existing = cur.execute(
+                "SELECT record_json FROM coverage_mission_document_review_reopens "
+                "WHERE review_id=? AND prior_review_hash=?", (review_id, expected_review_hash)
+            ).fetchone()
+            if existing is not None:
+                saved = _canonical_record(existing["record_json"], "document review reopen")
+                if saved.get("decision_ref") != rule_ref:
+                    raise CoverageMissionConflict("document review reopen payload changed")
+                return {"status": "duplicate", **saved}
+            prior = self._review_row(row)
+            if content_hash(prior) != expected_review_hash:
+                raise CoverageMissionConflict("document review changed; reload before reopening")
+            rationale = row["rationale"] if isinstance(row["rationale"], str) else ""
+            if row["state"] != "dismissed" or not rationale.startswith("P13i:"):
+                raise CoverageMissionConflict(
+                    "only a P13i-dismissed document review is re-evaluated by the subject rule")
+            if f"[{rule_ref}]" in rationale:
+                raise CoverageMissionConflict(
+                    "this dismissal was decided under the current subject rule")
+            pointer = cur.execute(
+                "SELECT mission_version_id FROM coverage_mission_pointer WHERE mission_version_id=?",
+                (row["mission_version_ref"],),
+            ).fetchone()
+            if pointer is None:
+                raise CoverageMissionConflict("document review mission is not current")
+            body = {"schema_version": "0.1", "review_id": review_id,
+                    "prior_review": prior, "prior_review_hash": expected_review_hash,
+                    "decision_ref": rule_ref, "failed_windows": [],
+                    "basis": "subject_rule_reevaluation",
+                    "matched": sorted({str(name) for name in matched})[:20],
+                    "actor_ref": actor_ref, "created_at": now}
+            record = {**body, "reopen_id": _ref("mission-document-review-reopen", body)}
+            record["content_hash"] = content_hash(record)
+            cur.execute(
+                "INSERT INTO coverage_mission_document_review_reopens"
+                "(reopen_id,review_id,prior_review_hash,record_json,content_hash,actor_ref,created_at) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (record["reopen_id"], review_id, expected_review_hash, canonical_json(record),
+                 record["content_hash"], actor_ref, now),
+            )
+            cur.execute(
+                "UPDATE coverage_mission_document_reviews SET state='awaiting_human_extraction',"
+                "candidate_claim_version_ref=NULL,rationale=NULL,updated_at=? "
+                "WHERE review_id=? AND state='dismissed'",
+                (now, review_id),
+            )
+            if cur.rowcount != 1:
+                raise CoverageMissionConflict("document review changed concurrently")
+        return {"status": "fresh", **record}
+
+    def subject_reevaluation_reopens_since(self, rule_ref: str, since: str) -> int:
+        """How many reviews the subject rule ``rule_ref`` has reopened since ``since``."""
+
+        count = 0
+        for row in self.connection.execute(
+            "SELECT record_json FROM coverage_mission_document_review_reopens WHERE created_at>=?",
+            (_text(since, "since"),),
+        ).fetchall():
+            try:
+                record = json.loads(row["record_json"])
+            except (TypeError, ValueError):
+                continue
+            if record.get("basis") == "subject_rule_reevaluation" and record.get("decision_ref") == rule_ref:
+                count += 1
+        return count
+
     def document_review(self, review_id: str) -> dict[str, Any]:
         row = self.connection.execute(
             "SELECT * FROM coverage_mission_document_reviews WHERE review_id=?",

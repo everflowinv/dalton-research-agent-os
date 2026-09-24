@@ -512,6 +512,10 @@ def run_extraction(
             # thing it filtered out was every filing and transcript queued
             # after the first five hundred news pages.  Ask the database for
             # the queue in reading order instead.
+            # 2026-09-24b: P13i dismissals decided under an older subject
+            # rule, re-checked against the same bytes, a few per tick.
+            summary.setdefault("subject_reevaluation", []).append(
+                _reevaluate_unattributed(host, service, windows, mission, actor))
             reviews = _awaiting_reviews_in_reading_order(
                 host, mission, limit=500, plan_ranks=directed["ranks"])
             # P11u/P11y: both secondary passes read documents the queue has
@@ -998,6 +1002,114 @@ _PERMANENT_UNREADABLE = (
     # review is parked with the reason instead of retried hourly forever.
     "and no completed acquisition of it remains",
 )
+
+
+#: 2026-09-24b: how fast P13i dismissals made under an older subject rule are
+#: re-examined.  The check itself is free (the pinned bytes, re-read from the
+#: spool, against the current name table); what costs money is reading a
+#: reopened document again, which then goes through the ordinary queue and its
+#: own window allowance and day ledger.  These caps keep that from arriving as
+#: one wave: at most five documents reopened a tick and thirty a UTC day, so
+#: ws-7d's ~240 dismissals drain over a week or so of ticks, not one afternoon.
+SUBJECT_REEVALUATION_CHECKS_PER_TICK = 25
+SUBJECT_REEVALUATION_REOPENS_PER_TICK = 5
+SUBJECT_REEVALUATION_REOPENS_PER_DAY = 30
+
+
+def _reevaluate_unattributed(
+    host: ExtractionHost, service: DocumentExtractionService,
+    windows: ExtractionWindowLedger, mission: Mapping[str, Any], actor: str,
+    *, checks: int = SUBJECT_REEVALUATION_CHECKS_PER_TICK,
+    reopens: int = SUBJECT_REEVALUATION_REOPENS_PER_TICK,
+    per_day: int = SUBJECT_REEVALUATION_REOPENS_PER_DAY,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Re-ask "does this document name its company" of old P13i dismissals.
+
+    A P13i dismissal is final under the rule that made it and only under that
+    rule: the rationale carries ``[SUBJECT_RULE_REF]`` from 2026-09-24b on, and
+    one without the current tag was decided against a name table that has
+    since changed.  Each such review is checked once per rule, newest first:
+    the same pinned bytes are re-read and asked the current question.  One
+    that now names its company is reopened (an append-only reopen record, the
+    review back in the queue); one that still does not is written down in the
+    review-exhaustion ledger for this rule, so it is not re-read next tick.
+    """
+
+    from .document_extraction import SUBJECT_RULE_REF
+
+    moment = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    day = moment.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    pass_ref = "subject_reevaluation:" + SUBJECT_RULE_REF
+    result: dict[str, Any] = {"mission_version_ref": mission["id"], "rule_ref": SUBJECT_RULE_REF,
+                              "checked": 0, "reopened": [], "still_unattributed": 0,
+                              "unreadable": 0, "remaining": 0, "stop_reason": None}
+    try:
+        rows = host.store.connection.execute(
+            "SELECT review_id FROM coverage_mission_document_reviews "
+            "WHERE mission_version_ref=? AND state='dismissed' AND rationale LIKE 'P13i:%' "
+            "AND instr(rationale, ?)=0 ORDER BY updated_at DESC, review_id",
+            (mission["id"], f"[{SUBJECT_RULE_REF}]"),
+        ).fetchall()
+        done = windows.exhausted_reviews(pass_ref)
+        reopened_today = host.coverage_mission.subject_reevaluation_reopens_since(
+            SUBJECT_RULE_REF, day)
+    except Exception as exc:  # noqa: BLE001 - a re-check is never a gate on the queue
+        result["stop_reason"] = f"{type(exc).__name__}: {exc}"[:300]
+        return result
+    pending = []
+    for row in rows:
+        review = host.coverage_mission.document_review(row["review_id"])
+        review_hash = content_hash(review)
+        if (review["review_id"], review_hash) not in done:
+            pending.append((review, review_hash))
+    result["remaining"] = len(pending)
+    for review, review_hash in pending:
+        if result["checked"] >= checks:
+            result["stop_reason"] = "tick check allowance spent"
+            break
+        if len(result["reopened"]) >= reopens:
+            result["stop_reason"] = "tick reopen allowance spent"
+            break
+        if reopened_today + len(result["reopened"]) >= per_day:
+            result["stop_reason"] = "daily reopen allowance spent"
+            break
+        result["checked"] += 1
+        try:
+            context = service.source_context(
+                review["review_id"], review_hash, 0, actor, require_open=False)
+            subject = service.document_names_subject(context)
+        except Exception as exc:  # noqa: BLE001 - unreadable: stays dismissed
+            subject = {"checked": False, "names_subject": False, "matched": [],
+                       "error": f"{type(exc).__name__}: {exc}"[:300]}
+        if subject.get("names_subject") and subject.get("matched"):
+            try:
+                host.coverage_mission.reopen_unattributed_document_review(
+                    review["review_id"], expected_review_hash=review_hash, actor_ref=actor,
+                    rule_ref=SUBJECT_RULE_REF, matched=list(subject["matched"]))
+            except Exception as exc:  # noqa: BLE001 - one refusal must not stop the rest
+                result.setdefault("refused", []).append(
+                    {"review_id": review["review_id"], "reason": f"{type(exc).__name__}: {exc}"[:300]})
+                continue
+            result["reopened"].append({"review_id": review["review_id"],
+                                       "document_ref": review["document_ref"],
+                                       "company_ref": review["company_ref"],
+                                       "matched": list(subject["matched"])[:5]})
+            continue
+        if subject.get("error"):
+            result["unreadable"] += 1
+        else:
+            result["still_unattributed"] += 1
+        try:
+            windows.exhaust(
+                review_id=review["review_id"], source_review_hash=review_hash,
+                pass_ref=pass_ref, reason="not_attributed",
+                detail=str(subject.get("error") or "still never names the company"),
+                document_ref=review["document_ref"], company_ref=review["company_ref"])
+        except Exception:  # noqa: BLE001 - it is simply checked again next tick
+            pass
+    result["remaining"] -= result["checked"]
+    return result
 
 
 def _daily_read_admit(
