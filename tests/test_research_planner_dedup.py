@@ -25,6 +25,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 
 from dalton_core.research_planner import (
+    PROMPT_PROJECTION_REF,
     READABLE_KEEP_LADDER,
     READABLE_KEEP_PER_COMPANY,
     ResearchPlanInputTooLarge,
@@ -72,9 +73,22 @@ class AttemptLedgerTests(unittest.TestCase):
         self.assertIn("input_too_large", TERMINAL_PLAN_STATUSES)
         ledger = {"abc": {"at": (NOW - timedelta(days=1)).isoformat(),
                           "status": "succeeded", "plan_status": "input_too_large",
-                          "attempts": 35, "reason": "exceeds the bound by 5495"}}
+                          "attempts": 35, "reason": "exceeds the bound by 5495",
+                          "projection_rule_ref": PROMPT_PROJECTION_REF}}
         self.assertEqual(attempt_hold(ledger, "abc", now=NOW)["held_reason"],
                          "terminal_for_this_state")
+
+    def test_a_prompt_refused_under_an_older_projection_rule_is_asked_again(self):
+        # 2026-09-24: a state refused as input_too_large under rule 0.3 stayed
+        # held after rule 0.4 could fit it, for as long as the state stood.
+        for recorded in (None, "rule:research-plan-input-projection:0.3"):
+            with self.subTest(recorded=recorded):
+                record = {"at": (NOW - timedelta(days=1)).isoformat(),
+                          "status": "succeeded", "plan_status": "input_too_large",
+                          "attempts": 74, "reason": "exceeds the bound by 18620"}
+                if recorded is not None:
+                    record["projection_rule_ref"] = recorded
+                self.assertIsNone(attempt_hold({"abc": record}, "abc", now=NOW))
 
     def test_a_dead_route_is_held_for_a_while_and_then_asked_again(self):
         # An outage is about this moment, not this state, so it is worth
