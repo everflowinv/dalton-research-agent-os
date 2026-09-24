@@ -157,6 +157,24 @@ class StatementLineProposalTests(unittest.TestCase):
         self.assertEqual(quantitative_aspect(proposal["metric_or_aspect"]),
                          "segments_and_mix")
 
+    def test_a_dimensioned_zero_is_an_empty_cross_tab_cell_not_a_claim(self) -> None:
+        # Live 2026-09-24: "EPAM ... 营业收入（分部：Americas - North America）... 为
+        # USD 0" was a promoted Claim, and 51 more like it.
+        self.assertIsNone(statement_line_proposal(line(
+            line_id="mission-statement-line:epam-na", ordinal=361,
+            concept="us-gaap:Revenues", label="Americas - North America",
+            dimension_axis="srt:StatementGeographicalAxis",
+            dimension_member="epam:AmericasNorthAmericaMember", is_breakdown=1,
+            value="0",
+        ), FILING))
+        self.assertIsNone(statement_line_proposal(line(
+            dimension_member="ibm:SalesMember", value="0.00"), FILING))
+
+    def test_an_undimensioned_zero_is_still_a_filed_fact(self) -> None:
+        proposal = statement_line_proposal(line(value="0"), FILING)
+        self.assertIsNotNone(proposal)
+        self.assertEqual(proposal["value"], "0")
+
     def test_an_unmapped_concept_is_silence_rather_than_a_guess(self) -> None:
         self.assertIsNone(metric_for_line(line(concept="ibm:ExpenseAndIncomeOther")))
         self.assertIsNone(statement_line_proposal(

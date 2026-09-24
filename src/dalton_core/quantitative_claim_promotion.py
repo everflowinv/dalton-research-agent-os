@@ -255,6 +255,14 @@ def statement_line_proposal(
     value = canonical_decimal(line.get("value"))
     if value is None:
         return None
+    if (line.get("dimension_member") or line.get("dimension_axis")) and Decimal(value) == 0:
+        # A dimensional cell reported as exactly zero is the empty corner of a
+        # cross-tab (EPAM's "APAC - Americas", DXC's "All Other", IBM's
+        # reclassification members), not a disclosure that the segment earned
+        # nothing.  Promoted, it read "EPAM 北美营业收入为 0 美元" (52 such
+        # Claims live on 2026-09-24).  An undimensioned zero is still a fact
+        # and is still promoted.
+        return None
     units = unit_wire(line.get("unit"))
     if units is None:
         return None

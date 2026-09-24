@@ -1115,22 +1115,65 @@ def new_refs(record: Mapping[str, Any], prior: Mapping[str, Any] | None) -> list
     return sorted(set(evidence_scope(record)) - set(evidence_scope(prior)))
 
 
+def retired_withdrawals(
+    connection: Any, record: Mapping[str, Any], prior: Mapping[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Source rows the current version cites, that are now retired, and this one drops.
+
+    ADR-0008's other door.  A version that learned nothing new is a duplicate,
+    but a version that *stops* resting on a Claim P10b has since retired has
+    learned something: the file it replaces cites a fact the Ledger disowns.
+    Refusing it would freeze every published dossier on its retired Claims
+    until unrelated new evidence happened to arrive for the same unit.
+
+    Only Claims retired *now* count (``claim_retirement.retired_claim_version_refs``:
+    retired less reinstated), so dropping an ordinary citation is still a duplicate.
+    """
+
+    if prior is None:
+        return []
+    from .claim_retirement import retired_claim_version_refs
+
+    retired = retired_claim_version_refs(connection)
+    if not retired:
+        return []
+    cited_now = set(evidence_scope(record))
+    rows: dict[str, dict[str, Any]] = {}
+    blocks = [*(prior.get("sections") or []),
+              *(block for block in (prior.get("industry_classification"),
+                                    prior.get("variant_view")) if block)]
+    for block in blocks:
+        for row in block.get("sources") or []:
+            ref = row.get("ref")
+            if ref in retired and ref not in cited_now:
+                rows.setdefault(ref, {key: row[key] for key in ("kind", "ref", "text", "period")
+                                      if key in row})
+    return [rows[ref] for ref in sorted(rows)]
+
+
 # ---------------------------------------------------------------------------
 # readable projections
 # ---------------------------------------------------------------------------
 
 
-def section_body(section: Mapping[str, Any]) -> str:
+def section_body(section: Mapping[str, Any], *, drop_refs: Any = ()) -> str:
     """The prose a reader sees, assembled from the sentence rows.
 
     Assembled here rather than written by the model: the tags never enter the
     text, so nothing is left behind when they are stripped, because they were
     never in it.
+
+    ``drop_refs`` leaves out every sentence resting on one of those refs.  A
+    redraft is shown its unit's prior body; a sentence whose Claim has since
+    been retired must not be handed back to the model as something to keep.
     """
 
+    drop = set(drop_refs)
     body = ""
     for slot in section.get("slots") or []:
         for row in slot.get("sentences") or ():
+            if drop and drop.intersection(row.get("refs") or ()):
+                continue
             text = row["text"]
             if body and body[-1] not in _CJK_TERMINATORS:
                 # Chinese sentences carry their own full stop and need no
@@ -1305,8 +1348,13 @@ def output_rubric_findings(
     constitution: Mapping[str, Any],
     policy: Mapping[str, Any],
     prior: Mapping[str, Any] | None = None,
+    withdrawn_refs: Sequence[str] = (),
 ) -> list[dict[str, Any]]:
     """Run every ``method.output_rubric`` criterion the policy bound to a check.
+
+    ``withdrawn_refs`` are retired Claims the prior version cited and this one
+    drops (``retired_withdrawals``); a version that stops resting on them is
+    a correction, not a restatement.
 
     A criterion the policy neither binds nor declares inapplicable is itself a
     finding.  The Constitution is a published standard; a consumer that reads
@@ -1348,7 +1396,7 @@ def output_rubric_findings(
                         "section": part["title"], "figure": token,
                     })
         elif check == "not_a_restatement":
-            if prior is not None and not new_refs(record, prior):
+            if prior is not None and not new_refs(record, prior) and not withdrawn_refs:
                 findings.append({
                     "code": "no_new_evidence", "criterion_index": index,
                 })
@@ -1451,7 +1499,8 @@ class CompanyDossierAuthority:
         latest = None if latest_row is None else self.dossier(latest_row["version_id"])
         if latest is not None and latest["body_hash"] == digest:
             return {**latest, "status": "duplicate", "duplicate_reason": "identical_body"}
-        if latest is not None and not new_refs(body, latest):
+        if (latest is not None and not new_refs(body, latest)
+                and not retired_withdrawals(self.connection, body, latest)):
             return {
                 **latest, "status": "duplicate",
                 "duplicate_reason": "no_new_evidence",
@@ -1716,6 +1765,7 @@ __all__ = [
     "evidence_scope",
     "load_policy",
     "new_refs",
+    "retired_withdrawals",
     "normalise_ref",
     "output_rubric_findings",
     "policy_hash",

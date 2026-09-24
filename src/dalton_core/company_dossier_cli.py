@@ -55,6 +55,7 @@ from .company_dossier import (
     load_policy,
     new_refs,
     output_rubric_findings,
+    retired_withdrawals,
     policy_hash,
     section_body,
     unit_slots,
@@ -637,12 +638,17 @@ def plan_units(
         claim_context = prepare_company_claim_query(store, company_ref)
     prior_sections = {item["aspect"]: item for item in (prior or {}).get("sections") or []}
     plan: dict[str, Any] = {}
+    from .claim_retirement import retired_claim_version_refs
+
+    # Retired after the unit was written: the unit is stale whatever else has
+    # happened, because it cites something the Ledger has since disowned.
+    retired = retired_claim_version_refs(connection)
     numbers = number_material(store, company_ref)
     market = market_view_material(store, company_ref, claim_context=claim_context)
     for unit in UNITS:
         entry: dict[str, Any] = {"unit": unit, "status": "ready", "reason": None,
                                  "structure": [], "material": [], "new_refs": 0,
-                                 "stale": True}
+                                 "retired_refs": [], "stale": True}
         try:
             structure = unit_slots(
                 unit, constitution=constitution, policy=policy,
@@ -694,6 +700,7 @@ def plan_units(
             held = (prior or {}).get("variant_view")
         cited = {row["ref"] for row in (held or {}).get("sources") or []}
         entry["new_refs"] = len({row["ref"] for row in material} - cited)
+        entry["retired_refs"] = sorted(cited & retired)
         drafted_before = held is not None and held.get("status") != "unavailable"
         # When *this* unit was last written, not when the chain last moved.
         # Against the chain head, a unit nobody has ever drafted looks current
@@ -704,7 +711,8 @@ def plan_units(
         newest = max((str(row.get("created_at") or "") for row in material),
                      default="")
         entry["stale"] = (
-            not drafted_before or not written_at or newest > written_at)
+            not drafted_before or not written_at or newest > written_at
+            or bool(entry["retired_refs"]))
         plan[unit] = entry
     return plan
 
@@ -800,6 +808,9 @@ def reconstruct_dossier_input(
         (record.get("industry_classification") or {}).get("classification") or "") or None
     profile_table = render_profile_table(profile)
     rebuilt = {}
+    from .claim_retirement import retired_claim_version_refs
+
+    retired_now = retired_claim_version_refs(connection)
     provenance = record.get("unit_provenance") or {}
     anchored_priors: dict[str | None, Mapping[str, Any] | None] = {
         None: None,
@@ -826,7 +837,10 @@ def reconstruct_dossier_input(
         rebuilt[unit] = build_dossier_input(
             unit=unit, structure=entry.get("structure", []), material=material,
             company=company, mission=current_mission, constitution=constitution,
-            policy=policy, prior_body="" if held is None else section_body(held),
+            # Mirrors the run: a sentence resting on a retired Claim is never
+            # part of the prior body a redraft is shown.
+            policy=policy, prior_body="" if held is None else section_body(
+                held, drop_refs=retired_now),
             profile_table=profile_table if unit == "guidance_style" else "",
             profile=profile if unit == "guidance_style" else None,
             market_view_available=any(
@@ -1611,12 +1625,18 @@ def stale_units(
     ready = [entry for entry in plan.values()
              if entry["status"] == "ready"
              and (entry["unit"] in asked
-                  or (entry.get("stale") and entry["new_refs"] > 0))]
+                  or (entry.get("stale") and entry["new_refs"] > 0)
+                  # A unit resting on a retired Claim is redrafted even with
+                  # nothing new to say: the correction is the new thing.
+                  or entry.get("retired_refs"))]
     ready.sort(key=lambda entry: (
         # Classification supplies the demand template, even when another
         # section has more new references in this bounded batch.
         0 if entry["unit"] == CLASSIFICATION_UNIT else 1,
         0 if entry.get("last_drafted") is None else 1,
+        # A correction before an extension, within the same per-run bound:
+        # a published unit citing a disowned fact is the worse defect.
+        0 if entry.get("retired_refs") else 1,
         -int(entry["new_refs"]),
         order[entry["unit"]],
     ))
@@ -1887,7 +1907,8 @@ def run_dossier(
             )
             actual_classification = (blocks.get(CLASSIFICATION_UNIT) or {}).get(
                 "classification", held_classification)
-            prior_body = "" if held is None else section_body(held)
+            prior_body = "" if held is None else section_body(
+                held, drop_refs=entry.get("retired_refs") or ())
             unit_profile_table = profile_table if unit == "guidance_style" else ""
             market_view_available = any(
                 slot["slot_id"] == "market_view" for slot in entry["structure"])
@@ -2195,6 +2216,18 @@ def run_dossier(
             # would leave the summary describing a record nobody can read.
             fresh = fresh_evidence(blocks, prior)
             if not fresh:
+                # ADR-0008's other door: nothing new, but the current version
+                # rests on Claims retired since, and this one no longer will
+                # (a carried-forward unit still citing one is dropped below).
+                drafted_scope = {"sections": [
+                    {"sources": list(block.get("sources") or [])}
+                    for block in blocks.values()]}
+                fresh = [dict(row, text=("retired: " + str(row.get("text") or "-"))[:1000])
+                         for row in retired_withdrawals(
+                             store.connection, drafted_scope, prior)]
+                if fresh:
+                    summary["retired_withdrawals"] = [row["ref"] for row in fresh]
+            if not fresh:
                 summary.update({"status": "succeeded", "dossier_status": "no_new_evidence",
                                 "failure_reason": ("this draft cites nothing the current "
                                                    "version does not")})
@@ -2260,8 +2293,10 @@ def run_dossier(
                                 "failure_reason": "hard checks failed: "
                                                   + ", ".join(gate["failed"]) + detail})
                 return summary
-            findings = output_rubric_findings(record, constitution=constitution,
-                                              policy=policy, prior=prior)
+            findings = output_rubric_findings(
+                record, constitution=constitution, policy=policy, prior=prior,
+                withdrawn_refs=[row["ref"] for row in retired_withdrawals(
+                    store.connection, record, prior)])
             summary["output_rubric_findings"] = findings
             if findings:
                 # Live 2026-09-17 (CTSH), 27 runs: three ``investment_conclusion``
@@ -2449,7 +2484,9 @@ def rubric_gate(
     result = run_deterministic(art, get_rubric("company_dossier"), core=connection)
     failed = [name for name in result["failed_checks"] if name in HARD_CHECKS]
     overridden = []
-    if "new_version_cites_new_refs" in failed and new_refs(record, prior):
+    if "new_version_cites_new_refs" in failed and (
+            new_refs(record, prior)
+            or retired_withdrawals(connection, record, prior)):
         failed = [name for name in failed if name != "new_version_cites_new_refs"]
         overridden.append("new_version_cites_new_refs")
     checks = {

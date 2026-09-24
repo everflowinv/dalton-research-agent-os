@@ -4,6 +4,7 @@ import hashlib
 import sqlite3
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 from dalton_core.research_localization import build_localization
@@ -114,6 +115,79 @@ class LocalizationStoreTests(unittest.TestCase):
         translated=build_localization(second,{'sections':[{'index':0,'title':'收入','body':'收入下降。','gaps':[]}]},self.verifier)
         publish_ui_texts(self.directory,[{'source':second,'localization':translated}])
         self.assertEqual(load_ui_texts(self.db),{'Revenue increased.':'收入增长。','Revenue fell.':'收入下降。'})
+
+
+class UiTextShardingTests(unittest.TestCase):
+    """0.2: one file per batch, so the mapping grows without a single-file ceiling.
+
+    Live 2026-09-22 the 0.1 ``ui-texts.json`` held 836 batches in
+    16,775,691 of its 16,777,216 permitted bytes; every later publication that
+    merged a UI batch failed with "display attachment exceeds the size limit".
+    """
+
+    setUp = LocalizationStoreTests.setUp
+    tearDown = LocalizationStoreTests.tearDown
+
+    def batch(self, body, translated):
+        source = copy.deepcopy(self.product)
+        source['version_ref'] = 'ui:' + body
+        source['sections'][0]['body'] = body
+        localization = build_localization(source, {'sections': [
+            {'index': 0, 'title': '界面文字', 'body': translated, 'gaps': []}]}, self.verifier)
+        return {'source': source, 'localization': localization}
+
+    def test_each_batch_is_its_own_record_and_the_index_only_lists_refs(self):
+        publish_ui_texts(self.directory, [self.batch('Revenue increased.', '收入增长。')])
+        publish_ui_texts(self.directory, [self.batch('Revenue fell.', '收入下降。')])
+        index = json.loads((self.directory / 'ui-texts.json').read_text())
+        self.assertEqual(index['schema_version'], 'cockpit-ui-texts:0.2')
+        self.assertEqual(len(index['batch_refs']), 2)
+        records = sorted((self.directory / 'ui-records').glob('*.json'))
+        self.assertEqual(sorted(path.stem for path in records), sorted(index['batch_refs']))
+        self.assertEqual(load_ui_texts(self.db),
+                         {'Revenue increased.': '收入增长。', 'Revenue fell.': '收入下降。'})
+
+    def test_the_mapping_can_outgrow_the_old_single_file_limit(self):
+        from dalton_core import research_localization_store as store
+
+        filler = 'x' * 3000
+        with unittest.mock.patch.object(store, '_MAX_BYTES', 64 * 1024):
+            for number in range(40):
+                publish_ui_texts(self.directory, [self.batch(
+                    f'Line {number} {filler}', f'第 {number} 行')])
+            total = sum(path.stat().st_size for path in (self.directory / 'ui-records').glob('*.json'))
+            self.assertGreater(total, 64 * 1024)
+            self.assertLess((self.directory / 'ui-texts.json').stat().st_size, 64 * 1024)
+            self.assertEqual(len(load_ui_texts(self.db)), 40)
+
+    def test_a_legacy_single_file_is_migrated_in_order_on_the_next_publish(self):
+        first = self.batch('Same text.', '第一版译文。')
+        second = self.batch('Revenue fell.', '收入下降。')
+        second['source']['sections'][0]['body'] = 'Same text.'
+        second['localization'] = build_localization(second['source'], {'sections': [
+            {'index': 0, 'title': '界面文字', 'body': '第二版译文。', 'gaps': []}]}, self.verifier)
+        self.directory.mkdir(parents=True)
+        (self.directory / 'ui-texts.json').write_text(json.dumps(
+            {'schema_version': 'cockpit-ui-texts:0.1', 'batches': [first, second]},
+            ensure_ascii=False))
+        # Readable as it stands, first approved translation wins.
+        self.assertEqual(load_ui_texts(self.db), {'Same text.': '第一版译文。'})
+        publish_ui_texts(self.directory, [self.batch('Revenue increased.', '收入增长。')])
+        index = json.loads((self.directory / 'ui-texts.json').read_text())
+        self.assertEqual(index['schema_version'], 'cockpit-ui-texts:0.2')
+        self.assertEqual(len(index['batch_refs']), 3)
+        self.assertEqual(load_ui_texts(self.db), {'Same text.': '第一版译文。',
+                                                  'Revenue increased.': '收入增长。'})
+
+    def test_one_unreadable_record_costs_only_its_own_strings(self):
+        publish_ui_texts(self.directory, [self.batch('Revenue increased.', '收入增长。')])
+        publish_ui_texts(self.directory, [self.batch('Revenue fell.', '收入下降。')])
+        index = json.loads((self.directory / 'ui-texts.json').read_text())
+        (self.directory / 'ui-records' / (index['batch_refs'][0] + '.json')).write_text('{}')
+        # A fresh index write moves the cache key, as every publish does.
+        publish_ui_texts(self.directory, [self.batch('Margin rose.', '利润率上升。')])
+        self.assertEqual(load_ui_texts(self.db),
+                         {'Revenue fell.': '收入下降。', 'Margin rose.': '利润率上升。'})
 
 
 if __name__ == '__main__':

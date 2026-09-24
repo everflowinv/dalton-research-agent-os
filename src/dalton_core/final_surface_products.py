@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping
 from hashlib import sha256
 from typing import Any
@@ -25,10 +26,72 @@ def _has_column(connection: Any, table: str, column: str) -> bool:
         f"PRAGMA table_info({table})").fetchall())
 
 
+#: A prefix shorter than this is a coincidence, not a truncated copy.
+MIN_TRUNCATED_COPY_CHARS = 40
+_ELLIPSIS = ("…", "...")
+#: A table cell that is an identifier (a lane key, a pool name) or a
+#: placeholder, not prose.  Sent for translation it comes back as the same
+#: English token, which is where the mixed-language reflections came from.
+_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/-]*")
+_PLACEHOLDERS = frozenset({"—", "-", "–", "n/a", "N/A", "none", "None", "null"})
+
+
+def _core(value: str) -> str:
+    text = value.strip()
+    for mark in _ELLIPSIS:
+        if text.endswith(mark):
+            return text[: -len(mark)].rstrip()
+    return text
+
+
+def truncated_copy_of(candidate: str, other: str) -> bool:
+    """Whether ``candidate`` is ``other`` again, or a leading cut of it.
+
+    Live 2026-09-24: 15 of 17 judgement localizations had a second section
+    that was the first one cut at 400 characters, because ``effect.reason``
+    of a no_change judgement *is* ``because[:400]``.  The verifier passed them,
+    correctly -- the translation was faithful to a source that said the same
+    thing twice.  The duplicate has to be refused where the source is built.
+    """
+
+    a, b = _core(candidate), _core(other)
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    return len(a) >= MIN_TRUNCATED_COPY_CHARS and len(a) < len(b) and b.startswith(a)
+
+
 def _sections(title: str, *values: Any) -> list[dict[str, Any]]:
-    """One exact source string per section so UI displayText can key it."""
-    return [{"title": title, "body": value, "gaps": []}
-            for value in values if isinstance(value, str) and value.strip()]
+    """One exact source string per section so UI displayText can key it.
+
+    A value that repeats, or is a truncated copy of, a value already kept is
+    dropped; when the longer one arrives second it replaces the cut copy in
+    place.  A section list is prose a reader reads top to bottom, and the same
+    paragraph twice -- once whole, once cut -- is a defect, not emphasis.
+    """
+    kept: list[str] = []
+    for value in values:
+        if not isinstance(value, str) or not value.strip():
+            continue
+        if any(truncated_copy_of(value, earlier) for earlier in kept):
+            continue
+        shorter = next((index for index, earlier in enumerate(kept)
+                        if truncated_copy_of(earlier, value)), None)
+        if shorter is not None:
+            kept[shorter] = value
+            continue
+        kept.append(value)
+    return [{"title": title, "body": value, "gaps": []} for value in kept]
+
+
+def _prose_cell(value: Any) -> bool:
+    """A reflection table cell worth translating: prose, not a key or a dash."""
+
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    return bool(text) and text not in _PLACEHOLDERS and _IDENTIFIER.fullmatch(text) is None
 
 
 def _product(kind: str, subject: str, version: str, binding_hash: str,
@@ -225,7 +288,7 @@ def final_surface_products(connection: Any, mission: Mapping[str, Any],
                       body.get("authority_note")]
             for item in narrative.get("table") or []:
                 if isinstance(item, Mapping):
-                    values.extend(value for value in item.values() if isinstance(value, str))
+                    values.extend(value for value in item.values() if _prose_cell(value))
             for item in body.get("backlog_candidates") or []:
                 if isinstance(item, Mapping):
                     values.extend((item.get("question"), item.get("because")))
@@ -266,4 +329,4 @@ def final_surface_products(connection: Any, mission: Mapping[str, Any],
     return [row for row in products if row is not None]
 
 
-__all__ = ["final_surface_products"]
+__all__ = ["MIN_TRUNCATED_COPY_CHARS", "final_surface_products", "truncated_copy_of"]

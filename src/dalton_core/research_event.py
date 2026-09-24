@@ -724,6 +724,101 @@ def classify_document(spec_ref: str | None, source_ref: str | None) -> tuple[str
     return ("news", "news_media")
 
 
+# ---------------------------------------------------------------------------
+# pages that are not news
+# ---------------------------------------------------------------------------
+#
+# Live 2026-09-24: a ``management-changes`` web search returned Julie Sweet's
+# Wikipedia, Britannica and Forbes profile pages.  Each became a ``news`` event
+# and one of them a research task asking who had left Accenture.  Nobody had:
+# the pages describe a person and carry no date, and all three had first been
+# found on 2026-09-07 -- a later mission version found them again and the scan
+# counted the re-discovery as the thing that happened.
+#
+# Two deterministic rules, applied to undated web pages (the ``news_media``
+# tier, where neither the search result nor the ledger holds a publication
+# date):
+#
+# 1. an encyclopedia or profile page is never an event;
+# 2. an undated page is an event only in the window in which it was *first*
+#    found.  The first sighting is the only date such a page has; finding it
+#    again says something about the search, not about the company.
+
+#: Hosts whose pages are reference material, never reports of something new.
+EVERGREEN_HOSTS: frozenset[str] = frozenset({
+    "wikipedia.org", "wikimedia.org", "wikidata.org", "britannica.com",
+    "wikiwand.com", "dbpedia.org", "everybodywiki.com", "famousbirthdays.com",
+    "crunchbase.com", "zoominfo.com", "theorg.com", "craft.co", "rocketreach.co",
+    "cbinsights.com", "pitchbook.com", "owler.com", "golden.com",
+    "linkedin.com", "wallmine.com", "companiesmarketcap.com",
+})
+#: URL path fragments that mark a profile, biography or standing "about" page.
+EVERGREEN_PATH_MARKERS: tuple[str, ...] = (
+    # Each is a whole path segment (matched with its trailing slash, or as the
+    # end of the path): "/leadership-transition-at-acn" is news and must not
+    # match "/leadership/".
+    "/wiki/", "/profile/", "/profiles/", "/biography/", "/bio/", "/bios/",
+    "/people/", "/person/", "/in/", "/leadership/", "/our-leaders/",
+    "/executive-team/", "/executives/", "/management-team/",
+    "/board-of-directors/", "/about-us/", "/company-profile/",
+)
+_EVERGREEN_TITLE = re.compile(
+    r"wikipedia|britannica|\bbiography\b|\bprofile\b|net worth|\bbio\b|"
+    r"简介|百科|个人资料|人物介绍",
+    re.IGNORECASE,
+)
+#: Tiers whose pages carry no publication date anywhere in this Core.
+UNDATED_PAGE_TIERS: frozenset[str] = frozenset({"news_media"})
+
+
+def evergreen_page_reason(
+    *, host: str | None, url: str | None = None, title: str | None = None,
+) -> str | None:
+    """Why a page is reference material rather than news, or ``None``.
+
+    Deterministic and conservative: a host is evergreen only as a whole
+    registrable domain on the list, and a general news host (forbes.com) is
+    evergreen only for a profile-shaped path or title.
+    """
+
+    name = (host or "").strip().lower().rstrip(".")
+    if name.startswith("www."):
+        name = name[4:]
+    for candidate in EVERGREEN_HOSTS:
+        if name == candidate or name.endswith("." + candidate):
+            return f"evergreen_host:{candidate}"
+    if url:
+        from urllib.parse import urlsplit
+
+        path = urlsplit(url).path.lower().rstrip("/") + "/"
+        for marker in EVERGREEN_PATH_MARKERS:
+            if marker in path:
+                return f"evergreen_path:{marker}"
+    if title and _EVERGREEN_TITLE.search(title):
+        return "evergreen_title"
+    return None
+
+
+def _first_seen(
+    connection: sqlite3.Connection, company_ref: str, document_refs: Sequence[str],
+) -> dict[str, str]:
+    """document_ref -> when this company first discovered it, in any mission version."""
+
+    first: dict[str, str] = {}
+    refs = list(dict.fromkeys(document_refs))
+    for start in range(0, len(refs), 400):
+        window = refs[start:start + 400]
+        for row in connection.execute(
+            "SELECT document_ref, MIN(created_at) AS first_seen "
+            "FROM coverage_mission_discovered_documents WHERE company_ref=? "
+            "AND document_ref IN (" + ",".join("?" * len(window)) + ") "
+            "GROUP BY document_ref",
+            (company_ref, *window),
+        ).fetchall():
+            first[str(row["document_ref"])] = str(row["first_seen"])
+    return first
+
+
 def _lookback(now: datetime, days: int) -> str:
     return (now - timedelta(days=max(1, days))).isoformat(timespec="microseconds")
 
@@ -789,9 +884,15 @@ def document_event_candidates(
         current = chosen.get(row["document_ref"])
         if current is None or rank < current[0]:
             chosen[row["document_ref"]] = (rank, row)
+    first_seen = _first_seen(connection, company_ref, list(chosen))
     candidates: list[dict[str, Any]] = []
     for _rank, row in chosen.values():
         kind, tier = classify_document(row["spec_ref"], row["source_ref"])
+        if kind == "news" and tier in UNDATED_PAGE_TIERS:
+            if evergreen_page_reason(host=row["host"]) is not None:
+                continue
+            if first_seen.get(row["document_ref"], row["created_at"]) < since:
+                continue
         candidates.append({
             "kind": kind,
             "evidence_tier": tier,
@@ -913,6 +1014,9 @@ def reconciliation_event_candidates(
 __all__ = [
     "DEFAULT_LOOKBACK_DAYS",
     "DEFAULT_TIER_BY_KIND",
+    "EVERGREEN_HOSTS",
+    "EVERGREEN_PATH_MARKERS",
+    "UNDATED_PAGE_TIERS",
     "EVENT_KINDS",
     "EVIDENCE_TIERS",
     "MAX_EVENTS_PER_SCAN",
@@ -929,6 +1033,7 @@ __all__ = [
     "classify_document",
     "day_start",
     "document_event_candidates",
+    "evergreen_page_reason",
     "event_ref_for",
     "payload_hash",
     "reconciliation_event_candidates",

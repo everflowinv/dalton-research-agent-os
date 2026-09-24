@@ -58,7 +58,8 @@ from .event_judgement import (
 )
 from .mission_deliverable import MissionDeliverableAuthority
 from .model_configurations import register_model_config_name
-from .research_event import ResearchEventAuthority
+from .research_event import (UNDATED_PAGE_TIERS, ResearchEventAuthority,
+                             evergreen_page_reason)
 from .source_capability_map import build_map, prompt_table
 from .store import content_hash
 from .store import DaltonStore
@@ -269,8 +270,27 @@ def unjudged_event_groups(
     groups: list[list[dict[str, Any]]] = []
     positions: dict[tuple[str, ...], int] = {}
     moment = now or datetime.now(timezone.utc)
+    from .claim_retirement import retired_claim_version_refs
+
+    # An event that *is* a Claim is recorded while the Claim is live; if P10b
+    # retires it before the judge gets to it, judging it would put a disowned
+    # fact in front of the model (live 2026-09-24: judged 11:40 on a Claim
+    # retired 10:49).  It is skipped, not judged: a later revoked retirement
+    # (a reinstatement) makes it eligible again: the set is read every time.
+    retired = retired_claim_version_refs(events.connection)
     for row in rows:
         event = events.event(row["event_id"])
+        if retired and retired.intersection(
+                ref for ref in event.get("source_refs") or ()
+                if isinstance(ref, str)):
+            continue
+        # Recorded before the tracking scan learned to refuse reference pages:
+        # an encyclopedia or profile page is not judged as news either.
+        if (event.get("kind") == "news"
+                and event.get("evidence_tier") in UNDATED_PAGE_TIERS
+                and evergreen_page_reason(
+                    host=(event.get("payload") or {}).get("host")) is not None):
+            continue
         grouped_key = buyback_group_key(event)
         if not _closed_hk_week(grouped_key, moment):
             continue

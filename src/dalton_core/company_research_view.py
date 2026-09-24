@@ -492,8 +492,16 @@ def annotate_with_index(
     importance: str | None = None,
     canonical_only: bool = True,
     entries: Mapping[str, Mapping[str, Any]] | None = None,
+    retired_refs: set[str] | frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
     """Join P12b index entries onto claim rows and filter by them.
+
+    ``retired_refs`` are Claims the caller is about to drop as retired.  When
+    one of them is the canonical copy of its dedupe group, ``canonical_only``
+    would otherwise drop every live duplicate with it and the fact would
+    vanish from the view; instead the best live member of that group (by the
+    index's own ``canonical_order_key``) stands in as canonical.  The index is
+    not rewritten -- this is a read-side substitution only.
 
     ``entries`` is an already-read ``claim_version_ref -> entry`` mapping
     covering at least ``rows``; a caller that annotates the same rows several
@@ -548,6 +556,25 @@ def annotate_with_index(
         )
     elif not indexed:
         entries = {}
+    stand_in: dict[str, str] = {}
+    if canonical_only and retired_refs:
+        vacated = {
+            entry["dedupe_group_ref"]
+            for row in rows
+            if (entry := entries.get(row[ref_key])) is not None
+            and entry["is_canonical"] and row[ref_key] in retired_refs
+        }
+        best: dict[str, tuple[tuple[Any, ...], str]] = {}
+        for row in rows:
+            entry = entries.get(row[ref_key])
+            if (entry is None or entry["dedupe_group_ref"] not in vacated
+                    or row[ref_key] in retired_refs):
+                continue
+            key = canonical_order_key(entry)
+            group = entry["dedupe_group_ref"]
+            if group not in best or key < best[group][0]:
+                best[group] = (key, row[ref_key])
+        stand_in = {group: ref for group, (_key, ref) in best.items()}
     result: list[dict[str, Any]] = []
     for row in rows:
         entry = entries.get(row[ref_key])
@@ -579,7 +606,8 @@ def annotate_with_index(
             continue
         if as_of_to is not None and (entry["as_of"] is None or entry["as_of"] > as_of_to):
             continue
-        if canonical_only and not entry["is_canonical"]:
+        promoted = stand_in.get(entry["dedupe_group_ref"]) == row[ref_key]
+        if canonical_only and not entry["is_canonical"] and not promoted:
             continue
         result.append({
             **dict(row),
@@ -588,7 +616,7 @@ def annotate_with_index(
             "as_of_basis": entry["as_of_basis"],
             "importance": entry["importance"],
             "dedupe_group_ref": entry["dedupe_group_ref"],
-            "is_canonical": entry["is_canonical"],
+            "is_canonical": entry["is_canonical"] or promoted,
             "index_entry_ref": entry["id"],
             "index_order": canonical_order_key(entry),
         })
@@ -667,24 +695,24 @@ def query_company_research(
             key: value for key, value in row.items() if key != "period_key"
         })
     from .claim_index_authority import table_exists
+    from .claim_retirement import retired_claim_version_refs
 
+    # Retired less reinstated (2026-09-24); empty on a Core without the table.
+    # Read before the index join, so a retired canonical copy can hand its
+    # place to a live duplicate instead of taking the fact with it.
+    retired = retired_claim_version_refs(store.connection) if exclude_retired else set()
     joined = annotate_with_index(
         store.connection, filtered, index_aspect=index_aspect,
         as_of_from=as_of_from, as_of_to=as_of_to, importance=importance,
-        canonical_only=canonical_only,
+        canonical_only=canonical_only, retired_refs=retired,
         # The context's rows are exactly what ``filtered`` was drawn from, so
         # its index read covers them and is shared by every aspect asked of
         # the same context.
         entries=None if claim_context is None else claim_context.index_entries(),
     )
-    if exclude_retired:
-        from .claim_retirement import retired_claim_version_refs
-
-        # Retired less reinstated (2026-09-24); empty on a Core without the table.
-        retired = retired_claim_version_refs(store.connection)
-        if retired:
-            joined = [row for row in joined
-                      if str(row["claim_version_ref"]) not in retired]
+    if exclude_retired and retired:
+        joined = [row for row in joined
+                  if str(row["claim_version_ref"]) not in retired]
     # A Core that has never opened the index answers byte-identically to the
     # way it did before P12b -- not with seven null columns bolted on.  A Core
     # that has one always carries them, including on a claim the index has not
