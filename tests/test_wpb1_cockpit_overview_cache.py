@@ -258,5 +258,56 @@ class TicketCacheBoundsTests(unittest.TestCase):
         self.assertEqual(cache.tickets()[0]["ticket"]["status"], "succeeded")
 
 
+class ClaimsCacheKeyTests(unittest.TestCase):
+    """2026-09-25: the claims cache key must not read the whole table."""
+
+    SCHEMA = """CREATE TABLE claim_versions (
+        claim_version_id TEXT PRIMARY KEY, claim_ref TEXT NOT NULL,
+        version_number INTEGER NOT NULL, claim_json TEXT NOT NULL,
+        content_hash TEXT NOT NULL, prior_version_id TEXT, created_at TEXT NOT NULL,
+        UNIQUE (claim_ref, version_number))"""
+
+    def setUp(self):
+        import sqlite3
+        self.core = sqlite3.connect(":memory:")
+        self.core.row_factory = sqlite3.Row
+        self.core.execute(self.SCHEMA)
+        self.plane = CockpitPlane.__new__(CockpitPlane)
+        self.plane._claims_cache = None
+
+    def insert(self, n):
+        self.core.execute(
+            "INSERT INTO claim_versions VALUES (?,?,1,?,?,NULL,?)",
+            (f"cv-{n}", f"claim-{n}", json.dumps({"id": f"cv-{n}", "subject_ref": "company:x",
+                                                 "normalized_statement": f"Claim {n}." + "x" * 2000}),
+             "h", f"2026-09-{n:02d}T00:00:00+00:00"))
+
+    def claims(self):
+        from unittest import mock
+        from dalton_core import cockpit_plane
+        statements = []
+        self.core.set_trace_callback(statements.append)
+        try:
+            with mock.patch.object(cockpit_plane, "retired_claim_refs", return_value=set()):
+                return self.plane._claims(self.core), statements
+        finally:
+            self.core.set_trace_callback(None)
+
+    def test_the_key_is_answered_from_an_index_and_the_cache_follows_inserts(self):
+        for n in range(1, 4):
+            self.insert(n)
+        first, _ = self.claims()
+        again, statements = self.claims()
+        self.assertIs(again, first)
+        self.assertEqual(len(statements), 1, statements)
+        plan = " ".join(str(tuple(row)) for row in
+                        self.core.execute("EXPLAIN QUERY PLAN " + statements[0]))
+        self.assertIn("COVERING INDEX", plan)
+        self.assertNotIn("created_at", statements[0])
+        self.insert(4)
+        fourth, _ = self.claims()
+        self.assertEqual([c["ref"] for c in fourth], ["cv-1", "cv-2", "cv-3", "cv-4"])
+
+
 if __name__ == "__main__":
     unittest.main()

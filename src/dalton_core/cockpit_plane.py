@@ -2579,7 +2579,14 @@ class CockpitPlane:
         return result
 
     def _claims(self, core: sqlite3.Connection) -> list[dict[str, Any]]:
-        row = core.execute("SELECT COUNT(*) AS n, MAX(created_at) AS latest FROM claim_versions").fetchone()
+        # 2026-09-25: the cache key was COUNT(*) and MAX(created_at).  With no
+        # index on created_at the MAX read every page of the table, claim JSON
+        # included -- 4.3 s of a 9.8 s cold overview build on the live copy --
+        # only to find out whether anything changed.  claim_versions is
+        # append-only (its triggers refuse UPDATE and DELETE), so the row count
+        # alone identifies its contents; COUNT(*) is answered from the
+        # smallest index and MAX(rowid) from the end of the table b-tree.
+        row = core.execute("SELECT COUNT(*) AS n, MAX(rowid) AS latest FROM claim_versions").fetchone()
         # P10b: a retired Claim never reaches an answer, a count or a deliverable.
         retired = retired_claim_refs(core)
         key = (row["n"], row["latest"], len(retired))
