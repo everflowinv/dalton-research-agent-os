@@ -9,6 +9,16 @@
 
 ---
 
+（当前没有待部署批次。）
+
+---
+
+## 已部署
+
+- 2026-09-25 14:36 UTC：批次 2026-09-25c，release `efe93904…`。C1 已完成：用户在 bootout 后立即 bootstrap 报错，由我补做了 bootstrap；三个 control 均为 Standard，cockpit overview 响应 0.02s。C2（authorize-unproved 5 条）待执行。
+
+<details><summary>批次 2026-09-25c 说明</summary>
+
 ## 批次 2026-09-25c（main `e60954bd` 及之后）
 
 ### 这批解决什么（均为 09-25 部署后验证中发现的问题）
@@ -100,9 +110,8 @@ ws-7d 执行前先 `export DALTON_WORKSPACE_MANIFEST=$HOME/.dalton/workspaces/ws
 
 所有分支合并后在 main `e60954bd` 上跑全量测试：共 10333 个，**全部通过**（skipped 4，0 error）。
 
----
+</details>
 
-## 已部署
 
 - 2026-09-25 06:12 UTC：批次 2026-09-24b，`d3c1f687`（release `2f726c84…`）。用户执行了 P1、P2、P3。**本次切换没有弹出外接盘授权**，venv 符号链接修复已生效。部署后验证见巡检记录。下面保留该批次的完整说明，供查阅。
 
