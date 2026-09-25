@@ -523,5 +523,21 @@ class DraftRunTests(unittest.TestCase):
         self.assertEqual(change_reason_for(None), "evidence_thicker")
 
 
+
+class OutputBudgetTests(unittest.TestCase):
+    def test_the_drafting_budget_holds_the_maps_that_were_drawn(self) -> None:
+        # 2026-09-25: 266 verified drafts replied in up to 16.4 KB, ~7,700
+        # tokens at the claude gateway's rate; at 4,000 the gateway paid for
+        # the reply and the adapter refused it.  The packaged default is the
+        # one CockpitModel reads, and the module constant must agree with it.
+        from dalton_core.call_budget import default_call_budget
+        from dalton_core.debate_map_draft import MAX_OUTPUT_TOKENS
+
+        self.assertGreaterEqual(MAX_OUTPUT_TOKENS, 8_000)
+        self.assertEqual(default_call_budget("debate_map")["max_output_tokens"],
+                         MAX_OUTPUT_TOKENS)
+        self.assertGreater(int(16_437 * 0.47), 4_000)
+        self.assertLessEqual(int(16_437 * 0.47), MAX_OUTPUT_TOKENS)
+
 if __name__ == "__main__":
     unittest.main()

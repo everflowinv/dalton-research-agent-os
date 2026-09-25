@@ -186,6 +186,75 @@ class SettingsTests(unittest.TestCase):
             with self.assertRaises(ClaimSupportError):
                 purpose_spend_micros(Path(temp) / "missing.sqlite", PURPOSE, "2026-09-24")
 
+    def test_a_refusal_never_sent_is_not_spend_and_nothing_else_is_dropped(self) -> None:
+        # 2026-09-25: before 4fa1e3c4 the adapter's contract-wiring refusal
+        # (raised before the broker request exists) was settled at the full
+        # reservation with no usage entry; both ceilings filled on money never
+        # spent (backfill 511,231 of 500,000, verifier 172,991 of 150,000).
+        wiring = ("the model call failed: independent verifier WorkOrder lacks "
+                  "the required output schema version")
+        day = "2026-09-25"
+        with tempfile.TemporaryDirectory() as temp:
+            ledger = Path(temp) / "thesis-impact-budget.sqlite"
+            connection = sqlite3.connect(ledger)
+            connection.executescript("""
+                CREATE TABLE thesis_impact_day_admissions (admission_id TEXT, day TEXT,
+                    work_order_ref TEXT, attempt_number INTEGER, reserved_micros INTEGER);
+                CREATE TABLE thesis_impact_day_settlements (settlement_id TEXT,
+                    admission_id TEXT, actual_micros INTEGER, usage_entry_ref TEXT);
+                CREATE TABLE thesis_impact_settlement_corrections (admission_id TEXT,
+                    corrected_micros INTEGER);
+            """)
+            rows = {
+                # name: (reserved, actual, usage_entry_ref, chain failure messages)
+                "wired": (102137, 102137, None, [wiring]),
+                "budget": (100000, 100000, None, ["provider max_output_tokens telemetry "
+                                                  "exceeds WorkOrder budget"]),
+                "mixed": (100000, 100000, None, [wiring, "TIMEOUT"]),
+                "reported": (100000, 100000, "usage:x", [wiring]),
+                "partial": (100000, 700, None, [wiring]),
+                "succeeded": (100000, 100000, None, None),
+                "open": (30000, None, None, [wiring]),
+            }
+            for name, (reserved, actual, usage, _) in rows.items():
+                work = f"work:cockpit-{PURPOSE}-{name}"
+                connection.execute(
+                    "INSERT INTO thesis_impact_day_admissions VALUES(?,?,?,?,?)",
+                    (name, day, work, 1, reserved))
+                if actual is not None:
+                    connection.execute(
+                        "INSERT INTO thesis_impact_day_settlements VALUES(?,?,?,?)",
+                        ("s-" + name, name, actual, usage))
+            connection.commit()
+            connection.close()
+            everything = sum(actual if actual is not None else reserved
+                             for reserved, actual, _u, _m in rows.values())
+            # No scheduler beside the ledger: nothing can be shown unsent.
+            self.assertEqual(purpose_spend_micros(ledger, PURPOSE, day), everything)
+            scheduler = sqlite3.connect(Path(temp) / "scheduler.sqlite")
+            scheduler.execute(
+                "CREATE TABLE scheduler_result_envelopes (work_order_id TEXT, "
+                "attempt_number INTEGER, result_envelope_json TEXT, created_at TEXT)")
+            for name, (_r, _a, _u, messages) in rows.items():
+                envelope = ({"status": "succeeded", "metadata": {}} if messages is None else {
+                    "status": "failed",
+                    "error": {"code": "MODEL_CHAIN_EXHAUSTED", "message": messages[0]},
+                    "metadata": {"chain_failures": [
+                        {"code": "unclassified_failure", "message": text}
+                        for text in messages]}})
+                scheduler.execute(
+                    "INSERT INTO scheduler_result_envelopes VALUES(?,?,?,?)",
+                    (f"work:cockpit-{PURPOSE}-{name}", 1, json.dumps(envelope), day))
+            scheduler.commit()
+            scheduler.close()
+            self.assertEqual(purpose_spend_micros(ledger, PURPOSE, day),
+                             everything - 102137)
+            # The scheduler named explicitly is the one read.
+            self.assertEqual(
+                purpose_spend_micros(ledger, PURPOSE, day,
+                                     scheduler_db=Path(temp) / "elsewhere.sqlite"),
+                everything)
+
 
 class VerifierTests(unittest.TestCase):
     def setUp(self) -> None:

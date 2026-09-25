@@ -424,7 +424,9 @@ def run_earnings_season(
         # ledger when the writer's configuration names one.
         from .event_judgement_cli import _budget_db
         budget_db = _budget_db(model_config, writer_model)
-        state = pool_state(judgements, mission, day=day, budget_db=budget_db)
+        state = pool_state(
+            judgements, mission, day=day, budget_db=budget_db,
+            scheduler_db=getattr(writer_model, "scheduler_db", None))
         summary["pool"] = state
         if state.get("ledger_error"):
             summary.update({
@@ -508,7 +510,9 @@ def run_earnings_season(
             reservation = (reserve(writer_model, writer_config, writer_purpose)
                            + reserve(verifier_model, verifier_config, verifier_purpose))
             if budget_db is not None:
-                state = pool_state(judgements, mission, day=day, budget_db=budget_db)
+                state = pool_state(
+                    judgements, mission, day=day, budget_db=budget_db,
+                    scheduler_db=getattr(writer_model, "scheduler_db", None))
                 summary["pool"] = state
                 remaining = state["remaining_micros"]
             else:

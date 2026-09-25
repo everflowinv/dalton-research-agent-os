@@ -102,7 +102,16 @@ _FIT_LADDER: tuple[tuple[int, int], ...] = (
 )
 MAX_COST_USD = default_call_budget("debate_map")["max_cost_usd"]
 MAX_INPUT_TOKENS = 80_000
-MAX_OUTPUT_TOKENS = 4_000
+# 2026-09-25: 4,000 was short of what a map is.  266 verified drafts (both
+# environments, 09-11..09-25) replied in up to 16.4 KB -- p50 9.0 KB, p95 14.4
+# KB -- and the claude gateway spends ~0.42-0.47 tokens a byte on this
+# mostly-Chinese JSON (muse ~0.5-0.64, deepseek ~0.25): 148 of the 266 would
+# be over 4,000 at the claude rate, the largest ~7,700.  Every refusal was
+# paid first (ws-7d GOOGL, 14:42: four models refused, 0.526 USD).  8,000
+# clears every draft seen at the claude rate; at 20 USD/M the extra ceiling
+# is 0.08 USD of reservation.  The packaged default (call_budget_defaults)
+# says the same, and it is the one CockpitModel reads.
+MAX_OUTPUT_TOKENS = 8_000
 TIMEOUT_SECONDS = 240
 
 MAX_QUESTION_CHARS = 300

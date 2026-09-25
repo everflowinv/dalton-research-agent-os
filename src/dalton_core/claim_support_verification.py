@@ -334,11 +334,15 @@ def hold_reason(verdict: Mapping[str, Any], subject_name: str) -> str | None:
 
 # -- the day ledger -------------------------------------------------------------
 
-def purpose_spend_micros(budget_db: str | Path, purpose: str, day: str) -> int:
+def purpose_spend_micros(budget_db: str | Path, purpose: str, day: str,
+                         *, scheduler_db: str | Path | None = None) -> int:
     """What this purpose has committed in the day ledger today, read-only.
 
     Settled calls at what they cost, open reservations at what they hold -- the
-    same arithmetic the ledger's own day cap uses.
+    same arithmetic the ledger's own day cap uses -- less the settlements
+    :func:`never_sent_admissions` finds: calls the adapter refused over the
+    verifier's own contract wiring before sending them, which CockpitModel
+    settled at the full reservation until 4fa1e3c4.
     """
 
     target = Path(budget_db).expanduser()
@@ -349,23 +353,117 @@ def purpose_spend_micros(budget_db: str | Path, purpose: str, day: str) -> int:
         tables = {row[0] for row in connection.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")}
         corrected = "thesis_impact_settlement_corrections" in tables
-        row = connection.execute(
-            "SELECT COALESCE(SUM(COALESCE("
-            + ("c.corrected_micros, " if corrected else "")
-            + "s.actual_micros, a.reserved_micros)),0) "
-            "FROM thesis_impact_day_admissions a "
+
+        def columns(table: str) -> set[str]:
+            return {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+
+        # A ledger without the attempt number or the usage ref (an older or a
+        # hand-made one) cannot say a settlement was a never-sent refusal; its
+        # usage ref reads as present, so nothing in it is excluded.
+        attempt = ("a.attempt_number" if "attempt_number"
+                   in columns("thesis_impact_day_admissions") else "1")
+        usage = ("s.usage_entry_ref" if "usage_entry_ref"
+                 in columns("thesis_impact_day_settlements") else "'unknown'")
+        rows = connection.execute(
+            f"SELECT a.admission_id, a.work_order_ref, {attempt}, a.reserved_micros, "
+            f"s.admission_id, s.actual_micros, {usage}, "
+            + ("c.corrected_micros " if corrected else "NULL ")
+            + "FROM thesis_impact_day_admissions a "
             "LEFT JOIN thesis_impact_day_settlements s ON s.admission_id=a.admission_id "
             + ("LEFT JOIN thesis_impact_settlement_corrections c ON c.admission_id=a.admission_id "
                if corrected else "")
             + "WHERE a.day=? AND a.work_order_ref LIKE ?",
             (day, f"work:cockpit-{purpose}-%"),
-        ).fetchone()
+        ).fetchall()
     except sqlite3.Error as exc:
         # A ceiling nobody can read is not a ceiling that has room.
         raise ClaimSupportError(f"the day ledger cannot be read: {exc}") from exc
     finally:
         connection.close()
-    return int(row[0] or 0)
+    if not isinstance(scheduler_db, (str, Path)) or not str(scheduler_db):
+        # The CockpitModel scheduler sits beside the day ledger in every state
+        # directory; a caller that does not know its own says nothing else.
+        scheduler_db = target.with_name("scheduler.sqlite")
+    never_sent = never_sent_admissions(rows, scheduler_db)
+    total = 0
+    for admission_id, _wo, _attempt, reserved, _sid, actual, _usage, correction in rows:
+        if admission_id in never_sent:
+            continue
+        total += int(next(v for v in (correction, actual, reserved, 0) if v is not None))
+    return total
+
+
+def never_sent_admissions(rows: Sequence[Sequence[Any]], scheduler_db: str | Path) -> set[str]:
+    """Admissions settled at their reservation for a call that was never sent.
+
+    2026-09-25: before 4fa1e3c4, an adapter refusal of the verifier's own
+    output-contract wiring ("independent verifier WorkOrder lacks the required
+    output schema version") -- raised while the broker request is still being
+    built -- was settled at the full reservation, with no usage entry.  Eight
+    of them per environment (claim_support_backfill 511,231 of 500,000 micros
+    in legacy, claim_support_verifier 172,991 of 150,000) filled both ceilings
+    on money never spent, and every review deferred.
+
+    An admission is excluded only when all of these hold, so a call that could
+    have cost something is never left out:
+
+    * it is settled, not corrected, with no ``usage_entry_ref`` and at exactly
+      what it reserved (the shape of a reservation charged in full, not a
+      provider-reported cost);
+    * the WorkOrder's result for that attempt, in the scheduler, failed; and
+    * every model the chain tried failed with a contract-wiring refusal
+      (:func:`contract_wiring_failure`) -- a chain that reached any model and
+      failed otherwise may have paid for it.
+
+    ``rows`` are ``(admission_id, work_order_ref, attempt_number,
+    reserved_micros, settled_admission_id, actual_micros, usage_entry_ref,
+    corrected_micros)`` -- the fifth null when the admission is still open.  A scheduler that is absent or unreadable excludes
+    nothing: the ledger's figure is then the account, as before.
+    """
+
+    candidates = {
+        (str(row[1]), int(row[2])): str(row[0]) for row in rows
+        if row[4] is not None and row[6] is None and row[7] is None
+        and row[5] is not None and int(row[5]) > 0 and int(row[5]) == int(row[3])
+    }
+    if not candidates:
+        return set()
+    target = Path(scheduler_db).expanduser()
+    if not target.is_file():
+        return set()
+    excluded: set[str] = set()
+    try:
+        connection = sqlite3.connect(f"file:{target}?mode=ro", uri=True, timeout=5)
+    except sqlite3.Error:
+        return set()
+    try:
+        for (work_order_ref, attempt), admission_id in candidates.items():
+            row = connection.execute(
+                "SELECT result_envelope_json FROM scheduler_result_envelopes "
+                "WHERE work_order_id=? AND attempt_number=? ORDER BY created_at DESC LIMIT 1",
+                (work_order_ref, attempt),
+            ).fetchone()
+            if row is not None and _refused_before_sending(row[0]):
+                excluded.add(admission_id)
+    except sqlite3.Error:
+        return set()
+    finally:
+        connection.close()
+    return excluded
+
+
+def _refused_before_sending(envelope_json: Any) -> bool:
+    try:
+        envelope = json.loads(envelope_json)
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(envelope, Mapping) or envelope.get("status") != "failed":
+        return False
+    failures = (envelope.get("metadata") or {}).get("chain_failures")
+    if failures:
+        return all(isinstance(item, Mapping) and contract_wiring_failure(item.get("message"))
+                   for item in failures)
+    return contract_wiring_failure(str((envelope.get("error") or {}).get("message") or ""))
 
 
 # -- the store ------------------------------------------------------------------
@@ -727,7 +825,8 @@ def build_verifier(*, store: Any, model_config: Mapping[str, Any], scheduler_db:
         max_prompt_bytes=int(model.budget_for(purpose)["max_input_tokens"]),
         max_items_per_call=max_items_per_call,
         daily_cap_micros=micros(daily_cap_usd),
-        spend_today=lambda name, day: purpose_spend_micros(model_config["budget_db"], name, day),
+        spend_today=lambda name, day: purpose_spend_micros(
+            model_config["budget_db"], name, day, scheduler_db=scheduler_db),
         producer_family=family,
     )
 
@@ -751,6 +850,7 @@ __all__ = [
     "item_key",
     "load_settings",
     "parse_verdicts",
+    "never_sent_admissions",
     "purpose_spend_micros",
     "recorded_rejection",
     "support_item",
