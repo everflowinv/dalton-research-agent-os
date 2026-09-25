@@ -133,6 +133,17 @@ VERIFIER_FINDING_CODES: tuple[str, ...] = (
 # the extraction lane for the thing the mission is actually for.
 POOL_NAME = "event_response"
 POOL_SHARE = Decimal("0.15")
+#: Every cockpit purpose that books into ``event_response_spend`` -- this lane's
+#: four and the earnings season's four (P14f shares the pool and the book) --
+#: and so every purpose whose day-ledger spend :func:`pool_state` sums.  The
+#: earnings names are spelled here rather than imported because
+#: ``earnings_season`` imports this module.
+POOL_LEDGER_PURPOSES: tuple[str, ...] = (
+    "event_judgement", "event_judgement_verifier",
+    "thesis_reflection", "thesis_reflection_verifier",
+    "earnings_preview", "earnings_preview_verifier",
+    "earnings_calibration", "earnings_calibration_verifier",
+)
 
 MAX_BECAUSE_CHARS = 1200
 MAX_NOTE_CHARS = 1200
@@ -292,6 +303,57 @@ EVIDENCE_KIND_LINES: tuple[str, ...] = tuple(
 )
 
 
+def _grouped_input_lines(context: Mapping[str, Any], *, heading: str) -> list[str]:
+    """The other members of the event's group, as the judge and verifier read them.
+
+    A buyback group is one filing's monthly rows or one closed HK week and is
+    printed as the table it is.  Any other group is a batch of low-tier inputs
+    on one company and day, or one document found twice: every input is
+    printed in full, and the instruction says the batch is not a vote -- one
+    input that matters is the decision.
+    """
+
+    event = context["event"]
+    grouped = context.get("grouped_events") or ()
+    if len(grouped) <= 1:
+        return []
+    if event.get("kind") != "buyback_disclosure":
+        lines = [
+            "", f"{heading}Other inputs judged together with this one (same judgement)"
+            + ("" if heading else ":"),
+            "These are further inputs on this company from the same day, or the same",
+            "document found again. Every one was read: the decision covers all of them.",
+            "If any single input warrants a decision other than NO_CHANGE, the decision",
+            "is taken on that input and cites its ref; the others do not dilute it.",
+        ]
+        for row in grouped[1:]:
+            lines.append(
+                f"- ref: {row['id']} ({row.get('kind')}, evidence tier: "
+                f"{row.get('evidence_tier')}, occurred_at: {row.get('occurred_at')})"
+            )
+            lines.extend(f"  {line}" for line in _payload_lines(row))
+            lines.append(f"    source refs: {', '.join(row.get('source_refs') or ())}")
+        return lines
+    market = ((event.get("payload") or {}).get("market"))
+    label = ("HK daily rows in this closed ISO week (same judgement)"
+             if market == "HK"
+             else "Other monthly rows in this filing (same judgement)")
+    lines = ["", f"{heading}{label}" + ("" if heading else ":")]
+    for row in grouped[1:]:
+        payload = row.get("payload") or {}
+        lines.append(
+            f"- ref: {row['id']}; period_label={payload.get('period_label')}; "
+            f"period_end={payload.get('period_end')}; "
+            f"shares_purchased={payload.get('shares_purchased')}; "
+            f"average_price_paid={payload.get('average_price_paid')}; "
+            f"total_paid={payload.get('total_paid')}; "
+            f"shares_purchased_under_plans="
+            f"{payload.get('shares_purchased_under_plans')}; "
+            f"remaining_authorisation={payload.get('remaining_authorisation')}"
+        )
+    return lines
+
+
 def build_judge_prompt(
     context: Mapping[str, Any], *, max_prompt_bytes: int = MAX_PROMPT_BYTES
 ) -> str:
@@ -347,25 +409,7 @@ def build_judge_prompt(
         "",
         f"## Company: {context.get('ticker') or context['company_ref']} ({context['company_ref']})",
     ]
-    grouped = context.get("grouped_events") or ()
-    if len(grouped) > 1:
-        market = ((event.get("payload") or {}).get("market"))
-        label = ("## HK daily rows in this closed ISO week (same judgement)"
-                 if market == "HK"
-                 else "## Other monthly rows in this filing (same judgement)")
-        lines.extend(["", label])
-        for row in grouped[1:]:
-            payload = row.get("payload") or {}
-            lines.append(
-                f"- ref: {row['id']}; period_label={payload.get('period_label')}; "
-                f"period_end={payload.get('period_end')}; "
-                f"shares_purchased={payload.get('shares_purchased')}; "
-                f"average_price_paid={payload.get('average_price_paid')}; "
-                f"total_paid={payload.get('total_paid')}; "
-                f"shares_purchased_under_plans="
-                f"{payload.get('shares_purchased_under_plans')}; "
-                f"remaining_authorisation={payload.get('remaining_authorisation')}"
-            )
+    lines.extend(_grouped_input_lines(context, heading="## "))
     theses = context.get("theses") or ()
     lines.append("")
     lines.append("## Theses in force")
@@ -1100,25 +1144,7 @@ def build_verifier_prompt(
         f"Event ({event['kind']}, evidence tier {event['evidence_tier']}, ref {event['id']}):",
         *_payload_lines(event),
     ]
-    grouped = context.get("grouped_events") or ()
-    if len(grouped) > 1:
-        market = ((event.get("payload") or {}).get("market"))
-        label = ("HK daily rows in this closed ISO week (same judgement):"
-                 if market == "HK"
-                 else "Other monthly rows in this filing (same judgement):")
-        lines.extend(["", label])
-        for row in grouped[1:]:
-            payload = row.get("payload") or {}
-            lines.append(
-                f"- ref: {row['id']}; period_label={payload.get('period_label')}; "
-                f"period_end={payload.get('period_end')}; "
-                f"shares_purchased={payload.get('shares_purchased')}; "
-                f"average_price_paid={payload.get('average_price_paid')}; "
-                f"total_paid={payload.get('total_paid')}; "
-                f"shares_purchased_under_plans="
-                f"{payload.get('shares_purchased_under_plans')}; "
-                f"remaining_authorisation={payload.get('remaining_authorisation')}"
-            )
+    lines.extend(_grouped_input_lines(context, heading=""))
     lines.extend([
         "",
         f"Decision: {judgement['decision']} / {judgement['action']}",
@@ -1851,18 +1877,45 @@ def pool(mission: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def pool_state(
-    authority: EventJudgementAuthority, mission: Mapping[str, Any], *, day: str
+    authority: EventJudgementAuthority, mission: Mapping[str, Any], *, day: str,
+    budget_db: str | Path | None = None,
 ) -> dict[str, Any]:
-    """The day's account, derived from the judgement ledger itself.
+    """The day's account: what the day ledger says this pool's purposes cost.
 
-    No second book: the pool and the ledger cannot disagree because the pool
-    *is* the ledger, summed.  (P14e reached the same conclusion for ``adhoc``
-    and it is the shape C2 should generalise.)
+    The lane's own ``event_response_spend`` book is written from what a call
+    *returned*, so it cannot see a call it never heard back from.  Live
+    (2026-09-23/24) 135 Opus judgements came back to the lane as "this request
+    is already running" or a transport failure -- no provenance, so nothing
+    booked -- and were then settled in the day ledger at 0.27-0.28 USD each:
+    the book said 38.2 USD for 09-24 while the ledger said 55.3, and the 50 USD
+    cap was checked against the smaller number.  The book also keeps the cost
+    a call reported on return, not the settlement the ledger later made.
+
+    So when the lane knows where the day ledger is, the pool is the ledger:
+    admissions settled at what they cost (corrections included), open
+    reservations at what they hold, for every purpose that spends this pool --
+    read with the same function the claim-support ceiling uses.  A ledger that
+    cannot be read leaves no room (``ledger_error``): a ceiling nobody can read
+    is not a ceiling that has room.  With no ledger configured (tests, a bare
+    Core) the book is still the account.
     """
 
     state = pool(mission)
-    spent = authority.day_cost_micros(day)
-    return {**state, "day": day, "spent_micros": spent,
+    if budget_db is None:
+        spent = authority.day_cost_micros(day)
+        return {**state, "day": day, "spent_micros": spent, "source": "lane_book",
+                "remaining_micros": max(0, state["cap_micros"] - spent)}
+    from .claim_support_verification import ClaimSupportError, purpose_spend_micros
+
+    try:
+        by_purpose = {purpose: purpose_spend_micros(budget_db, purpose, day)
+                      for purpose in POOL_LEDGER_PURPOSES}
+    except ClaimSupportError as exc:
+        return {**state, "day": day, "spent_micros": None, "source": "day_ledger",
+                "remaining_micros": 0, "ledger_error": str(exc)}
+    spent = sum(by_purpose.values())
+    return {**state, "day": day, "spent_micros": spent, "source": "day_ledger",
+            "spent_by_purpose": by_purpose,
             "remaining_micros": max(0, state["cap_micros"] - spent)}
 
 
@@ -2602,6 +2655,7 @@ __all__ = [
     "EventJudgementValidationError",
     "MAX_NOTE_SENTENCES",
     "MAX_RECENT_JUDGEMENTS",
+    "POOL_LEDGER_PURPOSES",
     "POOL_NAME",
     "POOL_SHARE",
     "PURPOSE",
