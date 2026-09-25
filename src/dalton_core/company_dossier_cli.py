@@ -63,6 +63,7 @@ from .company_dossier import (
 )
 from .company_dossier_draft import (
     DRAFT_CONTRACT_VERSION,
+    DossierDraftRefused,
     FINDINGS_REMINDER_LINES,
     MAX_CLAIM_ROWS,
     independence_precheck,
@@ -1493,7 +1494,39 @@ def validate_formal_unit_provenance(
                                         "repair input binding drifted",
                                         unit=unit, carry_forward=False)
                             else:
-                                violations = violations_of(parent["text"], contract)
+                                # The repair was addressed on the list the
+                                # drafting loop built, which ends with the
+                                # semantic validator's own message whenever
+                                # the parent reply failed to parse
+                                # (``run_with_contract_repair`` passes that
+                                # exception as ``parse_error``).  Rebuilding the
+                                # list without it drops that line, so every
+                                # such repair -- EPAM's catalyst_calendar and
+                                # kpi_dictionary, 09-18 on -- read as "repair
+                                # identity drifted" on a reply replayed byte
+                                # for byte at no cost, forever.
+                                parse_error: BaseException | None = None
+                                try:
+                                    parse_unit_output(
+                                        parent["text"], unit=unit,
+                                        structure=prompt_args["structure"],
+                                        material=prompt_args["material"],
+                                        market_view_available=prompt_args[
+                                            "market_view_available"],
+                                        profile=producer_input["parse_input"]["profile"],
+                                        classification=prompt_args["classification"])
+                                except DossierDraftRefused as exc:
+                                    parse_error = exc
+                                except Exception as exc:
+                                    # Any other outcome of that parse (an
+                                    # insufficient-evidence answer, a crash)
+                                    # is not one the drafting loop repairs.
+                                    raise UnitProvenanceDrift(
+                                        f"unit_provenance.{unit}.producer_repair parent "
+                                        "reply is not a repairable refusal",
+                                        unit=unit, carry_forward=not is_current) from exc
+                                violations = violations_of(
+                                    parent["text"], contract, parse_error=parse_error)
                                 if not violations:
                                     raise UnitProvenanceDrift(
                                         f"unit_provenance.{unit}.producer_repair repaired a "
