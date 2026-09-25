@@ -116,14 +116,42 @@ class ConnectorGovernanceTests(unittest.TestCase):
             "schema_hash": identity["schema_hash"],
         }
         receipt = approved.approval(query)
+        # 2026-09-25: the fixtures of the operations this approval covers --
+        # the manifest the owner approved on 2026-08-26 / 09-09, byte for byte
+        # -- not the whole template, which S5 grew by four separately approved
+        # ownership operations and so silently revoked every SEC approval.
         self.assertEqual(
             receipt["fixture_manifest_hash"],
-            inventory["templates"]["sec"]["fixture_manifest_hash"],
+            "8f88e64939d4f2140189337e323ea11479a86fbf459ca3f0afe501f3aa099957",
         )
+        self.assertNotEqual(receipt["fixture_manifest_hash"],
+                            inventory["templates"]["sec"]["fixture_manifest_hash"])
         self.assertEqual(receipt["capability_id"], "capability:dalton:connector:sec-edgar")
         policy = approved.policy({"policy_ref": approved.policy_ref})
         self.assertEqual(policy["allowed_permissions"], PUBLIC_PERMISSIONS)
         self.assertEqual(approved.policy_hash(), policy["content_hash"])
+
+    def test_sec_approval_moves_only_with_its_own_operations_fixtures(self) -> None:
+        import copy
+        from unittest.mock import patch
+
+        from dalton_core import connector_governance as module
+
+        inventory = load_packaged_connector_inventory()
+        base = module._sec_fixture_hash()
+        grown = copy.deepcopy(inventory)
+        manifest = grown["fixtures"]["sec"]
+        manifest["operations"].append({"operation": "some_new_operation", "pagination_mode": "none"})
+        manifest["cases"].append({**manifest["cases"][0], "operation": "some_new_operation",
+                                  "case_ref": "fixture:sec:some_new_operation:empty:0.1"})
+        with patch.object(module, "load_packaged_connector_inventory", return_value=grown):
+            self.assertEqual(module._sec_fixture_hash(), base)
+        changed = copy.deepcopy(inventory)
+        case = next(item for item in changed["fixtures"]["sec"]["cases"]
+                    if item["operation"] == "get_company_facts")
+        case["provider_status"] = 599
+        with patch.object(module, "load_packaged_connector_inventory", return_value=changed):
+            self.assertNotEqual(module._sec_fixture_hash(), base)
 
     def test_unknown_capability_is_rejected(self) -> None:
         record = build_governance_record("sec-company-facts", approved_by=OWNER)
