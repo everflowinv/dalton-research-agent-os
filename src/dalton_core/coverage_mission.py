@@ -3517,7 +3517,22 @@ class CoverageMissionAuthority:
         decision_ref: str, failed_windows: Sequence[Mapping[str, Any]],
         formal_reader: Any,
     ) -> dict[str, Any]:
-        """Human-authorize a supplemental read without erasing the old decision."""
+        """Human-authorize a supplemental read without erasing the old decision.
+
+        2026-09-25b: the review may sit under any version of a mission that is
+        still pointed at.  P1/P2 publish a new version over the old one, and
+        refusing every review not under the version in force left the owner
+        unable to act on a failed formal window decided a day earlier.  A
+        review under a superseded version is carried into the current one
+        first, exactly as :meth:`reopen_unattributed_document_review` carries
+        it (``_carry_review_into_version``: acquired row with its ticket, new
+        review under the current version with the old ``created_at``); the old
+        review stays dismissed and the append-only record names the review
+        that was reopened (``carried_to``).  When the current version already
+        holds the document under a dismissed review carried from this one
+        (same decision), that review is the one reopened; any other hold
+        means the document is decided there and the reopen is refused.
+        """
 
         review_id = _text(review_id, "review_id")
         expected_review_hash = _sha256(expected_review_hash, "expected_review_hash")
@@ -3557,6 +3572,25 @@ class CoverageMissionAuthority:
             if not isinstance(authoritative, Mapping) or dict(authoritative) != item:
                 raise CoverageMissionValidationError("failed formal window authority drifted")
             verified.append(item)
+        # Where the review is carried if its version has been superseded.
+        # Resolved before the transaction: the grant reads the store itself.
+        owner = self.mission(prior_row["mission_version_ref"])
+        current_pointer = self.connection.execute(
+            "SELECT mission_version_id FROM coverage_mission_pointer WHERE mission_ref=?",
+            (owner["mission_ref"],),
+        ).fetchone()
+        if current_pointer is None:
+            raise CoverageMissionConflict("document review mission is not current")
+        current_ref = current_pointer["mission_version_id"]
+        carry_grant: dict[str, Any] | None = None
+        if current_ref != owner["id"]:
+            # Refuses (CoverageMissionConflict) a company that has left the
+            # universe or a source no longer connected, as for a discovery.
+            carry_grant = self.authorize_source_discovery(
+                company_ref=prior_row["company_ref"], source_ref=prior_row["source_ref"],
+                requested_by=self.mission(current_ref)["autonomy"]["automation_principal"],
+                mission_version_ref=current_ref,
+            )
         now = _now()
         with self._transaction() as cur:
             row = cur.execute(
@@ -3564,6 +3598,8 @@ class CoverageMissionAuthority:
             ).fetchone()
             if row is None:
                 raise CoverageMissionNotFound("document review was not found")
+            if row["mission_version_ref"] != owner["id"]:
+                raise CoverageMissionConflict("document review changed concurrently")
             existing = cur.execute(
                 "SELECT record_json FROM coverage_mission_document_review_reopens "
                 "WHERE review_id=? AND prior_review_hash=?", (review_id, expected_review_hash)
@@ -3573,7 +3609,14 @@ class CoverageMissionAuthority:
                 if (saved.get("actor_ref") != actor_ref or saved.get("decision_ref") != decision_ref
                         or saved.get("failed_windows") != verified):
                     raise CoverageMissionConflict("document review reopen payload changed")
-                if row["state"] != "awaiting_human_extraction":
+                reopened = row
+                carried_to = saved.get("carried_to")
+                if isinstance(carried_to, Mapping):
+                    reopened = cur.execute(
+                        "SELECT state FROM coverage_mission_document_reviews WHERE review_id=?",
+                        (carried_to.get("review_id"),),
+                    ).fetchone()
+                if reopened is None or reopened["state"] != "awaiting_human_extraction":
                     raise CoverageMissionConflict("duplicate reopen no longer names an open review")
                 return {"status": "duplicate", **saved}
             prior = self._review_row(row)
@@ -3594,16 +3637,50 @@ class CoverageMissionAuthority:
                     raise CoverageMissionConflict(
                         "supplemental annual reread lacks exact issuer 10-K authority")
             pointer = cur.execute(
-                "SELECT p.mission_version_id FROM coverage_mission_pointer p "
-                "JOIN coverage_mission_versions v ON v.mission_ref=p.mission_ref "
-                "WHERE p.mission_version_id=?", (row["mission_version_ref"],)
+                "SELECT mission_version_id FROM coverage_mission_pointer WHERE mission_version_id=?",
+                (current_ref,),
             ).fetchone()
             if pointer is None:
                 raise CoverageMissionConflict("document review mission is not current")
+            carried: dict[str, Any] | None = None
+            target: str | None = review_id
+            if carry_grant is not None:
+                # The newest row of the document speaks for it, as in
+                # carry-forward.  A later version may hold it under the same
+                # dismissal (a search found it again and the decision was
+                # carried): that copy is the one reopened.  Held any other way,
+                # the document was decided there and this review is moot.
+                newest = cur.execute(
+                    "SELECT d.mission_version_ref FROM coverage_mission_discovered_documents d "
+                    "JOIN coverage_mission_versions v ON v.mission_version_id=d.mission_version_ref "
+                    "WHERE v.mission_ref=? AND d.document_ref=? ORDER BY v.version_number DESC LIMIT 1",
+                    (owner["mission_ref"], row["document_ref"]),
+                ).fetchone()
+                source = row
+                if newest is not None and newest["mission_version_ref"] != row["mission_version_ref"]:
+                    source = cur.execute(
+                        "SELECT * FROM coverage_mission_document_reviews "
+                        "WHERE mission_version_ref=? AND document_ref=?",
+                        (newest["mission_version_ref"], row["document_ref"]),
+                    ).fetchone()
+                    if source is None or (source["state"], source["rationale"], source["created_at"]) != (
+                            "dismissed", row["rationale"], row["created_at"]):
+                        raise CoverageMissionConflict(
+                            "a later mission version already holds this document; it is decided there")
+                if source["mission_version_ref"] == current_ref:
+                    carried = {"mission_version_ref": current_ref, "review_id": source["review_id"],
+                               "discovered_document_ref": source["discovered_document_ref"]}
+                    target = source["review_id"]
+                else:
+                    carried = self._carry_review_into_version(
+                        cur, source, current_ref, registered_by=carry_grant["actor_ref"], now=now)
+                    target = None
             body = {"schema_version": "0.1", "review_id": review_id,
                     "prior_review": prior, "prior_review_hash": expected_review_hash,
                     "decision_ref": decision_ref, "failed_windows": verified,
                     "actor_ref": actor_ref, "created_at": now}
+            if carried is not None:
+                body["carried_to"] = carried
             record = {**body, "reopen_id": _ref("mission-document-review-reopen", body)}
             record["content_hash"] = content_hash(record)
             cur.execute(
@@ -3613,13 +3690,14 @@ class CoverageMissionAuthority:
                 (record["reopen_id"], review_id, expected_review_hash, canonical_json(record),
                  record["content_hash"], actor_ref, now),
             )
-            cur.execute(
-                "UPDATE coverage_mission_document_reviews SET state='awaiting_human_extraction',"
-                "candidate_claim_version_ref=NULL,rationale=NULL,updated_at=? WHERE review_id=? AND state='dismissed'",
-                (now, review_id),
-            )
-            if cur.rowcount != 1:
-                raise CoverageMissionConflict("document review changed concurrently")
+            if target is not None:
+                cur.execute(
+                    "UPDATE coverage_mission_document_reviews SET state='awaiting_human_extraction',"
+                    "candidate_claim_version_ref=NULL,rationale=NULL,updated_at=? WHERE review_id=? AND state='dismissed'",
+                    (now, target),
+                )
+                if cur.rowcount != 1:
+                    raise CoverageMissionConflict("document review changed concurrently")
         return {"status": "fresh", **record}
 
     def reopen_unattributed_document_review(

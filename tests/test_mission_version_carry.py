@@ -226,6 +226,126 @@ class RediscoveryTests(_VersionHarness):
                          ["awaiting_human_extraction"])
 
 
+@_own_tests_only
+class HumanReopenTests(_VersionHarness):
+    """Item 2: the owner's supplemental reopen works on any version of the mission."""
+
+    def test_same_version_reopen_is_unchanged(self) -> None:
+        self._decide()
+        record = self._reopen()
+        self.assertNotIn("carried_to", record)
+        self.assertEqual(self._owed_reads(), [(self.v2["id"], NEW_DOC)])
+
+    def test_a_review_on_a_superseded_version_is_carried_then_reopened(self) -> None:
+        old = self._decide()
+        v3 = self._publish(3)
+        record = self._reopen()
+        carried = record["carried_to"]
+        self.assertEqual(carried["mission_version_ref"], v3["id"])
+        # The old decision stands where it was made; the append-only record
+        # names the review that was reopened in its place.
+        self.assertEqual(self._review(), old)
+        self.assertEqual(record["prior_review"], old)
+        new = self._review(carried["review_id"])
+        self.assertEqual((new["state"], new["document_ref"], new["created_at"]),
+                         ("awaiting_human_extraction", NEW_DOC, old["created_at"]))
+        # Invariant: one open review of the document under the version in
+        # force -- what the same reopen gives without the bump.
+        self.assertEqual(self._owed_reads(), [(v3["id"], NEW_DOC)])
+        [saved] = self.h.h.core.connection.execute(
+            "SELECT record_json FROM coverage_mission_document_review_reopens").fetchall()
+        self.assertEqual(json.loads(saved["record_json"])["carried_to"], carried)
+        # Replay is a duplicate while the carried review is still open.
+        self.assertEqual(self._reopen()["status"], "duplicate")
+        self.assertEqual(self._owed_reads(), [(v3["id"], NEW_DOC)])
+
+    def test_a_carried_decision_is_the_one_reopened(self) -> None:
+        self._decide()
+        v3 = self._publish(3)
+        [carried] = self._rediscover()["carried_decided"]
+        record = self._reopen()
+        self.assertEqual(record["carried_to"]["review_id"], carried["review_id"])
+        self.assertEqual(self._review(carried["review_id"])["state"], "awaiting_human_extraction")
+        self.assertEqual(self._review()["state"], "dismissed")
+        self.assertEqual(self._owed_reads(), [(v3["id"], NEW_DOC)])
+
+    def test_the_newest_holder_of_the_document_is_the_one_carried(self) -> None:
+        # v2 dismissed it; a search under v3 carried the dismissal; v4 is in
+        # force and does not hold it.  The v3 copy is what moves to v4.
+        self._decide()
+        self._publish(3)
+        [copy] = self._rediscover()["carried_decided"]
+        v4 = self._publish(4)
+        record = self._reopen()
+        self.assertEqual(record["carried_to"]["mission_version_ref"], v4["id"])
+        self.assertEqual(self._review()["state"], "dismissed")
+        self.assertEqual(self._review(copy["review_id"])["state"], "dismissed")
+        self.assertEqual(self._owed_reads(), [(v4["id"], NEW_DOC)])
+
+    def test_a_document_decided_differently_under_the_current_version_is_refused(self) -> None:
+        self._decide()
+        self._publish(3)
+        [carried] = self._rediscover()["carried_decided"]
+        self._reopen(carried["review_id"])  # reopened where it is held now
+        with self.assertRaisesRegex(CoverageMissionConflict, "decided there"):
+            self._reopen()
+
+    def test_the_read_only_candidate_review_accepts_a_superseded_version(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            core, scheduler = Path(tmp, "core.sqlite"), Path(tmp, "scheduler.sqlite")
+            sqlite3.connect(scheduler).close()
+            db = sqlite3.connect(core)
+            db.executescript(
+                "CREATE TABLE coverage_mission_versions(mission_version_id TEXT, mission_ref TEXT, version_number INT);"
+                "CREATE TABLE coverage_mission_pointer(mission_ref TEXT, mission_version_id TEXT);"
+                "CREATE TABLE coverage_mission_discovered_documents(mission_version_ref TEXT, document_ref TEXT);"
+                "CREATE TABLE coverage_mission_statement_filings(company_ref TEXT, accession TEXT, form TEXT);"
+                "CREATE TABLE coverage_mission_document_reviews(review_id TEXT, mission_version_ref TEXT,"
+                " company_ref TEXT, source_ref TEXT, document_ref TEXT, discovered_document_ref TEXT, state TEXT,"
+                " candidate_claim_version_ref TEXT, rationale TEXT, registered_by TEXT, created_at TEXT,"
+                " updated_at TEXT);"
+                "INSERT INTO coverage_mission_versions VALUES('m:3','m',3),('m:4','m',4);"
+                "INSERT INTO coverage_mission_pointer VALUES('m','m:4');"
+                "INSERT INTO coverage_mission_statement_filings VALUES('c','0001','10-K');"
+                "INSERT INTO coverage_mission_document_reviews VALUES('r:3','m:3','c','source:sec-edgar',"
+                " 'sec:filing:0001','d:3','dismissed',NULL,'why','a','t0','t1');")
+            db.commit()
+            db.row_factory = sqlite3.Row
+            prior = review_wire(db.execute("SELECT * FROM coverage_mission_document_reviews").fetchone())
+            candidate = {"schema_version": "0.1", "action": "authorize_supplemental_document_reads",
+                         "signed_decision": None, "human_signature_required": True,
+                         "items": [{"review_id": "r:3", "prior_review_hash": content_hash(prior),
+                                    "failed_windows": [dict(FAILED)]}]}
+            candidate["candidate_hash"] = content_hash(candidate)
+
+            def check():
+                with patch.object(FailedDocumentWindowReader, "read_failed_window",
+                                  return_value=dict(FAILED)):
+                    return review_reopen_candidate(core_db=core, scheduler_db=scheduler,
+                                                   candidate=candidate)
+
+            # v3 review, v4 in force, v4 does not hold the filing: ready.
+            self.assertEqual(check()["ready_review_ids"], ["r:3"])
+            # v4 holds it under the same dismissal (carried): still ready.
+            db.execute("INSERT INTO coverage_mission_discovered_documents VALUES('m:4','sec:filing:0001')")
+            db.execute("INSERT INTO coverage_mission_document_reviews VALUES('r:4','m:4','c','source:sec-edgar',"
+                       "'sec:filing:0001','d:4','dismissed',NULL,'why','a','t0','t1')")
+            db.commit()
+            self.assertEqual(check()["ready_review_ids"], ["r:3"])
+            # v4 decided it differently: refused, as the writer would.
+            db.execute("UPDATE coverage_mission_document_reviews SET state='awaiting_human_extraction',"
+                       "rationale=NULL WHERE review_id='r:4'")
+            db.commit()
+            with self.assertRaisesRegex(ValueError, "decided there"):
+                check()
+            # A mission no longer pointed at is still refused.
+            db.execute("DELETE FROM coverage_mission_pointer")
+            db.commit()
+            with self.assertRaisesRegex(ValueError, "not current"):
+                check()
+            db.close()
+
+
 class FeedLaneBumpTests(_feeds.FeedEndToEndHarness):
     """Item 1 through the lane that did it live: ws-7d's 32 re-registrations
     were all sales notes and company-wiki documents."""
