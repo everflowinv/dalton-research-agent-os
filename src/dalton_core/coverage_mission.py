@@ -2763,17 +2763,78 @@ class CoverageMissionAuthority:
 
         return establish_requirements(self.metric_observations(company_ref))
 
-    def document_spec_refs(self, mission_version_ref: str) -> dict[str, str]:
-        """document_ref → the discovery spec that found it (P10a reading order)."""
+    def document_spec_refs(
+        self, mission_version_ref: str, *, across_versions: bool = False,
+        document_refs: Sequence[str] | None = None,
+    ) -> dict[str, str]:
+        """document_ref → the discovery spec that found it (P10a reading order).
 
+        ``across_versions`` (2026-09-25b): every version of the mission, the
+        newest row of a document winning.  A document decided under v3 is
+        still a transcript or a 10-K after P1 publishes v4, and the secondary
+        passes grade and gate by kind -- a kind looked up under v4 alone came
+        back unknown for every document v4 does not hold.  ``document_refs``
+        narrows the lookup to the documents asked about.
+        """
+
+        mission_version_ref = _text(mission_version_ref, "mission_version_ref")
+        narrow = ""
+        params: list[Any] = []
+        if document_refs is not None:
+            wanted = list(dict.fromkeys(_text(ref, "document_ref") for ref in document_refs))
+            if not wanted:
+                return {}
+            narrow = " AND d.document_ref IN (%s)" % ",".join("?" * len(wanted))
+            params = wanted
+        if not across_versions:
+            rows = self.connection.execute(
+                "SELECT d.document_ref AS document_ref, s.spec_ref AS spec_ref "
+                "FROM coverage_mission_discovered_documents d "
+                "JOIN coverage_mission_source_discoveries s ON s.record_id=d.discovery_ref "
+                "WHERE d.mission_version_ref=?" + narrow,
+                (mission_version_ref, *params),
+            ).fetchall()
+            return {row["document_ref"]: row["spec_ref"] for row in rows}
         rows = self.connection.execute(
             "SELECT d.document_ref AS document_ref, s.spec_ref AS spec_ref "
-            "FROM coverage_mission_discovered_documents d "
+            "FROM coverage_mission_versions o "
+            "JOIN coverage_mission_versions v ON v.mission_ref=o.mission_ref "
+            "JOIN coverage_mission_discovered_documents d ON d.mission_version_ref=v.mission_version_id "
             "JOIN coverage_mission_source_discoveries s ON s.record_id=d.discovery_ref "
-            "WHERE d.mission_version_ref=?",
-            (_text(mission_version_ref, "mission_version_ref"),),
+            "WHERE o.mission_version_id=?" + narrow + " ORDER BY v.version_number",
+            (mission_version_ref, *params),
         ).fetchall()
         return {row["document_ref"]: row["spec_ref"] for row in rows}
+
+    def held_document_reviews(self, mission_ref: str, *, limit: int = 500) -> list[dict[str, Any]]:
+        """Every document review of a mission, one per document: the newest.
+
+        2026-09-25b: the secondary passes (figures, metric discovery) read
+        documents the queue has already closed, and read them out of
+        ``document_reviews(current version)``.  P1 published ws-7d's v4 and
+        the 1,100 documents closed under v3 fell out of both passes.  This is
+        every version of the mission, under the rule carry-forward and the
+        P13i re-evaluation use: a review speaks for its document only while
+        no later version holds that document (carried, re-discovered or
+        reopened there) -- so a document is read once, under its newest
+        decision, never once per version.  Ordered like ``document_reviews``.
+        """
+
+        mission_ref = _text(mission_ref, "mission_ref")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 5000:
+            raise CoverageMissionValidationError("document review limit must be 1..5000")
+        rows = self.connection.execute(
+            "SELECT r.* FROM coverage_mission_document_reviews r "
+            "JOIN coverage_mission_versions v ON v.mission_version_id=r.mission_version_ref "
+            "WHERE v.mission_ref=? "
+            "AND NOT EXISTS (SELECT 1 FROM coverage_mission_versions nv "
+            "JOIN coverage_mission_discovered_documents n ON n.mission_version_ref=nv.mission_version_id "
+            "WHERE nv.mission_ref=v.mission_ref AND nv.version_number>v.version_number "
+            "AND n.document_ref=r.document_ref) "
+            "ORDER BY r.created_at,r.review_id LIMIT ?",
+            (mission_ref, limit),
+        ).fetchall()
+        return [self._review_row(row) for row in rows]
 
     def discovered_documents_held_by_skip(
         self, *, source_ref: str | None = None, skip_hosts: Sequence[str] = ()

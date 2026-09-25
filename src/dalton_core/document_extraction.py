@@ -1652,9 +1652,10 @@ class DocumentExtractionService:
                 "document_age_days": None, "document_stale": False}
 
     def context(self, review_id, expected_review_hash, offset, actor_ref,
-                require_open=True):
+                require_open=True, allow_superseded=False):
         base = self._source_context(review_id, expected_review_hash, offset, actor_ref,
-                                    require_open=require_open)
+                                    require_open=require_open,
+                                    allow_superseded=allow_superseded)
         config = getattr(self.writer, "_document_extraction_model_config", None)
         if config is not None:
             from .model_router import ModelRouter
@@ -1765,8 +1766,12 @@ class DocumentExtractionService:
         row exactly, its state included.
         """
 
+        # A context built for a closed review under a superseded version was
+        # bound to the version now in force; re-derive it the same way.  One
+        # built under its own version still is (the grant resolves to it), and
+        # any other change shows up as drift, as before.
         return self.context(context["review_id"], context["review_hash"], context["offset"],
-                            actor_ref, require_open=False)
+                            actor_ref, require_open=False, allow_superseded=True)
 
     def _suggestions(self, context):
         work = build_work(context, model_config=getattr(self.writer, "_document_extraction_model_config", None))
@@ -1890,9 +1895,9 @@ class DocumentExtractionService:
             return {"status": "not_reserved"} if row is None else {"status": "rejected", "rejection": json.loads(row["record_json"])}
 
     def view(self, *, review_id, expected_review_hash, offset, actor_ref,
-             require_open=True):
+             require_open=True, allow_superseded=False):
         context = self.context(review_id, expected_review_hash, offset, actor_ref,
-                               require_open=require_open)
+                               require_open=require_open, allow_superseded=allow_superseded)
         configured = bool(context.get("model_binding"))
         return {"context": context, "model_budget": self.budget_status(context), "model_execution": "broker" if configured else "gated", "gate_reason": None if configured else GATE_REASON,
                 "generation_enabled": configured or self.writer._document_extraction_worker_factory is not None,
@@ -2001,9 +2006,13 @@ class DocumentExtractionService:
         kind cannot be resolved yields no figures rather than ungraded ones.
         """
 
+        # 2026-09-25b: any version of the mission.  A closed review left under
+        # a superseded version is read under the version now in force, which
+        # need not hold the document; its kind did not change with the version.
         try:
             specs = self.writer.coverage_mission.document_spec_refs(
-                context["mission_version_ref"])
+                context["mission_version_ref"], across_versions=True,
+                document_refs=[context["document_ref"]])
         except Exception:  # noqa: BLE001 - an unresolvable kind is not a crash
             return None
         return specs.get(context["document_ref"])
@@ -2195,8 +2204,10 @@ class DocumentExtractionService:
         # open. And "dismissed" means the *prose* pass found no admissible
         # statement, which says nothing about the figures: a filing full of
         # tables is exactly the document where that happens.
+        # 2026-09-25b: a document closed under a superseded version of the
+        # mission is still read here, under the version now in force.
         context = self.context(review_id, expected_review_hash, offset, actor_ref,
-                               require_open=False)
+                               require_open=False, allow_superseded=True)
         if context["content_hash"] != expected_context_hash:
             raise ResearchVerificationConflict("source context changed; reload original")
         # P11v: a figure with no grade is a figure whose provenance nobody
@@ -2274,7 +2285,7 @@ class DocumentExtractionService:
         from .metric_discovery_extraction import proposals_from_window
 
         context = self.context(review_id, expected_review_hash, offset, actor_ref,
-                               require_open=False)
+                               require_open=False, allow_superseded=True)
         if context["content_hash"] != expected_context_hash:
             raise ResearchVerificationConflict("source context changed; reload original")
         # P13y: the third pass, and the one the P13c/P13i gate was never added

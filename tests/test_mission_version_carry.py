@@ -346,6 +346,111 @@ class HumanReopenTests(_VersionHarness):
             db.close()
 
 
+@_own_tests_only
+class HeldAcrossVersionsTests(_VersionHarness):
+    """Item 3: the secondary passes keep every closed document, once."""
+
+    def _held(self):
+        return [(r["mission_version_ref"], r["document_ref"], r["state"])
+                for r in self.m.held_document_reviews(REF)]
+
+    def test_closed_documents_survive_the_bump_once_each(self) -> None:
+        self._decide()
+        before = self._held()
+        self.assertEqual(before, [(self.v2["id"], NEW_DOC, "dismissed")])
+        v3 = self._publish(3)
+        # The bug: the version in force holds none of it.
+        self.assertEqual(self.m.document_reviews(v3["id"]), [])
+        self.assertEqual(self._held(), before)
+        # Carried in by a later search: the copy speaks, never both.
+        self._rediscover()
+        self.assertEqual(self._held(), [(v3["id"], NEW_DOC, "dismissed")])
+
+    def test_a_document_reopened_under_a_later_version_is_held_there_only(self) -> None:
+        self._decide()
+        v3 = self._publish(3)
+        self._reopen()
+        self.assertEqual(self._held(), [(v3["id"], NEW_DOC, "awaiting_human_extraction")])
+
+    def test_the_kind_of_a_document_does_not_change_with_the_version(self) -> None:
+        self._decide()
+        before = self.m.document_spec_refs(self.v2["id"], across_versions=True)
+        v3 = self._publish(3)
+        self.assertEqual(self.m.document_spec_refs(v3["id"]), {})
+        self.assertEqual(self.m.document_spec_refs(v3["id"], across_versions=True), before)
+        self.assertEqual(before, {NEW_DOC: SPEC})
+        self.assertEqual(self.m.document_spec_refs(v3["id"], across_versions=True,
+                                                   document_refs=[NEW_DOC]), {NEW_DOC: SPEC})
+
+    def test_a_closed_review_on_a_superseded_version_reads_under_the_version_in_force(self) -> None:
+        old = self._decide()
+        v3 = self._publish(3)
+        with self.assertRaisesRegex(CoverageMissionConflict, "active mission version"):
+            self.service.view(review_id=self.review_id, expected_review_hash=content_hash(old),
+                              offset=0, actor_ref=self.actor, require_open=False)
+        context = self.service.view(review_id=self.review_id, expected_review_hash=content_hash(old),
+                                    offset=0, actor_ref=self.actor, require_open=False,
+                                    allow_superseded=True)["context"]
+        self.assertEqual(context["mission_version_ref"], v3["id"])
+        self.assertEqual(self.service._document_spec_ref(context), SPEC)
+        self.assertEqual(self.service.reread(context, self.actor), context)
+
+    def test_the_secondary_sweep_reads_the_same_documents_before_and_after_the_bump(self) -> None:
+        self._decide()
+
+        def sweep():
+            held = self.m.held_document_reviews(REF)
+            mission = self.m.active_mission(REF)
+            specs = self.m.document_spec_refs(mission["id"], across_versions=True)
+            summary = {"discovery": [], "metrics_observed": 0}
+            seen = []
+
+            def method(**kwargs):
+                seen.append(kwargs["review_id"])
+                return {"status": "nothing_owed"}
+
+            with patch.object(DocumentExtractionService, "generate_metric_discovery",
+                              side_effect=lambda **kw: method(**kw), create=True):
+                _secondary_sweep(self.service, [(self.actor, held, specs)], summary, limit=5,
+                                 entries="discovery", wanted=lambda review, spec: spec == SPEC,
+                                 call="generate_metric_discovery",
+                                 counts={"proposals": "proposals"},
+                                 total=("metrics_observed", "recorded"),
+                                 spent_key="discovery_fresh", require_open=False)
+            failed = [e for e in summary["discovery"] if e.get("status") == "failed"]
+            self.assertEqual(failed, [], summary)
+            return sorted({self.m.document_review(ref)["document_ref"] for ref in seen}), len(seen)
+
+        before = sweep()
+        self._publish(3)
+        # Same documents, every window of them, once.
+        self.assertEqual(sweep(), before)
+        self.assertEqual(before[0], [NEW_DOC])
+
+
+@_own_tests_only
+class ConsensusReaderTests(_VersionHarness):
+    """Found in the sweep: consensus extraction was offered broker notes from
+    the version in force only."""
+
+    def test_a_note_closed_before_the_bump_is_still_offered(self) -> None:
+        from dalton_core import street_estimate
+        from dalton_core.mission_consensus_lane import _context_reader
+
+        self._decide()
+
+        def offered():
+            # The fixture document stands in for a broker note.
+            with patch.object(street_estimate, "SELL_SIDE_SPEC_REFS", (SPEC,)):
+                found = _context_reader(self.h.writer)(ACN, set())
+            return None if found is None else (found["document_ref"], found["source_manifest_hash"])
+
+        before = offered()
+        self.assertEqual(before[0], NEW_DOC)
+        self._publish(3)
+        self.assertEqual(offered(), before)
+
+
 class FeedLaneBumpTests(_feeds.FeedEndToEndHarness):
     """Item 1 through the lane that did it live: ws-7d's 32 re-registrations
     were all sales notes and company-wiki documents."""
