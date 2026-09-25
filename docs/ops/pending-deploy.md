@@ -9,7 +9,93 @@
 
 ---
 
-（当前没有待部署批次。）
+## 批次 2026-09-25c（main `11a375d4` 及之后）
+
+### 这批解决什么（均为 09-25 部署后验证中发现的问题）
+
+| 主题 | 效果 |
+|---|---|
+| **cockpit 加载慢**（`53625232` `d8f4af06` `279c6144` `1d18154f` `fe15dbe2` `39bbcffb`） | 线上 overview 一次要 59–428 秒，页面 30 秒就超时。原因有四个：译文索引每次发布都全量重建（7.5 秒）；缓存上限小于实际 run 数，每 5 秒要重新解析约 3800 个 run；缓存键全表扫描；control 以 Background 优先级运行，CPU 和 IO 被限流。修复后发布后再刷新首屏只要 0.5 秒（原来 12.8 秒以上，甚至超时），log 接口从约 10 秒降到 1 秒以内，译文请求合并成少量批次。**需要额外执行下面的 C1。** |
+| **文档研究先付费后被拒、P3 重入全部失败**（`4dc4ac63` `6d866f9e` `65660a62` `edbeca0c` `8e19713f` `35656887`） | token 预算把 CLI 网关自带的前缀算进去了，装不下时在发送前就拒绝（不付费），并换到链上下一个模型；PROVIDER_BUDGET_EXCEEDED 不再在同一路由上自动重试。已完成的阶段改为按当时的绑定核验，所以 mission 升版后也能重入；因系统性校验失败的重入会退还一次 grant；已完成的 admission 会移出 holds。按回放，**15 条被浪费的重入会自动恢复，不需要重新签发 P3**。 |
+| **SEC**（`3c8fa7c0` `fc47930c` `485c9ad6`） | ws-7d 的 company-facts 车道按 mission 的 CIK 运行（AMZN/GOOGL/META/MSFT）。ClaimIndex 挪到领取 lease 之前构建。审批只绑定自己操作对应的 fixture，修复了 09-12 以来 75 次 discovery 失败，CTSH 2026Q2 可以入账。 |
+| **P13i 与 mission 版本**（`2ca24c65` `55f360c4` `af17d30a` `d0adbc30` `c05a1d92`） | mission 升版后，旧版本已决定的文档带着决定迁入新版本，不再重读（ws-7d 模拟 1,084 份，约省 2,900 个付费窗口）。P13i 重评、人工 reopen、figures 和 prose 二次读取、搜索节奏都改为跨版本。 |
+| **晨报 claim 核验**（`4fa1e3c4`） | 补上核验合同，入账前核验和回补才能跑起来；发送前就被拒的调用按 0 结算。 |
+| **debate map**（`c8d61613` `340f64b3`） | 同一主题最短 6 小时重算一次，失败后退避；去掉已退役引用算作新版本。 |
+| **规划器、出版、dossier**（`ae3cb1d3` `62240231` `b84353b9` `cee24324` `dbb4215e`） | dossier 状态来回翻转不再触发付费规划；"四家"等同于"4 家"；check_only 失败时有确定性回退；出版产品有了重试入口，部署后 19 个卡住的产品会自动重试一次；checker 引文里的空格差异会被重新锚定（114 个卡住的 stage 中 113 个能通过）；dossier 按路由的实际价格预留；因引用退役被清空的节会优先重新起草。 |
+| **行业改挂、撤销收紧**（`ea243e88` `bc9dfe12` `390e0d3d`） | 约 97 条（legacy）和 72 条（ws-7d）行业层面的退役结论作为行业证据保留，只在行业口径下读取。撤销规则收紧到 v4，6 条过宽的撤销会被自动撤回。 |
+| **lease 与锁**（`0adf919e` `e4e37643`） | release 切换前领取的孤儿 lease 可以回收；预算库 admit 遇到锁冲突会重试。 |
+
+全量测试：见文末"测试记录"。
+
+### ⚠️ 部署后会自动发生、会花钱的事
+
+- 15 条文档研究会自动重入：其中约 9 条直接完成，不再调用模型；约 4 条会走一次自动重试的模型调用（草稿阶段每次上限 $1）。
+- 19 个出版产品各自动重试一次（每个用途都受日上限约束）。
+- 行业改挂、撤回撤销、P13i 重评（约 213 份，每天最多重开 30 份）：判定部分不花钱，重读走正常队列。
+- ws-7d 的 company-facts 车道开始为 4 家公司产出增长 claim（SEC 数据免费）。
+- dossier 每次运行能完成更多 unit，预计每天 $8–15。
+
+### 部署命令
+
+```zsh
+cd ~/Projects/dalton-research-agent-os
+.venv/bin/python scripts/build_release.py --apply | tee /tmp/dalton-build-20260925c.json
+NEW=$(python3 -c "import json;print(json.load(open('/tmp/dalton-build-20260925c.json'))['release_hash'])"); echo $NEW
+.venv/bin/python scripts/release_switch.py ~/.dalton/runtime/releases/$NEW --source-commit $(git rev-parse HEAD) --apply
+```
+
+### 部署后执行
+
+**C1 把三个 control 服务改为 Standard 优先级**（cockpit 提速的一部分；release_switch 不会改 ProcessType）。只改 control，controller/writer 保持 Background：
+
+```zsh
+for p in space.lumos.dalton.control space.lumos.dalton.workspace.ws-7d894366d1132e2930475a60.control space.lumos.dalton.workspace.ws-e399ececd5aa7a3762b1a0a4.control; do
+  f=~/Library/LaunchAgents/$p.plist
+  plutil -replace ProcessType -string Standard "$f" && plutil -lint "$f"
+  launchctl bootout gui/$(id -u)/$p
+  launchctl bootstrap gui/$(id -u) "$f"
+done
+# 应输出 3 行 "Standard"
+for p in space.lumos.dalton.control space.lumos.dalton.workspace.ws-7d894366d1132e2930475a60.control space.lumos.dalton.workspace.ws-e399ececd5aa7a3762b1a0a4.control; do plutil -extract ProcessType raw ~/Library/LaunchAgents/$p.plist; done
+```
+
+然后强制刷新 cockpit 页面。
+
+**C2 授权因 PROVIDER_BUDGET 被挂起的文档研究**（每条只放一次，每次最多 $1）。部署后等 10–20 分钟，让车道先把能自动恢复的恢复掉，再执行：
+
+```zsh
+PY=~/.dalton/runtime/releases/$NEW/venv/bin/python
+L=/Volumes/EveSSD/Dalton/legacy-state/dalton-core
+W=/Volumes/EveSSD/Dalton/workspaces/ws-7d894366d1132e2930475a60/state/dalton-core
+# 先看还剩哪些 hold，把结果贴给我也行，我来挑出需要授权的
+$PY -m dalton_core.document_recovery_cli holds --state-dir "$L"
+$PY -m dalton_core.document_recovery_cli holds --state-dir "$W"
+```
+
+目前已知的有 legacy b2f1a00d、ddf3a04b 和 ws-7d bec19d08、c737cc83，可能还有新增的。先 dry-run，确认后再加 `--apply`：
+
+```zsh
+$PY -m dalton_core.document_recovery_cli authorize-unproved --state-dir "$L" --admission-ref mission-document-research-admission:<ref> --max-cost-usd 1.0 --actor human:owner
+```
+
+ws-7d 执行前先 `export DALTON_WORKSPACE_MANIFEST=$HOME/.dalton/workspaces/ws-7d894366d1132e2930475a60/workspace.json`，执行完再 `unset`。
+
+**不要再执行 P3 的 `authorize-all-escalated`**，这批部署后它们会自动恢复。
+
+### 已替你决定的事项
+
+- SEC 审批的语义调整：审批只绑定自己操作对应的 fixture。接受。安全性不变，修复了 75 次 discovery 失败。
+- 出版自动重试也覆盖 check_only 的内容失败，否则已经卡住的 NO_CHANGE 研判不会受益于这次修复。
+
+### 已知未修（设计决定，后续评估）
+
+- figures/metric 窗口的身份绑定了 mission 版本（ADR-0006 的有意设计），每次升版会把同一份文档整份重读一遍。只在签策略、切周报这类升版时触发。
+- 初筛、备忘录、stage readiness、年报研究等几处仍只认当前 mission 版本，升版后会重新起草。
+- `mission_annual_research_lane.py:729` 用的是 `source:sec-filings`，其他地方都是 `source:sec-edgar`，待核实。
+
+### 测试记录
+
+所有分支合并后在 main `11a375d4` 上跑全量测试：共 10315 个，**全部通过**（skipped 4，0 error）。
 
 ---
 
