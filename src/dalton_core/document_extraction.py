@@ -2553,12 +2553,19 @@ class DocumentExtractionService:
         # byte-identical for it and a replay is still a duplicate.
         resolve_subjects = self.statement_subjects(context, spec_ref)
         span_names = self.admission_subject_check(context, spec_ref)
+        # 2026-09-25b: what the statement's own words cannot show -- a page
+        # that is an SEO statistics compilation, a statement impossible at the
+        # document's date, a relative year -- is asked here, before the
+        # support check spends anything, and answered with a hold.
+        quality = self.admission_quality_check(context)
         pairs = []
         for suggestion in drafted["suggestions"]:
+            suggestion, quality_hold = quality(suggestion)
             plan = resolve_subjects(suggestion["normalized_statement"])
             for subject_ref in plan["subjects"]:
                 pairs.append((suggestion, subject_ref, plan["basis"],
-                              span_names(subject_ref, suggestion["citation"].get("raw_text"))))
+                              span_names(subject_ref, suggestion["citation"].get("raw_text"))
+                              or quality_hold))
         # 2026-09-24: the independent support check, one call for the window.
         # Asked only about what would otherwise be committed, and before any
         # write: a window that cannot be checked now is not admitted now.
@@ -2713,6 +2720,57 @@ class DocumentExtractionService:
         result.update({"status": "verified", "cost_micros": outcome.get("cost_micros", 0)})
         return result
 
+    def admission_quality_check(self, context):
+        """A checker: ``suggestion -> (suggestion, hold reason or None)``.
+
+        2026-09-25b post-deploy sample (``claim_admission_quality``):
+
+        * a fetched public-web page that is a statistics compilation (title
+          and one figure per paragraph) holds every statement drafted from it;
+        * a statement that cites a report for a period not over at the
+          document's date, or states as fact how an unfinished (or future)
+          period turned out, is held; a forecast stated as one is admitted;
+        * a relative year ("the following year") is written as the year it
+          means against the document's published date -- statement and
+          period both -- and held when it cannot be anchored.
+
+        The returned suggestion is the one to stage: the same dict unless a
+        relative year was anchored.
+        """
+
+        from .claim_admission_quality import (
+            anchor_relative_years, statistics_compilation_evidence,
+            statistics_compilation_hold, temporal_impossibility,
+        )
+
+        page_hold = None
+        if context.get("source_ref") == PUBLIC_WEB_SOURCE_REF:
+            try:
+                text = self._document_text(context)
+            except Exception:  # noqa: BLE001 - unreadable page: the other checks still run
+                text = None
+            evidence = statistics_compilation_evidence(text)
+            if evidence is not None:
+                page_hold = statistics_compilation_hold(evidence)
+        document_date = context.get("document_date")
+        date_basis = context.get("document_date_basis")
+
+        def check(suggestion):
+            anchored = anchor_relative_years(
+                statement=suggestion["normalized_statement"], period=suggestion["period"],
+                document_date=document_date, date_basis=date_basis)
+            if anchored["anchored"] is not None:
+                suggestion = {**suggestion, "normalized_statement": anchored["statement"],
+                              "period": anchored["period"]}
+            hold = page_hold or temporal_impossibility(
+                statement=suggestion["normalized_statement"], period=suggestion["period"],
+                document_date=document_date,
+                cited_span=(suggestion.get("citation") or {}).get("raw_text"),
+            ) or anchored["hold"]
+            return suggestion, hold
+
+        return check
+
     def admission_subject_check(self, context, spec_ref):
         """A checker: why a span may not be admitted for a subject, or None.
 
@@ -2725,6 +2783,9 @@ class DocumentExtractionService:
         ``names`` and the discovery plans' ``search_terms``).  The subject's own
         document -- a filing attributed by accession, a transcript or note whose
         title or head names it -- is exempt: there "we" is the subject.  A
+        fetched public-web page is the subject's own only by issuer, filing
+        cover or density, never by its title or head (2026-09-25b, as the
+        reinstatement side has read it since 390e0d3d).  A
         statement about an industry subject is not checked; it is about no
         company.  The answer is a hold, never a drop.
         """
@@ -2745,7 +2806,28 @@ class DocumentExtractionService:
             ticker = str(member.get("ticker") or "").strip().upper()
             if ref and names.get(ticker):
                 table[ref] = sorted(set(table.get(ref, ())) | set(name_needles(names[ticker])))
-        own_cache: dict[str, bool] = {}
+        own_cache: dict[str, Any] = {}
+        issuer = attribution_for(spec_ref) is not None
+        web = context.get("source_ref") == PUBLIC_WEB_SOURCE_REF
+
+        def web_span_names(subject_ref, needles, span):
+            # 2026-09-25b: a fetched page is the subject's own only on the
+            # evidence a reinstatement may rest on, never on its title or
+            # head; otherwise the span names the subject or its executive
+            # (claim_subject.web_span_names_subject_strictly).
+            from .claim_subject import web_span_names_subject_strictly
+
+            key = "web-text"
+            if key not in own_cache:
+                try:
+                    own_cache[key] = self._document_text(context)
+                except Exception:  # noqa: BLE001 - unreadable page: not the subject's own
+                    own_cache[key] = None
+            peers = sorted({needle for ref, values in table.items()
+                            if ref != subject_ref for needle in values})
+            return web_span_names_subject_strictly(
+                span=span, text=own_cache[key], needles=needles, subject_ref=subject_ref,
+                peer_needles=peers, issuer_document=issuer)
 
         def document_is_own(needles):
             key = "|".join(needles)
@@ -2775,9 +2857,15 @@ class DocumentExtractionService:
             if str(subject_ref).startswith("industry:"):
                 return None
             needles = table.get(subject_ref, [])
+            if web and needles:
+                # The strict rule is the whole answer for a fetched page; the
+                # rejection below then only words the hold.
+                own = web_span_names(subject_ref, needles, span)
+            else:
+                own = document_is_own(needles)
             return document_qualitative_subject_rejection(
                 subject_ref=subject_ref, cited_span=span, needles=needles,
-                document_is_own=document_is_own(needles))
+                document_is_own=own)
 
         return check
 

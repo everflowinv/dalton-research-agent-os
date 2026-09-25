@@ -8,6 +8,15 @@
     # rest were refused
     .venv/bin/python -m dalton_core.claim_industry_reattribution_cli simulate --state-dir "..."
 
+    # read-only: which automatic reattributions today's rule (v2: a lone
+    # "capex" is no longer the industry's) would withdraw
+    .venv/bin/python -m dalton_core.claim_industry_reattribution_cli recheck --state-dir "..."
+
+    # one reattribution withdrawn by a person: dry run, then --apply
+    .venv/bin/python -m dalton_core.claim_industry_reattribution_cli withdraw \\
+        --state-dir "..." --claim-version-ref claim-version:… --reason "讲的是资本市场"
+        [--apply --actor human:lumos]
+
     # one Claim, by a person: dry run, then --apply
     .venv/bin/python -m dalton_core.claim_industry_reattribution_cli reattribute \\
         --state-dir "..." --claim-version-ref claim-version:… --reason "CIO 调查的行业结论"
@@ -36,6 +45,7 @@ from typing import Any, Iterable
 from .claim_reinstatement_cli import _MissionReader, _connect, _plans, _print
 
 OPERATION = "reattribute_claim_to_industry"
+WITHDRAW_OPERATION = "withdraw_industry_reattribution"
 
 
 def status(state: Path) -> dict[str, Any]:
@@ -83,6 +93,78 @@ def simulate(state: Path, *, max_documents: int, show: int) -> dict[str, Any]:
     summary["would_reattribute"] = (summary.get("would_reattribute") or [])[:show]
     summary["refused_examples"] = (summary.get("refused_examples") or [])[:show]
     return summary
+
+
+def _read_only_driver(state: Path, connection: Any) -> Any:
+    from .claim_review import ClaimReviewDriver, needles_from_plans, review_spool
+    from .claim_subject import mission_subject_needles
+
+    plans = _plans(state)
+    needles = {ref: set(values) for ref, values in needles_from_plans(plans).items()}
+    for ref, values in mission_subject_needles([], plans=plans).items():
+        needles.setdefault(ref, set()).update(values)
+    return ClaimReviewDriver.read_only(
+        connection=connection, missions=_MissionReader(connection),
+        spool=review_spool(state),
+        needles={ref: sorted(values) for ref, values in needles.items()},
+    )
+
+
+def recheck(state: Path, *, max_documents: int) -> dict[str, Any]:
+    """Read-only: what the patrol's recheck would withdraw today."""
+
+    connection = _connect(state)
+    try:
+        summary = _read_only_driver(state, connection).recheck_industry_reattributions(
+            principal=None, max_documents=max_documents, dry_run=True)
+    finally:
+        connection.close()
+    summary["would_withdraw_count"] = len(summary.get("would_withdraw") or [])
+    return summary
+
+
+def withdraw(state: Path, *, claim_version_ref: str, reason: str,
+             apply: bool, actor: str | None) -> dict[str, Any]:
+    from .claim_industry_reattribution import TABLE, withdrawn_reattribution_refs
+
+    connection = _connect(state)
+    try:
+        row = connection.execute(
+            f"SELECT r.record_json AS record, r.content_hash AS reattribution_hash, "
+            f"v.claim_json AS claim FROM {TABLE} r "
+            "JOIN claim_versions v ON v.claim_version_id=r.claim_version_ref "
+            "WHERE r.claim_version_ref=?", (claim_version_ref,),
+        ).fetchone()
+        withdrawn = withdrawn_reattribution_refs(connection)
+    finally:
+        connection.close()
+    if row is None:
+        return {"status": "not_found", "claim_version_ref": claim_version_ref}
+    record = json.loads(row["record"])
+    claim = json.loads(row["claim"])
+    preview = {
+        "claim_version_ref": claim_version_ref,
+        "statement": claim.get("normalized_statement"),
+        "industry_ref": record.get("industry_ref"),
+        "reattribution_ref": record.get("id"),
+        "reattribution_hash": row["reattribution_hash"],
+        "reattributed_rule_ref": record.get("rule_ref"),
+        "already_withdrawn": record.get("id") in withdrawn,
+    }
+    if not apply:
+        return {"status": "dry_run", **preview}
+    if not actor or not actor.startswith("human:"):
+        raise SystemExit("--apply needs --actor human:<name>")
+    from .governance_cli import ephemeral_call
+
+    result = ephemeral_call(
+        state / "writer-tokens.json", state / "run" / "writer.sock",
+        actor_ref=actor, operation=WITHDRAW_OPERATION,
+        params={"claim_version_ref": claim_version_ref,
+                "reattribution_hash": row["reattribution_hash"],
+                "rationale": reason, "actor_ref": actor},
+    )
+    return {"status": "applied", "preview": preview, "result": result}
 
 
 def reattribute(state: Path, *, claim_version_ref: str, reason: str,
@@ -144,13 +226,14 @@ def reattribute(state: Path, *, claim_version_ref: str, reason: str,
 def main(argv: Iterable[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("status", "simulate", "reattribute"):
+    for name in ("status", "simulate", "recheck", "reattribute", "withdraw"):
         command = sub.add_parser(name)
         command.add_argument("--state-dir", type=Path, required=True)
-        if name == "simulate":
+        if name in ("simulate", "recheck"):
             command.add_argument("--max-documents", type=int, default=10 ** 6)
+        if name == "simulate":
             command.add_argument("--show", type=int, default=50)
-        if name == "reattribute":
+        if name in ("reattribute", "withdraw"):
             command.add_argument("--claim-version-ref", required=True)
             command.add_argument("--reason", required=True)
             command.add_argument("--apply", action="store_true")
@@ -161,6 +244,11 @@ def main(argv: Iterable[str] | None = None) -> int:
         _print(status(state))
     elif args.command == "simulate":
         _print(simulate(state, max_documents=args.max_documents, show=args.show))
+    elif args.command == "recheck":
+        _print(recheck(state, max_documents=args.max_documents))
+    elif args.command == "withdraw":
+        _print(withdraw(state, claim_version_ref=args.claim_version_ref,
+                        reason=args.reason, apply=args.apply, actor=args.actor))
     else:
         _print(reattribute(state, claim_version_ref=args.claim_version_ref,
                            reason=args.reason, apply=args.apply, actor=args.actor))

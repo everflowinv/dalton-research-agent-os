@@ -125,8 +125,15 @@ def _context_proof(context: Any, *, store: Any, connection: Any,
 def authorize_document_candidate(*, connection, store, context, policy_version,
                                  evidence, claim, material, source_verification):
     from .research_auto_commit import _decision, DOCUMENT_QUALITATIVE_RULE_REF
+    from .claim_admission_quality import SYSTEM_META_REJECTION, statement_is_system_meta
 
     _need(isinstance(material, Mapping), "directed document material is unavailable")
+    # 2026-09-25b: a directed-document verifier once confirmed "the figures
+    # pass returned zero, so read it as not yet run" as an AMZN finding.  A
+    # statement about the system's own process is refused before promotion,
+    # whatever the verifier said (the generic gate asks the same question).
+    _need(not statement_is_system_meta((claim or {}).get("normalized_statement")),
+          SYSTEM_META_REJECTION)
     payload = material.get("normalized_payload", {})
     binding = payload.get("mission_document_admission", {}) if isinstance(payload, Mapping) else {}
     _need(isinstance(binding, Mapping) and isinstance(binding.get("ref"), str),

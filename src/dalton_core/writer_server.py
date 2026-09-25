@@ -755,6 +755,13 @@ HUMAN_GOVERNANCE_OPERATIONS = frozenset({
     # industry (company level keeps it retired).  A person's door; the review
     # patrol's backfill writes through the authority under claim_challenge.
     "reattribute_claim_to_industry",
+    # 2026-09-25b: withdraw an industry reattribution (append-only), so the
+    # Claim is retired and nobody's again.  A person's door; the patrol's
+    # recheck writes through the authority under claim_challenge.
+    "withdraw_industry_reattribution",
+    # 2026-09-25b: retire an admitted Claim by hand (challenge + decision in
+    # one), for what no detector flags.  A person's door only.
+    "retire_claim_by_hand",
     "mission_deliverables",
     "mission_document_evidence", "generate_document_extraction", "stage_document_extraction",
     "document_extraction_preflight",
@@ -1196,6 +1203,12 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     "reattribute_claim_to_industry": frozenset({
         "claim_version_ref", "decision_hash", "industry_ref", "rationale", "actor_ref",
     }),
+    "withdraw_industry_reattribution": frozenset({
+        "claim_version_ref", "reattribution_hash", "rationale", "actor_ref",
+    }),
+    "retire_claim_by_hand": frozenset({
+        "claim_version_ref", "claim_version_hash", "rationale", "actor_ref",
+    }),
     "run_mission_source_discovery": frozenset({
         "requested_by", "company_ref", "spec_ref", "as_of", "source_ref",
         "variant_index", "missing_periods",
@@ -1480,6 +1493,8 @@ OPERATION_ACTOR_FIELDS: dict[str, str] = {
     "reinstate_claim_retirement": "actor_ref",
     "reattribute_claim_to_industry": "actor_ref",
     "withdraw_claim_reinstatement": "actor_ref",
+    "retire_claim_by_hand": "actor_ref",
+    "withdraw_industry_reattribution": "actor_ref",
 }
 
 
@@ -5471,6 +5486,18 @@ class WriterServer:
         if not str(values.get("actor_ref") or "").startswith("human:"):
             raise WriterServerError("a reinstatement is withdrawn by hand only by a person")
         return self.claim_retirement_challenges.withdraw_reinstatement(**values)
+
+    def _op_withdraw_industry_reattribution(self, p: Mapping[str, Any]) -> Any:
+        values = dict(p)
+        if not str(values.get("actor_ref") or "").startswith("human:"):
+            raise WriterServerError("an industry reattribution is withdrawn by hand only by a person")
+        return self.claim_industry_reattributions.withdraw(**values)
+
+    def _op_retire_claim_by_hand(self, p: Mapping[str, Any]) -> Any:
+        values = dict(p)
+        if not str(values.get("actor_ref") or "").startswith("human:"):
+            raise WriterServerError("a Claim is retired by hand only by a person")
+        return self.claim_retirement_challenges.retire_by_hand(**values)
 
     def _op_reattribute_claim_to_industry(self, p: Mapping[str, Any]) -> Any:
         values = dict(p)

@@ -197,8 +197,11 @@ def document_qualitative_content_rejection(
 ) -> str | None:
     """The content reasons the document qualitative rule refuses a candidate.
 
-    Only the three that are decided by the candidate's own words: a numeric
-    field, a statement carrying a value, disclaimer text.  They are the
+    Only the four that are decided by the candidate's own words: a numeric
+    field, a statement carrying a value, disclaimer text, and (2026-09-25b) a
+    statement about the research system's own process -- "figures 抽取为零应
+    解释为未执行" is a note about Dalton's pipeline, not a finding about the
+    company it was filed under.  They are the
     reasons a caller can know *before* asking for the commit, so an executor
     can record one refused candidate and finish its run instead of dying on
     the write gate; the gate below still asks the same question itself, so
@@ -216,6 +219,9 @@ def document_qualitative_content_rejection(
         return "document qualitative rule admits no numeric statement"
     if statement_is_boilerplate(statement):
         return "document qualitative rule admits no disclaimer or boilerplate"
+    from .claim_admission_quality import SYSTEM_META_REJECTION, statement_is_system_meta
+    if statement_is_system_meta(statement):
+        return SYSTEM_META_REJECTION
     return None
 
 

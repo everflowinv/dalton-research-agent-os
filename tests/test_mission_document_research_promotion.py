@@ -248,6 +248,43 @@ class DocumentPromotionTests(unittest.TestCase):
         self.assertEqual(fixture.store.connection.execute(
             'SELECT count(*) FROM mission_document_research_promotions').fetchone()[0], 0)
 
+    def test_a_statement_about_the_pipeline_itself_is_refused(self):
+        """2026-09-25b, ws-7d a2375cbf: a note about Dalton's figures pass was
+        promoted as an AMZN finding.  It is refused before promotion now."""
+
+        from dalton_core.claim_admission_quality import SYSTEM_META_REJECTION
+
+        statement = ('AMZN 2025 财年 10-K 文档本身包含可提取的财务数字，因此 figures 抽取结果为零'
+                     '应解释为抽取尚未执行，而非文档没有可提取数字。')
+        fixture, executor, admission, outcome, _draft, _verifier = self._drafted(statement)
+        self.assertEqual(outcome['research_status'], 'candidate_rejected')
+        self.assertEqual(outcome['rejection_reason'], SYSTEM_META_REJECTION)
+        self.assertEqual(fixture.store.connection.execute(
+            'SELECT count(*) FROM claim_versions').fetchone()[0], 0)
+        self.assertEqual(executor.run_once(admission['id']), outcome)
+
+    def test_the_promotion_gate_refuses_it_even_if_the_executor_did_not(self):
+        from dalton_core.claim_admission_quality import SYSTEM_META_REJECTION
+
+        with self.assertRaisesRegex(ResearchAutoCommitRejected, "research system's own process"):
+            authorize_document_candidate(
+                connection=None, store=None, context=None, policy_version={},
+                evidence={}, material={},
+                claim={'normalized_statement': 'The figures pass returned zero, so the '
+                                               'extraction result is not yet run.'},
+                source_verification={})
+        self.assertIn('own process', SYSTEM_META_REJECTION)
+
+    def test_a_candidate_promoted_before_the_rule_keeps_its_promotion(self):
+        fixture, executor, admission, works, records, outcome, draft, verifier = self._completed()
+        self.assertEqual(outcome['research_status'], 'canonical_claim_promoted')
+        with patch('dalton_core.claim_admission_quality.statement_is_system_meta',
+                   return_value=True):
+            self.assertEqual(executor.run_once(admission['id']), outcome)
+        self.assertEqual(fixture.store.connection.execute(
+            'SELECT count(*) FROM mission_document_research_candidate_rejections'
+        ).fetchone()[0], 0)
+
     def test_json_candidate_cannot_supply_execution_authority(self):
         fixture, executor, admission, _, records, _, _, _ = self._completed()
         bundle = executor.staging.exact_candidate_bundle(

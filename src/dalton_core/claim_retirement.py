@@ -341,6 +341,14 @@ def retirement_state_probe(connection: Any) -> str:
             continue
         row = connection.execute(f"SELECT COUNT(*), MAX(rowid) FROM {table}").fetchone()
         parts.append(f"{table}:{row[0]}:{row[1]}")
+    # 2026-09-25b: a withdrawn industry reattribution moves the industry reads
+    # too.  Named only once one exists, so a Core without any keeps the probe
+    # (and every lane change key built on it) it had.
+    table = "claim_industry_reattribution_withdrawals"
+    if _table_exists(connection, table):
+        row = connection.execute(f"SELECT COUNT(*), MAX(rowid) FROM {table}").fetchone()
+        if row[0]:
+            parts.append(f"{table}:{row[0]}:{row[1]}")
     return "|".join(parts)
 
 
@@ -671,6 +679,56 @@ class ClaimRetirementAuthority:
                  wire["content_hash"], wire["created_at"]),
             )
         return {**wire, "status": "fresh"}
+
+    def retire_by_hand(
+        self,
+        *,
+        claim_version_ref: str,
+        claim_version_hash: str,
+        actor_ref: str,
+        rationale: str,
+    ) -> dict[str, Any]:
+        """A person retires one admitted Claim: challenge and decision together.
+
+        The owner's door for a Claim no detector will ever flag -- the
+        2026-09-25b SEO statistics compilations, a statement impossible at its
+        document's date.  It is exactly the two records a patrol writes (a
+        ``human_judgment`` challenge, then a ``retired`` decision), bound to the
+        exact claim version and its hash, so every read path treats the Claim
+        as retired and a reinstatement can still withdraw it.  A Claim that
+        already has a decision is left as it is (``already_decided``):
+        decisions are one per Claim.
+        """
+
+        import json
+
+        actor = _actor(actor_ref)
+        if not _HUMAN_RE.fullmatch(actor):
+            raise ClaimRetirementConflict("only a person retires a Claim by hand")
+        claim_version_ref = _text(claim_version_ref, "claim_version_ref", maximum=512)
+        claim_version_hash = _sha256(claim_version_hash, "claim_version_hash")
+        rationale = _text(rationale, "rationale")
+        claim = self._claim(claim_version_ref)
+        if claim["content_hash"] != claim_version_hash:
+            raise ClaimRetirementConflict("claim version hash binding failed")
+        existing = self.connection.execute(
+            "SELECT record_json FROM claim_retirement_decisions WHERE claim_version_ref=?",
+            (claim_version_ref,),
+        ).fetchone()
+        if existing is not None:
+            return {"status": "already_decided", "claim_version_ref": claim_version_ref,
+                    "decision": json.loads(existing["record_json"])}
+        challenge = self.challenge(
+            claim_version_ref=claim_version_ref, claim_version_hash=claim_version_hash,
+            reason_code="human_judgment", rationale=rationale, actor_ref=actor,
+        )
+        decision = self.decide(
+            challenge_ref=challenge["id"], challenge_hash=challenge["content_hash"],
+            decision="retired", actor_ref=actor, rationale=rationale,
+        )
+        return {"status": decision["status"], "claim_version_ref": claim_version_ref,
+                "challenge_ref": challenge["id"], "decision_ref": decision["id"],
+                "decision_hash": decision["content_hash"]}
 
     def reinstate(
         self,
