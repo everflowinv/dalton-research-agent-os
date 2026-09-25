@@ -501,6 +501,24 @@ class EndToEndTests(P14aHarness):
         self.assertEqual(summary["season_status"], "ungranted")
         self.assertEqual(writer.calls, [])
 
+    def test_event_judgement_spend_in_the_day_ledger_closes_the_shared_pool(self):
+        # 2026-09-25: the pool is the day ledger, not the lanes' shared book --
+        # a judgement the book never heard of still spends the season's share.
+        from dalton_core.event_judgement import pool
+        from tests.test_event_judgement_ledger_pool import make_ledger
+
+        self.calendar(expected="2026-10-01", confirmed=False)
+        cap = pool(self.mission)["cap_micros"]
+        ledger = make_ledger(self.state_dir / "budget.sqlite", [
+            ("a1", TODAY, "work:cockpit-event_judgement-unbooked", cap, cap)])
+        config = self.state_dir / "writer.json"
+        config.write_text(json.dumps({"budget_db": str(ledger)}), encoding="utf-8")
+        summary, writer, _verifier = self.execute(
+            writer_answers={"earnings_preview": self.preview_answer}, model_config=config)
+        self.assertEqual(summary["season_status"], "skipped:pool_exhausted")
+        self.assertEqual(summary["pool"]["source"], "day_ledger")
+        self.assertEqual(writer.calls, [])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -420,8 +420,19 @@ def run_earnings_season(
             summary.update({"status": "idle", "season_status": "nothing_due"})
             return summary
         day = moment.date().isoformat()
-        state = pool_state(judgements, mission, day=day)
+        # The same pool and the same account as the judgement lane: the day
+        # ledger when the writer's configuration names one.
+        from .event_judgement_cli import _budget_db
+        budget_db = _budget_db(model_config, writer_model)
+        state = pool_state(judgements, mission, day=day, budget_db=budget_db)
         summary["pool"] = state
+        if state.get("ledger_error"):
+            summary.update({
+                "status": "idle", "season_status": "gated:ledger_unreadable",
+                "failure_reason": "the day ledger this pool is read from cannot be "
+                                  f"read: {state['ledger_error']}",
+            })
+            return summary
         if dry_run:
             summary.update({
                 "status": "succeeded", "season_status": "dry_run",
@@ -496,7 +507,13 @@ def run_earnings_season(
                 return int(float(budget["max_cost_usd"]) * 1_000_000)
             reservation = (reserve(writer_model, writer_config, writer_purpose)
                            + reserve(verifier_model, verifier_config, verifier_purpose))
-            if state["remaining_micros"] - spent < reservation:
+            if budget_db is not None:
+                state = pool_state(judgements, mission, day=day, budget_db=budget_db)
+                summary["pool"] = state
+                remaining = state["remaining_micros"]
+            else:
+                remaining = state["remaining_micros"] - spent
+            if remaining < reservation:
                 summary["season_status"] = "skipped:pool_exhausted"
                 break
             outcome = _one_window(

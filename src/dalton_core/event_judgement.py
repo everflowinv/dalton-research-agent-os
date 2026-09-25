@@ -133,6 +133,17 @@ VERIFIER_FINDING_CODES: tuple[str, ...] = (
 # the extraction lane for the thing the mission is actually for.
 POOL_NAME = "event_response"
 POOL_SHARE = Decimal("0.15")
+#: Every cockpit purpose that books into ``event_response_spend`` -- this lane's
+#: four and the earnings season's four (P14f shares the pool and the book) --
+#: and so every purpose whose day-ledger spend :func:`pool_state` sums.  The
+#: earnings names are spelled here rather than imported because
+#: ``earnings_season`` imports this module.
+POOL_LEDGER_PURPOSES: tuple[str, ...] = (
+    "event_judgement", "event_judgement_verifier",
+    "thesis_reflection", "thesis_reflection_verifier",
+    "earnings_preview", "earnings_preview_verifier",
+    "earnings_calibration", "earnings_calibration_verifier",
+)
 
 MAX_BECAUSE_CHARS = 1200
 MAX_NOTE_CHARS = 1200
@@ -1851,18 +1862,45 @@ def pool(mission: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def pool_state(
-    authority: EventJudgementAuthority, mission: Mapping[str, Any], *, day: str
+    authority: EventJudgementAuthority, mission: Mapping[str, Any], *, day: str,
+    budget_db: str | Path | None = None,
 ) -> dict[str, Any]:
-    """The day's account, derived from the judgement ledger itself.
+    """The day's account: what the day ledger says this pool's purposes cost.
 
-    No second book: the pool and the ledger cannot disagree because the pool
-    *is* the ledger, summed.  (P14e reached the same conclusion for ``adhoc``
-    and it is the shape C2 should generalise.)
+    The lane's own ``event_response_spend`` book is written from what a call
+    *returned*, so it cannot see a call it never heard back from.  Live
+    (2026-09-23/24) 135 Opus judgements came back to the lane as "this request
+    is already running" or a transport failure -- no provenance, so nothing
+    booked -- and were then settled in the day ledger at 0.27-0.28 USD each:
+    the book said 38.2 USD for 09-24 while the ledger said 55.3, and the 50 USD
+    cap was checked against the smaller number.  The book also keeps the cost
+    a call reported on return, not the settlement the ledger later made.
+
+    So when the lane knows where the day ledger is, the pool is the ledger:
+    admissions settled at what they cost (corrections included), open
+    reservations at what they hold, for every purpose that spends this pool --
+    read with the same function the claim-support ceiling uses.  A ledger that
+    cannot be read leaves no room (``ledger_error``): a ceiling nobody can read
+    is not a ceiling that has room.  With no ledger configured (tests, a bare
+    Core) the book is still the account.
     """
 
     state = pool(mission)
-    spent = authority.day_cost_micros(day)
-    return {**state, "day": day, "spent_micros": spent,
+    if budget_db is None:
+        spent = authority.day_cost_micros(day)
+        return {**state, "day": day, "spent_micros": spent, "source": "lane_book",
+                "remaining_micros": max(0, state["cap_micros"] - spent)}
+    from .claim_support_verification import ClaimSupportError, purpose_spend_micros
+
+    try:
+        by_purpose = {purpose: purpose_spend_micros(budget_db, purpose, day)
+                      for purpose in POOL_LEDGER_PURPOSES}
+    except ClaimSupportError as exc:
+        return {**state, "day": day, "spent_micros": None, "source": "day_ledger",
+                "remaining_micros": 0, "ledger_error": str(exc)}
+    spent = sum(by_purpose.values())
+    return {**state, "day": day, "spent_micros": spent, "source": "day_ledger",
+            "spent_by_purpose": by_purpose,
             "remaining_micros": max(0, state["cap_micros"] - spent)}
 
 
@@ -2602,6 +2640,7 @@ __all__ = [
     "EventJudgementValidationError",
     "MAX_NOTE_SENTENCES",
     "MAX_RECENT_JUDGEMENTS",
+    "POOL_LEDGER_PURPOSES",
     "POOL_NAME",
     "POOL_SHARE",
     "PURPOSE",

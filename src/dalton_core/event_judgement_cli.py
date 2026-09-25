@@ -367,6 +367,19 @@ def _model(config_path: Path | None, state_dir: Path, scheduler_db: Path | None)
     )
 
 
+def _budget_db(config_path: Path | None, model: Any) -> str | None:
+    """The day ledger the judge's calls are admitted into, if one is configured."""
+
+    config = getattr(model, "config", None)
+    if config is None and config_path is not None:
+        try:
+            config = json.loads(Path(config_path).expanduser().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            config = None
+    value = (config or {}).get("budget_db") if isinstance(config, dict) else None
+    return value if isinstance(value, str) and value else None
+
+
 def _call_budget(model: Any, purpose: str) -> dict[str, Any]:
     resolver = getattr(model, "budget_for", None)
     if callable(resolver):
@@ -455,6 +468,7 @@ def run_judgement(
     verifier_model: Any = None,
     family_resolver: Any = None,
     now: datetime | None = None,
+    budget_db: str | Path | None = None,
 ) -> dict[str, Any]:
     state_dir = Path(state_dir).expanduser().resolve()
     summary_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -507,7 +521,8 @@ def run_judgement(
         if company_ref is not None:
             tracked = [ref for ref in tracked if ref == company_ref]
         day = moment.date().isoformat()
-        state = pool_state(judgements, mission, day=day)
+        budget_db = budget_db or _budget_db(judge_model_config, judge_model)
+        state = pool_state(judgements, mission, day=day, budget_db=budget_db)
         summary["pool"] = state
 
         run_budget = _event_run_budget(judge_model_config, judge_model)
@@ -619,6 +634,13 @@ def run_judgement(
         # series gets an empty map and the context block says so.
         prices, market_caps = _price_reads(store, tracked)
 
+        if state.get("ledger_error"):
+            summary.update({
+                "status": "idle", "judgement_status": "gated:ledger_unreadable",
+                "failure_reason": "the day ledger this pool is read from cannot be "
+                                  f"read: {state['ledger_error']}",
+            })
+            return summary
         spent = 0
         # Four calls, not two: a divergence or a revise-shaped decision owes a
         # reflection and its verification as well. Reserving the pair only
@@ -635,10 +657,19 @@ def run_judgement(
             )
         ) * 1_000_000)
         for event_group in batch:
-            event = event_group[0]
-            if state["remaining_micros"] - spent < reservation:
+            if budget_db is not None:
+                # The ledger already holds every admission this run made, paid
+                # or still open, and every one it never heard back from; re-read
+                # it rather than adding what the calls reported.
+                state = pool_state(judgements, mission, day=day, budget_db=budget_db)
+                summary["pool"] = state
+                remaining = state["remaining_micros"]
+            else:
+                remaining = state["remaining_micros"] - spent
+            if remaining < reservation:
                 summary["judgement_status"] = "skipped:pool_exhausted"
                 break
+            event = event_group[0]
             context = build_context(
                 event=event, mission=mission, connection=store.connection,
                 judgements=judgements,
