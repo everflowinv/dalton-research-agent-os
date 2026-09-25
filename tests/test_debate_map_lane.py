@@ -14,6 +14,7 @@ import copy
 import sqlite3
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -430,10 +431,17 @@ class LaneCoordinatorTests(unittest.TestCase):
         self.harness = ChildHarness()
         self.addCleanup(self.harness.close)
         self.launcher = FakeLauncher()
+        self.now = datetime(2026, 9, 25, 6, 13, tzinfo=timezone.utc)
         self.coordinator = MissionDebateMapLaneCoordinator(
             store=self.harness.store, launcher=self.launcher,
-            mission=lambda: self.harness.mission,
+            mission=lambda: self.harness.mission, clock=lambda: self.now,
         )
+
+    def _new_claim(self, key, statement="Another view arrives."):
+        self.harness.fixture.add_claim(
+            key, kind="qualitative", value=None, unit=None,
+            metric="demand environment", period="current",
+            statement=statement, source_type="public_web")
 
     def test_a_subject_with_no_claims_is_not_chosen(self):
         result = self.coordinator.dispatch_once()
@@ -503,11 +511,14 @@ class LaneCoordinatorTests(unittest.TestCase):
         self.assertEqual(held["status"], "held")
         self.assertEqual(held["reason"], "bad draft")
         self.assertEqual(held["settled"]["map_status"], "refused")
-        # A new Claim changes the fingerprint, so the hold does not survive it.
-        self.harness.fixture.add_claim(
-            "debate-third", kind="qualitative", value=None, unit=None,
-            metric="demand environment", period="current",
-            statement="A third view arrives.", source_type="public_web")
+        # A new Claim changes the fingerprint, so the hold does not survive
+        # it -- but the failed draft is backed off first (2026-09-25), so the
+        # next one waits out the six hours rather than following every Claim.
+        self._new_claim("debate-third", "A third view arrives.")
+        paced = self.coordinator.dispatch_once()
+        self.assertEqual(paced["status"], "held")
+        self.assertIn("backing off after 1 draft", paced["reason"])
+        self.now += timedelta(hours=6, seconds=1)
         self.assertEqual(self.coordinator.dispatch_once()["status"], "launched")
 
     def test_a_duplicate_holds_the_slot_open_for_the_next_subject(self):
@@ -521,11 +532,66 @@ class LaneCoordinatorTests(unittest.TestCase):
         again = self.coordinator.dispatch_once()
         self.assertEqual(again["status"], "held")
         self.assertIn("duplicate", again["reason"])
-        self.harness.fixture.add_claim(
-            "debate-after-duplicate", kind="qualitative", value=None, unit=None,
-            metric="demand environment", period="current",
-            statement="Something new arrives.", source_type="public_web")
+        self._new_claim("debate-after-duplicate", "Something new arrives.")
+        self.assertEqual(self.coordinator.dispatch_once()["status"], "held")
+        self.now += timedelta(hours=6, seconds=1)
         self.assertEqual(self.coordinator.dispatch_once()["status"], "launched")
+
+    def test_redraws_are_paced_and_failures_back_off(self):
+        # 2026-09-25: AMZN drafted eleven times in 72 minutes, each new Claim
+        # launching another ~$0.52 draft that came back duplicate or invalid.
+        self.harness.add_claims()
+        launched = []
+        for index in range(6):
+            result = self.coordinator.dispatch_once()
+            if result["status"] == "launched":
+                launched.append(self.now)
+                self.launcher.settle(result["ticket_ref"], {"map_status": "refused",
+                                                            "failure_reason": "invalid JSON"})
+            self._new_claim(f"debate-burst-{index}", f"View {index}.")
+            self.now += timedelta(minutes=7)
+        self.assertEqual(len(launched), 1)
+        # Backoff doubles: 6 h after the first failure, then 12 h.
+        start = launched[0]
+        self.now = start + timedelta(hours=6, seconds=1)
+        second = self.coordinator.dispatch_once()
+        self.assertEqual(second["status"], "launched")
+        self.launcher.settle(second["ticket_ref"], {"map_status": "duplicate"})
+        self._new_claim("debate-burst-late", "Later view.")
+        self.now += timedelta(hours=11)
+        self.assertEqual(self.coordinator.dispatch_once()["status"], "held")
+        self.now += timedelta(hours=1, seconds=1)
+        third = self.coordinator.dispatch_once()
+        self.assertEqual(third["status"], "launched")
+        # A published draft resets the backoff to the plain minimum interval.
+        self.launcher.settle(third["ticket_ref"], {"map_status": "fresh"})
+        self._new_claim("debate-burst-after", "After publishing.")
+        self.now += timedelta(hours=5)
+        self.assertEqual(self.coordinator.dispatch_once()["status"], "held")
+        self.now += timedelta(hours=1, seconds=1)
+        self.assertEqual(self.coordinator.dispatch_once()["status"], "launched")
+
+    def test_a_published_map_standing_on_a_retired_claim_is_redrawn_at_once(self):
+        from unittest.mock import patch
+
+        self.test_a_map_drawn_from_the_evidence_we_hold_is_left_alone()
+        from dalton_core.debate_map import cited_refs
+
+        cited = sorted(cited_refs(
+            DebateMapAuthority(self.harness.store).current(ACN)))
+        # Drawn a minute ago: an ordinary new Claim waits out the six hours...
+        self.coordinator.pacing.put(ACN, {"last_draft_at": self.now.isoformat(), "failures": 0})
+        self._new_claim("debate-retire-1", "An ordinary new view.")
+        self.assertEqual(self.coordinator.dispatch_once()["status"], "held")
+        # ...but a retired Claim under the published map does not.
+        with patch("dalton_core.claim_retirement.retired_claim_version_refs",
+                   return_value={cited[0]}):
+            urgent = self.coordinator.dispatch_once()
+            self.assertEqual(urgent["status"], "launched")
+            self.launcher.settle(urgent["ticket_ref"], {"map_status": "refused"})
+            # Once per retired set, and a failed attempt still backs off.
+            self._new_claim("debate-retire-2", "Yet another view.")
+            self.assertEqual(self.coordinator.dispatch_once()["status"], "held")
 
     def test_every_subject_gets_a_turn_when_none_of_them_publishes(self):
         # The starvation this lane had to be taught about: five companies, one

@@ -187,6 +187,14 @@ class DebateMapChangeKeyTests(unittest.TestCase):
     def setUp(self):
         self.harness = Harness()
         self.addCleanup(self.harness.close)
+        # These count Ledger reads per tick with a launcher whose "fresh" run
+        # never publishes, so the same subject is chosen tick after tick.
+        # Redraw pacing (2026-09-25) would hold it and move the loop on to the
+        # next subject -- a different, deliberate read; it is tested in
+        # test_debate_map_lane and switched off here.
+        pacing = patch.object(debate_lane, "MIN_REDRAW_SECONDS", 0)
+        pacing.start()
+        self.addCleanup(pacing.stop)
         self.state = Path(tempfile.mkdtemp())
         self.mission = {
             "id": self.harness.mission["id"],
@@ -343,6 +351,9 @@ class ExpensiveCallsPerTickTests(unittest.TestCase):
             store=self.harness.store,
             launcher=DebateMapChangeKeyTests.Launcher(),
             mission=lambda: dict(mission), failure_ledger_dir=self.state)
+        pacing = patch.object(debate_lane, "MIN_REDRAW_SECONDS", 0)  # as above
+        pacing.start()
+        self.addCleanup(pacing.stop)
         snapshots, counter = self._snapshots()
         with counter:
             coordinator.dispatch_once()
