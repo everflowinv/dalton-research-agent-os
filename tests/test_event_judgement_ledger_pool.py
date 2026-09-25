@@ -157,6 +157,55 @@ class DayLedgerPoolTests(Harness):
         self.assertEqual(state["remaining_micros"], max(0, self.cap - expected))
         self.assertEqual(state["spent_by_purpose"]["event_judgement_verifier"], 3_000)
 
+    def test_a_refusal_never_sent_does_not_fill_the_pool(self):
+        # The pool reads purpose_spend_micros, so a call the adapter refused
+        # over contract wiring before sending it -- settled at its reservation
+        # with no usage entry before 4fa1e3c4 -- is not spend here either.
+        import json
+
+        ledger = self.state_dir / "ledger" / "thesis-impact-budget.sqlite"
+        ledger.parent.mkdir()
+        connection = sqlite3.connect(ledger)
+        connection.executescript("""
+            CREATE TABLE thesis_impact_day_admissions (admission_id TEXT, day TEXT,
+                work_order_ref TEXT, attempt_number INTEGER, reserved_micros INTEGER);
+            CREATE TABLE thesis_impact_day_settlements (admission_id TEXT,
+                actual_micros INTEGER, usage_entry_ref TEXT);
+        """)
+        connection.executemany(
+            "INSERT INTO thesis_impact_day_admissions VALUES(?,?,?,?,?)", [
+                ("w", DAY, "work:cockpit-event_judgement_verifier-w", 1, 400_000),
+                ("t", DAY, "work:cockpit-event_judgement-t", 1, 300_000)])
+        connection.executemany(
+            "INSERT INTO thesis_impact_day_settlements VALUES(?,?,?)",
+            [("w", 400_000, None), ("t", 300_000, None)])
+        connection.commit()
+        connection.close()
+        scheduler = self.state_dir / "sched.sqlite"
+        connection = sqlite3.connect(scheduler)
+        connection.execute(
+            "CREATE TABLE scheduler_result_envelopes (work_order_id TEXT, "
+            "attempt_number INTEGER, result_envelope_json TEXT, created_at TEXT)")
+        for ref, message in (
+                ("work:cockpit-event_judgement_verifier-w",
+                 "the model call failed: independent verifier provider contract "
+                 "is unsupported"),
+                ("work:cockpit-event_judgement-t", "TIMEOUT")):
+            connection.execute(
+                "INSERT INTO scheduler_result_envelopes VALUES(?,?,?,?)",
+                (ref, 1, json.dumps({"status": "failed", "metadata": {
+                    "chain_failures": [{"code": "x", "message": message}]}}), DAY))
+        connection.commit()
+        connection.close()
+        state = pool_state(self.judgements, self.mission, day=DAY, budget_db=ledger,
+                           scheduler_db=scheduler)
+        self.assertEqual(state["spent_micros"], 300_000)
+        self.assertEqual(state["spent_by_purpose"]["event_judgement_verifier"], 0)
+        # Without the scheduler nothing can be shown unsent: both count.
+        self.assertEqual(
+            pool_state(self.judgements, self.mission, day=DAY,
+                       budget_db=ledger)["spent_micros"], 700_000)
+
     def test_the_pool_counts_every_purpose_that_books_into_it(self):
         from dalton_core import earnings_season, event_judgement
 

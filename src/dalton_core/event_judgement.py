@@ -1878,7 +1878,7 @@ def pool(mission: Mapping[str, Any]) -> dict[str, Any]:
 
 def pool_state(
     authority: EventJudgementAuthority, mission: Mapping[str, Any], *, day: str,
-    budget_db: str | Path | None = None,
+    budget_db: str | Path | None = None, scheduler_db: str | Path | None = None,
 ) -> dict[str, Any]:
     """The day's account: what the day ledger says this pool's purposes cost.
 
@@ -1898,6 +1898,11 @@ def pool_state(
     cannot be read leaves no room (``ledger_error``): a ceiling nobody can read
     is not a ceiling that has room.  With no ledger configured (tests, a bare
     Core) the book is still the account.
+
+    ``scheduler_db`` (default: ``scheduler.sqlite`` beside the ledger) is where
+    ``purpose_spend_micros`` looks up why a call failed, so that a call the
+    adapter refused over contract wiring before sending it -- settled at its
+    full reservation before 4fa1e3c4 -- does not count against the pool.
     """
 
     state = pool(mission)
@@ -1908,7 +1913,8 @@ def pool_state(
     from .claim_support_verification import ClaimSupportError, purpose_spend_micros
 
     try:
-        by_purpose = {purpose: purpose_spend_micros(budget_db, purpose, day)
+        by_purpose = {purpose: purpose_spend_micros(budget_db, purpose, day,
+                                                    scheduler_db=scheduler_db)
                       for purpose in POOL_LEDGER_PURPOSES}
     except ClaimSupportError as exc:
         return {**state, "day": day, "spent_micros": None, "source": "day_ledger",

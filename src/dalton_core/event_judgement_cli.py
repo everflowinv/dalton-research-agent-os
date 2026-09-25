@@ -686,7 +686,9 @@ def run_judgement(
             tracked = [ref for ref in tracked if ref == company_ref]
         day = moment.date().isoformat()
         budget_db = budget_db or _budget_db(judge_model_config, judge_model)
-        state = pool_state(judgements, mission, day=day, budget_db=budget_db)
+        state = pool_state(
+            judgements, mission, day=day, budget_db=budget_db,
+            scheduler_db=getattr(judge_model, "scheduler_db", None))
         summary["pool"] = state
 
         run_budget = _event_run_budget(judge_model_config, judge_model)
@@ -823,7 +825,9 @@ def run_judgement(
                 # The ledger already holds every admission this run made, paid
                 # or still open, and every one it never heard back from; re-read
                 # it rather than adding what the calls reported.
-                state = pool_state(judgements, mission, day=day, budget_db=budget_db)
+                state = pool_state(
+                    judgements, mission, day=day, budget_db=budget_db,
+                    scheduler_db=getattr(judge_model, "scheduler_db", None))
                 summary["pool"] = state
                 remaining = state["remaining_micros"]
             else:
