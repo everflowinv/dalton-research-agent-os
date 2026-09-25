@@ -147,6 +147,40 @@ class CoordinatorTests(unittest.TestCase):
         self.assertEqual(restarted.dispatch_once()["status"], "held")
         self.assertEqual(len(self.launcher.started), 1)
 
+    def test_preview_output_contract_change_releases_a_held_preview_once(self):
+        # IBM's preview was held after "citations must be a list of at most
+        # 16 refs"; the prompt fix ships with a new output contract ref, which
+        # must release that hold without releasing calibration windows.
+        rows = [
+            {"company_ref": "company:A", "occurrence_ref": "occurrence:A",
+             "window": "preview", "input_hash": "a" * 64},
+            {"company_ref": "company:B", "occurrence_ref": "occurrence:B",
+             "window": "calibration", "input_hash": "b" * 64},
+        ]
+        coordinator = self.coordinator(rows)
+        with patch.object(lane, "PREVIEW_OUTPUT_CONTRACT_REF", "earnings-preview-output:1"):
+            for _ in rows:
+                ticket = coordinator.dispatch_once()
+                self.launcher.finish(ticket["ticket_ref"], season_status="refused",
+                                     windows=[{
+                    "company_ref": ticket["company_ref"],
+                    "occurrence_ref": ticket["occurrence_ref"],
+                    "window": ticket["window"], "status": "refused",
+                    "reason": "refused: unsupported",
+                }])
+            self.assertEqual(coordinator.dispatch_once()["status"], "held")
+        released = coordinator.dispatch_once()
+        self.assertEqual(released["status"], "launched")
+        self.assertEqual(released["window"], "preview")
+        self.assertTrue(released["batch_ref"].endswith(
+            ":" + lane.PREVIEW_OUTPUT_CONTRACT_REF))
+        self.launcher.finish(released["ticket_ref"], season_status="refused", windows=[{
+            **rows[0], "status": "refused", "reason": "refused: unsupported",
+        }])
+        again = coordinator.dispatch_once()
+        self.assertEqual(again["status"], "held")
+        self.assertIn("occurrence:B:calibration", again["held"])
+
     def test_input_change_releases_only_the_affected_window(self):
         rows = [{"company_ref": "company:A", "occurrence_ref": "occurrence:A",
                  "window": "preview", "input_hash": "a" * 64}]

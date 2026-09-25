@@ -472,6 +472,31 @@ class PreviewOutputTests(PreviewHarness):
             preview.validate_preview_output(self.answer(what_to_watch=[]), self.context)
         self.assertIn("nothing to watch", str(caught.exception))
 
+    # IBM, 2026-09-25: the preview was refused repeatedly with "citations must
+    # be a list of at most 16 refs" because the prompt showed ~100 citable
+    # refs and never said the list is capped.
+    def test_the_prompt_states_the_citation_cap_the_contract_enforces(self):
+        prompt = preview.build_preview_prompt(self.context)
+        self.assertIn(f"citations 最多 {preview.MAX_CITATIONS} 条", prompt)
+        self.assertIn(f"最多 {preview.MAX_CITATIONS} 条>", prompt)
+
+    def test_too_many_distinct_citations_are_still_refused_with_the_count(self):
+        shown = sorted(season.citable_refs(self.context))[:1]
+        many = shown + [f"source:{index}" for index in range(preview.MAX_CITATIONS)]
+        context = {**self.context, "source_refs": list(self.context.get(
+            "source_refs") or ()) + many}
+        with self.assertRaises(season.EarningsSeasonValidationError) as caught:
+            preview.validate_preview_output(self.answer(citations=many), context)
+        self.assertIn(f"at most {preview.MAX_CITATIONS} refs", str(caught.exception))
+        self.assertIn(f"(got {len(set(many))})", str(caught.exception))
+
+    def test_a_repeated_citation_does_not_count_twice_against_the_cap(self):
+        refs = ["thesis-version:1", self.claim_ref]
+        repeated = refs * preview.MAX_CITATIONS
+        checked = preview.validate_preview_output(
+            self.answer(citations=repeated), self.context)
+        self.assertEqual(checked["citations"], refs)
+
 
 class PreviewPublishTests(PreviewHarness):
     def published(self, context=None):

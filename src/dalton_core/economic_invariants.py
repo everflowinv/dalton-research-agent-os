@@ -122,7 +122,10 @@ ADDITIVE_SEGMENT_AXES = frozenset({
 # spellings are normalized exactly as model inputs are, while legacy replay
 # retains its byte-exact unit comparison. Version 6 makes cumulative filing
 # proof independent of statement-row order while retaining exact arithmetic.
-FORECAST_INVARIANT_CONTRACT_REF = "forecast-economic-invariants:6"
+# Version 7 applies the direction check only where operating income is
+# provably revenue times a constant: a cost line carried on its own growth
+# rate no longer counts as a "held cost ratio".
+FORECAST_INVARIANT_CONTRACT_REF = "forecast-economic-invariants:7"
 FORECAST_INVARIANT_CONTRACT = {
     "schema_version": "forecast-economic-invariant-contract-0.1",
     "contract_ref": FORECAST_INVARIANT_CONTRACT_REF,
@@ -144,6 +147,7 @@ FORECAST_INVARIANT_CONTRACT = {
     ),
     "filing_proof_units": "structured-sec-per-share-normalization:v1",
     "cumulative_pair_selection": "all-exact-adjacent-pairs:v1",
+    "direction_premise": "revenue-proportional-operating-income:v1",
 }
 FORECAST_INVARIANT_CONTRACT_HASH = content_hash(FORECAST_INVARIANT_CONTRACT)
 PERIOD_BASIS = "period_basis"
@@ -194,6 +198,12 @@ _ROLE_DIRECTION: dict[str, tuple[str, int | None]] = {
 # Roles whose assumption is a share of revenue and therefore sits inside the
 # implied margin.
 _MARGIN_ROLES = frozenset({"cost_of_revenue", "operating_expense"})
+# The measures under which a margin-role assumption *is* a share. A constant
+# ``quarterly_growth`` on a cost line is a constant assumption value but not a
+# held share of revenue, so it cannot stand in for "every cost ratio held".
+# ``share_of_line`` is a share of whatever base the structure names; whether
+# that base is itself proportional to revenue is settled by the structure walk.
+_REVENUE_SHARE_MEASURES = frozenset({"revenue_share", "share_of_line"})
 
 
 class EconomicInvariantError(RuntimeError):
@@ -401,6 +411,16 @@ def _direction(series: Sequence[Mapping[str, Any]]) -> InvariantResult:
                 # income is allowed to move any way at all. Skipping it is the
                 # point: this invariant is about the case where nothing but
                 # revenue changed.
+                continue
+            if (prior.get("revenue_proportional") is False
+                    or current.get("revenue_proportional") is False):
+                # The chain above holds only when every cost line is a share of
+                # revenue. A cost carried forward on its own growth rate (a
+                # "fixed" D&A line, say) keeps its assumption *value* constant
+                # while its share of revenue moves every quarter, so the
+                # operating margin legitimately drifts -- operating leverage,
+                # not a broken chain. Neither the proportion nor the direction
+                # follows from the formula then, so there is nothing to check.
                 continue
             rev_a, rev_b = _decimal(prior.get("revenue")), _decimal(current.get("revenue"))
             op_a, op_b = _decimal(prior.get("operating_income")), _decimal(
@@ -922,6 +942,59 @@ def measure_band(record: Mapping[str, Any], driver_ref: str, measure: str) -> di
     }
 
 
+def _operating_income_revenue_proportional(record: Mapping[str, Any]) -> bool | None:
+    """Whether a structure-backed model's operating income is revenue times a constant.
+
+    ``None`` when the record carries no statement structure (the legacy chain,
+    whose cost lines are all ``revenue_share`` by construction) or names no
+    operating-income line. Otherwise walk the structure: revenue is the anchor;
+    a ``share_of_line`` line is proportional when its base is; a ``sum``
+    formula is proportional when every term is. Anything else -- a line carried
+    on its own ``quarterly_growth``, a ratio formula, an unknown line -- is not,
+    and one such term makes operating income not proportional to revenue.
+    """
+
+    structure = record.get("financial_statement_structure")
+    if not isinstance(structure, Mapping):
+        return None
+    lines = {str(line.get("ref")): line for line in (structure.get("lines") or [])
+             if isinstance(line, Mapping) and line.get("ref") is not None}
+    formulas = {str(item.get("output_ref")): item
+                for item in (structure.get("formulas") or [])
+                if isinstance(item, Mapping) and item.get("output_ref") is not None}
+    target = next((ref for ref, line in lines.items()
+                   if line.get("role") == "operating_income"), None)
+    if target is None:
+        return None
+    memo: dict[str, bool] = {}
+
+    def proportional(ref: str, trail: frozenset[str]) -> bool:
+        if ref in memo:
+            return memo[ref]
+        if ref in trail:
+            return False
+        line = lines.get(ref)
+        result = False
+        if line is not None:
+            method = line.get("forecast_method")
+            if line.get("role") == "revenue":
+                result = True
+            elif method == "share_of_line":
+                result = proportional(str(line.get("forecast_base_ref")), trail | {ref})
+            elif method == "formula":
+                formula = formulas.get(ref) or line.get("formula")
+                if isinstance(formula, Mapping) and formula.get("operator") == "sum":
+                    terms = formula.get("terms") or []
+                    result = bool(terms) and all(
+                        isinstance(term, Mapping)
+                        and proportional(str(term.get("line_ref")), trail | {ref})
+                        for term in terms)
+        memo[ref] = result
+        return result
+
+    return proportional(target, frozenset())
+
+
 def forecast_subject(
     record: Mapping[str, Any],
     *,
@@ -941,17 +1014,25 @@ def forecast_subject(
     operating = _estimate_values(record, "result:operating_income")
 
     ratios: dict[str, list[tuple[str, str]]] = {}
+    # Quarters in which some cost line is not a share of revenue: its
+    # assumption can stay constant (a growth rate) while its share moves.
+    not_shares: set[str] = set()
     for item in live:
         role = roles.get(str(item["driver_ref"]))
         if role in _MARGIN_ROLES:
-            ratios.setdefault(str(item["period"]["end"]), []).append(
+            end = str(item["period"]["end"])
+            ratios.setdefault(end, []).append(
                 (str(item["driver_ref"]), str(item["value"])))
+            if str(item.get("measure")) not in _REVENUE_SHARE_MEASURES:
+                not_shares.add(end)
+    structural = _operating_income_revenue_proportional(record)
     ends = [str(item["end"]) for item in (record.get("forecast_periods") or [])]
     direction_series = [{
         "period_end": end,
         "revenue": revenue.get(end),
         "operating_income": operating.get(end),
         "ratios": sorted(ratios.get(end, [])),
+        "revenue_proportional": structural is not False and end not in not_shares,
     } for end in ends]
 
     bands: list[dict[str, Any]] = []
