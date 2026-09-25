@@ -123,6 +123,75 @@ class ReevaluationTests(_automation.AutomationDraftingTests):
         self.assertEqual((second["checked"], second["remaining"]), (0, 0))
         self.assertEqual(self.h.missions.document_review(self.review_id)["state"], "dismissed")
 
+    def _publish_v3(self) -> dict:
+        """What P1 did live: a new version over the one holding the dismissals."""
+
+        from tests.test_document_extraction_automation import mission_params
+
+        params = mission_params(self.h.state)
+        params["autonomy"]["may_write"] = list(params["autonomy"]["may_write"]) + ["source_discovery"]
+        for item in params["source_plan"]:
+            if item["source_ref"] == "source:alphaengine":
+                item["status"] = "connected"
+        params.update({"version_id": "coverage-mission-version:us-it-services:3",
+                       "prior_version_ref": self.mission["id"],
+                       "idempotency_key": "coverage-mission:us-it-services:3"})
+        ref = params.pop("mission_ref")
+        v3 = self.h.missions.create_mission(ref, **params)
+        # The ordinary carry-forward leaves a resolved review behind.
+        self.assertEqual(self.h.missions.carry_forward_superseded_documents(ref), [])
+        return v3
+
+    def test_a_dismissal_left_on_a_superseded_version_is_carried_and_reopened(self) -> None:
+        old = self.h.missions.document_review(self.review_id)
+        v3 = self._publish_v3()
+        self.mission = v3
+        result = self._reevaluate()
+        self.assertEqual(result["checked"], 1, result)
+        [item] = result["reopened"]
+        self.assertEqual(item["review_id"], self.review_id)
+        self.assertEqual(item["from_version_ref"], old["mission_version_ref"])
+        carried = item["carried_to"]
+        self.assertEqual(carried["mission_version_ref"], v3["id"])
+        # The old decision stands where it was made; the document is open
+        # again under the version the queue reads.
+        self.assertEqual(self.h.missions.document_review(self.review_id)["state"], "dismissed")
+        new = self.h.missions.document_review(carried["review_id"])
+        self.assertEqual((new["state"], new["mission_version_ref"], new["document_ref"]),
+                         ("awaiting_human_extraction", v3["id"], old["document_ref"]))
+        self.assertEqual(new["created_at"], old["created_at"])
+        row = self.h.missions.discovered_documents(v3["id"])[0]
+        self.assertEqual((row["status"], row["document_ref"]), ("acquired", old["document_ref"]))
+        self.assertTrue(row["ticket_ref"].startswith("alphaengine-acquisition:"))
+        self.assertIn(new["review_id"],
+                      [r["review_id"] for r in self.h.missions.document_reviews(
+                          v3["id"], state="awaiting_human_extraction")])
+        # The carried review reads under v3 like any other open one.
+        context = self.service.source_context(new["review_id"], content_hash(new), 0, self.actor)
+        self.assertEqual(context["mission_version_ref"], v3["id"])
+        [ledger] = self.h.h.core.connection.execute(
+            "SELECT record_json FROM coverage_mission_document_review_reopens").fetchall()
+        self.assertEqual(json.loads(ledger["record_json"])["carried_to"], carried)
+        # Decided once: the next tick has nothing left to look at.
+        again = self._reevaluate()
+        self.assertEqual((again["checked"], again["remaining"], again["reopened"]), (0, 0, []), again)
+
+    def test_a_superseded_dismissal_still_unnamed_is_written_down_not_carried(self) -> None:
+        self.mission = self._publish_v3()
+        with patch.object(DocumentExtractionService, "document_names_subject",
+                          return_value={"checked": True, "names_subject": False, "matched": []}):
+            first = self._reevaluate()
+        self.assertEqual((first["checked"], first["still_unattributed"], first["unreadable"]),
+                         (1, 1, 0), first)
+        self.assertEqual(self.h.missions.discovered_documents(self.mission["id"]), [])
+        self.assertEqual((self._reevaluate()["checked"]), 0)
+
+    def test_pacing_is_unchanged_across_versions(self) -> None:
+        self.mission = self._publish_v3()
+        result = self._reevaluate(reopens=0)
+        self.assertEqual((result["reopened"], result["stop_reason"], result["remaining"]),
+                         ([], "tick reopen allowance spent", 1))
+
 
 if __name__ == "__main__":
     unittest.main()

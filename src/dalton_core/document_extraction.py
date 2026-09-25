@@ -1444,7 +1444,7 @@ class DocumentExtractionService:
         return policy
 
     def _source_context(self, review_id, expected_review_hash, offset, actor_ref,
-                        require_open=True):
+                        require_open=True, allow_superseded=False):
         writer = self.writer
         reading_config = getattr(writer, "_document_extraction_model_config", None)
         limits = resolve_reading_limits(reading_config)
@@ -1472,9 +1472,18 @@ class DocumentExtractionService:
         # until the acquisition queue drained, days later.
         if require_open and review["state"] != "awaiting_human_extraction":
             raise ResearchVerificationConflict("review is stale; reload the queue")
+        grant_version_ref = review["mission_version_ref"]
+        if allow_superseded and not require_open:
+            # 2026-09-25: a closed review left under a superseded version of
+            # its mission (P1/P2 publish v4 over v3 and every P13i dismissal
+            # stays on v3) is re-read under the grant of the version now in
+            # force -- same mission, company still in its universe, source
+            # still connected.  Read-only: nothing here drafts or writes.
+            owner = writer.coverage_mission.mission(review["mission_version_ref"])
+            grant_version_ref = writer.coverage_mission.active_mission(owner["mission_ref"])["id"]
         grant = writer.coverage_mission.authorize_source_discovery(
             company_ref=review["company_ref"], source_ref=review["source_ref"],
-            requested_by=actor_ref, mission_version_ref=review["mission_version_ref"],
+            requested_by=actor_ref, mission_version_ref=grant_version_ref,
         )
         if review["source_ref"] not in SUPPORTED_SOURCE_REFS:
             raise ResearchVerificationError(
@@ -1665,7 +1674,7 @@ class DocumentExtractionService:
         return _record({"id": "document-extraction-context:" + content_hash(base)[:32], **base})
 
     def source_context(self, review_id, expected_review_hash, offset, actor_ref,
-                       require_open=True):
+                       require_open=True, allow_superseded=False):
         """Return the verified local source window without model authority.
 
         Deterministic readers use this boundary when they do not dispatch a
@@ -1675,7 +1684,7 @@ class DocumentExtractionService:
         """
         base = self._source_context(
             review_id, expected_review_hash, offset, actor_ref,
-            require_open=require_open,
+            require_open=require_open, allow_superseded=allow_superseded,
         )
         return _record({
             "id": "document-extraction-source-context:" + content_hash(base)[:32],
