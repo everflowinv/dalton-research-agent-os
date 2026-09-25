@@ -39,7 +39,7 @@
     "debate_map": {
       "max_cost_usd": 1.0,
       "max_input_tokens": 80000,
-      "max_output_tokens": 4000,
+      "max_output_tokens": 8000,
       "timeout_seconds": 240
     },
     "debate_map_verifier": {
