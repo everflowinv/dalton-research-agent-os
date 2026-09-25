@@ -53,6 +53,8 @@ DISPATCH_ERROR_REASON = "dispatch_error"
 # had already rebound this admission onto a new ticket identity by itself.
 # Automatic once, then a person -- the same rule the two retry doors follow.
 REENTRY_ESCALATED_REASON = "reentry_failed_after_automatic_rebind"
+# Research feedback outcomes that settle an admission for good.
+TERMINAL_RESEARCH_OUTCOMES = frozenset({"query_miss", "no_verified_claim"})
 MODEL_AUTHORITY_PREEXECUTION_ERROR = (
     "MissionDocumentResearchError: mission document admission is no longer executable"
 )
@@ -1627,23 +1629,27 @@ class MissionDocumentResearchCoordinator:
         # as an immutable observation.  Older dispatches could later recreate a
         # generic started_without_owned_live_ticket hold because those terminal
         # outcomes intentionally do not occupy the promoted-outcome table.
-        # Reconcile only from the latest fully validated observation; a later
-        # recovery_required observation must remain visible.
+        #
+        # Any validated terminal research feedback settles its admission.  It
+        # used to take only the *latest* observation, but the feedback is
+        # stamped with the admission's own ``created_at`` (its identity is
+        # deterministic), so it always sorts before the recovery observations
+        # of any admission that needed a recovery first.  Live on 2026-09-25,
+        # ca9bac39 completed ``no_verified_claim`` at 06:29 and stayed in the
+        # hold ledger as ``reentry_failed_after_automatic_rebind`` behind its
+        # 2026-09-11 recovery observations.  The executor writes feedback only
+        # once every model stage has succeeded, and nothing re-enters an
+        # admission after it, so no recovery can follow it.
         from .mission_document_research_executor import (
             read_mission_document_research_candidate_rejections,
             read_mission_document_research_observations,
         )
-        latest_observation: dict[str, Mapping[str, Any]] = {}
-        for observation in read_mission_document_research_observations(
-            self.store.connection
-        ):
-            latest_observation[observation["admission_ref"]] = observation
         completed_refs = {
-            admission_ref
-            for admission_ref, observation in latest_observation.items()
-            if observation["outcome"] in {
-                "query_miss", "no_verified_claim",
-            }
+            observation["admission_ref"]
+            for observation in read_mission_document_research_observations(
+                self.store.connection
+            )
+            if observation["outcome"] in TERMINAL_RESEARCH_OUTCOMES
         }
         # A candidate the governance rule refused settles its admission the
         # same way: the child completed, the refusal is written down, and a

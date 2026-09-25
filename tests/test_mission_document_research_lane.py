@@ -655,6 +655,38 @@ class MissionDocumentResearchLaneTests(unittest.TestCase):
         self.assertIn(failed["id"], holds)
         self.assertIn(staged["id"], holds)
 
+    def test_feedback_settles_admission_even_when_recovery_rows_sort_after_it(self) -> None:
+        """Live ca9bac39: complete at 06:29, still held as an escalation.
+
+        Research feedback is stamped with the admission's own ``created_at``,
+        so the recovery observations an admission collected on its way there
+        always sort *after* it.  The latest-row rule therefore never saw the
+        completion, and the hold outlived the finished run.
+        """
+
+        completed = self.store.add(1)
+        self.store.started(completed["id"])
+        self.assertEqual(self.lane.dispatch_once()["status"], "recovery_required")
+        holds = json.loads(self.lane.holds_path.read_text(encoding="utf-8"))["holds"]
+        self.assertIn(completed["id"], holds)
+
+        observations = [
+            # Written by today's run, stamped 2026-09-11T20:30:27 (admission time).
+            {"admission_ref": completed["id"], "outcome": "no_verified_claim"},
+            # Written on 2026-09-11 by the failures before it, stamped 20:35:12.
+            {"admission_ref": completed["id"], "outcome": "recovery_required"},
+            {"admission_ref": completed["id"], "outcome": "recovery_required"},
+        ]
+        with patch(
+            "dalton_core.mission_document_research_executor."
+            "read_mission_document_research_observations",
+            return_value=observations,
+        ):
+            self.lane.dispatch_once()
+
+        holds = json.loads(self.lane.holds_path.read_text(encoding="utf-8"))["holds"]
+        self.assertNotIn(completed["id"], holds)
+
     def test_staged_outcome_is_pending_only_when_policy_requires_promotion(self) -> None:
         admission = self.store.add(1)
         self.store.completed(admission["id"])
