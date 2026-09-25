@@ -551,7 +551,7 @@ def admit_day_ledger(
             route_decision_ref=route_decision_ref,
             reserved_micros=reserved_micros,
             mission_binding=mission_binding,
-        ), work_order_ref)
+        ), work_order_ref, budget=budget, attempt_number=attempt_number, phase=phase)
     except ThesisImpactBudgetError as exc:
         return {
             "status": "refused",
@@ -870,7 +870,9 @@ def _reclaim_unrecorded_lease(scheduler: Scheduler, work: WorkOrder,
     return None
 
 
-def _admit_through_lock(admit: Callable[[], Any], work_order_ref: str) -> Any:
+def _admit_through_lock(admit: Callable[[], Any], work_order_ref: str, *,
+                        budget: Any = None, attempt_number: int | None = None,
+                        phase: str | None = None) -> Any:
     """A day-ledger admission that waits out a locked budget file.
 
     2026-09-25 06:19: the planner's admission hit the budget database's
@@ -879,13 +881,52 @@ def _admit_through_lock(admit: Callable[[], Any], work_order_ref: str) -> Any:
     phase) and replays as the same admission, and a lock error at BEGIN or
     COMMIT leaves nothing written, so it is retried like the scheduler's own
     completion, for the same bounded time.
+
+    When the retry gives up the caller raises and never calls the model under
+    this admission -- but it cannot know whether one of the tries landed.  So
+    the identity is recorded beside the budget file first
+    (:mod:`.pending_settlement_registry`): the next cockpit call that opens
+    the ledger settles such an admission at zero if it exists, instead of
+    leaving it to charge its reservation to every day from now on.
     """
 
-    return retry_on_sqlite_lock(
-        admit, deadline_seconds=LEASE_RELEASE_RETRY_SECONDS, sleep=_lock_retry_sleep,
-        on_retry=lambda n, exc, wait: print(
-            f"cockpit-model: admitting {work_order_ref} to the day budget hit {exc}; "
-            f"retry {n} in {wait:.2f}s", file=sys.stderr))
+    try:
+        return retry_on_sqlite_lock(
+            admit, deadline_seconds=LEASE_RELEASE_RETRY_SECONDS, sleep=_lock_retry_sleep,
+            on_retry=lambda n, exc, wait: print(
+                f"cockpit-model: admitting {work_order_ref} to the day budget hit {exc}; "
+                f"retry {n} in {wait:.2f}s", file=sys.stderr))
+    except sqlite3.OperationalError as exc:
+        if (budget is not None and attempt_number is not None and phase is not None
+                and is_sqlite_lock_error(exc)):
+            from .pending_settlement_registry import PendingSettlements
+
+            recorded = PendingSettlements.for_budget(budget).record_unconfirmed_admission(
+                work_order_ref=work_order_ref, attempt_number=attempt_number,
+                phase=phase, reason=f"{type(exc).__name__}: {exc}")
+            print(f"cockpit-model: admitting {work_order_ref} attempt {attempt_number} "
+                  f"gave up on {exc}; "
+                  + ("recorded for voiding if it landed" if recorded
+                     else "could not record it for voiding"), file=sys.stderr)
+        raise
+
+
+def _drain_pending_settlements(budget: Any) -> list[dict[str, Any]]:
+    """Write the settlements earlier calls lost to a locked ledger.  Never raises."""
+
+    from .pending_settlement_registry import PendingSettlements
+
+    try:
+        results = PendingSettlements.for_budget(budget).drain(budget)
+    except Exception as exc:  # noqa: BLE001 - a backlog must never cost a call
+        print(f"cockpit-model: pending day-ledger settlements were not replayed "
+              f"({type(exc).__name__}: {exc})", file=sys.stderr)
+        return []
+    for item in results:
+        if item.get("status") not in {"locked"}:
+            print(f"cockpit-model: replayed a pending day-ledger settlement: "
+                  f"{json.dumps(item, sort_keys=True)}", file=sys.stderr)
+    return results
 
 
 def _settle_without_losing_the_lease(budget: Any, admission: Mapping[str, Any], *,
@@ -909,11 +950,27 @@ def _settle_without_losing_the_lease(budget: Any, admission: Mapping[str, Any], 
             lambda: settle_day_ledger(budget, admission, actual_micros=actual_micros),
             deadline_seconds=LEASE_RELEASE_RETRY_SECONDS, sleep=_lock_retry_sleep)
     except (ThesisImpactBudgetError, sqlite3.Error) as exc:
+        # 2026-09-25: four of these (two event judgements among them) were
+        # printed and forgotten, and each open reservation went on charging
+        # the day ledger in full -- about $1.8 on the day, $0.9 of it in the
+        # event pool.  A ledger that could not be written is recorded beside
+        # the budget file and replayed by the next call that opens it.
+        pending = False
+        if isinstance(exc, sqlite3.Error) and admission.get("admission_id"):
+            from .pending_settlement_registry import PendingSettlements
+
+            pending = PendingSettlements.for_budget(budget).record_settlement(
+                admission_id=str(admission["admission_id"]),
+                actual_micros=actual_micros,
+                work_order_ref=admission.get("work_order_ref"),
+                attempt_number=admission.get("attempt_number"),
+                reason=f"{type(exc).__name__}: {exc}")
         print(
             "cockpit-model: settlement of "
             f"{admission.get('admission_id')} for {actual_micros} micros was not "
             f"recorded ({type(exc).__name__}: {exc}); the reservation stays open "
-            "and the attempt is completed anyway",
+            + ("until the next call replays it" if pending else "")
+            + " and the attempt is completed anyway",
             file=sys.stderr,
         )
         return None
@@ -2390,6 +2447,7 @@ class CockpitModel:
                 with _ReleaseLeaseOnError(scheduler, work, attempt, lease) as guard, \
                         ModelRouter(self.config["model_router_db"]) as router, \
                         ThesisImpactBudgetStore(self.config["budget_db"]) as budget:
+                    _drain_pending_settlements(budget)
                     prompt_bytes = len(prompt.encode("utf-8"))
                     pool_rejection: dict[str, Any] | None = None
                     result: ResultEnvelope
@@ -2778,7 +2836,7 @@ class CockpitModel:
                     work_order_ref=work.id, attempt_number=attempt, phase="assessment",
                     route_decision_ref=route["id"],
                     reserved_micros=max(ceiling, micros), mission_binding=scope,
-                ), work.id)
+                ), work.id, budget=budget, attempt_number=attempt, phase="assessment")
             except ThesisImpactBudgetError as exc:
                 refusal.append(str(exc))
                 return None
