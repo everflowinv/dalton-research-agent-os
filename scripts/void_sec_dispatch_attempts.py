@@ -15,6 +15,15 @@ So this withdraws the attempts, and only the ones whose runs failed for a
 reason given on the command line.  Withdrawal is recorded, never a deletion:
 the dispatch happened, it simply proved nothing about the filing.
 
+Running it beside a live writer: planning (no ``--apply``) opens the Core
+``mode=ro`` and writes nothing.  ``--apply`` goes through the formal path --
+``DaltonStore`` and ``CoverageMissionAuthority.void_sec_dispatch_attempt``,
+whose schema trigger refuses any other insert -- and each void is one
+``BEGIN IMMEDIATE`` row insert under the store's 15 s busy timeout, in WAL,
+the same way every lane child writes this Core while the writer runs.  The
+SEC coordinator re-reads the voids from the table on every tick, so nothing
+has to be stopped or restarted.
+
 **Deliberately not automatic.**  Inferring "this failure was not the filing's
 fault" is how a genuinely dead filing gets retried forever.  Someone has to
 name the outage, and the name is kept beside every attempt it excuses.
@@ -24,6 +33,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
+import sqlite3
 import sys
 from collections import Counter
 from pathlib import Path
@@ -40,6 +51,7 @@ from dalton_core.coverage_mission import (  # noqa: E402
 from dalton_core.store import DaltonStore  # noqa: E402
 
 PRECONDITION_PREFIX = "lane precondition failed:"
+MAX_RUN_ERROR = 500
 
 
 def run_error(state_dir: Path | None, ticket_ref: str | None) -> str | None:
@@ -71,22 +83,59 @@ def run_error(state_dir: Path | None, ticket_ref: str | None) -> str | None:
                 return issuer["error"].strip()
         return None
     # A run that failed its preconditions never wrote a summary at all -- it
-    # refused before opening anything -- so its only trace is the log line.
-    # Those are exactly the infrastructure failures worth telling apart from a
+    # refused before opening anything -- so its only trace is the log.  Those
+    # are exactly the infrastructure failures worth telling apart from a
     # filing that genuinely cannot be fetched, and reading nothing would leave
     # them unattributable and therefore unforgivable.
     try:
-        log = (directory / "run.log").read_text(encoding="utf-8")
+        log = (directory / "run.log").read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
-    for line in log.splitlines():
+    return log_error(log)
+
+
+# Lines that say what went wrong when the run died before a summary.
+_ERROR_LINE = re.compile(
+    r"(error|exception|failed|refused|unknown|denied|conflict|invalid|not found)",
+    re.IGNORECASE,
+)
+
+
+def log_error(log: str) -> str | None:
+    """The line of a summary-less run's log that says why it stopped.
+
+    In order: the lane's own precondition line; the exception a traceback
+    ends with; the last line that reads as an error; the last line at all.
+    Live on ws-7d (2026-09-25) all 47 failed 10-Q runs left exactly one line,
+    ``unknown issuer ticker(s): AMZN; use --issuer-cik T=CIK`` -- the CLI's
+    SystemExit -- and none of them could be matched by ``--match`` because
+    only a "lane precondition failed:" line was ever read.
+    """
+
+    lines = [line.strip() for line in log.splitlines() if line.strip()]
+    for line in lines:
         if line.startswith(PRECONDITION_PREFIX):
-            return line.strip()
-    return None
+            return line[:MAX_RUN_ERROR]
+    if not lines:
+        return None
+    last_traceback = max(
+        (index for index, line in enumerate(lines)
+         if line.startswith("Traceback (most recent call last)")),
+        default=None,
+    )
+    if last_traceback is not None:
+        for line in reversed(lines[last_traceback + 1:]):
+            if not line.startswith(("File ", "^", "~")) and ":" in line:
+                return line[:MAX_RUN_ERROR]
+    for line in reversed(lines):
+        if _ERROR_LINE.search(line):
+            return line[:MAX_RUN_ERROR]
+    return lines[-1][:MAX_RUN_ERROR]
 
 
 def candidates(
-    store: DaltonStore, *, match: str | None, state_dir: Path | None = None
+    store: Any, *, match: str | None, state_dir: Path | None = None,
+    accessions: Any = None,
 ) -> list[dict[str, Any]]:
     """Settled dispatches whose runs did not succeed, newest last.
 
@@ -108,6 +157,8 @@ def candidates(
     selected = []
     for row in rows:
         item = dict(row)
+        if accessions and item.get("expected_accession") not in set(accessions):
+            continue
         item["run_error"] = item.get("failure_reason") or run_error(
             state_dir, item.get("ticket_ref"))
         if match is not None:
@@ -118,7 +169,7 @@ def candidates(
     return selected
 
 
-def attempts_by_accession(store: DaltonStore) -> dict[str, int]:
+def attempts_by_accession(store: Any) -> dict[str, int]:
     """What the retry budget currently reads, after voids."""
 
     rows = store.connection.execute(
@@ -131,6 +182,18 @@ def attempts_by_accession(store: DaltonStore) -> dict[str, int]:
     return {row["accession"]: int(row["n"]) for row in rows if row["accession"]}
 
 
+class _ReadOnlyCore:
+    """A Core opened ``mode=ro`` for planning; it cannot write anything."""
+
+    def __init__(self, path: Path) -> None:
+        self.connection = sqlite3.connect(
+            Path(path).expanduser().resolve().as_uri() + "?mode=ro", uri=True)
+        self.connection.row_factory = sqlite3.Row
+
+    def close(self) -> None:
+        self.connection.close()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--config", type=Path, required=True, help="service.json")
@@ -141,20 +204,26 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--match", default=None,
                         help="only attempts whose detail or failure reason contains this; "
                              "omit to void every unsuccessful attempt")
+    parser.add_argument("--accession", action="append", default=None,
+                        help="only attempts on this expected accession; repeatable")
     parser.add_argument("--apply", action="store_true",
                         help="without this the withdrawal is only described")
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     service = json.loads(args.config.expanduser().resolve().read_text(encoding="utf-8"))
     core_db = Path(service["core_db"])
-    store = DaltonStore(str(core_db))
+    # Planning opens nothing for writing: a DaltonStore runs the schema and
+    # its migrations on open, which a dry run against a live Core has no
+    # business doing.  Only --apply opens the authority.
+    store: Any = DaltonStore(str(core_db)) if args.apply else _ReadOnlyCore(core_db)
     try:
-        authority = CoverageMissionAuthority(store)
-        selected = candidates(store, match=args.match, state_dir=core_db.parent)
+        selected = candidates(store, match=args.match, state_dir=core_db.parent,
+                              accessions=args.accession)
         result: dict[str, Any] = {
             "status": "applied" if args.apply else "planned",
             "reason": args.reason,
             "match": args.match,
+            "accessions": args.accession,
             "attempts_to_void": len(selected),
             "by_ticker": dict(Counter(item["ticker"] for item in selected)),
             "by_detail": dict(Counter(item["detail"] for item in selected)),
@@ -163,16 +232,31 @@ def main(argv: list[str] | None = None) -> int:
             "by_run_error": dict(Counter(
                 (item.get("run_error") or "<none recorded>")[:70] for item in selected)),
             "accessions_affected": len({item["expected_accession"] for item in selected}),
-            "attempts_before": attempts_by_accession(store),
+            "selected": [
+                {key: item.get(key) for key in (
+                    "dispatch_id", "ticker", "expected_accession", "ticket_ref",
+                    "settled_at")}
+                for item in selected
+            ],
+            "attempts_before": {
+                accession: count
+                for accession, count in attempts_by_accession(store).items()
+                if accession in {item["expected_accession"] for item in selected}
+            },
         }
         if args.apply:
+            authority = CoverageMissionAuthority(store)
             applied = 0
             for item in selected:
                 outcome = authority.void_sec_dispatch_attempt(
                     item["dispatch_id"], reason=args.reason, voided_by=args.voided_by)
                 applied += int(outcome["status_marker"] == "fresh")
             result["applied"] = applied
-            result["attempts_after"] = attempts_by_accession(store)
+            result["attempts_after"] = {
+                accession: count
+                for accession, count in attempts_by_accession(store).items()
+                if accession in result["attempts_before"]
+            }
     finally:
         store.close()
     print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=1))
