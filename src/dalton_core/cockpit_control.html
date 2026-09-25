@@ -530,26 +530,46 @@ function uiTextKeyOf(text){let key=UI_TEXT_KEYS.get(text);if(key===undefined){if
 function uiTextSource(revision){if(revision===undefined||revision===UI_TEXT_SOURCE)return;UI_TEXT_SOURCE=revision;UI_TEXT_RESOLVED.clear();UI_TEXT_EPOCH++}
 function collectUiStrings(value,out,depth=0){if(out.size>=20000||depth>40)return out;if(typeof value==="string"){if(value&&value.length<=200000)out.add(value)}else if(Array.isArray(value)){for(const x of value)collectUiStrings(x,out,depth+1)}else if(value&&typeof value==="object"){for(const k of Object.keys(value))if(k!=="csrf_token")collectUiStrings(value[k],out,depth+1)}return out}
 async function fetchUiTexts(keys){const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),10000);try{const r=await fetch(`${UI_TEXT_ENDPOINT}?keys=${keys.join(",")}`,{headers:{Accept:"application/json"},cache:"no-store",signal:controller.signal});if(!r.ok)throw new Error(`HTTP ${r.status}`);return await r.json()}finally{clearTimeout(timer)}}
-function applyUiTexts(chunk,byKey,r,deferred){
-  const texts=r.texts&&typeof r.texts==="object"?r.texts:{},same=new Set(Array.isArray(r.same)?r.same:[]),later=new Set(Array.isArray(r.deferred)?r.deferred:[]);let changed=false;
-  for(const key of chunk){if(later.has(key)){deferred.push(key);continue}
-    const reviewed=Object.prototype.hasOwnProperty.call(texts,key)&&typeof texts[key]==="string"?texts[key]:same.has(key)?null:undefined;
-    for(const text of byKey.get(key)||[]){const shown=reviewed===null?text:reviewed,held=Object.prototype.hasOwnProperty.call(UI_TEXT,text);
-      if(shown===undefined){if(held){delete UI_TEXT[text];changed=true}}else if(!held||UI_TEXT[text]!==shown){UI_TEXT[text]=shown;changed=true}}
-    UI_TEXT_RESOLVED.add(key)}
-  return changed}
+/* 2026-09-25: one queue for the whole page.  Every getJson used to resolve its
+   own payload with its own requests, so the first paint sent overlapping
+   requests for the same keys (overview, log and approvals together), and every
+   poll after it sent a request of its own for its one or two new strings --
+   live, a stream of ui-texts?keys=<1-2 keys> requests.  Callers now put keys
+   on one queue; it is sent after UI_TEXT_COALESCE_MS in pages of up to
+   UI_TEXT_BATCH keys, and a key already on its way is waited for, not asked
+   again.  An answer is {text}, {same}, {none}, or null when the key could not
+   be answered (failed or still deferred at the deadline): null is not
+   remembered, so the next read asks again. */
+const UI_TEXT_COALESCE_MS=25,UI_TEXT_WAITING=new Map();let UI_TEXT_QUEUE=[],UI_TEXT_FLUSH=null;
+function uiTextAnswer(key,r){const texts=r.texts&&typeof r.texts==="object"?r.texts:{};if(Object.prototype.hasOwnProperty.call(texts,key)&&typeof texts[key]==="string")return {text:texts[key]};if(Array.isArray(r.same)&&r.same.includes(key))return {same:true};return {none:true}}
+async function flushUiTexts(){
+  UI_TEXT_FLUSH=null;let queue=UI_TEXT_QUEUE;UI_TEXT_QUEUE=[];const deadline=Date.now()+UI_TEXT_DEADLINE_MS,owned=new Map(queue.map(key=>[key,UI_TEXT_WAITING.get(key)]));
+  const settle=(key,answer)=>{const w=owned.get(key);if(!w)return;owned.delete(key);if(UI_TEXT_WAITING.get(key)===w)UI_TEXT_WAITING.delete(key);w.resolve(answer)};
+  try{
+    while(queue.length&&Date.now()<deadline){
+      const chunks=[],deferred=[];for(let i=0;i<queue.length;i+=UI_TEXT_BATCH)chunks.push(queue.slice(i,i+UI_TEXT_BATCH));
+      for(let i=0;i<chunks.length&&Date.now()<deadline;i+=UI_TEXT_PARALLEL){
+        const answers=await Promise.all(chunks.slice(i,i+UI_TEXT_PARALLEL).map(chunk=>fetchUiTexts(chunk).then(r=>[chunk,r],()=>[chunk,null])));
+        for(const [chunk,r] of answers){if(!r||typeof r!=="object"){for(const key of chunk)settle(key,null);continue}
+          if(r.revision!==undefined&&r.revision!==UI_TEXT_SOURCE)uiTextSource(r.revision);
+          const later=new Set(Array.isArray(r.deferred)?r.deferred:[]);
+          for(const key of chunk){if(later.has(key))deferred.push(key);else settle(key,uiTextAnswer(key,r))}}}
+      if(deferred.length>=queue.length)break;queue=deferred}
+  }finally{for(const key of [...owned.keys()])settle(key,null)}}
+function askUiText(key){let w=UI_TEXT_WAITING.get(key);if(w)return w.promise;w={};w.promise=new Promise(resolve=>{w.resolve=resolve});UI_TEXT_WAITING.set(key,w);UI_TEXT_QUEUE.push(key);if(!UI_TEXT_FLUSH)UI_TEXT_FLUSH=setTimeout(flushUiTexts,UI_TEXT_COALESCE_MS);return w.promise}
+function applyUiText(key,byKey,answer){let changed=false;
+  const reviewed=answer.text!==undefined?answer.text:answer.same?null:undefined;
+  for(const text of byKey.get(key)||[]){const shown=reviewed===null?text:reviewed,held=Object.prototype.hasOwnProperty.call(UI_TEXT,text);
+    if(shown===undefined){if(held){delete UI_TEXT[text];changed=true}}else if(!held||UI_TEXT[text]!==shown){UI_TEXT[text]=shown;changed=true}}
+  UI_TEXT_RESOLVED.add(key);return changed}
 async function resolveUiTexts(payload){
   if(!payload||typeof payload!=="object")return;
   if(Object.prototype.hasOwnProperty.call(payload,"text_localization_revision"))uiTextSource(payload.text_localization_revision);
   const byKey=new Map();
   for(const text of collectUiStrings(payload,new Set())){const key=uiTextKeyOf(text);if(UI_TEXT_RESOLVED.has(key))continue;const list=byKey.get(key);if(list)list.push(text);else byKey.set(key,[text])}
-  let queue=[...byKey.keys()],changed=false;const deadline=Date.now()+UI_TEXT_DEADLINE_MS;
-  while(queue.length&&Date.now()<deadline){
-    const chunks=[],deferred=[];for(let i=0;i<queue.length;i+=UI_TEXT_BATCH)chunks.push(queue.slice(i,i+UI_TEXT_BATCH));
-    for(let i=0;i<chunks.length&&Date.now()<deadline;i+=UI_TEXT_PARALLEL){
-      const answers=await Promise.all(chunks.slice(i,i+UI_TEXT_PARALLEL).map(chunk=>fetchUiTexts(chunk).then(r=>[chunk,r],()=>[chunk,null])));
-      for(const [chunk,r] of answers){if(!r||typeof r!=="object")continue;if(r.revision!==undefined&&r.revision!==UI_TEXT_SOURCE){uiTextSource(r.revision)}if(applyUiTexts(chunk,byKey,r,deferred))changed=true}}
-    if(deferred.length>=queue.length)break;queue=deferred}
+  if(!byKey.size)return;
+  const keys=[...byKey.keys()],answers=await Promise.all(keys.map(askUiText));let changed=false;
+  keys.forEach((key,i)=>{if(answers[i]&&applyUiText(key,byKey,answers[i]))changed=true});
   if(changed)UI_TEXT_REVISION++}
 const uiTextPath=path=>path.startsWith("/v1/")&&!path.startsWith(UI_TEXT_ENDPOINT);
 const rawNode=(tag,text,cls)=>{const n=document.createElement(tag);if(text!=null)n.textContent=text;if(cls)n.className=cls;return n};

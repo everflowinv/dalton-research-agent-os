@@ -351,6 +351,51 @@ class CockpitUiTextDeliveryEndToEndTests(_Store):
         self.assertGreater(result["requests"], 5)
         self.assertEqual(result["absent"], CHECKING)
 
+    def test_concurrent_views_share_one_batch_and_never_ask_a_key_twice(self) -> None:
+        # 2026-09-25: the first paint resolved the overview, the log and the
+        # approvals separately, and every poll after it sent its own request
+        # for one or two new strings.  One queue now serves every caller.
+        publish_ui_texts(self.directory, [batch("Revenue increased.", "收入增长。"),
+                                          batch("Revenue fell.", "收入下降。")])
+        revision = ui_texts_revision(self.db)
+        overview = {"text_localization_revision": revision,
+                    "a": "Revenue increased.", "b": "Shared status.", "c": "Only here."}
+        log = {"events": [{"t": "Revenue fell."}, {"t": "Shared status."}]}
+        approvals = {"items": [{"s": "Revenue increased."}, {"s": "Another."}]}
+        polls = [{"as_of": f"2026-09-25T06:{n:02d}:00+00:00"} for n in range(6)]
+        result = self.run_page(f"""
+            await Promise.all([resolveUiTexts({json.dumps(overview)}),
+                               resolveUiTexts({json.dumps(log)}),
+                               resolveUiTexts({json.dumps(approvals)})]);
+            const first=requests.length;
+            const keys=requests.flatMap(r=>r.split("keys=")[1].split(","));
+            await Promise.all({json.dumps(polls)}.map(p=>resolveUiTexts(p)));
+            console.log(JSON.stringify({{first, polls: requests.length-first,
+              asked: keys.length, distinct: new Set(keys).size,
+              increased: finalResearchText("Revenue increased."),
+              fell: finalResearchText("Revenue fell.")}}));""")
+        self.assertEqual(result["first"], 1)
+        self.assertEqual(result["asked"], result["distinct"])
+        self.assertEqual(result["polls"], 1)
+        self.assertEqual(result["increased"], "收入增长。")
+        self.assertEqual(result["fell"], "收入下降。")
+
+    def test_a_failed_request_is_not_remembered_and_is_asked_again(self) -> None:
+        publish_ui_texts(self.directory, [batch("Revenue increased.", "收入增长。")])
+        payload = {"a": "Revenue increased."}
+        result = self.run_page(f"""
+            const working=globalThis.fetch;let fail=true;
+            globalThis.fetch=(path,options)=>fail?Promise.reject(new Error("offline")):working(path,options);
+            await resolveUiTexts({json.dumps(payload)});
+            const before=finalResearchText("Revenue increased.");
+            fail=false;
+            await resolveUiTexts({json.dumps(payload)});
+            console.log(JSON.stringify({{before, after: finalResearchText("Revenue increased."),
+              waiting: UI_TEXT_WAITING.size}}));""")
+        self.assertEqual(result["before"], CHECKING)
+        self.assertEqual(result["after"], "收入增长。")
+        self.assertEqual(result["waiting"], 0)
+
     def test_a_new_revision_re_asks_strings_that_were_not_reviewed_before(self) -> None:
         publish_ui_texts(self.directory, [batch("Revenue increased.", "收入增长。")])
         before = ui_texts_revision(self.db)
