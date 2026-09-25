@@ -767,6 +767,48 @@ class MissionDocumentResearchTests(unittest.TestCase):
         )
         self.assertEqual(works[1]["id"], old_draft_ref)
 
+    def test_model_roll_after_staging_reuses_the_finished_staging_stage(self):
+        """Live 2026-09-25: ``staging completion did not converge`` on re-entry.
+
+        All four stages had succeeded before a model-policy roll.  The roll's
+        refresh hash renamed the staging stage, so the next run enqueued a
+        second staging Work whose completion collided with the first one's
+        admission-scoped completion key (legacy 16a7a137, 28632c70; ws-7d
+        d02eaa60, 42459ee5).
+        """
+
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        admission = authority.admit_from_plan(**args)
+        executor, draft, verifier = self._executor(fixture, authority)
+        finished = self._run_until(
+            executor, admission,
+            lambda item: item.get("research_status") == "candidate_staged")
+        staged_before = effective_mission_document_work_orders(
+            authority, executor.scheduler, admission["id"],
+            draft_worker=executor.draft_worker, verifier_worker=executor.verifier_worker)
+        current_execution = copy.deepcopy(admission["model_execution"])
+        current_authority = copy.deepcopy(admission["model_authority"])
+        current_authority["draft"]["routing_policy_hash"] = "5" * 64
+        current_authority["verifier"]["routing_policy_hash"] = "6" * 64
+        authority.model_execution_resolver = lambda: (current_execution, current_authority)
+        refreshed = authority.resolve_for_execution(admission["id"])
+        self.assertIsInstance(refreshed.get("model_authority_refresh"), dict)
+
+        again = executor.run_once(admission["id"])
+
+        self.assertEqual(again["status"], "complete")
+        self.assertEqual(again["research_status"], finished["research_status"])
+        self.assertEqual((draft.calls, verifier.calls), (1, 1))
+        works = effective_mission_document_work_orders(
+            authority, executor.scheduler, admission["id"],
+            draft_worker=executor.draft_worker, verifier_worker=executor.verifier_worker)
+        self.assertEqual([work["id"] for work in works],
+                         [work["id"] for work in staged_before])
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM scheduler_work_orders WHERE json_extract("
+            "work_order_json,'$.metadata.stage')='qualitative_candidate_staging'"
+        ).fetchone()[0], 1)
+
     def test_model_roll_reuses_exact_pre_numeric_prompt_draft(self):
         fixture, authority, args, _registration, _launcher = self._fixture()
         admission = authority.admit_from_plan(**args)
@@ -1743,6 +1785,47 @@ class MissionDocumentResearchTests(unittest.TestCase):
             "SELECT count(*) FROM "
             "mission_document_research_model_authority_epoch_rebinds"
         ).fetchone()[0], 1)
+
+    def test_intermediate_epoch_recovery_chain_survives_a_second_model_roll(self):
+        """Live 6a2bcd: ``recovery link authority drifted`` after two rolls.
+
+        The verifier first ran -- and failed, and spent its automatic retry --
+        under an intermediate model-authority epoch (09-22).  A later roll
+        (09-25) renamed the stage again, so its recovery chain no longer
+        started at any Work the executor could derive.  The chain's root is
+        still this admission's own sealed stage Work, exactly as the lane
+        already accepts it; the escalation it ended in must stay readable.
+        """
+
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        self._enable_recovery(fixture, maximum=2)
+        admission = authority.admit_from_plan(**args)
+        first_execution = copy.deepcopy(admission["model_execution"])
+        first_authority = copy.deepcopy(admission["model_authority"])
+        first_authority["verifier"]["routing_policy_hash"] = "3" * 64
+        authority.model_execution_resolver = lambda: (first_execution, first_authority)
+        adapter = AlwaysUnprovedSendAdapter({"unused": True})
+        executor, draft, _verifier = self._executor(
+            fixture, authority, verifier_adapter=adapter)
+        escalated = self._run_until(
+            executor, admission,
+            lambda item: item.get("reason")
+            == "unproved_send_failed_after_automatic_retry")
+        self.assertEqual(escalated["stage"], "independent_qualitative_verifier")
+        calls = (draft.calls, adapter.calls)
+        second_execution = copy.deepcopy(admission["model_execution"])
+        second_authority = copy.deepcopy(admission["model_authority"])
+        second_authority["verifier"]["routing_policy_hash"] = "4" * 64
+        authority.model_execution_resolver = lambda: (second_execution, second_authority)
+        # And, as live, a signing rolled the budget envelope in between.
+        self._roll_mission(fixture, budget={
+            **fixture.mission["budget"], "max_daily_cost_usd": 9.0})
+
+        again = executor.run_once(admission["id"])
+
+        self.assertEqual(again["status"], "stopped")
+        self.assertEqual(again["reason"], "unproved_send_failed_after_automatic_retry")
+        self.assertEqual((draft.calls, adapter.calls), calls)
 
     def test_epoch_inspector_classifies_an_unenqueued_model_prefix(self):
         fixture, authority, args, _registration, _launcher = self._fixture()

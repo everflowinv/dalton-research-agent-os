@@ -2284,6 +2284,9 @@ def _effective_stage(authority: Any, scheduler: Scheduler,
                     raise MissionDocumentResearchExecutorError(
                         "model authority refresh has an unresolved historical stage")
             else:
+                if remaining and remaining[0]["failed_work_order_ref"] != base["id"]:
+                    base = _sealed_epoch_chain_root(
+                        scheduler, admission, base, remaining[0]) or base
                 while remaining:
                     row = remaining.pop(0)
                     link = _read_recovery_link(
@@ -2303,6 +2306,100 @@ def _effective_stage(authority: Any, scheduler: Scheduler,
                 selected_links.append(link)
         effective.append(base)
     return effective[index], selected_links
+
+
+def _sealed_epoch_chain_root(
+    scheduler: Scheduler, admission: Mapping[str, Any], base: Mapping[str, Any],
+    row: Any,
+) -> dict[str, Any] | None:
+    """The stored stage Work a recovery chain from an intermediate epoch starts at.
+
+    A stage that ran and failed under one model-authority refresh, and was
+    then renamed by a later one, keeps a recovery chain rooted at a Work that
+    neither the admitted nor the current authority derives (live 6a2bcd: the
+    verifier failed and spent its automatic retry under the 2026-09-22
+    epoch; the 09-25 roll renamed the stage and every re-entry died on
+    ``recovery link authority drifted``).  The lane already accepts such a
+    root from persisted Scheduler authority; so does this, under the same
+    binding: the chain's first link names a stored, content-sealed stage Work
+    of this very admission and stage, fed by the same upstream Work as the
+    stage derived now.  ``_read_recovery_link`` then re-verifies every link
+    against that exact Work, so nothing outside the stored chain is trusted.
+    """
+
+    if row["recovery_number"] != 1:
+        return None
+    ref = row["failed_work_order_ref"]
+    if not isinstance(ref, str) or not ref.startswith("work:mission-document-research-"):
+        return None
+    stored = scheduler.work_order_authority(ref)
+    if stored is None:
+        return None
+    work = stored["work_order"]
+    metadata = work.get("metadata") if isinstance(work, Mapping) else None
+    if (not isinstance(metadata, Mapping)
+            or content_hash(work) != stored["work_order_hash"]
+            or work.get("id") != ref
+            or metadata.get("authority_kind") != AUTHORITY_KIND
+            or metadata.get("mission_document_research_admission_ref") != admission["id"]
+            or metadata.get("mission_document_research_admission_hash")
+            != admission["content_hash"]
+            or metadata.get("stage") != base["metadata"]["stage"]
+            or metadata.get("upstream_work_order_ref")
+            != base["metadata"].get("upstream_work_order_ref")
+            or "mission_document_model_authority_epoch_rebind" in metadata
+            or _terminal_model_failure(scheduler, work) is None):
+        return None
+    return dict(work)
+
+
+def _effective_staging_work(
+    admission: Mapping[str, Any], scheduler: Scheduler,
+    registry: DocumentResearchRegistry, effective: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """The staging Work for this effective model prefix, reusing a finished one.
+
+    A model-authority refresh mixes its hash into the identity of every stage
+    after retrieval, staging included, so that a new routing/budget epoch never
+    aliases the old one.  The model stages already reuse an epoch that
+    succeeded under the admitted authority; staging did not.  So an admission
+    whose four stages had all succeeded before a model-policy roll derived a
+    *new* staging Work on its next run, and completing it collided with the
+    admission-scoped completion key the finished staging already holds: live
+    2026-09-25, ``staging completion did not converge`` on every such
+    re-entry (legacy 16a7a137, 28632c70; ws-7d d02eaa60, 42459ee5).
+
+    Staging calls no model and routes nothing, so the epoch is only in its
+    name.  When the admitted-authority staging Work for the very same upstream
+    verifier Work exists, byte-exact, and succeeded, it is the stage.
+    """
+
+    current = _derive(admission, scheduler, registry,
+                      [*effective, _blueprints(admission)[3]], 3)
+    if not isinstance(admission.get("model_authority_refresh"), Mapping):
+        return current
+    current_formal = scheduler.formal_result(current["id"])
+    if current_formal is not None:
+        return current
+    admitted = {
+        key: value for key, value in admission.items()
+        if key not in {"admitted_model_execution", "admitted_model_authority",
+                       "model_authority_refresh"}
+    }
+    admitted["model_execution"] = admission["admitted_model_execution"]
+    admitted["model_authority"] = admission["admitted_model_authority"]
+    prior = _derive(admitted, scheduler, registry,
+                    [*effective, _blueprints(admitted)[3]], 3)
+    if prior["id"] == current["id"]:
+        return current
+    stored = scheduler.work_order_authority(prior["id"])
+    formal = scheduler.formal_result(prior["id"])
+    if (stored is None or formal is None or formal["terminal_state"] != "succeeded"
+            or stored["work_order_hash"] != content_hash(prior)
+            or canonical_json(stored["work_order"]) != canonical_json(prior)
+            or prior["metadata"]["upstream_work_order_ref"] != effective[2]["id"]):
+        return current
+    return prior
 
 
 def validate_mission_document_work_authority(authority, scheduler, work, *, worker=None):
@@ -2352,9 +2449,8 @@ def effective_mission_document_work_orders(
             work, _links = _effective_stage(
                 authority, scheduler, admission, index, worker=worker)
         else:
-            work = _derive(
-                admission, scheduler, authority.registry,
-                [*effective, originals[index]], index)
+            work = _effective_staging_work(
+                admission, scheduler, authority.registry, effective)
         stored = scheduler.work_order_authority(work["id"])
         if stored is not None and (stored["work_order_hash"] != content_hash(work)
                                    or canonical_json(stored["work_order"])
@@ -4731,9 +4827,8 @@ class MissionDocumentResearchExecutor:
                 work, _links = _effective_stage(
                     self.authority, self.scheduler, admission, index, worker=stage_worker)
             else:
-                work = _derive(
-                    admission, self.scheduler, self.registry,
-                    [*effective, originals[index]], index)
+                work = _effective_staging_work(
+                    admission, self.scheduler, self.registry, effective)
             effective.append(work)
             stored = self.scheduler.work_order_authority(work["id"])
             if stored is None:
