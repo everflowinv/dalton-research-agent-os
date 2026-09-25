@@ -238,6 +238,143 @@ class ChildRunTests(unittest.TestCase):
         self.assertEqual(current["change_reason"], "mission_rebind")
         self.assertEqual(current["mission_version_ref"], mission["id"])
 
+    def _redraw(self, *, bull, bear, debate_ref="new-1"):
+        """Draft a map citing the claims whose statements are given, by row id."""
+
+        def reply(prompt):
+            ids = {line.split("\t")[-1]: line.split("\t")[0].strip()
+                   for line in prompt.splitlines() if line.strip().startswith("C")
+                   and "\t" in line}
+            body = json.loads(draft_reply())
+            debate = body["debates"][0]
+            debate["debate_ref"] = debate_ref
+            debate["bull"]["claim_refs"] = [ids[text] for text in bull]
+            debate["bear"]["claim_refs"] = [ids[text] for text in bear]
+            return json.dumps(body)
+
+        class PromptModel(FakeModel):
+            def call(inner, *, purpose, request_id, prompt, mission):
+                result = FakeModel.call(inner, purpose=purpose, request_id=request_id,
+                                        prompt=prompt, mission=mission)
+                if callable(result["text"]):
+                    result["text"] = result["text"](prompt)
+                return result
+
+        model = PromptModel([reply, PASS])
+        with patch("dalton_core.debate_map_cli.CockpitModel", model), \
+                patch("dalton_core.debate_map_cli.route_family", fake_family):
+            return self.harness.run(dry_run=False,
+                                    model_config_path=self.harness.with_model())
+
+    def test_a_mission_bump_that_withdraws_a_retired_claim_publishes(self):
+        # 2026-09-25: under a changed mission every redraw went out as
+        # mission_rebind, which the authority admits only for an identical
+        # map, so each paid redraw was a duplicate (legacy 123 since 09-14,
+        # ws-7d 30 today) and AMZN v5 / GOOGL v2 / MSFT v1 kept citing Claims
+        # retired since.  A mission bump plus a withdrawn retired ref is an
+        # ordinary new version, bound to the current mission.
+        bull, bull2 = ("Bookings are accelerating into next year.",
+                       "Backlog is at a record.")
+        bear = "Discretionary demand is decelerating."
+        self.harness.add_claims()
+        retiring = self.harness.fixture.add_claim(
+            "debate-bull2", kind="qualitative", value=None, unit=None,
+            metric="demand environment", period="current", statement=bull2,
+            source_type="authenticated_transcript")
+        first = self._redraw(bull=[bull, bull2], bear=[bear])
+        self.assertEqual(first["map_status"], "fresh")
+        authority = DebateMapAuthority(self.harness.store)
+        v1 = authority.current(ACN)
+        retired_ref = retiring["claim_version_id"]
+        self.assertIn(retired_ref, v1["debates"][0]["bull_position"]["claim_refs"])
+
+        mission = self.harness.roll_mission()
+        with patch("dalton_core.claim_retirement.retired_claim_version_refs",
+                   return_value={retired_ref}):
+            summary = self._redraw(bull=[bull], bear=[bear],
+                                   debate_ref=v1["debates"][0]["debate_ref"])
+        self.assertEqual((summary["status"], summary["map_status"]),
+                         ("succeeded", "fresh"), summary)
+        current = authority.current(ACN)
+        self.assertEqual(current["version"], 2)
+        self.assertEqual(current["change_reason"], "evidence_thicker")
+        self.assertEqual(current["mission_version_ref"], mission["id"])
+        self.assertNotIn(retired_ref, current["debates"][0]["bull_position"]["claim_refs"])
+        self.assertTrue(current["change_evidence_refs"])
+
+    def test_a_mission_bump_with_a_new_ref_publishes_as_evidence_thicker(self):
+        bull, bull2 = ("Bookings are accelerating into next year.",
+                       "Backlog is at a record.")
+        bear = "Discretionary demand is decelerating."
+        self.harness.add_claims()
+        self._redraw(bull=[bull], bear=[bear])
+        v1 = DebateMapAuthority(self.harness.store).current(ACN)
+        mission = self.harness.roll_mission()
+        added = self.harness.fixture.add_claim(
+            "debate-bull2", kind="qualitative", value=None, unit=None,
+            metric="demand environment", period="current", statement=bull2,
+            source_type="authenticated_transcript")
+        summary = self._redraw(bull=[bull, bull2], bear=[bear],
+                               debate_ref=v1["debates"][0]["debate_ref"])
+        self.assertEqual(summary["map_status"], "fresh", summary)
+        current = DebateMapAuthority(self.harness.store).current(ACN)
+        self.assertEqual(current["change_reason"], "evidence_thicker")
+        self.assertEqual(current["change_evidence_refs"], [added["claim_version_id"]])
+        self.assertEqual(current["mission_version_ref"], mission["id"])
+
+    def test_a_mission_bump_whose_redraw_is_unchanged_rebinds_the_current_map(self):
+        # New evidence arrived (so the no-model rebind did not apply) but the
+        # paid redraw came out identical: bind the current content to the new
+        # mission rather than refuse it as a duplicate.
+        bull = "Bookings are accelerating into next year."
+        bear = "Discretionary demand is decelerating."
+        self.harness.add_claims()
+        self._redraw(bull=[bull], bear=[bear])
+        authority = DebateMapAuthority(self.harness.store)
+        v1 = authority.current(ACN)
+        mission = self.harness.roll_mission()
+        self.harness.fixture.add_claim(
+            "debate-other", kind="qualitative", value=None, unit=None,
+            metric="demand environment", period="current",
+            statement="Pricing is stable.", source_type="authenticated_transcript")
+        summary = self._redraw(bull=[bull], bear=[bear],
+                               debate_ref=v1["debates"][0]["debate_ref"])
+        self.assertEqual(summary["map_status"], "fresh", summary)
+        current = authority.current(ACN)
+        self.assertEqual(current["version"], 2)
+        self.assertEqual(current["change_reason"], "mission_rebind")
+        self.assertEqual(current["mission_version_ref"], mission["id"])
+        self.assertEqual(current["debates"], v1["debates"])
+        self.assertEqual(current["evidence_fingerprint"], v1["evidence_fingerprint"])
+
+    def test_a_rebind_after_an_evidence_thicker_version_is_not_a_duplicate(self):
+        # The no-model rebind named every cited ref as its change refs; after
+        # an evidence_thicker version (whose change refs are only the new
+        # ones) that differed, and the rebind was refused as a duplicate.
+        bull, bull2 = ("Bookings are accelerating into next year.",
+                       "Backlog is at a record.")
+        bear = "Discretionary demand is decelerating."
+        self.harness.add_claims()
+        self._redraw(bull=[bull], bear=[bear])
+        v1 = DebateMapAuthority(self.harness.store).current(ACN)
+        self.harness.fixture.add_claim(
+            "debate-bull2", kind="qualitative", value=None, unit=None,
+            metric="demand environment", period="current", statement=bull2,
+            source_type="authenticated_transcript")
+        self._redraw(bull=[bull, bull2], bear=[bear],
+                     debate_ref=v1["debates"][0]["debate_ref"])
+        v2 = DebateMapAuthority(self.harness.store).current(ACN)
+        self.assertEqual(v2["version"], 2)
+        mission = self.harness.roll_mission()
+        with patch("dalton_core.debate_map_cli.CockpitModel",
+                   side_effect=AssertionError("must not call a model")):
+            summary = self.harness.run(dry_run=False, model_config_path=None)
+        self.assertEqual(summary["map_status"], "fresh", summary)
+        current = DebateMapAuthority(self.harness.store).current(ACN)
+        self.assertEqual((current["version"], current["change_reason"]),
+                         (3, "mission_rebind"))
+        self.assertEqual(current["mission_version_ref"], mission["id"])
+
     def test_rebind_requires_the_same_constitution_and_policy(self):
         previous = {
             "mission_version_ref": "mission:old", "evidence_fingerprint": "f",

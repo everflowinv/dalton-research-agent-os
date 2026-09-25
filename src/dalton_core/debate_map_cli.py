@@ -28,6 +28,7 @@ from .debate_map import (
     contested_aspects,
     cited_refs,
     evidence_fingerprint,
+    novelty,
 )
 from .debate_map_draft import (
     MAX_COST_USD,
@@ -86,6 +87,31 @@ def can_rebind(previous: Any, mission: Any, constitution: Any,
         and previous["policy_ref"] == POLICY_REF
         and previous["policy_hash"] == POLICY_HASH
     )
+
+
+def publication_refs(
+    debates: Any, previous: Any, retired: Any = (),
+) -> list[str]:
+    """The ``change_evidence_refs`` of a redraw ``novelty`` has admitted.
+
+    A ref the current version does not cite, when there is one.  A redraw
+    whose news is a *withdrawal* -- it stops citing a Claim retired since, or
+    a debate moved or was dropped -- has no such ref, and the authority
+    requires the refs to be non-empty and cited by the version, so it names
+    the refs of the debates that changed; failing that, everything the version
+    cites.  ``retired`` is accepted for symmetry with ``novelty``: a withdrawn
+    ref cannot be named, because the version no longer cites it.
+    """
+
+    fresh = change_evidence(debates, previous)
+    if fresh:
+        return fresh
+    prior = {item["debate_ref"]: item for item in (previous or {}).get("debates") or []}
+    changed = [item for item in debates if prior.get(item["debate_ref"]) != item]
+    refs = cited_refs({"debates": changed})
+    if not refs:
+        refs = cited_refs({"debates": list(debates)})
+    return sorted(refs)
 
 
 def run_debate_map(
@@ -201,22 +227,8 @@ def run_debate_map(
             # A mission version moved while the research inputs did not. Bind
             # the already verified map to the newly authorized mission without
             # buying the identical draft and verifier calls again.
-            published = authority.publish_map(
-                subject_ref=subject_ref,
-                subject_kind=subject_kind_for(subject_ref),
-                change_reason="mission_rebind",
-                change_evidence_refs=sorted(cited_refs(previous)),
-                constitution_ref=previous["constitution_ref"],
-                constitution_hash=previous["constitution_hash"],
-                policy_ref=previous["policy_ref"], policy_hash=previous["policy_hash"],
-                evidence_fingerprint=current_fingerprint,
-                mission_version_ref=mission["id"],
-                mission_version_hash=mission["content_hash"],
-                debates=previous["debates"],
-                rejected_by_constitution=previous["rejected_by_constitution"],
-                drafted_by=previous["drafted_by"], verified_by=previous["verified_by"],
-                actor_ref=actor_ref, created_at=_now(),
-            )
+            published = _rebind(authority, previous, subject_ref=subject_ref,
+                                mission=mission, actor_ref=actor_ref)
             summary.update({
                 "status": "succeeded", "map_status": published["status"],
                 "version_ref": published["id"], "version": published["version"],
@@ -271,24 +283,45 @@ def run_debate_map(
         # normally argued about that nothing on this map argues about is a hole
         # in the map, and the reader is the one who decides whether it matters.
         summary["template_gaps"] = debate_map_gaps(debates, classification)
-        refs = change_evidence(debates, previous)
         mission_changed = (
             previous is not None
             and (previous.get("mission_version_ref") != mission["id"]
                  or previous.get("mission_version_hash") != mission["content_hash"])
         )
-        if not refs and mission_changed:
-            refs = sorted(cited_refs({"debates": debates}))
+        # 2026-09-25: this used to publish every redraw under a changed mission
+        # as ``mission_rebind`` -- which the authority admits only for an
+        # otherwise identical map -- so a mission bump made every paid redraw a
+        # duplicate (legacy: 123 "last run: duplicate" since 09-14; ws-7d: 30
+        # today) and AMZN v5, GOOGL v2 and MSFT v1 kept citing retired Claims.
+        # The redraw is judged by the ordinary rule first; only a map whose
+        # content did not change is a rebind, and then of the current
+        # version's content, verbatim.
+        from .claim_retirement import retired_claim_version_refs
+
+        retired = retired_claim_version_refs(store.connection)
+        reason = change_reason_for(previous)
+        decision = novelty(previous, {"debates": debates, "change_reason": reason},
+                           retired=retired)
+        if decision["new"]:
+            refs = publication_refs(debates, previous, retired)
+        elif mission_changed:
+            published = _rebind(authority, previous, subject_ref=subject_ref,
+                                mission=mission, actor_ref=actor_ref)
+            summary.update({
+                "status": "succeeded", "map_status": published["status"],
+                "version_ref": published["id"], "version": published["version"],
+            })
+            return summary
+        else:
+            refs = []
         if not refs:
             summary.update({"status": "succeeded", "map_status": "duplicate",
-                            "failure_reason": "no reference the current version "
-                                              "does not already cite"})
+                            "failure_reason": decision["reason"]})
             return summary
         published = authority.publish_map(
             subject_ref=subject_ref,
             subject_kind=subject_kind_for(subject_ref),
-            change_reason=("mission_rebind" if mission_changed
-                           else change_reason_for(previous)),
+            change_reason=reason,
             change_evidence_refs=refs,
             constitution_ref=constitution["id"],
             constitution_hash=constitution["content_hash"],
@@ -313,6 +346,36 @@ def run_debate_map(
     finally:
         _write_owner_only(summary_dir / "summary.json", summary)
         store.close()
+
+
+def _rebind(authority: Any, previous: Any, *, subject_ref: str, mission: Any,
+            actor_ref: str) -> dict[str, Any]:
+    """Bind the current version's content, unchanged, to a new mission.
+
+    ``novelty`` admits ``mission_rebind`` only for a map identical to the
+    current one in everything but the mission -- change refs, evidence
+    fingerprint and attribution included -- so the rebind carries all of it
+    over verbatim.  (Naming every cited ref as the change refs, as this used
+    to, was a difference whenever the current version was not itself a first
+    version or a rebind, and the rebind was refused as a duplicate.)
+    """
+
+    return authority.publish_map(
+        subject_ref=subject_ref,
+        subject_kind=subject_kind_for(subject_ref),
+        change_reason="mission_rebind",
+        change_evidence_refs=list(previous["change_evidence_refs"]),
+        constitution_ref=previous["constitution_ref"],
+        constitution_hash=previous["constitution_hash"],
+        policy_ref=previous["policy_ref"], policy_hash=previous["policy_hash"],
+        evidence_fingerprint=previous["evidence_fingerprint"],
+        mission_version_ref=mission["id"],
+        mission_version_hash=mission["content_hash"],
+        debates=previous["debates"],
+        rejected_by_constitution=previous["rejected_by_constitution"],
+        drafted_by=previous["drafted_by"], verified_by=previous["verified_by"],
+        actor_ref=actor_ref, created_at=_now(),
+    )
 
 
 def subject_classification(store: Any, subject_ref: str) -> str | None:
@@ -379,6 +442,7 @@ __all__ = [
     "build_parser",
     "granted",
     "main",
+    "publication_refs",
     "run_debate_map",
     "subject_kind_for",
 ]
