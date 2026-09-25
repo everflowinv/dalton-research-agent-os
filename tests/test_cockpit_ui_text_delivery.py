@@ -145,6 +145,64 @@ class UiTextLookupTests(_Store):
         # validated during publish), not once per request.
         self.assertLessEqual(validate.call_count, 3)
 
+    def test_a_publish_revalidates_only_the_records_it_rewrote(self) -> None:
+        # 2026-09-25: every publish (live, every one to two minutes) made the
+        # next reader re-read and re-validate all ~860 records: 5-8 s of
+        # regular-expression work under the GIL per rebuild.
+        from dalton_core import research_localization
+        publish_ui_texts(self.directory, [batch(f"Line {n}.", f"第 {n} 行。") for n in range(20)])
+        ui_texts_revision(self.db)
+        with unittest.mock.patch.object(store, "validate_localization",
+                                        wraps=research_localization.validate_localization) as validate:
+            publish_ui_texts(self.directory, [batch("Line 20.", "第 20 行。")])
+            validate.reset_mock()
+            page = lookup_ui_texts(self.db, [ui_text_key(f"Line {n}.") for n in range(21)])
+        self.assertEqual(len(page["texts"]), 21)
+        self.assertEqual(validate.call_count, 1)
+
+    def test_a_republished_batch_is_read_again_and_a_removed_one_is_dropped(self) -> None:
+        publish_ui_texts(self.directory, [batch("Revenue increased.", "收入增长。"),
+                                          batch("Revenue fell.", "收入下降。")])
+        self.assertEqual(lookup_ui_texts(self.db, [ui_text_key("Revenue increased.")])["texts"],
+                         {ui_text_key("Revenue increased."): "收入增长。"})
+        # The same batch published again with a corrected translation replaces
+        # its record; the memo is keyed by the record's file state.
+        publish_ui_texts(self.directory, [batch("Revenue increased.", "收入有所增长。")])
+        self.assertEqual(lookup_ui_texts(self.db, [ui_text_key("Revenue increased.")])["texts"],
+                         {ui_text_key("Revenue increased."): "收入有所增长。"})
+        # A record that becomes unreadable costs its own strings only.
+        index = json.loads((self.directory / "ui-texts.json").read_text())
+        fell = [ref for ref in index["batch_refs"]
+                if "Revenue fell." in (self.directory / "ui-records" / f"{ref}.json").read_text()]
+        (self.directory / "ui-records" / f"{fell[0]}.json").write_text("{broken")
+        publish_ui_texts(self.directory, [batch("Margin rose.", "利润率上升。")])
+        page = lookup_ui_texts(self.db, [ui_text_key(t) for t in
+                                         ("Revenue increased.", "Revenue fell.", "Margin rose.")])
+        self.assertEqual(page["texts"], {ui_text_key("Revenue increased."): "收入有所增长。",
+                                         ui_text_key("Margin rose."): "利润率上升。"})
+
+    def test_concurrent_readers_after_a_publish_share_one_rebuild(self) -> None:
+        publish_ui_texts(self.directory, [batch("Revenue increased.", "收入增长。")])
+        ui_texts_revision(self.db)
+        publish_ui_texts(self.directory, [batch("Revenue fell.", "收入下降。")])
+        barrier = threading.Barrier(8)
+        pages = []
+
+        def read() -> None:
+            barrier.wait(5)
+            pages.append(lookup_ui_texts(self.db, [ui_text_key("Revenue fell.")]))
+
+        with unittest.mock.patch.object(store, "_load_ui_cached",
+                                        wraps=store._load_ui_cached) as load:
+            threads = [threading.Thread(target=read) for _ in range(8)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(10)
+        self.assertEqual(len(pages), 8)
+        self.assertTrue(all(p["texts"] == {ui_text_key("Revenue fell."): "收入下降。"} for p in pages))
+        self.assertEqual(load.call_count, 1)
+
     def test_no_mapping_serves_nothing_and_has_no_revision(self) -> None:
         self.assertIsNone(ui_texts_revision(self.db))
         page = lookup_ui_texts(self.db, [ui_text_key("Anything.")])

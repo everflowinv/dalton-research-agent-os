@@ -13,6 +13,7 @@ import os
 import re
 import sqlite3
 import tempfile
+import threading
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -224,24 +225,71 @@ def publish_ui_texts(directory: str | Path, batches: list[dict[str, Any]]) -> Pa
     return target
 
 
-def _ui_batches(path: Path, payload: Mapping[str, Any]) -> list[Any]:
-    if payload.get("schema_version") == UI_TEXTS_LEGACY_SCHEMA:
-        return list(payload.get("batches", []))
-    if payload.get("schema_version") != UI_TEXTS_SCHEMA:
-        return []
+def _batch_pairs(batch: Any) -> tuple[tuple[str, str], ...]:
+    """The (source, reviewed translation) bodies of one validated batch."""
+    source = batch["source"]
+    valid = validate_localization(source, batch["localization"])
+    return tuple((original["body"], localized["body"])
+                 for original, localized in zip(source["sections"], valid["sections"]))
+
+
+# 2026-09-25: what one 0.2 batch record contributes, validated once per file
+# state.  ``ui-texts.json`` is rewritten by every publish -- live, every one to
+# two minutes -- and each rewrite used to re-read and re-validate all ~860
+# records (5-8 s of regular-expression work holding the GIL) before one
+# ui-texts or overview request could be answered; four parallel requests from
+# the page did it four times over.  A record is replaced whole (new inode) when
+# its batch is published again, so (inode, mtime, size) identifies its content
+# exactly as the same triple identifies ``ui-texts.json`` itself.
+_UI_RECORD_PAIRS: dict[str, tuple[tuple[int, int, int], tuple[tuple[str, str], ...] | None]] = {}
+_UI_RECORD_LOCK = threading.Lock()
+
+
+def _ui_record_pairs(path: Path) -> tuple[tuple[str, str], ...] | None:
+    """One record's pairs, or None when it is unreadable or does not validate."""
+    try:
+        if path.is_symlink():
+            return None
+        stat = path.stat()
+    except OSError:
+        return None
+    identity = (stat.st_ino, stat.st_mtime_ns, stat.st_size)
+    key = str(path)
+    with _UI_RECORD_LOCK:
+        held = _UI_RECORD_PAIRS.get(key)
+    if held is not None and held[0] == identity:
+        return held[1]
+    try:
+        pairs: tuple[tuple[str, str], ...] | None = _batch_pairs(_read_json(path))
+    except (OSError, KeyError, TypeError, ValueError):
+        # One unreadable record costs its own strings, not every page's.
+        pairs = None
+    with _UI_RECORD_LOCK:
+        _UI_RECORD_PAIRS[key] = (identity, pairs)
+    return pairs
+
+
+def _ui_record_pair_lists(path: Path, payload: Mapping[str, Any]) -> list[tuple[tuple[str, str], ...]]:
     records = path.parent / UI_RECORDS_DIRECTORY
     if records.is_symlink():
         return []
-    batches = []
+    wanted: list[Path] = []
     for ref in payload.get("batch_refs") or []:
-        if not isinstance(ref, str) or not _SHA.fullmatch(ref):
-            continue
-        try:
-            batches.append(_read_json(records / (ref + ".json")))
-        except (OSError, ValueError):
-            # One unreadable record costs its own strings, not every page's.
-            continue
-    return batches
+        if isinstance(ref, str) and _SHA.fullmatch(ref):
+            wanted.append(records / (ref + ".json"))
+    result = []
+    for record in wanted:
+        pairs = _ui_record_pairs(record)
+        if pairs is not None:
+            result.append(pairs)
+    # Forget records this index no longer names, so the memo stays the size
+    # of the mapping it serves.
+    keep = {str(record) for record in wanted}
+    with _UI_RECORD_LOCK:
+        for key in [key for key in _UI_RECORD_PAIRS
+                    if key.startswith(str(records)) and key not in keep]:
+            del _UI_RECORD_PAIRS[key]
+    return result
 
 
 @functools.lru_cache(maxsize=8)
@@ -249,19 +297,16 @@ def _load_ui_cached(path_string: str, inode: int, modified_ns: int, size: int) -
     path = Path(path_string)
     payload = _read_json(path)
     entries = {}
-    legacy = payload.get("schema_version") == UI_TEXTS_LEGACY_SCHEMA
-    for batch in _ui_batches(path, payload):
-        try:
-            source = batch["source"]
-            valid = validate_localization(source, batch["localization"])
-        except (KeyError, TypeError, ValueError):
-            if legacy:
-                # 0.1 behaviour, unchanged: one bad batch in the single file
-                # invalidates the file.
-                raise
-            continue
-        for original, localized in zip(source["sections"], valid["sections"]):
-            old, new = original["body"], localized["body"]
+    if payload.get("schema_version") == UI_TEXTS_LEGACY_SCHEMA:
+        # 0.1 behaviour, unchanged: one bad batch in the single file
+        # invalidates the file.
+        pair_lists = [_batch_pairs(batch) for batch in payload.get("batches", [])]
+    elif payload.get("schema_version") == UI_TEXTS_SCHEMA:
+        pair_lists = _ui_record_pair_lists(path, payload)
+    else:
+        pair_lists = []
+    for pairs in pair_lists:
+        for old, new in pairs:
             if old not in entries:
                 entries[old] = new
     return entries
@@ -303,15 +348,13 @@ def _ui_index_cached(path_string: str, inode: int, modified_ns: int,
     In the key index ``None`` means the reviewed translation is the source
     string itself, which the page already holds.
     """
-    from .research_gap_display import display_metadata_text
     entries = _load_ui_cached(path_string, inode, modified_ns, size)
     display: dict[str, str] = {}
     index: dict[str, str | None] = {}
     collided: set[str] = set()
     for original, localized in entries.items():
-        shown = display_metadata_text(localized)
+        shown, key = _shown_and_key(original, localized)
         display[original] = shown
-        key = ui_text_key(original)
         if key is None:
             continue
         if key in index:
@@ -327,13 +370,33 @@ def _ui_index_cached(path_string: str, inode: int, modified_ns: int,
     return revision, display, index
 
 
+@functools.lru_cache(maxsize=65536)
+def _shown_and_key(original: str, localized: str) -> tuple[str, str | None]:
+    """The displayed form of one translation and its source key.
+
+    Both are pure functions of the two strings, and the same eight thousand
+    pairs come back on every rebuild, so a publish that adds one batch pays
+    for that batch's strings only.
+    """
+    from .research_gap_display import display_metadata_text
+    return display_metadata_text(localized), ui_text_key(original)
+
+
+# One build at a time.  ``functools.lru_cache`` does not hold concurrent
+# callers of a missing entry back, so every request that arrived while the
+# index was being rebuilt started its own rebuild; the page asks with four
+# requests in parallel, and the overview and the log ask too.
+_UI_INDEX_BUILD_LOCK = threading.Lock()
+
+
 def _ui_index(database: str | Path) -> tuple[str, dict[str, str], dict[str, str | None]] | None:
     path = directory_for_database(database) / "ui-texts.json"
     try:
         if path.parent.is_symlink() or path.is_symlink():
             return None
         stat = path.stat()
-        return _ui_index_cached(str(path), stat.st_ino, stat.st_mtime_ns, stat.st_size)
+        with _UI_INDEX_BUILD_LOCK:
+            return _ui_index_cached(str(path), stat.st_ino, stat.st_mtime_ns, stat.st_size)
     except (OSError, ValueError, KeyError, TypeError, ResearchLocalizationError):
         return None
 
