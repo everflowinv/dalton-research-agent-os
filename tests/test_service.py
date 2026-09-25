@@ -2052,6 +2052,11 @@ class ServiceTests(unittest.TestCase):
             control = plistlib.loads(Path(paths["control"]).read_bytes())
             self.assertEqual(control["Label"], CONTROL_LABEL)
             self.assertTrue(control["KeepAlive"])
+            # 2026-09-25: the control process serves the owner's browser.
+            # Under Background its reads were throttled behind every other
+            # process's I/O and the overview took 1 to 7 minutes live, past
+            # the page's 30 s timeout.
+            self.assertEqual(control["ProcessType"], "Standard")
             self.assertEqual(control["ProgramArguments"][:3], [
                 str((root / "venv" / "bin" / "python").resolve()),
                 "-m", "dalton_core.agenda_control"])

@@ -15,6 +15,7 @@ from tempfile import TemporaryDirectory
 
 from dalton_core.cockpit_plane import (
     MAX_CACHED_TICKETS,
+    OVERVIEW_STALE_SECONDS,
     OVERVIEW_TTL_SECONDS,
     TICKET_SCAN_TTL_SECONDS,
     SUMMARY_FIELDS_THE_COCKPIT_READS,
@@ -128,11 +129,100 @@ class OverviewTtlTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(results, [{"snapshot": 1}, {"snapshot": 1}])
 
+    def stale_plane(self, build):
+        plane = self.plane()
+        plane._overview_stale_seconds = OVERVIEW_STALE_SECONDS
+        plane._build_overview = build
+        return plane
+
+    def test_past_the_ttl_the_last_snapshot_answers_at_once_and_one_rebuild_runs(self):
+        # 2026-09-25: a rebuild took minutes live and the page waits 30 s.
+        started, release = threading.Event(), threading.Event()
+        builds = []
+
+        def build():
+            builds.append(1)
+            if len(builds) > 1:
+                started.set()
+                self.assertTrue(release.wait(5))
+            return {"snapshot": len(builds)}
+
+        plane = self.stale_plane(build)
+        self.assertEqual(plane.overview(), {"snapshot": 1})
+        self.clock.advance(OVERVIEW_TTL_SECONDS + 1)
+        self.assertEqual(plane.overview(), {"snapshot": 1, "refreshing": True})
+        self.assertTrue(started.wait(5))
+        # A second reader while that rebuild runs does not start another.
+        self.assertEqual(plane.overview(), {"snapshot": 1, "refreshing": True})
+        release.set()
+        for _ in range(500):
+            if plane._overview_generation == 2:
+                break
+            threading.Event().wait(0.01)
+        self.assertEqual(plane.overview(), {"snapshot": 2})
+        self.assertEqual(len(builds), 2)
+
+    def test_past_the_stale_window_the_reader_waits_for_a_rebuild(self):
+        plane = self.stale_plane(lambda: {"snapshot": len(self.builds.append(1) or self.builds)})
+        plane.overview()
+        self.clock.advance(OVERVIEW_STALE_SECONDS + 1)
+        self.assertEqual(plane.overview(), {"snapshot": 2})
+
+    def test_a_write_during_a_background_rebuild_is_not_answered_by_it(self):
+        started, release = threading.Event(), threading.Event()
+        builds = []
+
+        def build():
+            builds.append(1)
+            if len(builds) == 2:
+                started.set()
+                self.assertTrue(release.wait(5))
+            return {"snapshot": len(builds)}
+
+        plane = self.stale_plane(build)
+        plane.overview()
+        self.clock.advance(OVERVIEW_TTL_SECONDS + 1)
+        plane.overview()  # stale answer; rebuild 2 starts before the write
+        self.assertTrue(started.wait(5))
+        plane.invalidate_overview()
+        result = []
+        reader = threading.Thread(target=lambda: result.append(plane.overview()))
+        reader.start()
+        release.set()
+        reader.join(5)
+        # Build 2 began before the write; the reader after it gets build 3.
+        self.assertEqual(result, [{"snapshot": 3}])
+
+    def test_a_failed_background_rebuild_keeps_the_last_snapshot(self):
+        builds = []
+
+        def build():
+            builds.append(1)
+            if len(builds) == 2:
+                raise RuntimeError("broken snapshot")
+            return {"snapshot": len(builds)}
+
+        plane = self.stale_plane(build)
+        plane.overview()
+        self.clock.advance(OVERVIEW_TTL_SECONDS + 1)
+        self.assertEqual(plane.overview(), {"snapshot": 1, "refreshing": True})
+        for _ in range(500):
+            if not plane._overview_building:
+                break
+            threading.Event().wait(0.01)
+        self.assertEqual(plane.overview(), {"snapshot": 1, "refreshing": True})
+        for _ in range(500):
+            if plane._overview_generation == 2:
+                break
+            threading.Event().wait(0.01)
+        self.assertEqual(plane.overview(), {"snapshot": 3})
+
     def test_the_serving_process_opts_in(self):
         # agenda_control builds the one plane that serves HTTP and is the only
         # construction that turns the cache on.
         source = Path("src/dalton_core/agenda_control.py").read_text(encoding="utf-8")
         self.assertIn("overview_ttl_seconds=OVERVIEW_TTL_SECONDS", source)
+        self.assertIn("overview_stale_seconds=OVERVIEW_STALE_SECONDS", source)
         self.assertIn('getattr(plane, "invalidate_overview", None)', source)
 
 
@@ -220,7 +310,29 @@ class TicketCacheBoundsTests(unittest.TestCase):
         # Every ticket is still returned -- the cap bounds what is remembered,
         # not what is read.
         self.assertEqual(len(cache.tickets()), 6)
+        # What is remembered is never more than the last scan returned (and
+        # holds in ``_scan`` anyway), so deleting runs still frees them.
+        for index in range(4):
+            item = self.state / "discoveries" / f"run-{index}"
+            (item / "ticket.json").unlink()
+            item.rmdir()
+        self.assertEqual(len(cache.tickets()), 2)
         self.assertLessEqual(len(cache._entries), 4)
+
+    def test_a_tree_larger_than_the_cap_is_not_re_read_on_every_scan(self):
+        # 2026-09-25: 7,819 runs against a cap of 4,000.  Each scan evicted
+        # the oldest 3,819 and the next scan parsed all of them again -- the
+        # ticket and the summary -- every five seconds.
+        for index in range(6):
+            self._ticket("discoveries", f"run-{index}")
+        cache = _TicketCache(self.state, max_entries=4)
+        self.assertEqual(len(cache.tickets()), 6)
+        from unittest import mock
+        from dalton_core import cockpit_plane
+        with mock.patch.object(cockpit_plane, "_load_json",
+                               wraps=cockpit_plane._load_json) as load:
+            self.assertEqual(len(cache.tickets()), 6)
+        self.assertEqual(load.call_count, 0)
 
     def test_the_cap_is_a_real_number_and_the_window_is_shorter_than_the_overview(self):
         self.assertGreater(MAX_CACHED_TICKETS, 0)
@@ -234,6 +346,57 @@ class TicketCacheBoundsTests(unittest.TestCase):
         (item / "ticket.json").write_text(json.dumps({"status": "succeeded"}))
         self.clock.advance(TICKET_SCAN_TTL_SECONDS + 0.1)
         self.assertEqual(cache.tickets()[0]["ticket"]["status"], "succeeded")
+
+
+class ClaimsCacheKeyTests(unittest.TestCase):
+    """2026-09-25: the claims cache key must not read the whole table."""
+
+    SCHEMA = """CREATE TABLE claim_versions (
+        claim_version_id TEXT PRIMARY KEY, claim_ref TEXT NOT NULL,
+        version_number INTEGER NOT NULL, claim_json TEXT NOT NULL,
+        content_hash TEXT NOT NULL, prior_version_id TEXT, created_at TEXT NOT NULL,
+        UNIQUE (claim_ref, version_number))"""
+
+    def setUp(self):
+        import sqlite3
+        self.core = sqlite3.connect(":memory:")
+        self.core.row_factory = sqlite3.Row
+        self.core.execute(self.SCHEMA)
+        self.plane = CockpitPlane.__new__(CockpitPlane)
+        self.plane._claims_cache = None
+
+    def insert(self, n):
+        self.core.execute(
+            "INSERT INTO claim_versions VALUES (?,?,1,?,?,NULL,?)",
+            (f"cv-{n}", f"claim-{n}", json.dumps({"id": f"cv-{n}", "subject_ref": "company:x",
+                                                 "normalized_statement": f"Claim {n}." + "x" * 2000}),
+             "h", f"2026-09-{n:02d}T00:00:00+00:00"))
+
+    def claims(self):
+        from unittest import mock
+        from dalton_core import cockpit_plane
+        statements = []
+        self.core.set_trace_callback(statements.append)
+        try:
+            with mock.patch.object(cockpit_plane, "retired_claim_refs", return_value=set()):
+                return self.plane._claims(self.core), statements
+        finally:
+            self.core.set_trace_callback(None)
+
+    def test_the_key_is_answered_from_an_index_and_the_cache_follows_inserts(self):
+        for n in range(1, 4):
+            self.insert(n)
+        first, _ = self.claims()
+        again, statements = self.claims()
+        self.assertIs(again, first)
+        self.assertEqual(len(statements), 1, statements)
+        plan = " ".join(str(tuple(row)) for row in
+                        self.core.execute("EXPLAIN QUERY PLAN " + statements[0]))
+        self.assertIn("COVERING INDEX", plan)
+        self.assertNotIn("created_at", statements[0])
+        self.insert(4)
+        fourth, _ = self.claims()
+        self.assertEqual([c["ref"] for c in fourth], ["cv-1", "cv-2", "cv-3", "cv-4"])
 
 
 if __name__ == "__main__":

@@ -145,6 +145,64 @@ class UiTextLookupTests(_Store):
         # validated during publish), not once per request.
         self.assertLessEqual(validate.call_count, 3)
 
+    def test_a_publish_revalidates_only_the_records_it_rewrote(self) -> None:
+        # 2026-09-25: every publish (live, every one to two minutes) made the
+        # next reader re-read and re-validate all ~860 records: 5-8 s of
+        # regular-expression work under the GIL per rebuild.
+        from dalton_core import research_localization
+        publish_ui_texts(self.directory, [batch(f"Line {n}.", f"第 {n} 行。") for n in range(20)])
+        ui_texts_revision(self.db)
+        with unittest.mock.patch.object(store, "validate_localization",
+                                        wraps=research_localization.validate_localization) as validate:
+            publish_ui_texts(self.directory, [batch("Line 20.", "第 20 行。")])
+            validate.reset_mock()
+            page = lookup_ui_texts(self.db, [ui_text_key(f"Line {n}.") for n in range(21)])
+        self.assertEqual(len(page["texts"]), 21)
+        self.assertEqual(validate.call_count, 1)
+
+    def test_a_republished_batch_is_read_again_and_a_removed_one_is_dropped(self) -> None:
+        publish_ui_texts(self.directory, [batch("Revenue increased.", "收入增长。"),
+                                          batch("Revenue fell.", "收入下降。")])
+        self.assertEqual(lookup_ui_texts(self.db, [ui_text_key("Revenue increased.")])["texts"],
+                         {ui_text_key("Revenue increased."): "收入增长。"})
+        # The same batch published again with a corrected translation replaces
+        # its record; the memo is keyed by the record's file state.
+        publish_ui_texts(self.directory, [batch("Revenue increased.", "收入有所增长。")])
+        self.assertEqual(lookup_ui_texts(self.db, [ui_text_key("Revenue increased.")])["texts"],
+                         {ui_text_key("Revenue increased."): "收入有所增长。"})
+        # A record that becomes unreadable costs its own strings only.
+        index = json.loads((self.directory / "ui-texts.json").read_text())
+        fell = [ref for ref in index["batch_refs"]
+                if "Revenue fell." in (self.directory / "ui-records" / f"{ref}.json").read_text()]
+        (self.directory / "ui-records" / f"{fell[0]}.json").write_text("{broken")
+        publish_ui_texts(self.directory, [batch("Margin rose.", "利润率上升。")])
+        page = lookup_ui_texts(self.db, [ui_text_key(t) for t in
+                                         ("Revenue increased.", "Revenue fell.", "Margin rose.")])
+        self.assertEqual(page["texts"], {ui_text_key("Revenue increased."): "收入有所增长。",
+                                         ui_text_key("Margin rose."): "利润率上升。"})
+
+    def test_concurrent_readers_after_a_publish_share_one_rebuild(self) -> None:
+        publish_ui_texts(self.directory, [batch("Revenue increased.", "收入增长。")])
+        ui_texts_revision(self.db)
+        publish_ui_texts(self.directory, [batch("Revenue fell.", "收入下降。")])
+        barrier = threading.Barrier(8)
+        pages = []
+
+        def read() -> None:
+            barrier.wait(5)
+            pages.append(lookup_ui_texts(self.db, [ui_text_key("Revenue fell.")]))
+
+        with unittest.mock.patch.object(store, "_load_ui_cached",
+                                        wraps=store._load_ui_cached) as load:
+            threads = [threading.Thread(target=read) for _ in range(8)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(10)
+        self.assertEqual(len(pages), 8)
+        self.assertTrue(all(p["texts"] == {ui_text_key("Revenue fell."): "收入下降。"} for p in pages))
+        self.assertEqual(load.call_count, 1)
+
     def test_no_mapping_serves_nothing_and_has_no_revision(self) -> None:
         self.assertIsNone(ui_texts_revision(self.db))
         page = lookup_ui_texts(self.db, [ui_text_key("Anything.")])
@@ -157,6 +215,33 @@ class OverviewCarriesRevisionOnlyTests(unittest.TestCase):
         self.assertNotIn('"text_localizations"', source)
         self.assertNotIn("2_000_000", source)
         self.assertIn('"text_localization_revision": text_localization_revision', source)
+
+
+class ReusedOverviewNamesTheCurrentRevisionTests(_Store):
+    def test_a_reused_snapshot_names_the_mapping_as_it_is_now(self) -> None:
+        # A snapshot reused across a publish used to name the old revision
+        # while ui-texts answers named the new one; the page flipped between
+        # them and re-asked every string of the view on each flip.
+        publish_ui_texts(self.directory, [batch("Revenue increased.", "收入增长。")])
+        plane = CockpitPlane.__new__(CockpitPlane)
+        plane.config = types.SimpleNamespace(core_db=self.db)
+        plane._overview_condition = threading.Condition()
+        plane._overview_building = False
+        plane._overview_generation = 0
+        plane._overview_result = None
+        plane._overview_built_at = None
+        plane._overview_ttl_seconds = 60.0
+        builds = []
+        plane._build_overview = lambda: builds.append(1) or {
+            "text_localization_revision": ui_texts_revision(self.db), "goal": "g"}
+        first = plane.overview()
+        publish_ui_texts(self.directory, [batch("Revenue fell.", "收入下降。")])
+        second = plane.overview()
+        self.assertEqual(len(builds), 1)
+        self.assertNotEqual(first["text_localization_revision"],
+                            second["text_localization_revision"])
+        self.assertEqual(second, {"text_localization_revision": ui_texts_revision(self.db),
+                                  "goal": "g"})
 
 
 def _javascript_block() -> str:
@@ -265,6 +350,51 @@ class CockpitUiTextDeliveryEndToEndTests(_Store):
         self.assertEqual(result["shown"], 40)
         self.assertGreater(result["requests"], 5)
         self.assertEqual(result["absent"], CHECKING)
+
+    def test_concurrent_views_share_one_batch_and_never_ask_a_key_twice(self) -> None:
+        # 2026-09-25: the first paint resolved the overview, the log and the
+        # approvals separately, and every poll after it sent its own request
+        # for one or two new strings.  One queue now serves every caller.
+        publish_ui_texts(self.directory, [batch("Revenue increased.", "收入增长。"),
+                                          batch("Revenue fell.", "收入下降。")])
+        revision = ui_texts_revision(self.db)
+        overview = {"text_localization_revision": revision,
+                    "a": "Revenue increased.", "b": "Shared status.", "c": "Only here."}
+        log = {"events": [{"t": "Revenue fell."}, {"t": "Shared status."}]}
+        approvals = {"items": [{"s": "Revenue increased."}, {"s": "Another."}]}
+        polls = [{"as_of": f"2026-09-25T06:{n:02d}:00+00:00"} for n in range(6)]
+        result = self.run_page(f"""
+            await Promise.all([resolveUiTexts({json.dumps(overview)}),
+                               resolveUiTexts({json.dumps(log)}),
+                               resolveUiTexts({json.dumps(approvals)})]);
+            const first=requests.length;
+            const keys=requests.flatMap(r=>r.split("keys=")[1].split(","));
+            await Promise.all({json.dumps(polls)}.map(p=>resolveUiTexts(p)));
+            console.log(JSON.stringify({{first, polls: requests.length-first,
+              asked: keys.length, distinct: new Set(keys).size,
+              increased: finalResearchText("Revenue increased."),
+              fell: finalResearchText("Revenue fell.")}}));""")
+        self.assertEqual(result["first"], 1)
+        self.assertEqual(result["asked"], result["distinct"])
+        self.assertEqual(result["polls"], 1)
+        self.assertEqual(result["increased"], "收入增长。")
+        self.assertEqual(result["fell"], "收入下降。")
+
+    def test_a_failed_request_is_not_remembered_and_is_asked_again(self) -> None:
+        publish_ui_texts(self.directory, [batch("Revenue increased.", "收入增长。")])
+        payload = {"a": "Revenue increased."}
+        result = self.run_page(f"""
+            const working=globalThis.fetch;let fail=true;
+            globalThis.fetch=(path,options)=>fail?Promise.reject(new Error("offline")):working(path,options);
+            await resolveUiTexts({json.dumps(payload)});
+            const before=finalResearchText("Revenue increased.");
+            fail=false;
+            await resolveUiTexts({json.dumps(payload)});
+            console.log(JSON.stringify({{before, after: finalResearchText("Revenue increased."),
+              waiting: UI_TEXT_WAITING.size}}));""")
+        self.assertEqual(result["before"], CHECKING)
+        self.assertEqual(result["after"], "收入增长。")
+        self.assertEqual(result["waiting"], 0)
 
     def test_a_new_revision_re_asks_strings_that_were_not_reviewed_before(self) -> None:
         publish_ui_texts(self.directory, [batch("Revenue increased.", "收入增长。")])
