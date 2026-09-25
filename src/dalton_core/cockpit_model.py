@@ -722,6 +722,13 @@ class _ReleaseLeaseOnError:
 
 # _call_once's answer when it freed an attempt whose holder is gone: ask again.
 _RECLAIMED_LEASE = "_reclaimed_orphaned_lease"
+# When this process started running cockpit work -- taken at import, which is
+# no earlier than the process itself, so it can only err towards "younger".
+_PROCESS_STARTED_AT = datetime.now(timezone.utc)
+# How long before this process started an unrecorded lease must have been
+# claimed.  Every holder since the 2026-09-24b release records itself right
+# after its claim (milliseconds); this is the slack for that write.
+_UNRECORDED_LEASE_MARGIN_SECONDS = 5.0
 
 
 def _lock_retry_sleep(seconds: float) -> None:
@@ -810,6 +817,73 @@ def _reclaim_orphaned_lease(scheduler: Scheduler, work: WorkOrder) -> str | None
             print(f"cockpit-model: expired {work.id} attempt {attempt}; its holder "
                   f"is gone ({reason})", file=sys.stderr)
             return f"expired_orphaned_lease:{reason}"
+    if holders.enabled and not holders.holders_for(work.id):
+        return _reclaim_unrecorded_lease(scheduler, work)
+    return None
+
+
+def _reclaim_unrecorded_lease(scheduler: Scheduler, work: WorkOrder,
+                              *, now: datetime | None = None,
+                              started_at: datetime | None = None) -> str | None:
+    """Expire a lease claimed by a release that never recorded its holders.
+
+    2026-09-25: the release before 2026-09-24b claimed without writing the
+    holder registry, so a lease it left behind at the release switch could
+    only wait out its whole frozen lifetime -- nothing proved its holder gone.
+    Three facts together prove it here, and each rules out a live holder:
+
+    * no holder record exists for the work at all -- every process of this
+      release records one right after its claim;
+    * the lease was claimed before this process started (with a margin for
+      that record to be written), so it is not a claim racing this one;
+    * it has been held longer than one call of it could take -- the
+      WorkOrder's timeout, the completion grace and the bounded
+      locked-completion retry -- so it is not a claim made in the moments
+      around this process's start.
+
+    The release switch restarts the writer, so the old holder is gone.  The
+    one case this can misjudge is an old-release child still walking a long
+    fallback chain after the switch: its late completion is then refused, as
+    after any expiry, and the work is asked again -- one call's cost, against
+    the lease's whole frozen lifetime (2h10m live) of "already running".
+    """
+
+    clock = getattr(scheduler, "_now", None)
+    now = now or (clock() if callable(clock) else datetime.now(timezone.utc))
+    started_at = started_at or _PROCESS_STARTED_AT
+    event = scheduler.connection.execute(
+        "SELECT * FROM scheduler_attempt_events WHERE work_order_id=? "
+        "ORDER BY event_seq DESC LIMIT 1", (work.id,),
+    ).fetchone()
+    if event is None or event["state"] != "leased" or not event["lease_revision_id"]:
+        return None
+    if str(event["reason"] or "").startswith("operator_model_recovery_reserved:"):
+        return None
+    try:
+        claimed_at = datetime.fromisoformat(str(event["created_at"]))
+    except ValueError:
+        return None
+    if claimed_at.tzinfo is None:
+        return None
+    if claimed_at > started_at - timedelta(seconds=_UNRECORDED_LEASE_MARGIN_SECONDS):
+        return None
+    maximum = work.budget.get("max_seconds")
+    if isinstance(maximum, bool) or not isinstance(maximum, (int, float)) or maximum <= 0:
+        return None
+    longest = float(maximum) + _LEASE_GRACE_SECONDS + LEASE_RELEASE_RETRY_SECONDS
+    if (now - claimed_at).total_seconds() <= longest:
+        return None
+    attempt = int(event["attempt_number"])
+    revision = str(event["lease_revision_id"])
+    outcome = retry_on_sqlite_lock(
+        lambda: scheduler.expire_orphaned_lease(
+            work.id, attempt, revision, reason="unrecorded_before_process_start"),
+        deadline_seconds=LEASE_RELEASE_RETRY_SECONDS, sleep=_lock_retry_sleep)
+    if outcome["status"] == "expired":
+        print(f"cockpit-model: expired {work.id} attempt {attempt}; it was claimed at "
+              f"{claimed_at.isoformat()} by a process that recorded no holder, before "
+              f"this one started", file=sys.stderr)
+        return "expired_orphaned_lease:unrecorded_before_process_start"
     return None
 
 
