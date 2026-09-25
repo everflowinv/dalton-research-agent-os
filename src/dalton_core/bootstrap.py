@@ -64,6 +64,8 @@ SCHEMA_DATABASES: tuple[tuple[str, str | None], ...] = (
     ("claim_retirement_schema.sql", None),
     # C2-5: the retirement patrol's examination markers.
     ("claim_review_schema.sql", None),
+    # 2026-09-25: retired industry-level Claims kept as industry evidence.
+    ("claim_industry_reattribution_schema.sql", None),
     # 2026-09-24: independent support verdicts on qualitative statements.
     ("claim_support_schema.sql", None),
     ("company_dossier_schema.sql", None),

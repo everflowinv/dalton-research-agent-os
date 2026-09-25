@@ -747,6 +747,14 @@ HUMAN_GOVERNANCE_OPERATIONS = frozenset({
     # person's door; the review patrol's automatic re-review writes through
     # the authority directly under the mission's claim_challenge grant.
     "reinstate_claim_retirement",
+    # 2026-09-25: withdraw a wrong reinstatement, so the retirement stands
+    # again.  A person's door; the patrol's recheck writes through the
+    # authority under the mission's claim_challenge grant.
+    "withdraw_claim_reinstatement",
+    # 2026-09-25: record a retired Claim as evidence about the mission's
+    # industry (company level keeps it retired).  A person's door; the review
+    # patrol's backfill writes through the authority under claim_challenge.
+    "reattribute_claim_to_industry",
     "mission_deliverables",
     "mission_document_evidence", "generate_document_extraction", "stage_document_extraction",
     "document_extraction_preflight",
@@ -1182,6 +1190,12 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     "reinstate_claim_retirement": frozenset({
         "claim_version_ref", "decision_hash", "rationale", "actor_ref",
     }),
+    "withdraw_claim_reinstatement": frozenset({
+        "claim_version_ref", "reinstatement_hash", "rationale", "actor_ref",
+    }),
+    "reattribute_claim_to_industry": frozenset({
+        "claim_version_ref", "decision_hash", "industry_ref", "rationale", "actor_ref",
+    }),
     "run_mission_source_discovery": frozenset({
         "requested_by", "company_ref", "spec_ref", "as_of", "source_ref",
         "variant_index", "missing_periods",
@@ -1464,6 +1478,8 @@ OPERATION_ACTOR_FIELDS: dict[str, str] = {
     "run_mission_source_discovery": "requested_by",
     "decide_claim_retirement": "actor_ref",
     "reinstate_claim_retirement": "actor_ref",
+    "reattribute_claim_to_industry": "actor_ref",
+    "withdraw_claim_reinstatement": "actor_ref",
 }
 
 
@@ -5369,7 +5385,19 @@ class WriterServer:
             store=self.store, missions=self.coverage_mission,
             challenges=self.claim_retirement_challenges, spool=spool,
             needles=needles_from_plans(plans),
+            # A writer without the authority (a bare harness) only reports.
+            reattributions=getattr(self, "claim_industry_reattributions", None),
         )
+
+    @property
+    def claim_industry_reattributions(self) -> Any:
+        """2026-09-25: retired industry-level Claims kept as industry evidence."""
+
+        from .claim_industry_reattribution import ClaimIndustryReattributionAuthority
+
+        if getattr(self, "_claim_industry_reattributions", None) is None:
+            self._claim_industry_reattributions = ClaimIndustryReattributionAuthority(self.store)
+        return self._claim_industry_reattributions
 
     @property
     def mission_deliverables(self) -> Any:
@@ -5437,6 +5465,18 @@ class WriterServer:
         if not str(values.get("actor_ref") or "").startswith("human:"):
             raise WriterServerError("a retirement is withdrawn by hand only by a person")
         return self.claim_retirement_challenges.reinstate(**values)
+
+    def _op_withdraw_claim_reinstatement(self, p: Mapping[str, Any]) -> Any:
+        values = dict(p)
+        if not str(values.get("actor_ref") or "").startswith("human:"):
+            raise WriterServerError("a reinstatement is withdrawn by hand only by a person")
+        return self.claim_retirement_challenges.withdraw_reinstatement(**values)
+
+    def _op_reattribute_claim_to_industry(self, p: Mapping[str, Any]) -> Any:
+        values = dict(p)
+        if not str(values.get("actor_ref") or "").startswith("human:"):
+            raise WriterServerError("a Claim is reattributed by hand only by a person")
+        return self.claim_industry_reattributions.reattribute(**values)
 
     def _op_dispatch_mission_stage(self, p: Mapping[str, Any]) -> Any:
         # Controller tick (P10a).  Enters the Playbook's first stage for any

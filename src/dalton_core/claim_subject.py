@@ -390,7 +390,7 @@ def _mentions(lowered: str, needles: Sequence[str]) -> int:
 def own_document_evidence(
     *, title: Any = None, text: Any = None, needles: Sequence[str],
     issuer_document: bool = False, subject_ref: Any = None,
-    peer_needles: Sequence[str] = (),
+    peer_needles: Sequence[str] = (), include_head: bool = True,
 ) -> str | None:
     """Why this document is the subject's own, for the retirement rule, or None.
 
@@ -405,6 +405,12 @@ def own_document_evidence(
     * ``filing_cover`` -- "FORM 10-K" / "Annual report pursuant to Section 13"
       on the cover *and* a name of the subject there too;
     * ``density`` -- the subject is named throughout (see the thresholds).
+
+    ``include_head=False`` (2026-09-25, reinstatement only) skips the head
+    test: a listicle ("Top 35 Social Media Platforms ... Facebook") or a
+    sales note comparing Tencent with Facebook names Meta in its first 400
+    characters without being Meta's.  Keeping a Claim may rest on that;
+    putting a retired one back may not.
     """
 
     if issuer_document:
@@ -416,7 +422,7 @@ def own_document_evidence(
         return "title"
     if not isinstance(text, str) or not text:
         return None
-    if text_names_word(_cut(text, HEAD_CHARS), needles):
+    if include_head and text_names_word(_cut(text, HEAD_CHARS), needles):
         return "head"
     lowered = text.lower()
     cover = _cut(lowered, COVER_CHARS)
@@ -438,6 +444,61 @@ def own_document_evidence(
             and mine * 10_000 / max(1, len(lowered)) >= DENSITY_MIN_PER_10K_CHARS
             and mine >= DENSITY_MIN_SHARE * (mine + _mentions(lowered, peer_needles))):
         return "density"
+    return None
+
+
+#: The own-document reasons strong enough to put a retired Claim back.
+STRONG_OWN_DOCUMENT_REASONS = frozenset({
+    "issuer", "title", "xbrl_cover", "cik_cover", "filing_cover", "density",
+})
+
+
+def subject_named_for_reinstatement(
+    *, statement: Any, span: Any, needles: Sequence[str],
+    peer_needles: Sequence[str] = (), context_before: Any = None,
+    context_after: Any = None, own_document: str | None = None,
+) -> str | None:
+    """Why a retired Claim is positively the subject's, or None (2026-09-25).
+
+    The retirement rule keeps a Claim whenever the text gives *a* reading
+    under which it is the subject's, because keeping is the safe error.  A
+    reinstatement is the opposite act -- it asserts that the Claim is this
+    company's -- and the 2026-09-25 audit found the retirement rule's
+    leniency too loose for it:
+
+    * a cited "span" is often a 1,200-character window of a digest, and a
+      subject named somewhere in it put back "it is too early to count META
+      out" as Alphabet's and "the FT reported GOOGL capped META's use of
+      Gemini" as Amazon's;
+    * a document's head naming the subject made a listicle of social
+      platforms Meta's own document, and so a statement about the site's
+      methodology Meta's.
+
+    So only these put a Claim back, in this order: the statement names the
+    subject (``statement``); otherwise, when the statement names another
+    covered company, nothing does; the statement names the subject's
+    executive (``executive``); the statement leans on an antecedent that is
+    the subject (``context``, :func:`citation_context_names_subject`); the
+    document is the subject's own by its issuer, title, filing cover or
+    density -- never by its head alone (``own_document:<why>``).  A span
+    that merely contains the name is not a reason.
+    """
+
+    if text_names_word(statement, needles):
+        return "statement"
+    peers = _usable(peer_needles)
+    if text_names_word(statement, peers):
+        return None
+    executives = executive_needles(needles)
+    if text_names_word(statement, executives):
+        return "executive"
+    if citation_context_names_subject(
+        statement=statement, span=span, before=context_before, after=context_after,
+        needles=[*needles, *executives], peer_needles=peer_needles,
+    ):
+        return "context"
+    if own_document in STRONG_OWN_DOCUMENT_REASONS:
+        return f"own_document:{own_document}"
     return None
 
 
@@ -579,6 +640,8 @@ __all__ = [
     "mission_subject_needles",
     "own_document_evidence",
     "name_needles",
+    "STRONG_OWN_DOCUMENT_REASONS",
+    "subject_named_for_reinstatement",
     "span_names_subject_for_admission",
     "subject_absent_from_citation",
     "text_names_any",

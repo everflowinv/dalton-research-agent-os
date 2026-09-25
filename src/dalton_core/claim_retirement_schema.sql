@@ -105,3 +105,42 @@ BEFORE UPDATE ON claim_retirement_reinstatements BEGIN
 CREATE TRIGGER IF NOT EXISTS claim_retirement_reinstatements_no_delete
 BEFORE DELETE ON claim_retirement_reinstatements BEGIN
     SELECT RAISE(ABORT, 'claim reinstatements are append-only'); END;
+
+-- 2026-09-25: an automatic reinstatement shown to be wrong is withdrawn by a
+-- further record, the same way a retirement is.  The 2026-09-25 audit found
+-- the v3 re-review reinstating on a subject named anywhere in a 1,200-char
+-- digest window, or on a document head that names the subject in a list: "it
+-- is too early to count META out" put back as Alphabet's.  One withdrawal per
+-- reinstatement, binding its id and hash; with it the Claim is retired again
+-- (``claim_retirement.reinstated_claim_version_refs`` counts only reinstatements
+-- that stand).  The re-review never reinstates a decision twice.
+CREATE TABLE IF NOT EXISTS claim_retirement_reinstatement_withdrawals (
+    withdrawal_id TEXT PRIMARY KEY,
+    claim_version_ref TEXT NOT NULL REFERENCES claim_versions(claim_version_id),
+    reinstatement_ref TEXT NOT NULL UNIQUE
+        REFERENCES claim_retirement_reinstatements(reinstatement_id),
+    reinstatement_hash TEXT NOT NULL,
+    reason_code TEXT NOT NULL CHECK(reason_code IN (
+        'human_judgment',
+        'subject_not_named_under_strict_rule'
+    )),
+    rule_ref TEXT,
+    actor_ref TEXT NOT NULL,
+    rationale TEXT NOT NULL,
+    record_json TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_claim_retirement_reinstatement_withdrawals_claim
+ON claim_retirement_reinstatement_withdrawals(claim_version_ref, created_at);
+
+CREATE TRIGGER IF NOT EXISTS claim_retirement_reinstatement_withdrawals_authorized_insert
+BEFORE INSERT ON claim_retirement_reinstatement_withdrawals WHEN dalton_claim_retirement_authorized() = 0 BEGIN
+    SELECT RAISE(ABORT, 'claim reinstatement withdrawal insert requires ClaimRetirementAuthority'); END;
+CREATE TRIGGER IF NOT EXISTS claim_retirement_reinstatement_withdrawals_no_update
+BEFORE UPDATE ON claim_retirement_reinstatement_withdrawals BEGIN
+    SELECT RAISE(ABORT, 'claim reinstatement withdrawals are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS claim_retirement_reinstatement_withdrawals_no_delete
+BEFORE DELETE ON claim_retirement_reinstatement_withdrawals BEGIN
+    SELECT RAISE(ABORT, 'claim reinstatement withdrawals are append-only'); END;

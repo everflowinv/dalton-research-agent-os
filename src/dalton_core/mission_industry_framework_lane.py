@@ -108,6 +108,14 @@ def ledger_signature(connection: Any) -> str:
         "SELECT COUNT(*) AS n, MAX(created_at) AS newest FROM claim_versions"
     ).fetchone()
     parts += [str(row["n"]), str(row["newest"] or "-")]
+    # 2026-09-25: a retired Claim recorded as the industry's is new industry
+    # evidence without a single new Claim version.
+    from .claim_industry_reattribution import reattribution_state_probe
+
+    try:
+        parts.append(reattribution_state_probe(connection))
+    except Exception:  # noqa: BLE001 - an unreadable probe is a valid state
+        parts.append("reattributions:none")
     for sql, label in (
         ("SELECT COUNT(*) AS n FROM statement_ingest_lines", "lines"),
         ("SELECT COUNT(*) AS n FROM company_dossier_versions", "dossiers"),

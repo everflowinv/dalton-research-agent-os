@@ -244,7 +244,9 @@ class RereviewTests(_V2Retirement):
         wrong_start = self.doc.index("Automakers")
         # Retired under v2 because the needles then were ["epamx"]: a name
         # table that did not know what the company is called.
-        self.fixed = self.claim(statement="Engineering Services grew bookings.",
+        # v4 (2026-09-25): the statement itself names the company; a span
+        # that merely contains the name no longer puts a Claim back.
+        self.fixed = self.claim(statement="EPAM Engineering Services grew bookings.",
                                 source=self.doc, span=(good_start, wrong_start))
         self.retire_v2(self.fixed, cited_span=self.doc[good_start:wrong_start],
                        needles=["epamx"], source=self.doc)
@@ -307,6 +309,191 @@ class RereviewTests(_V2Retirement):
                          [self.fixed["ref"]])
 
 
+class StrictReinstatementRuleTests(unittest.TestCase):
+    """2026-09-25 audit: what may put a retired Claim back (rule v4)."""
+
+    GOOGL_ALL = ["alphabet", "gemini", "goog", "googl", "google"]
+    PEERS_OF_GOOGL = ["amazon", "aws", "meta", "facebook", "microsoft", "msft"]
+
+    def named(self, statement, span="A long digest window mentioning GOOG somewhere.", **kw):
+        from dalton_core.claim_subject import subject_named_for_reinstatement
+
+        return subject_named_for_reinstatement(
+            statement=statement, span=span, needles=kw.pop("needles", self.GOOGL_ALL),
+            peer_needles=kw.pop("peers", self.PEERS_OF_GOOGL), **kw)
+
+    def test_a_name_somewhere_in_the_span_is_not_a_reason(self) -> None:
+        # 4d4e7f46: an expert on software moats, a GOOG in the 1,200-char window.
+        self.assertIsNone(self.named(
+            "An expert cited by SignalFire argues code is no longer a moat for software."))
+
+    def test_a_statement_about_a_peer_is_the_peers(self) -> None:
+        # 5f5b205f: filed under GOOGL, about META.
+        self.assertIsNone(self.named(
+            "The expert adds it is too early to count META out as long as they have "
+            "access to compute."))
+        # 14cf6141 (AMZN): about GOOGL and META, an AWS somewhere in the span.
+        self.assertIsNone(self.named(
+            "Per the note, the FT reported GOOGL capped META's use of Gemini AI.",
+            span="... AWS ...", needles=AMZN, peers=["googl", "gemini", "meta"]))
+
+    def test_the_statement_its_executive_or_its_antecedent_is(self) -> None:
+        self.assertEqual(self.named("The same expert says GOOG continues to benefit."),
+                         "statement")
+        self.assertEqual(self.named("Sundar Pichai said capacity is tight.", span="x"),
+                         "executive")
+        self.assertEqual(self.named(
+            NDRC_STATEMENT, span=NDRC_SPAN, needles=META, peers=PEERS_OF_META,
+            context_before=NDRC_BEFORE, context_after=""), "context")
+
+    def test_a_document_is_the_subjects_own_by_more_than_its_head(self) -> None:
+        listicle = "Top 35 Social Media Platforms (January 2026) Facebook Instagram " + "x " * 400
+        self.assertEqual(own_document_evidence(text=listicle, needles=META), "head")
+        self.assertIsNone(own_document_evidence(text=listicle, needles=META,
+                                                include_head=False))
+        # 96c222bb: a statement about a third-party site's methodology.
+        self.assertIsNone(self.named(
+            "The document frame is a traffic-analytics article from a third-party site.",
+            needles=META, peers=GOOGL, own_document=None))
+        self.assertEqual(self.named("Deferred tax assets declined.", span="x",
+                                    own_document="xbrl_cover"), "own_document:xbrl_cover")
+        self.assertIsNone(self.named("Deferred tax assets declined.", span="x",
+                                     own_document="head"))
+
+
+class ReinstatementWithdrawalTests(_V2Retirement):
+    """A wrong automatic reinstatement is withdrawn by a further record."""
+
+    V3 = "claim-rereview:subject-absent-span:v3"
+
+    def setUp(self) -> None:
+        super().setUp()
+        from tests.test_claim_retirement import EPAM
+
+        self.subject = EPAM
+        self.doc = ("Digest. " + "Filler about macro flows. " * 20
+                    + "Bench strength: EPAM grew bookings. Peers: Accenture held share. "
+                    + "Automakers see power generation as a near-term opportunity.")
+        start = self.doc.index("Bench strength")
+        end = self.doc.index("Automakers")
+        self.span = self.doc[start:end]
+        # Loose (span only) and good (the statement names EPAM), both retired
+        # under v2 with a name table that did not know EPAM.
+        self.loose = self.claim(statement="Bookings grew on engineering demand.",
+                                source=self.doc, span=(start, end))
+        self.good = self.claim(statement="EPAM bookings grew on engineering demand.",
+                               source=self.doc + " ", span=(start, end))
+        for claim, source in ((self.loose, self.doc), (self.good, self.doc + " ")):
+            self.retire_v2(claim, cited_span=self.span, needles=["epamx"], source=source)
+            self._reinstate_v3(claim, source)
+
+    def _reinstate_v3(self, claim, source) -> dict:
+        """A reinstatement made the way the v3 re-review made them."""
+
+        with patch.object(claim_retirement, "REREVIEW_RULE_REF", self.V3), \
+                patch("dalton_core.claim_subject.subject_named_for_reinstatement",
+                      return_value="span"):
+            return self.authority.reinstate(
+                claim_version_ref=claim["ref"], actor_ref="automation:coverage-mission",
+                rationale="v3", subject_needles=["epam"], source_text=source,
+                cited_span=self.span)
+
+    def _driver(self):
+        from dalton_core.claim_review import ClaimReviewDriver
+
+        return ClaimReviewDriver(store=self.store, missions=self.missions,
+                                 challenges=self.authority, spool=self.spool,
+                                 needles={self.subject: ["epam"]})
+
+    def test_v4_never_reinstates_on_a_span_alone(self) -> None:
+        other = self.claim(statement="Bookings grew on engineering demand again.",
+                           source=self.doc + "  ", span=(self.doc.index("Bench"),
+                                                         self.doc.index("Automakers")))
+        self.retire_v2(other, cited_span=self.span, needles=["epamx"], source=self.doc + "  ")
+        with self.assertRaises(ClaimRetirementConflict):
+            self.authority.reinstate(
+                claim_version_ref=other["ref"], actor_ref="automation:coverage-mission",
+                rationale="r", subject_needles=["epam"], source_text=self.doc + "  ",
+                cited_span=self.span)
+
+    def test_a_withdrawal_restores_the_retirement_by_appending(self) -> None:
+        connection = self.store.connection
+        self.assertNotIn(self.loose["ref"], retired_claim_version_refs(connection))
+        probe = retirement_state_probe(connection)
+        with self.assertRaises(ClaimRetirementConflict):  # the good one is still named
+            self.authority.withdraw_reinstatement(
+                claim_version_ref=self.good["ref"], actor_ref="automation:coverage-mission",
+                rationale="r", subject_needles=["epam"], cited_span=self.span)
+        with self.assertRaises(ClaimRetirementConflict):  # never unverified
+            self.authority.withdraw_reinstatement(
+                claim_version_ref=self.loose["ref"], actor_ref="automation:coverage-mission",
+                rationale="r", subject_needles=["epam"])
+        record = self.authority.withdraw_reinstatement(
+            claim_version_ref=self.loose["ref"], actor_ref="automation:coverage-mission",
+            rationale="r", subject_needles=["epam"], cited_span=self.span,
+            peer_needles=["accenture"])
+        self.assertEqual(record["reason_code"], "subject_not_named_under_strict_rule")
+        self.assertEqual(record["rule_ref"], REREVIEW_RULE_REF)
+        self.assertEqual(record["reinstated_rule_ref"], self.V3)
+        self.assertIn(self.loose["ref"], retired_claim_version_refs(connection))
+        self.assertNotIn(self.loose["ref"], reinstated_claim_version_refs(connection))
+        self.assertNotEqual(probe, retirement_state_probe(connection))
+        again = self.authority.withdraw_reinstatement(
+            claim_version_ref=self.loose["ref"], actor_ref="human:lumos", rationale="again")
+        self.assertEqual(again["status"], "duplicate")
+        for sql in ("UPDATE claim_retirement_reinstatement_withdrawals SET rationale='x'",
+                    "DELETE FROM claim_retirement_reinstatement_withdrawals"):
+            with self.assertRaises(sqlite3.DatabaseError):
+                connection.execute(sql)
+        # A person may withdraw any reinstatement, the good one included.
+        self.authority.withdraw_reinstatement(
+            claim_version_ref=self.good["ref"], actor_ref="human:lumos", rationale="我看过了")
+        self.assertIn(self.good["ref"], retired_claim_version_refs(connection))
+
+    def test_automation_withdraws_only_prior_rule_automatic_reinstatements(self) -> None:
+        human = self.claim(statement="Bookings grew on engineering demand, per the note.",
+                           source=self.doc + "   ", span=(self.doc.index("Bench"),
+                                                          self.doc.index("Automakers")))
+        self.retire_v2(human, cited_span=self.span, needles=["epamx"], source=self.doc + "   ")
+        self.authority.reinstate(claim_version_ref=human["ref"], actor_ref="human:lumos",
+                                 rationale="r")
+        with self.assertRaises(ClaimRetirementConflict):
+            self.authority.withdraw_reinstatement(
+                claim_version_ref=human["ref"], actor_ref="automation:coverage-mission",
+                rationale="r", subject_needles=["epam"], cited_span=self.span)
+        with self.assertRaises(ClaimRetirementNotFound):
+            self.authority.withdraw_reinstatement(
+                claim_version_ref="claim-version:unknown", actor_ref="human:lumos",
+                rationale="r")
+
+    def test_the_recheck_withdraws_the_loose_ones_once_and_is_idempotent(self) -> None:
+        self.grant_claim_challenge()
+        summary = self._driver().run_once()["reinstatement_recheck"]
+        self.assertEqual(summary["candidates"], 2)
+        self.assertEqual([item["claim_version_ref"] for item in summary["withdrawn"]],
+                         [self.loose["ref"]])
+        self.assertEqual(summary["confirmed"], 1)
+        retired = retired_claim_version_refs(self.store.connection)
+        self.assertIn(self.loose["ref"], retired)
+        self.assertNotIn(self.good["ref"], retired)
+        reads = self.spool.reads
+        again = self._driver().run_once()["reinstatement_recheck"]
+        self.assertEqual(again["candidates"], 1)
+        self.assertEqual(again["already_reviewed"], 1)
+        self.assertEqual(again["withdrawn"], [])
+        self.assertEqual(self.spool.reads, reads)
+        # And the re-review never puts the withdrawn one back.
+        self.assertNotIn(self.loose["ref"], {
+            row["ref"] for row in self._driver().span_retirements_to_rereview()})
+
+    def test_without_the_grant_the_recheck_only_reports(self) -> None:
+        summary = self._driver().run_once()["reinstatement_recheck"]
+        self.assertEqual(summary["withdrawn"], [])
+        self.assertEqual([item["claim_version_ref"] for item in summary["would_withdraw"]],
+                         [self.loose["ref"]])
+        self.assertNotIn(self.loose["ref"], retired_claim_version_refs(self.store.connection))
+
+
 class ReadPathTests(_V2Retirement):
     """Every read path that skips retired Claims takes the reinstatement back."""
 
@@ -360,6 +547,9 @@ class WriterDoorTests(unittest.TestCase):
         self.assertIn("reinstate_claim_retirement", HUMAN_GOVERNANCE_OPERATIONS)
         self.assertEqual(OPERATION_FIELDS["reinstate_claim_retirement"], frozenset({
             "claim_version_ref", "decision_hash", "rationale", "actor_ref"}))
+        self.assertIn("withdraw_claim_reinstatement", HUMAN_GOVERNANCE_OPERATIONS)
+        self.assertEqual(OPERATION_FIELDS["withdraw_claim_reinstatement"], frozenset({
+            "claim_version_ref", "reinstatement_hash", "rationale", "actor_ref"}))
 
     def test_the_cli_is_a_dry_run_unless_told_otherwise(self) -> None:
         from dalton_core import claim_reinstatement_cli

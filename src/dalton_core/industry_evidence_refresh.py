@@ -14,7 +14,9 @@ The lane is deterministic -- no model call:
   boundary, coverage universe, driver pack, source plan, report contract and
   debates are the approved frame; the lane only re-selects Claims;
 * a Claim is eligible when it is the latest version of its claim_ref, was
-  written no later than the scheduled instant, is not retired and not
+  written no later than the scheduled instant, is not retired (a retired
+  Claim reattributed to the pack's industry counts, as the industry's --
+  ``claim_industry_reattribution``) and not
   adjudicated superseded/retracted, is about a covered company (or the
   industry), carries exactly a driver metric as ``metric_or_aspect``, has at
   least one evidence relation, and its period ends inside the
@@ -130,11 +132,15 @@ def _table_exists(connection: sqlite3.Connection, name: str) -> bool:
     ).fetchone() is not None
 
 
-def _excluded_claim_versions(connection: sqlite3.Connection) -> set[str]:
+def _excluded_claim_versions(
+    connection: sqlite3.Connection, *, industry_evidence: set[str] | frozenset[str] = frozenset(),
+) -> set[str]:
     from .claim_retirement import retired_claim_version_refs
 
-    # Retired less reinstated (2026-09-24).
-    excluded: set[str] = set(retired_claim_version_refs(connection))
+    # Retired less reinstated (2026-09-24), less the retired Claims recorded
+    # as evidence about this pack's industry (2026-09-25): those are read as
+    # the industry's, never as their company's.  Adjudication still applies.
+    excluded: set[str] = set(retired_claim_version_refs(connection)) - set(industry_evidence)
     if _table_exists(connection, "adjudication_versions"):
         latest: dict[str, tuple[int, str]] = {}
         for row in connection.execute(
@@ -158,7 +164,16 @@ def _candidates(
     subject_refs: set[str],
     scheduled_for: datetime,
     window_days: int,
+    industry_ref: str | None = None,
 ) -> list[dict[str, Any]]:
+    from .claim_industry_reattribution import reattributed_claim_version_refs
+
+    # A retired Claim reattributed to the pack's industry is a candidate under
+    # the industry's subject -- the industry row of the pack -- and never under
+    # the company it was filed under, so no overlay picks it up.
+    industry_evidence = (
+        reattributed_claim_version_refs(connection, industry_ref)
+        if industry_ref is not None else set())
     placeholders = ",".join("?" for _ in metric_refs)
     rows = connection.execute(
         "SELECT c.claim_version_id,c.claim_json,c.content_hash,c.created_at "
@@ -167,14 +182,16 @@ def _candidates(
         "WHERE n.prior_version_id=c.claim_version_id)",
         sorted(metric_refs),
     ).fetchall()
-    excluded = _excluded_claim_versions(connection)
+    excluded = _excluded_claim_versions(connection, industry_evidence=industry_evidence)
     window_start = (scheduled_for - timedelta(days=window_days)).date()
     result = []
     for row in rows:
         if row["claim_version_id"] in excluded:
             continue
         claim = json.loads(row["claim_json"])
-        if claim.get("subject_ref") not in subject_refs:
+        subject_ref = (industry_ref if row["claim_version_id"] in industry_evidence
+                       else claim.get("subject_ref"))
+        if subject_ref not in subject_refs:
             continue
         written = _instant(row["created_at"])
         if written > scheduled_for:
@@ -193,7 +210,7 @@ def _candidates(
         result.append({
             "claim_version_ref": row["claim_version_id"],
             "claim_version_hash": row["content_hash"],
-            "subject_ref": claim["subject_ref"],
+            "subject_ref": subject_ref,
             "metric_ref": claim["metric_or_aspect"],
             "period": claim.get("period"),
             "value": claim.get("value"),
@@ -306,6 +323,7 @@ def refresh_evidence_pack(
             connection, metric_refs=set(driver_of_metric),
             subject_refs=universe_refs | {template["industry_ref"]},
             scheduled_for=when, window_days=claim_window_days,
+            industry_ref=template["industry_ref"],
         ),
         verification,
     )

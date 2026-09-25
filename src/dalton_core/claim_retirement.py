@@ -94,9 +94,18 @@ REINSTATEMENT_REASONS: tuple[str, ...] = (
     "human_judgment",
     "subject_named_under_current_rule",
 )
-#: The rule an automatic reinstatement re-runs: the current span detector,
-#: over the current alias table.
-REREVIEW_RULE_REF = "claim-rereview:subject-absent-span:" + SUBJECT_DETECTOR_REF.rsplit(":", 1)[-1]
+#: The rule an automatic reinstatement re-runs.  v3: the current span
+#: detector no longer fires.  v4 (2026-09-25 audit): and the subject is
+#: positively named -- by the statement, its executive, the antecedent it
+#: leans on, or a document that is the subject's own by more than its head
+#: (``claim_subject.subject_named_for_reinstatement``).  A name somewhere in a
+#: 1,200-character span no longer puts a Claim back.
+PRIOR_REREVIEW_RULE_REFS = frozenset({"claim-rereview:subject-absent-span:v3"})
+REREVIEW_RULE_REF = "claim-rereview:subject-named-strict:v4"
+WITHDRAWAL_REASONS: tuple[str, ...] = (
+    "human_judgment",
+    "subject_not_named_under_strict_rule",
+)
 BOILERPLATE_DETECTOR_REF = "claim-detector:boilerplate-disclaimer:v1"
 DETECTOR_REFS = {
     "subject_absent_from_source": SUBJECT_DETECTOR_REF,
@@ -270,9 +279,26 @@ def reinstated_claim_version_refs(connection: Any) -> set[str]:
 
     if not _table_exists(connection, "claim_retirement_reinstatements"):
         return set()
+    # 2026-09-25: a reinstatement a later record withdrew no longer stands.
+    withdrawn = ""
+    if _table_exists(connection, "claim_retirement_reinstatement_withdrawals"):
+        withdrawn = (" WHERE NOT EXISTS (SELECT 1 FROM claim_retirement_reinstatement_withdrawals w"
+                     " WHERE w.reinstatement_ref=r.reinstatement_id)")
     return {
         str(row[0]) for row in connection.execute(
-            "SELECT claim_version_ref FROM claim_retirement_reinstatements"
+            "SELECT r.claim_version_ref FROM claim_retirement_reinstatements r" + withdrawn
+        ).fetchall()
+    }
+
+
+def withdrawn_reinstatement_claim_version_refs(connection: Any) -> set[str]:
+    """Claim versions whose reinstatement a later record withdrew (retired again)."""
+
+    if not _table_exists(connection, "claim_retirement_reinstatement_withdrawals"):
+        return set()
+    return {
+        str(row[0]) for row in connection.execute(
+            "SELECT claim_version_ref FROM claim_retirement_reinstatement_withdrawals"
         ).fetchall()
     }
 
@@ -304,7 +330,12 @@ def retirement_state_probe(connection: Any) -> str:
     """
 
     parts = []
-    for table in ("claim_retirement_decisions", "claim_retirement_reinstatements"):
+    # 2026-09-25: an industry reattribution moves what an industry subject
+    # reads (``company_research_view`` answers an industry with them), so the
+    # lanes' change keys see it too.
+    for table in ("claim_retirement_decisions", "claim_retirement_reinstatements",
+                  "claim_retirement_reinstatement_withdrawals",
+                  "claim_industry_reattributions"):
         if not _table_exists(connection, table):
             parts.append(f"{table}:absent")
             continue
@@ -655,6 +686,7 @@ class ClaimRetirementAuthority:
         context_before: str | None = None,
         context_after: str | None = None,
         peer_needles: Sequence[str] = (),
+        strict_own_document: str | None = None,
     ) -> dict[str, Any]:
         """Withdraw one retirement by appending a record that names it.
 
@@ -663,9 +695,13 @@ class ClaimRetirementAuthority:
         retirement (``human_judgment``).  Automation may withdraw only a
         subject-absent retirement, and only when the *current* span rule --
         today's alias table, the v3 context and own-document tests -- no
-        longer fires on the exact original; the rule is re-run here, the same
-        way ``decide`` re-runs a detector before it retires.  One
-        reinstatement per decision, so a repeat is ``duplicate``.
+        longer fires on the exact original *and* the subject is positively
+        named under the v4 reinstatement rule
+        (``claim_subject.subject_named_for_reinstatement``; ``strict_own_document``
+        is the own-document reason computed without the head test); both are
+        re-run here, the same way ``decide`` re-runs a detector before it
+        retires.  One reinstatement per decision, so a repeat is
+        ``duplicate``.
         """
 
         import json
@@ -705,9 +741,21 @@ class ClaimRetirementAuthority:
                 context_after=context_after, peer_needles=list(peer_needles),
             ) is not None:
                 raise ClaimRetirementConflict("the current rule still retires this Claim")
+            from .claim_subject import subject_named_for_reinstatement
+
+            named_by = subject_named_for_reinstatement(
+                statement=claim["normalized_statement"], span=cited_span,
+                needles=list(subject_needles), peer_needles=list(peer_needles),
+                context_before=context_before, context_after=context_after,
+                own_document=strict_own_document,
+            )
+            if named_by is None:
+                raise ClaimRetirementConflict(
+                    "the subject is not positively named; a span that merely contains "
+                    "the name does not put a Claim back")
             reason_code, rule_ref = "subject_named_under_current_rule", REREVIEW_RULE_REF
         else:
-            reason_code = "human_judgment"
+            reason_code, named_by = "human_judgment", None
         wire = {
             "schema_version": SCHEMA_VERSION,
             "claim_version_ref": claim_version_ref,
@@ -724,6 +772,8 @@ class ClaimRetirementAuthority:
             "rationale": rationale,
             "created_at": self.clock(),
         }
+        if named_by is not None:
+            wire["named_by"] = named_by
         wire["id"] = "claim-retirement-reinstatement:" + content_hash(
             {"decision": decision["id"]})[:32]
         wire["content_hash"] = content_hash({k: v for k, v in wire.items() if k != "content_hash"})
@@ -745,11 +795,122 @@ class ClaimRetirementAuthority:
             )
         return {**wire, "status": "fresh"}
 
+    def withdraw_reinstatement(
+        self,
+        *,
+        claim_version_ref: str,
+        actor_ref: str,
+        rationale: str,
+        reinstatement_hash: str | None = None,
+        subject_needles: Sequence[str] = (),
+        cited_span: str | None = None,
+        context_before: str | None = None,
+        context_after: str | None = None,
+        peer_needles: Sequence[str] = (),
+        strict_own_document: str | None = None,
+    ) -> dict[str, Any]:
+        """Withdraw a reinstatement, so the retirement stands again (2026-09-25).
+
+        The decision table is one row per Claim for ever and a reinstatement
+        is one per decision, so a wrong reinstatement cannot be undone by
+        retiring the Claim again.  This appends the undo instead, binding the
+        reinstatement's id and hash; nothing is edited.
+
+        A person may withdraw any reinstatement (``human_judgment``).
+        Automation may withdraw only an automatic one made under an earlier
+        re-review rule (``PRIOR_REREVIEW_RULE_REFS``), and only when the
+        current reinstatement rule, re-run here on the exact span, finds the
+        subject not positively named (``subject_not_named_under_strict_rule``).
+        One withdrawal per reinstatement; a repeat is ``duplicate``.
+        """
+
+        import json
+
+        claim_version_ref = _text(claim_version_ref, "claim_version_ref", maximum=512)
+        rationale = _text(rationale, "rationale")
+        actor = _actor(actor_ref)
+        row = self.connection.execute(
+            "SELECT record_json, content_hash FROM claim_retirement_reinstatements "
+            "WHERE claim_version_ref=? ORDER BY created_at DESC LIMIT 1", (claim_version_ref,),
+        ).fetchone()
+        if row is None:
+            raise ClaimRetirementNotFound("no reinstatement names this claim version")
+        reinstatement = json.loads(row["record_json"])
+        if reinstatement.get("content_hash") != row["content_hash"]:
+            raise ClaimRetirementConflict("claim reinstatement authority drifted")
+        if (reinstatement_hash is not None
+                and _sha256(reinstatement_hash, "reinstatement_hash") != row["content_hash"]):
+            raise ClaimRetirementConflict("reinstatement hash binding failed")
+        rule_ref = None
+        if _AUTOMATION_RE.fullmatch(actor):
+            if reinstatement.get("reason_code") != "subject_named_under_current_rule":
+                raise ClaimRetirementConflict(
+                    "automation may only withdraw an automatic reinstatement")
+            if reinstatement.get("rule_ref") not in PRIOR_REREVIEW_RULE_REFS:
+                raise ClaimRetirementConflict(
+                    "a reinstatement made under the current rule is not re-judged by it")
+            if cited_span is None:
+                raise ClaimRetirementConflict(
+                    "the cited span cannot be read; a reinstatement is never withdrawn unverified")
+            from .claim_subject import subject_named_for_reinstatement
+
+            claim = self._claim(claim_version_ref)
+            named_by = subject_named_for_reinstatement(
+                statement=claim["normalized_statement"], span=cited_span,
+                needles=list(subject_needles), peer_needles=list(peer_needles),
+                context_before=context_before, context_after=context_after,
+                own_document=strict_own_document,
+            )
+            if named_by is not None:
+                raise ClaimRetirementConflict(
+                    f"the current rule still names the subject ({named_by})")
+            reason_code, rule_ref = "subject_not_named_under_strict_rule", REREVIEW_RULE_REF
+        else:
+            reason_code = "human_judgment"
+        wire = {
+            "schema_version": SCHEMA_VERSION,
+            "claim_version_ref": claim_version_ref,
+            "claim_ref": reinstatement.get("claim_ref"),
+            "reinstatement_ref": reinstatement["id"],
+            "reinstatement_hash": row["content_hash"],
+            "decision_ref": reinstatement.get("decision_ref"),
+            "reinstated_rule_ref": reinstatement.get("rule_ref"),
+            "reason_code": reason_code,
+            "rule_ref": rule_ref,
+            "actor_ref": actor,
+            "rationale": rationale,
+            "created_at": self.clock(),
+        }
+        wire["id"] = "claim-retirement-reinstatement-withdrawal:" + content_hash(
+            {"reinstatement": reinstatement["id"]})[:32]
+        wire["content_hash"] = content_hash({k: v for k, v in wire.items() if k != "content_hash"})
+        with self._transaction() as cur:
+            existing = cur.execute(
+                "SELECT record_json FROM claim_retirement_reinstatement_withdrawals "
+                "WHERE reinstatement_ref=?", (reinstatement["id"],),
+            ).fetchone()
+            if existing is not None:
+                return {**json.loads(existing["record_json"]), "status": "duplicate"}
+            cur.execute(
+                "INSERT INTO claim_retirement_reinstatement_withdrawals(withdrawal_id,"
+                "claim_version_ref,reinstatement_ref,reinstatement_hash,reason_code,rule_ref,"
+                "actor_ref,rationale,record_json,content_hash,created_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (wire["id"], claim_version_ref, reinstatement["id"], row["content_hash"],
+                 reason_code, rule_ref, actor, rationale,
+                 json.dumps(wire, ensure_ascii=False, sort_keys=True),
+                 wire["content_hash"], wire["created_at"]),
+            )
+        return {**wire, "status": "fresh"}
+
 
 __all__ = [
     "BOILERPLATE_DETECTOR_REF",
+    "PRIOR_REREVIEW_RULE_REFS",
     "REINSTATEMENT_REASONS",
     "REREVIEW_RULE_REF",
+    "WITHDRAWAL_REASONS",
+    "withdrawn_reinstatement_claim_version_refs",
     "SPAN_RATIONALE_PREFIX",
     "SPAN_V2_DETECTOR_REF",
     "reinstated_claim_version_refs",
