@@ -1308,6 +1308,8 @@ class ResearchPlanExecutor:
         step: Mapping[str, Any],
         work_order: Mapping[str, Any],
         authority: Mapping[str, Any],
+        *,
+        claim_index: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Persist the deterministic compiled-plan authority bridge records.
 
@@ -1358,9 +1360,10 @@ class ResearchPlanExecutor:
         mandate = read_exact_mandate_version(
             cursor, plan_wire["agenda_binding"]["mandate_version_ref"]
         )
-        claim_index = build_claim_index(
-            ledger=self.plan.store, created_at=created_at
-        )
+        if claim_index is None:
+            claim_index = build_claim_index(
+                ledger=self.plan.store, created_at=created_at
+            )
         context = build_context_pack(
             [{
                 "kind": "mandate",
@@ -1769,6 +1772,19 @@ class ResearchPlanExecutor:
                 "connector redispatch after a physical attempt is unsupported"
             )
 
+        # 2026-09-25: the ClaimIndex is a projection of the whole Ledger's
+        # claim status and takes minutes on the legacy Core (live, CTSH
+        # 2026Q2: >60s in ``project_claim_status_details``).  It depends only
+        # on the plan and the Ledger, not on the attempt, so build it before
+        # the Scheduler lease starts ticking: claimed first, the 60-second
+        # lease expired inside the projection and the transport was refused
+        # with "attempt is not the current leased attempt".  Skipped when the
+        # WorkOrder cannot be claimed at all, so a waiting plan pays nothing.
+        claim_index = None
+        if self.scheduler.status(work_order["id"])["state"] in {"ready", "leased"}:
+            claim_index = build_claim_index(
+                ledger=self.plan.store, created_at=plan_wire["created_at"]
+            )
         claim = self.scheduler.claim(self.actor_ref, work_order_id=work_order["id"])
         if claim is None:
             return {
@@ -1781,7 +1797,9 @@ class ResearchPlanExecutor:
         authority = self._connector_authority(
             plan_wire, step, work_order, scheduler_attempt_number=attempt_number
         )
-        bridge = self._bridge_records(plan_wire, step, work_order, authority)
+        bridge = self._bridge_records(
+            plan_wire, step, work_order, authority, claim_index=claim_index
+        )
         requests = self._runner_requests(
             plan_wire, step, work_order, authority, bridge, claim=claim
         )
