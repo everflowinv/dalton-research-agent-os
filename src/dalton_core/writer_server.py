@@ -747,6 +747,10 @@ HUMAN_GOVERNANCE_OPERATIONS = frozenset({
     # person's door; the review patrol's automatic re-review writes through
     # the authority directly under the mission's claim_challenge grant.
     "reinstate_claim_retirement",
+    # 2026-09-25: withdraw a wrong reinstatement, so the retirement stands
+    # again.  A person's door; the patrol's recheck writes through the
+    # authority under the mission's claim_challenge grant.
+    "withdraw_claim_reinstatement",
     # 2026-09-25: record a retired Claim as evidence about the mission's
     # industry (company level keeps it retired).  A person's door; the review
     # patrol's backfill writes through the authority under claim_challenge.
@@ -1186,6 +1190,9 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     "reinstate_claim_retirement": frozenset({
         "claim_version_ref", "decision_hash", "rationale", "actor_ref",
     }),
+    "withdraw_claim_reinstatement": frozenset({
+        "claim_version_ref", "reinstatement_hash", "rationale", "actor_ref",
+    }),
     "reattribute_claim_to_industry": frozenset({
         "claim_version_ref", "decision_hash", "industry_ref", "rationale", "actor_ref",
     }),
@@ -1472,6 +1479,7 @@ OPERATION_ACTOR_FIELDS: dict[str, str] = {
     "decide_claim_retirement": "actor_ref",
     "reinstate_claim_retirement": "actor_ref",
     "reattribute_claim_to_industry": "actor_ref",
+    "withdraw_claim_reinstatement": "actor_ref",
 }
 
 
@@ -5457,6 +5465,12 @@ class WriterServer:
         if not str(values.get("actor_ref") or "").startswith("human:"):
             raise WriterServerError("a retirement is withdrawn by hand only by a person")
         return self.claim_retirement_challenges.reinstate(**values)
+
+    def _op_withdraw_claim_reinstatement(self, p: Mapping[str, Any]) -> Any:
+        values = dict(p)
+        if not str(values.get("actor_ref") or "").startswith("human:"):
+            raise WriterServerError("a reinstatement is withdrawn by hand only by a person")
+        return self.claim_retirement_challenges.withdraw_reinstatement(**values)
 
     def _op_reattribute_claim_to_industry(self, p: Mapping[str, Any]) -> Any:
         values = dict(p)

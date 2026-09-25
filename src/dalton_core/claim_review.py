@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .claim_retirement import (
+    PRIOR_REREVIEW_RULE_REFS,
     REREVIEW_RULE_REF,
     SPAN_RATIONALE_PREFIX,
     SPAN_V2_DETECTOR_REF,
@@ -53,6 +54,7 @@ from .claim_subject import (
     mission_subject_needles,
     name_needles,
     own_document_evidence,
+    subject_named_for_reinstatement,
 )
 from .store import authorization_flag, content_hash
 
@@ -448,6 +450,38 @@ class ClaimReviewDriver:
                 "context_before": before, "context_after": after,
                 "peer_needles": list(peer_needles)}
 
+    def _strict_own(self, citation: Mapping[str, Any] | None, text: str | None,
+                    needles: Sequence[str], *, subject_ref: Any,
+                    peer_needles: Sequence[str]) -> str | None:
+        """Why the document is the subject's own, without the head test.
+
+        What a reinstatement may rest on (2026-09-25): a head that names the
+        subject in a list is not the subject's document.
+        """
+
+        if citation is None or text is None:
+            return None
+        facts = self._document_facts(citation.get("document_ref"))
+        return own_document_evidence(
+            title=facts["title"], text=text, needles=needles,
+            issuer_document=facts["issuer_document"], subject_ref=subject_ref,
+            peer_needles=peer_needles, include_head=False,
+        )
+
+    def _named_for_reinstatement(self, claim: Mapping[str, Any], citation: Any,
+                                 text: str | None, needles: Sequence[str],
+                                 inputs: Mapping[str, Any], *, subject_ref: Any,
+                                 peers: Sequence[str]) -> tuple[str | None, str | None]:
+        strict_own = self._strict_own(citation, text, needles, subject_ref=subject_ref,
+                                      peer_needles=peers)
+        named_by = subject_named_for_reinstatement(
+            statement=claim["normalized_statement"], span=inputs.get("cited_span"),
+            needles=needles, peer_needles=peers,
+            context_before=inputs.get("context_before"),
+            context_after=inputs.get("context_after"), own_document=strict_own,
+        )
+        return named_by, strict_own
+
     def _peer_needles(self, subject_ref: Any, roster: Mapping[str, Sequence[str]]) -> list[str]:
         """Every other covered company's names: what "another company" means."""
 
@@ -704,9 +738,12 @@ class ClaimReviewDriver:
             # Report-only: what the re-review would withdraw under a grant.
             summary["rereview"] = self.rereview_retirements(
                 principal=None, roster=roster, citations=citations, texts=texts)
+            summary["reinstatement_recheck"] = self.recheck_reinstatements(
+                principal=None, roster=roster, citations=citations, texts=texts)
             summary["industry_reattribution"] = self.reattribute_industry_findings(
                 principal=None, citations=citations, texts=texts)
             if (summary["rereview"]["would_reinstate"]
+                    or summary["reinstatement_recheck"]["would_withdraw"]
                     or summary["industry_reattribution"]["would_reattribute"]):
                 summary["status"] = "held"
             return summary
@@ -758,13 +795,146 @@ class ClaimReviewDriver:
             })
         summary["rereview"] = self.rereview_retirements(
             principal=principal, roster=roster, citations=citations, texts=texts)
+        # 2026-09-25: reinstatements the v3 rule made too loosely are withdrawn
+        # here, so the retirement stands again before the industry pass reads.
+        summary["reinstatement_recheck"] = self.recheck_reinstatements(
+            principal=principal, roster=roster, citations=citations, texts=texts)
         # After the re-review, so a retirement withdrawn this tick is its
         # company's again and never also the industry's.
         summary["industry_reattribution"] = self.reattribute_industry_findings(
             principal=principal, citations=citations, texts=texts)
         if (summary["challenged"] or summary["retired"] or summary["rereview"]["reinstated"]
+                or summary["reinstatement_recheck"]["withdrawn"]
                 or summary["industry_reattribution"]["reattributed"]):
             summary["status"] = "acted"
+        return summary
+
+    # -- re-check of standing automatic reinstatements (2026-09-25) ---------
+
+    def reinstatements_to_recheck(self) -> list[dict[str, Any]]:
+        """Automatic reinstatements made under an earlier rule, still standing."""
+
+        try:
+            rows = self.connection.execute(
+                "SELECT r.claim_version_ref AS ref, r.content_hash AS reinstatement_hash, "
+                "r.rule_ref AS rule_ref, v.claim_json AS claim_json "
+                "FROM claim_retirement_reinstatements r "
+                "JOIN claim_versions v ON v.claim_version_id=r.claim_version_ref "
+                "WHERE r.reason_code='subject_named_under_current_rule' "
+                "ORDER BY r.created_at, r.claim_version_ref"
+            ).fetchall()
+        except sqlite3.Error:
+            return []
+        from .claim_retirement import withdrawn_reinstatement_claim_version_refs
+
+        withdrawn = withdrawn_reinstatement_claim_version_refs(self.connection)
+        return [
+            {**dict(row), "subject_ref": json.loads(row["claim_json"]).get("subject_ref")}
+            for row in rows
+            if row["rule_ref"] in PRIOR_REREVIEW_RULE_REFS and row["ref"] not in withdrawn
+        ]
+
+    def recheck_reinstatements(
+        self,
+        *,
+        principal: str | None,
+        roster: Mapping[str, Sequence[str]] | None = None,
+        citations: Mapping[str, Mapping[str, Any]] | None = None,
+        texts: dict[str, str | None] | None = None,
+        max_documents: int = DEFAULT_REREVIEW_DOCUMENTS,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Re-judge the automatic reinstatements under today's stricter rule.
+
+        The v3 re-review put Claims back on a subject named anywhere in a long
+        span or in a document's head (2026-09-25 audit).  Each automatic
+        reinstatement made under an earlier rule and still standing is read
+        again against its exact original; when the v4 rule finds the subject
+        not positively named, the automation principal appends a withdrawal
+        (the authority re-runs the rule) and the retirement stands again.
+        Without a principal -- or on ``dry_run`` -- it reports only.
+
+        Idempotent: a withdrawn reinstatement leaves the query, and a confirmed
+        one is marked (``claim_review_rereviews``, outcome ``reinstated`` under
+        the v4 rule ref and the needles hash) and read again only when the
+        rule or the alias table changes.
+        """
+
+        roster = self._roster_needles() if roster is None else roster
+        summary: dict[str, Any] = {
+            "rule_ref": REREVIEW_RULE_REF, "candidates": 0, "examined": 0,
+            "withdrawn": [], "would_withdraw": [], "confirmed": 0, "unreadable": 0,
+            "deferred": 0, "already_reviewed": 0, "skipped": [],
+        }
+        candidates = self.reinstatements_to_recheck()
+        summary["candidates"] = len(candidates)
+        if not candidates:
+            return summary
+        markers = self._rereviews()
+        if not citations or any(row["ref"] not in citations for row in candidates):
+            citations = {**self._citations(), **(citations or {})}
+        texts = {} if texts is None else texts
+        read_here = 0
+        for row in candidates:
+            needles = self._needles_for(row["subject_ref"], roster)
+            peers = self._peer_needles(row["subject_ref"], roster)
+            needles_hash = content_hash({"needles": needles, "peers": peers})
+            marker = markers.get(row["ref"])
+            if (marker is not None and marker["rule_ref"] == REREVIEW_RULE_REF
+                    and marker["needles_hash"] == needles_hash
+                    and marker["outcome"] == "reinstated"):
+                summary["already_reviewed"] += 1
+                continue
+            citation = citations.get(row["ref"])
+            text = None
+            if citation is not None:
+                digest = citation["digest"]
+                if digest not in texts:
+                    if read_here >= max(1, int(max_documents)):
+                        summary["deferred"] += 1
+                        continue
+                    read_here += 1
+                    texts[digest] = self.source_text(digest)
+                text = texts[digest]
+            summary["examined"] += 1
+            if text is None:
+                summary["unreadable"] += 1
+                continue
+            claim = json.loads(row["claim_json"])
+            inputs = self._span_inputs(citation, text, needles,
+                                       subject_ref=row["subject_ref"], peer_needles=peers)
+            named_by, strict_own = self._named_for_reinstatement(
+                claim, citation, text, needles, inputs,
+                subject_ref=row["subject_ref"], peers=peers)
+            if named_by is not None:
+                summary["confirmed"] += 1
+                if not dry_run and self._authorization is not None:
+                    self._record_rereview(row["ref"], needles_hash, "reinstated")
+                continue
+            item = {"claim_version_ref": row["ref"], "subject_ref": row["subject_ref"],
+                    "statement": claim["normalized_statement"][:200]}
+            if dry_run or principal is None or self.challenges is None:
+                summary["would_withdraw"].append(item)
+                continue
+            try:
+                record = self.challenges.withdraw_reinstatement(
+                    claim_version_ref=row["ref"], actor_ref=principal,
+                    reinstatement_hash=row["reinstatement_hash"],
+                    rationale=(
+                        "按 v4 撤销规则重判：结论本身、其高管、所依附的上文或本公司文件"
+                        "（不含仅开头提到）都没有指向这家公司；只是长片段里某处出现了名字，"
+                        "当初的撤销不成立，退役恢复。"),
+                    subject_needles=needles, cited_span=inputs.get("cited_span"),
+                    context_before=inputs.get("context_before"),
+                    context_after=inputs.get("context_after"),
+                    peer_needles=peers, strict_own_document=strict_own,
+                )
+            except ClaimRetirementError as exc:
+                summary["skipped"].append({"claim_version_ref": row["ref"], "reason": str(exc)})
+                continue
+            self._record_rereview(row["ref"], needles_hash, "still_retired")
+            summary["withdrawn"].append({**item, "withdrawal_ref": record["id"],
+                                         "status": record["status"]})
         return summary
 
     # -- industry-level findings among the retirements (2026-09-25) ---------
@@ -947,16 +1117,21 @@ class ClaimReviewDriver:
             claim = json.loads(row["claim_json"])
             inputs = self._span_inputs(citation, text, needles,
                                        subject_ref=row["subject_ref"], peer_needles=peers)
+            named_by, strict_own = self._named_for_reinstatement(
+                claim, citation, text, needles, inputs,
+                subject_ref=row["subject_ref"], peers=peers)
             if subject_absent(
                 statement=claim["normalized_statement"], source_text=text,
                 needles=needles, **inputs,
-            ) is not None:
+            ) is not None or named_by is None:
+                # v4: the retirement rule no longer firing is not enough; the
+                # subject must be positively named to put the Claim back.
                 summary["still_retired"] += 1
                 if not dry_run:
                     self._record_rereview(row["ref"], needles_hash, "still_retired")
                 continue
             item = {"claim_version_ref": row["ref"], "subject_ref": row["subject_ref"],
-                    "statement": claim["normalized_statement"][:160]}
+                    "statement": claim["normalized_statement"][:160], "named_by": named_by}
             if dry_run or principal is None:
                 summary["would_reinstate"].append(item)
                 continue
@@ -967,7 +1142,8 @@ class ClaimReviewDriver:
                     rationale=(
                         "按当前别名表和 v3 退役规则重判：所引片段、结论本身、紧邻上下文或"
                         "文档本身（封面/标题/密度）其实指向这家公司，当初的退役不成立。"),
-                    subject_needles=needles, source_text=text, **inputs,
+                    subject_needles=needles, source_text=text,
+                    strict_own_document=strict_own, **inputs,
                 )
             except ClaimRetirementError as exc:
                 summary["skipped"].append({"claim_version_ref": row["ref"], "reason": str(exc)})
