@@ -1,0 +1,633 @@
+"""Keep an industry-level finding that was retired at company level.
+
+The span-level subject-absent detector (``claim_retirement``, v2/v3) retires
+a Claim whose cited span and statement never name the company it is filed
+under.  Right at company level -- and a loss of knowledge when the Claim was
+about the industry: the Wells Fargo mid-year IT services CIO survey
+(alphaengine-doc:320000609769188) was filed 54 times under CTSH and EPAM, and
+ws-7d holds about a hundred hyperscaler-capex statements filed under one
+hyperscaler or another.
+
+ClaimVersion is a frozen contract and ``subject_ref`` is part of its hash, so
+a Claim is never re-filed.  Instead, the way a reinstatement withdraws a
+retirement (``claim_retirement_reinstatements``), a further append-only record
+says *this retired claim version is evidence about this industry*:
+
+* ``claim_industry_reattributions`` -- one row per claim version, binding the
+  claim version and the retirement decision (ids and hashes), the company it
+  was filed under, the mission's ``industry_ref``, the rule ref that decided
+  it and who applied it.  Update and delete are refused by trigger.
+* The retirement stands.  Every company-level read path keeps skipping the
+  Claim through ``retired_claim_version_refs``, which this module never
+  touches; only the industry-level reads below pick it up, and only under the
+  industry the record names.
+
+Who may write one:
+
+* **automation** -- the mission's automation principal, only when the mission
+  grants ``claim_challenge`` (the grant that let it retire the Claim), only
+  for a ``subject_absent_from_source`` retirement, and only when the
+  deterministic rule (``claim_industry_rule.judge``) fires on the exact
+  statement and cited span, re-run here rather than trusted;
+* **a person** (``human:``) -- any retired Claim except a boilerplate
+  disclaimer, through the writer's ``reattribute_claim_to_industry``
+  operation (``claim_industry_reattribution_cli ... --apply --actor human:``).
+
+The ``industry_ref`` is always the covering mission's own; a caller cannot
+name another.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+import sqlite3
+from collections.abc import Mapping, Sequence
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Callable, Iterator
+
+from .claim_industry_rule import RULE_REF, judge
+from .store import DaltonStore, authorization_flag, authorized_flag, content_hash
+
+SCHEMA_VERSION = "0.1"
+_SCHEMA_PATH = Path(__file__).with_name("claim_industry_reattribution_schema.sql")
+TABLE = "claim_industry_reattributions"
+REVIEW_TABLE = "claim_industry_reattribution_reviews"
+REASON_CODES: tuple[str, ...] = ("industry_level_under_rule", "human_judgment")
+#: The mission grant automation writes under: the one that let it retire.
+WRITE_SCOPE = "claim_challenge"
+#: Originals read per tick by the backfill, and records written per tick.
+DEFAULT_MAX_DOCUMENTS = 20
+DEFAULT_MAX_WRITES = 50
+_HUMAN_RE = re.compile(r"^human:[A-Za-z0-9._:-]{1,128}$")
+_AUTOMATION_RE = re.compile(r"^automation:[A-Za-z0-9._:-]{1,128}$")
+
+
+class ClaimReattributionError(RuntimeError):
+    """Base error for the industry reattribution authority."""
+
+
+class ClaimReattributionValidationError(ClaimReattributionError):
+    """An argument is invalid."""
+
+
+class ClaimReattributionConflict(ClaimReattributionError):
+    """A gate refused, or a binding does not hold."""
+
+
+class ClaimReattributionNotFound(ClaimReattributionError):
+    """The named record does not exist."""
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+
+
+def _text(value: Any, name: str, *, maximum: int = 4000) -> str:
+    if not isinstance(value, str) or not value.strip() or len(value) > maximum:
+        raise ClaimReattributionValidationError(f"{name} must be text of 1..{maximum} characters")
+    return value.strip()
+
+
+def _actor(value: Any) -> str:
+    actor = _text(value, "actor_ref", maximum=256)
+    if not (_HUMAN_RE.fullmatch(actor) or _AUTOMATION_RE.fullmatch(actor)):
+        raise ClaimReattributionValidationError("actor_ref must be a human: or automation: principal")
+    return actor
+
+
+def _table_exists(connection: Any, name: str) -> bool:
+    try:
+        return connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+        ).fetchone() is not None
+    except sqlite3.Error:
+        return False
+
+
+# -- the shared reads ------------------------------------------------------
+
+
+def industry_reattributions(
+    connection: Any, industry_ref: str | None = None,
+) -> dict[str, dict[str, str]]:
+    """claim_version_ref -> {industry_ref, reattribution_ref} for live ones.
+
+    Live means the Claim is still retired: a retirement a reinstatement
+    withdrew puts the Claim back under its company, and it is then that
+    company's again, not the industry's.  Empty on a Core without the table.
+    Every industry-level consumer reads through this (or the two helpers
+    below); no company-level path does.
+    """
+
+    if not _table_exists(connection, TABLE):
+        return {}
+    from .claim_retirement import retired_claim_version_refs
+
+    query = f"SELECT claim_version_ref, industry_ref, reattribution_id FROM {TABLE}"
+    params: tuple[Any, ...] = ()
+    if industry_ref is not None:
+        query += " WHERE industry_ref=?"
+        params = (industry_ref,)
+    rows = connection.execute(query, params).fetchall()
+    if not rows:
+        return {}
+    retired = retired_claim_version_refs(connection)
+    return {
+        str(row[0]): {"industry_ref": str(row[1]), "reattribution_ref": str(row[2])}
+        for row in rows if str(row[0]) in retired
+    }
+
+
+def reattributed_claim_version_refs(connection: Any, industry_ref: str) -> set[str]:
+    """The retired claim versions that are evidence about this industry."""
+
+    return set(industry_reattributions(connection, industry_ref))
+
+
+def reattribution_state_probe(connection: Any) -> str:
+    """One short string that moves whenever a reattribution is appended."""
+
+    if not _table_exists(connection, TABLE):
+        return f"{TABLE}:absent"
+    row = connection.execute(f"SELECT COUNT(*), MAX(rowid) FROM {TABLE}").fetchone()
+    return f"{TABLE}:{row[0]}:{row[1]}"
+
+
+def covering_missions(connection: Any) -> dict[str, dict[str, Any]]:
+    """company_ref -> the active mission covering it, with its industry.
+
+    Read from the mission pointer and the exact version it names; a version
+    whose stored hash does not match the pointer is skipped (it covers
+    nothing here).  ``industry_ref`` is the mission's own field -- the only
+    place an industry ever comes from.
+    """
+
+    covering: dict[str, dict[str, Any]] = {}
+    try:
+        rows = connection.execute(
+            "SELECT p.mission_version_id AS id, p.content_hash AS pointer_hash, "
+            "v.record_json AS record_json, v.content_hash AS content_hash, "
+            "v.industry_ref AS industry_ref FROM coverage_mission_pointer p "
+            "JOIN coverage_mission_versions v ON v.mission_version_id=p.mission_version_id "
+            "ORDER BY p.mission_ref"
+        ).fetchall()
+    except sqlite3.Error:
+        return {}
+    for row in rows:
+        try:
+            mission = json.loads(row["record_json"])
+        except (TypeError, ValueError):
+            continue
+        if (row["pointer_hash"] != row["content_hash"]
+                or mission.get("content_hash") != row["content_hash"]
+                or mission.get("industry_ref") != row["industry_ref"]):
+            continue
+        industry = mission.get("industry_ref")
+        autonomy = mission.get("autonomy") or {}
+        for member in mission.get("universe") or ():
+            if not isinstance(member, Mapping) or not member.get("company_ref"):
+                continue
+            covering.setdefault(str(member["company_ref"]), {
+                "mission_version_ref": mission.get("id"),
+                "mission_hash": row["content_hash"],
+                "industry_ref": industry if isinstance(industry, str)
+                and industry.startswith("industry:") else None,
+                "principal": autonomy.get("automation_principal"),
+                "granted": WRITE_SCOPE in (autonomy.get("may_write") or ()),
+                "universe": [dict(item) for item in mission.get("universe") or ()
+                             if isinstance(item, Mapping)],
+            })
+    return covering
+
+
+def mission_roster(universe: Sequence[Mapping[str, Any]],
+                   extra: Mapping[str, Sequence[str]] | None = None) -> dict[str, list[str]]:
+    """company_ref -> every name of every covered company (a union)."""
+
+    from .claim_subject import mission_subject_needles
+
+    roster = {ref: set(values) for ref, values in mission_subject_needles(universe).items()}
+    for member in universe:
+        roster.setdefault(str(member.get("company_ref")), set())
+    for ref, values in (extra or {}).items():
+        if ref in roster:
+            roster[ref].update(str(value).lower() for value in values if value)
+    return {ref: sorted(values) for ref, values in roster.items()}
+
+
+def inputs_hash(industry_ref: Any, roster: Mapping[str, Sequence[str]]) -> str:
+    return content_hash({"rule": RULE_REF, "industry": industry_ref,
+                         "roster": {ref: sorted(values) for ref, values in roster.items()}})
+
+
+# -- the authority ---------------------------------------------------------
+
+
+class ClaimIndustryReattributionAuthority:
+    """Append-only industry reattributions over untouched retirements."""
+
+    _authorized = authorized_flag()
+
+    def __init__(self, store: DaltonStore, *, clock: Callable[[], str] | None = None) -> None:
+        self.store = store
+        self.connection = store.connection
+        self.clock = clock or _now
+        self._authorization_flag = authorization_flag(
+            self.connection, "dalton_claim_reattribution_authorized")
+        self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
+
+    @contextmanager
+    def _transaction(self) -> Iterator[sqlite3.Cursor]:
+        if self._authorized:
+            raise RuntimeError("ClaimIndustryReattributionAuthority operation cannot be nested")
+        self._authorized = True
+        try:
+            with self.store._transaction() as cur:
+                yield cur
+        finally:
+            self._authorized = False
+
+    # -- reads ---------------------------------------------------------------
+
+    def reattributions(self, *, industry_ref: str | None = None,
+                       limit: int = 500) -> list[dict[str, Any]]:
+        query = f"SELECT record_json, content_hash FROM {TABLE}"
+        params: list[Any] = []
+        if industry_ref is not None:
+            query += " WHERE industry_ref=?"
+            params.append(industry_ref)
+        query += " ORDER BY created_at, reattribution_id LIMIT ?"
+        params.append(int(limit))
+        return [
+            {**json.loads(row["record_json"]), "content_hash": row["content_hash"]}
+            for row in self.connection.execute(query, params).fetchall()
+        ]
+
+    def reviews(self) -> dict[str, dict[str, Any]]:
+        return {
+            row["claim_version_ref"]: dict(row)
+            for row in self.connection.execute(f"SELECT * FROM {REVIEW_TABLE}").fetchall()
+        }
+
+    # -- writes --------------------------------------------------------------
+
+    def record_review(self, *, claim_version_ref: str, inputs_hash: str,
+                      outcome: str, refusal: str | None = None) -> None:
+        """Remember that the backfill judged this Claim (a cache, not authority)."""
+
+        at = self.clock()
+        with self._transaction() as cur:
+            cur.execute(
+                f"INSERT INTO {REVIEW_TABLE}(claim_version_ref,rule_ref,inputs_hash,outcome,"
+                "refusal,attempts,reviewed_at) VALUES(?,?,?,?,?,1,?) "
+                "ON CONFLICT(claim_version_ref) DO UPDATE SET rule_ref=excluded.rule_ref, "
+                "inputs_hash=excluded.inputs_hash, outcome=excluded.outcome, "
+                "refusal=excluded.refusal, "
+                f"attempts={REVIEW_TABLE}.attempts+1, reviewed_at=excluded.reviewed_at",
+                (claim_version_ref, RULE_REF, inputs_hash, outcome,
+                 None if refusal is None else str(refusal)[:300], at),
+            )
+
+    def reattribute(
+        self,
+        *,
+        claim_version_ref: str,
+        actor_ref: str,
+        rationale: str,
+        industry_ref: str | None = None,
+        decision_hash: str | None = None,
+        cited_span: str | None = None,
+        source_text: str | None = None,
+        document_title: str | None = None,
+        roster_aliases: Mapping[str, Sequence[str]] | None = None,
+    ) -> dict[str, Any]:
+        """Record that this retired Claim is evidence about its mission's industry.
+
+        Nothing is edited: the Claim, its challenge and its retirement stay
+        byte for byte.  Automation must pass the exact cited span (and may
+        pass the whole original and the document title, which the rule's
+        own-document test reads); the rule is re-run here on the Claim's own
+        statement.  One record per claim version, so a repeat is
+        ``duplicate``.
+        """
+
+        from .claim_retirement import reinstated_claim_version_refs
+
+        claim_version_ref = _text(claim_version_ref, "claim_version_ref", maximum=512)
+        rationale = _text(rationale, "rationale")
+        actor = _actor(actor_ref)
+        automated = _AUTOMATION_RE.fullmatch(actor) is not None
+        row = self.connection.execute(
+            "SELECT d.record_json AS decision_json, d.content_hash AS decision_hash, "
+            "d.decision AS decision, c.record_json AS challenge_json, "
+            "c.content_hash AS challenge_hash "
+            "FROM claim_retirement_decisions d "
+            "JOIN claim_retirement_challenges c ON c.challenge_id=d.challenge_ref "
+            "WHERE d.claim_version_ref=?", (claim_version_ref,),
+        ).fetchone() if _table_exists(self.connection, "claim_retirement_decisions") else None
+        if row is None:
+            raise ClaimReattributionNotFound("no retirement decision names this claim version")
+        decision = json.loads(row["decision_json"])
+        challenge = json.loads(row["challenge_json"])
+        if (decision.get("content_hash") != row["decision_hash"]
+                or challenge.get("content_hash") != row["challenge_hash"]):
+            raise ClaimReattributionConflict("claim retirement authority drifted")
+        if row["decision"] != "retired":
+            raise ClaimReattributionConflict("only a retired claim version can be reattributed")
+        if claim_version_ref in reinstated_claim_version_refs(self.connection):
+            raise ClaimReattributionConflict(
+                "this retirement was withdrawn; the Claim is its company's again")
+        if decision_hash is not None and decision_hash != row["decision_hash"]:
+            raise ClaimReattributionConflict("decision hash binding failed")
+        if challenge.get("reason_code") == "boilerplate_disclaimer":
+            raise ClaimReattributionConflict("a disclaimer is not a finding about anything")
+        claim_row = self.connection.execute(
+            "SELECT claim_json, content_hash FROM claim_versions WHERE claim_version_id=?",
+            (claim_version_ref,),
+        ).fetchone()
+        if claim_row is None:
+            raise ClaimReattributionNotFound("claim version was not found")
+        claim = json.loads(claim_row["claim_json"])
+        if claim.get("content_hash") != claim_row["content_hash"]:
+            raise ClaimReattributionConflict("claim version authority drifted")
+        subject_ref = str(claim.get("subject_ref") or "")
+        mission = covering_missions(self.connection).get(subject_ref)
+        if mission is None:
+            raise ClaimReattributionConflict("no active mission covers this Claim's company")
+        if mission["industry_ref"] is None:
+            raise ClaimReattributionConflict("the covering mission names no industry")
+        if industry_ref is not None and industry_ref != mission["industry_ref"]:
+            raise ClaimReattributionConflict(
+                "industry_ref must be the covering mission's own industry")
+        verdict: dict[str, Any] | None = None
+        roster = mission_roster(mission["universe"], roster_aliases)
+        if automated:
+            if not mission["granted"] or mission["principal"] != actor:
+                raise ClaimReattributionConflict(
+                    f"the mission does not grant {WRITE_SCOPE} to this automation principal")
+            if challenge.get("reason_code") != "subject_absent_from_source":
+                raise ClaimReattributionConflict(
+                    "automation may only reattribute a subject-absent retirement")
+            if cited_span is None:
+                raise ClaimReattributionConflict(
+                    "the cited span cannot be read; nothing is reattributed unverified")
+            verdict = judge(
+                statement=claim.get("normalized_statement"), cited_span=cited_span,
+                industry_ref=mission["industry_ref"], roster=roster,
+                document_title=document_title, source_text=source_text,
+            )
+            if not verdict["industry_level"]:
+                raise ClaimReattributionConflict(
+                    f"the industry-level rule does not fire: {verdict['refusal']}")
+            reason_code, rule_ref = "industry_level_under_rule", RULE_REF
+        else:
+            reason_code, rule_ref = "human_judgment", None
+        wire: dict[str, Any] = {
+            "schema_version": SCHEMA_VERSION,
+            "claim_version_ref": claim_version_ref,
+            "claim_version_hash": claim_row["content_hash"],
+            "claim_ref": claim.get("claim_ref"),
+            "decision_ref": decision["id"],
+            "decision_hash": row["decision_hash"],
+            "challenge_ref": challenge["id"],
+            "retired_reason_code": challenge.get("reason_code"),
+            "retired_detector_ref": challenge.get("detector_ref"),
+            "from_subject_ref": subject_ref,
+            "industry_ref": mission["industry_ref"],
+            "mission_version_ref": mission["mission_version_ref"],
+            "mission_hash": mission["mission_hash"],
+            "reason_code": reason_code,
+            "rule_ref": rule_ref,
+            "rule_evidence": None if verdict is None else {
+                key: verdict[key] for key in (
+                    "form", "statement_companies", "collective_terms",
+                    "industry_terms", "survey_source") if key in verdict},
+            "cited_span_sha256": None if cited_span is None
+            else hashlib.sha256(cited_span.encode("utf-8")).hexdigest(),
+            "actor_ref": actor,
+            "rationale": rationale,
+            "created_at": self.clock(),
+        }
+        wire["id"] = "claim-industry-reattribution:" + content_hash(
+            {"claim": claim_version_ref})[:32]
+        wire["content_hash"] = content_hash({k: v for k, v in wire.items() if k != "content_hash"})
+        with self._transaction() as cur:
+            existing = cur.execute(
+                f"SELECT record_json FROM {TABLE} WHERE claim_version_ref=?",
+                (claim_version_ref,),
+            ).fetchone()
+            if existing is not None:
+                return {**json.loads(existing["record_json"]), "status": "duplicate"}
+            cur.execute(
+                f"INSERT INTO {TABLE}(reattribution_id,claim_version_ref,claim_version_hash,"
+                "decision_ref,decision_hash,from_subject_ref,industry_ref,mission_version_ref,"
+                "reason_code,rule_ref,actor_ref,rationale,record_json,content_hash,created_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (wire["id"], claim_version_ref, wire["claim_version_hash"], wire["decision_ref"],
+                 wire["decision_hash"], subject_ref, wire["industry_ref"],
+                 wire["mission_version_ref"], reason_code, rule_ref, actor, rationale,
+                 json.dumps(wire, ensure_ascii=False, sort_keys=True),
+                 wire["content_hash"], wire["created_at"]),
+            )
+        return {**wire, "status": "fresh"}
+
+
+# -- the backfill ------------------------------------------------------------
+
+
+def retired_candidates(connection: Any) -> list[dict[str, Any]]:
+    """Retired-now subject-absent Claims with no reattribution yet, oldest first."""
+
+    from .claim_retirement import retired_claim_version_refs
+
+    retired = retired_claim_version_refs(connection)
+    if not retired:
+        return []
+    done: set[str] = set()
+    if _table_exists(connection, TABLE):
+        done = {str(row[0]) for row in connection.execute(
+            f"SELECT claim_version_ref FROM {TABLE}").fetchall()}
+    rows = connection.execute(
+        "SELECT c.claim_version_ref AS ref, c.subject_ref AS subject_ref, "
+        "d.content_hash AS decision_hash, v.claim_json AS claim_json "
+        "FROM claim_retirement_challenges c "
+        "JOIN claim_retirement_decisions d ON d.challenge_ref=c.challenge_id "
+        "JOIN claim_versions v ON v.claim_version_id=c.claim_version_ref "
+        "WHERE d.decision='retired' AND c.reason_code='subject_absent_from_source' "
+        "ORDER BY d.created_at, c.claim_version_ref"
+    ).fetchall()
+    return [dict(row) for row in rows if row["ref"] in retired and row["ref"] not in done]
+
+
+def run_backfill(
+    driver: Any,
+    *,
+    authority: ClaimIndustryReattributionAuthority | None,
+    principal: str | None,
+    citations: Mapping[str, Mapping[str, Any]] | None = None,
+    texts: dict[str, str | None] | None = None,
+    max_documents: int = DEFAULT_MAX_DOCUMENTS,
+    max_writes: int = DEFAULT_MAX_WRITES,
+    dry_run: bool = False,
+    show: int | None = None,
+) -> dict[str, Any]:
+    """Judge retired Claims under the industry rule; append what it keeps.
+
+    ``driver`` is a ``claim_review.ClaimReviewDriver`` (read-only is fine for
+    a dry run): it resolves each Claim's citation chain and reads the exact
+    original, re-hashed.  Bounded per tick (``max_documents`` originals read,
+    ``max_writes`` records appended) and idempotent: a reattributed Claim
+    leaves the candidate query, and a refused one is marked with the rule ref
+    and the hash of the alias table it was judged with, and is looked at
+    again only when either changes.  Without a principal (no grant) it marks
+    refusals and reports what it would append; on ``dry_run`` it writes
+    nothing at all; without an authority it does nothing unless dry-running.
+    """
+
+    connection = driver.connection
+    summary: dict[str, Any] = {
+        "rule_ref": RULE_REF, "candidates": 0, "examined": 0,
+        "reattributed": [], "would_reattribute": [], "not_industry_level": 0,
+        "refusals": {}, "no_industry": 0, "unreadable": 0, "deferred": 0,
+        "already_reviewed": 0, "skipped": [], "refused_examples": [],
+    }
+    try:
+        candidates = retired_candidates(connection)
+    except sqlite3.Error as exc:
+        summary["skipped"].append({"reason": f"{type(exc).__name__}: {exc}"})
+        return summary
+    summary["candidates"] = len(candidates)
+    if not candidates:
+        return summary
+    if authority is None and not dry_run:
+        # A driver built without the authority (older wiring, a test) has no
+        # memory of what it judged, so it would re-read the same originals
+        # every tick for a report nobody asked for.
+        summary["skipped"].append({"reason": "no reattribution authority on this driver"})
+        return summary
+    missions = covering_missions(connection)
+    # Remembering a refusal is a read's cache, written with or without the
+    # grant (the patrol's examination markers are too); appending a
+    # reattribution needs the grant.
+    can_mark = not dry_run and authority is not None
+    writable = can_mark and principal is not None
+    markers = authority.reviews() if authority is not None else {}
+    if not citations or any(row["ref"] not in citations for row in candidates):
+        citations = {**driver._citations(), **(citations or {})}
+    texts = {} if texts is None else texts
+    extra = dict(getattr(driver, "needles", {}) or {})
+    read_here = written = 0
+    for row in candidates:
+        mission = missions.get(row["subject_ref"])
+        industry = None if mission is None else mission["industry_ref"]
+        roster = {} if mission is None else mission_roster(mission["universe"], extra)
+        digest_inputs = inputs_hash(industry, roster)
+        marker = markers.get(row["ref"])
+        if (marker is not None and marker["rule_ref"] == RULE_REF
+                and marker["inputs_hash"] == digest_inputs
+                and marker["outcome"] in ("not_industry_level", "no_industry")):
+            summary["already_reviewed"] += 1
+            continue
+        if industry is None:
+            summary["no_industry"] += 1
+            if can_mark:
+                authority.record_review(claim_version_ref=row["ref"],
+                                        inputs_hash=digest_inputs, outcome="no_industry")
+            continue
+        if writable and written >= max(0, int(max_writes)):
+            summary["deferred"] += 1
+            continue
+        citation = citations.get(row["ref"])
+        text = None
+        if citation is not None:
+            digest = citation["digest"]
+            if digest not in texts:
+                if read_here >= max(1, int(max_documents)):
+                    summary["deferred"] += 1
+                    continue
+                read_here += 1
+                texts[digest] = driver.source_text(digest)
+            text = texts[digest]
+        summary["examined"] += 1
+        span = None
+        if text is not None and citation is not None:
+            start, end = citation.get("start"), citation.get("end")
+            if isinstance(start, int) and isinstance(end, int) and 0 <= start < end <= len(text):
+                span = text[start:end]
+        if span is None:
+            summary["unreadable"] += 1
+            if can_mark:
+                authority.record_review(claim_version_ref=row["ref"],
+                                        inputs_hash=digest_inputs, outcome="unreadable")
+            continue
+        facts = driver._document_facts(citation.get("document_ref"))
+        claim = json.loads(row["claim_json"])
+        verdict = judge(
+            statement=claim.get("normalized_statement"), cited_span=span,
+            industry_ref=industry, roster=roster, document_title=facts.get("title"),
+            source_text=text, issuer_document=bool(facts.get("issuer_document")),
+        )
+        item = {"claim_version_ref": row["ref"], "subject_ref": row["subject_ref"],
+                "industry_ref": industry,
+                "statement": str(claim.get("normalized_statement") or "")[:240],
+                "document_ref": citation.get("document_ref"),
+                "form": verdict.get("form"), "survey_source": verdict.get("survey_source")}
+        if not verdict["industry_level"]:
+            summary["not_industry_level"] += 1
+            key = str(verdict["refusal"]).split(":", 1)[0]
+            summary["refusals"][key] = summary["refusals"].get(key, 0) + 1
+            if show is None or len(summary["refused_examples"]) < show:
+                summary["refused_examples"].append({**item, "refusal": verdict["refusal"]})
+            if can_mark:
+                authority.record_review(claim_version_ref=row["ref"], inputs_hash=digest_inputs,
+                                        outcome="not_industry_level", refusal=verdict["refusal"])
+            continue
+        if not writable:
+            summary["would_reattribute"].append(item)
+            continue
+        try:
+            record = authority.reattribute(
+                claim_version_ref=row["ref"], actor_ref=principal,
+                decision_hash=row["decision_hash"], industry_ref=industry,
+                rationale=(
+                    "按行业层面规则（claim-industry-reattribution:industry-level:v1）判定："
+                    "陈述不指向任何单一公司，谈的是整个行业；在公司口径下仍然退役，"
+                    "作为行业证据保留。"),
+                cited_span=span, source_text=text, document_title=facts.get("title"),
+                roster_aliases=extra,
+            )
+        except ClaimReattributionError as exc:
+            summary["skipped"].append({"claim_version_ref": row["ref"], "reason": str(exc)})
+            continue
+        written += 1
+        authority.record_review(claim_version_ref=row["ref"], inputs_hash=digest_inputs,
+                                outcome="reattributed")
+        summary["reattributed"].append({**item, "reattribution_ref": record["id"],
+                                        "status": record["status"]})
+    return summary
+
+
+__all__ = [
+    "ClaimIndustryReattributionAuthority",
+    "ClaimReattributionConflict",
+    "ClaimReattributionError",
+    "ClaimReattributionNotFound",
+    "ClaimReattributionValidationError",
+    "DEFAULT_MAX_DOCUMENTS",
+    "DEFAULT_MAX_WRITES",
+    "REASON_CODES",
+    "RULE_REF",
+    "WRITE_SCOPE",
+    "covering_missions",
+    "industry_reattributions",
+    "inputs_hash",
+    "mission_roster",
+    "reattributed_claim_version_refs",
+    "reattribution_state_probe",
+    "retired_candidates",
+    "run_backfill",
+]

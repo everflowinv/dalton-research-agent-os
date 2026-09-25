@@ -196,11 +196,15 @@ class ClaimReviewDriver:
         spool: Any,
         needles: Mapping[str, Sequence[str]] | None = None,
         clock: Callable[[], datetime] | None = None,
+        reattributions: Any = None,
     ) -> None:
         self.store = store
         self.connection = store.connection
         self.missions = missions
         self.challenges = challenges
+        # 2026-09-25: the industry reattribution authority, when the writer
+        # has one; without it the tick only reports what it would append.
+        self.reattributions = reattributions
         self.spool = spool
         self.needles = {ref: list(values) for ref, values in (needles or {}).items()}
         self._document_refs: dict[str, str] = {}
@@ -228,6 +232,7 @@ class ClaimReviewDriver:
         driver.connection = connection
         driver.missions = missions
         driver.challenges = None
+        driver.reattributions = None
         driver.spool = spool
         driver.needles = {ref: list(values) for ref, values in (needles or {}).items()}
         driver._document_refs = {}
@@ -699,7 +704,10 @@ class ClaimReviewDriver:
             # Report-only: what the re-review would withdraw under a grant.
             summary["rereview"] = self.rereview_retirements(
                 principal=None, roster=roster, citations=citations, texts=texts)
-            if summary["rereview"]["would_reinstate"]:
+            summary["industry_reattribution"] = self.reattribute_industry_findings(
+                principal=None, citations=citations, texts=texts)
+            if (summary["rereview"]["would_reinstate"]
+                    or summary["industry_reattribution"]["would_reattribute"]):
                 summary["status"] = "held"
             return summary
         for item in detections:
@@ -750,9 +758,57 @@ class ClaimReviewDriver:
             })
         summary["rereview"] = self.rereview_retirements(
             principal=principal, roster=roster, citations=citations, texts=texts)
-        if summary["challenged"] or summary["retired"] or summary["rereview"]["reinstated"]:
+        # After the re-review, so a retirement withdrawn this tick is its
+        # company's again and never also the industry's.
+        summary["industry_reattribution"] = self.reattribute_industry_findings(
+            principal=principal, citations=citations, texts=texts)
+        if (summary["challenged"] or summary["retired"] or summary["rereview"]["reinstated"]
+                or summary["industry_reattribution"]["reattributed"]):
             summary["status"] = "acted"
         return summary
+
+    # -- industry-level findings among the retirements (2026-09-25) ---------
+
+    def reattribute_industry_findings(
+        self,
+        *,
+        principal: str | None,
+        citations: Mapping[str, Mapping[str, Any]] | None = None,
+        texts: dict[str, str | None] | None = None,
+        max_documents: int | None = None,
+        max_writes: int | None = None,
+        dry_run: bool = False,
+        show: int | None = 20,
+    ) -> dict[str, Any]:
+        """Record retired industry-level Claims against the mission's industry.
+
+        The bounded, idempotent backfill of ``claim_industry_reattribution``
+        (``run_backfill``): under the mission's ``claim_challenge`` grant it
+        appends a reattribution for each retired subject-absent Claim the
+        deterministic industry-level rule keeps; without the grant (or on
+        ``dry_run``) it reports what it would append.  A failure here never
+        costs the patrol its pass.
+        """
+
+        from .claim_industry_reattribution import (
+            DEFAULT_MAX_DOCUMENTS as REATTRIBUTION_DOCUMENTS,
+            DEFAULT_MAX_WRITES as REATTRIBUTION_WRITES,
+            RULE_REF as REATTRIBUTION_RULE_REF,
+            run_backfill,
+        )
+
+        try:
+            return run_backfill(
+                self, authority=getattr(self, "reattributions", None), principal=principal,
+                citations=citations, texts=texts,
+                max_documents=REATTRIBUTION_DOCUMENTS if max_documents is None else max_documents,
+                max_writes=REATTRIBUTION_WRITES if max_writes is None else max_writes,
+                dry_run=dry_run, show=show,
+            )
+        except Exception as exc:  # noqa: BLE001 - the patrol's own pass stands
+            return {"rule_ref": REATTRIBUTION_RULE_REF, "reattributed": [],
+                    "would_reattribute": [],
+                    "skipped": [{"reason": f"{type(exc).__name__}: {exc}"}]}
 
     # -- re-review of past span retirements (2026-09-24 audit) ---------------
 
