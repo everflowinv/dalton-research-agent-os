@@ -139,7 +139,7 @@ _BARE_MONTH_DAY_RE = re.compile(
     _MONTH_DAY_RE.pattern + r"(?!\s*,?\s*(?:19|20)\d{2})",
     re.IGNORECASE,
 )
-NUMBER_SOURCE_CONTRACT_VERSION = "number-source-contract:0.3"
+NUMBER_SOURCE_CONTRACT_VERSION = "number-source-contract:0.4"
 
 
 def number_source_contract_fingerprint() -> str:
@@ -151,7 +151,9 @@ def number_source_contract_fingerprint() -> str:
         "version": NUMBER_SOURCE_CONTRACT_VERSION,
         "number_source_fields": ["text", "period"],
         "bound_period_equivalence": (
-            "iso-date-to-english-month-date-or-exact-cited-month-day"),
+            "iso-date-to-english-month-date-or-exact-cited-month-day"
+            "+cjk-and-slash-month-day"),
+        "print_equivalence": "percent-word",
     })
 
 
@@ -293,14 +295,67 @@ def _remove_bound_month_dates(
     )
 
 
+# The Ledger renders a percentage as "15.8 (percent)"; the Chinese prose the
+# drafting prompt asks for prints the same figure as "15.8%".  Same digits,
+# same unit, different token -- live on 2026-09-25 that refused CTSH's
+# supply_and_cost round after round.  Only the unit word is read: the digits
+# must still match exactly, and a bare cited number never sources a
+# percentage.  (A figure rescaled or rounded for print -- "约 188.6 亿" for a
+# filed 18857000000 -- is still a number the Ledger does not carry; see the
+# golden ``unit-rewrite`` case.)
+_PERCENT_WORD_RE = re.compile(
+    r"(\d[\d,.]*)\s*\(?\s*(?:percent|per\s?cent|pct)\b\)?", re.IGNORECASE)
+# A day written the way the Chinese prose writes it, and the "3/19" the sell
+# side writes in a period label.  Both are dates only when a cited period
+# names that same month and day; otherwise their digits stay figures.
+_CJK_MONTH_DAY_RE = re.compile(
+    r"(?<!\d)(1[0-2]|0?[1-9])\s*月\s*([12]\d|3[01]|0?[1-9])\s*[日号]")
+_SLASH_MONTH_DAY_RE = re.compile(
+    r"(?<![\d/.])(1[0-2]|0?[1-9])/([12]\d|3[01]|0?[1-9])(?![\d/])")
+
+
+def _bound_month_day_keys(numbers: Sequence[Mapping[str, Any]]) -> set[tuple[str, int]]:
+    """Every month and day a cited period names, in any of its spellings."""
+
+    keys = set(_bound_period_month_days(numbers))
+    for iso in _bound_period_dates(numbers):
+        keys.add((iso[5:7], int(iso[8:10])))
+    for item in numbers:
+        period = str(item.get("period") or "")
+        for pattern in (_CJK_MONTH_DAY_RE, _SLASH_MONTH_DAY_RE):
+            for match in pattern.finditer(period):
+                keys.add((f"{int(match.group(1)):02d}", int(match.group(2))))
+    return keys
+
+
+def _remove_bound_numeric_month_days(
+    body: str, numbers: Sequence[Mapping[str, Any]],
+) -> str:
+    keys = _bound_month_day_keys(numbers)
+    if not keys:
+        return body
+    for pattern in (_CJK_MONTH_DAY_RE, _SLASH_MONTH_DAY_RE):
+        body = pattern.sub(
+            lambda match: (" " * len(match.group(0)))
+            if (f"{int(match.group(1)):02d}", int(match.group(2))) in keys
+            else match.group(0),
+            body,
+        )
+    return body
+
+
 def unsourced_numbers(body: str, numbers: Sequence[Mapping[str, Any]]) -> list[str]:
     """Figures in the body that no supplied, Claim-bound number accounts for."""
 
     sourced = set()
     for item in numbers:
-        for token in value_tokens(str(item.get("text", ""))):
+        text = str(item.get("text", ""))
+        for token in value_tokens(text):
             sourced.add(_normalise_number(token))
-    checked_body = _remove_bound_month_dates(body, numbers)
+        for match in _PERCENT_WORD_RE.finditer(text):
+            sourced.add(_normalise_number(match.group(1)) + "%")
+    checked_body = _remove_bound_numeric_month_days(
+        _remove_bound_month_dates(body, numbers), numbers)
     return [
         token for token in value_tokens(checked_body)
         if _normalise_number(token) not in sourced

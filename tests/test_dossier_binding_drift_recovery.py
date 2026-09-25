@@ -216,7 +216,23 @@ class RepairedUnitProvenanceTests(unittest.TestCase):
             "gaps": [],
         }, ensure_ascii=False)
         contract = unit_contract(self.unit, structure=STRUCTURE, material=rows)
-        violations = violations_of(broken, contract)
+        # Exactly the list run_with_contract_repair addresses a repair on: the
+        # deterministic findings and the parser's own refusal.  Leaving the
+        # parser out is how EPAM's repairs read "identity drifted" from 09-18.
+        from dalton_core.company_dossier_draft import (
+            DossierDraftRefused, parse_unit_output)
+
+        parse = self.producer_input["parse_input"]
+        parse_error = None
+        try:
+            parse_unit_output(
+                broken, unit=self.unit, structure=parse["structure"],
+                material=parse["material"],
+                market_view_available=parse["market_view_available"],
+                profile=parse["profile"], classification=parse["classification"])
+        except DossierDraftRefused as exc:
+            parse_error = exc
+        violations = violations_of(broken, contract, parse_error=parse_error)
         self.assertTrue(violations)
         repair_prompt = build_repair_prompt(
             original_prompt=self.producer_prompt, reply_text=broken,

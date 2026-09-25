@@ -334,5 +334,179 @@ class DossierRepairTests(unittest.TestCase):
         self.assertGreater(summary["budget"]["spent_micros"], 0)
 
 
+class ContractRepairProvenanceTests(unittest.TestCase):
+    """The formal replay of a unit repaired for a broken shape.
+
+    Live EPAM (``company:sec-cik:0001352010``) from 2026-09-18, last
+    ``dfc89e7d18b54eb2692dd867`` on 09-25: ``catalyst_calendar`` wrote four
+    sentences in one slot.  The drafting loop addressed its repair on the
+    deterministic finding *and* the parser's own message (two lines, with
+    different words); the replay rebuilt the list without the parser's line,
+    so the repair's content-addressed id never matched and every run -- each a
+    free replay of the cached reply -- refused with "producer repair identity
+    drifted".
+    """
+
+    def setUp(self):
+        import sqlite3
+        import tempfile
+        from pathlib import Path
+
+        from dalton_core.company_dossier_draft import (
+            build_unit_prompt, build_verifier_prompt, citable_context, draft_hash,
+            verifier_prompt_contract_fingerprint,
+        )
+        from dalton_core.draft_contract_repair import (
+            build_repair_prompt, repair_request_id, violations_of,
+        )
+        from dalton_core.store import canonical_json, content_hash
+        from tests.test_company_dossier_draft import (
+            STRUCTURE as DRAFT_STRUCTURE, material, one_sentence, reply,
+        )
+
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.scheduler_path = Path(self.temp.name) / "scheduler.sqlite"
+        self.router_path = Path(self.temp.name) / "router.sqlite"
+        scheduler = sqlite3.connect(self.scheduler_path)
+        scheduler.executescript(
+            "CREATE TABLE scheduler_work_orders(work_order_id TEXT PRIMARY KEY,"
+            "work_order_json TEXT,work_order_hash TEXT);"
+            "CREATE TABLE scheduler_result_envelopes(result_envelope_id TEXT "
+            "PRIMARY KEY,work_order_id TEXT,attempt_number INTEGER,"
+            "result_envelope_json TEXT,result_envelope_hash TEXT,outcome TEXT,"
+            "content_hash TEXT,created_at TEXT);")
+        router = sqlite3.connect(self.router_path)
+        router.execute(
+            "CREATE TABLE model_route_decisions(decision_id TEXT PRIMARY KEY,"
+            "work_order_id TEXT,work_order_hash TEXT,outcome TEXT,"
+            "decision_json TEXT,decision_hash TEXT)")
+
+        unit = "demand_drivers"
+        rows = list(material())
+        company = {"company_ref": "company:epam", "ticker": "EPAM"}
+        parse_input = {"structure": list(DRAFT_STRUCTURE), "material": rows,
+                       "prior_body": "", "profile": None, "profile_table": "",
+                       "market_view_available": False, "classification": None}
+        over_cap = {"slot_id": "causal_chain:0", "sentences": [
+            {"text": f"第{index}句由所引材料支撑。", "refs": ["C1"]}
+            for index in range(1, SLOT_SENTENCE_CAP + 2)]}
+        parent_text = reply([over_cap, {"slot_id": "causal_chain:1", "unknown": "x"}])
+        repaired_text = reply([one_sentence("causal_chain:0", ["C1"]),
+                               {"slot_id": "causal_chain:1", "unknown": "x"}])
+        with self.assertRaises(DossierDraftRefused) as caught:
+            parse_unit_output(parent_text, unit=unit, structure=DRAFT_STRUCTURE,
+                              material=rows)
+        block = parse_unit_output(repaired_text, unit=unit,
+                                  structure=DRAFT_STRUCTURE, material=rows)
+        contract = unit_contract(unit, structure=DRAFT_STRUCTURE, material=rows)
+        # Exactly what ``run_with_contract_repair`` addresses the repair on.
+        self.violations = violations_of(parent_text, contract,
+                                        parse_error=caught.exception)
+        draft_prompt = build_unit_prompt(unit=unit, structure=DRAFT_STRUCTURE,
+                                         material=rows, company=company)
+        producer_input = {
+            "unit": unit, "company": company,
+            "prompt_sha": content_hash({"prompt": draft_prompt}),
+            "mission": {"ref": "mission:v14", "hash": "c" * 64},
+            "parse_input": parse_input,
+        }
+        parent_request = content_hash({
+            "unit": unit, "company": company["company_ref"],
+            "prompt_sha": content_hash(draft_prompt)})[:32]
+        repair_prompt = build_repair_prompt(
+            original_prompt=draft_prompt, reply_text=parent_text,
+            violations=self.violations,
+            contract_reminder=unit_contract_reminder(unit, structure=DRAFT_STRUCTURE),
+            context=citable_context(rows))
+        repair_request = repair_request_id(
+            parent_request, contract_name=contract.name, violations=self.violations)
+        blocks = {unit: block}
+        digest = draft_hash(blocks)
+        verifier_prompt = build_verifier_prompt(blocks, company=company)
+        verifier_request = (f"verify-{digest[:24]}-"
+                            f"{verifier_prompt_contract_fingerprint()[:16]}")
+
+        def record_call(name, *, prompt, text, request_id, purpose,
+                        producer_routes=()):
+            work_ref, route_ref = f"work:{name}", f"route-decision:{name}"
+            result_ref, invocation_ref = f"result:{name}", f"invocation:{name}"
+            work_request = request_id
+            if producer_routes:
+                work_request += ":producer:" + content_hash(
+                    sorted(set(producer_routes)))[:16]
+            work = {"id": work_ref, "question": prompt, "metadata": {
+                "purpose": purpose, "request_id": work_request,
+                "mission_version_ref": producer_input["mission"]["ref"],
+                "mission_version_hash": producer_input["mission"]["hash"],
+                "producer_route_decision_refs": list(producer_routes)}}
+            work_hash = content_hash(work)
+            envelope = {"id": result_ref, "work_order_ref": work_ref,
+                        "invocation_ref": invocation_ref, "status": "succeeded",
+                        "outputs": {"text": text},
+                        "metadata": {"route_decision_ref": route_ref}}
+            decision = {"id": route_ref}
+            decision["content_hash"] = content_hash(decision)
+            created = "2026-09-25T12:33:29+00:00"
+            envelope_hash = content_hash(envelope)
+            receipt = content_hash({
+                "result_envelope_id": result_ref, "work_order_id": work_ref,
+                "attempt_number": 1, "result_envelope_hash": envelope_hash,
+                "outcome": "succeeded", "created_at": created})
+            scheduler.execute("INSERT INTO scheduler_work_orders VALUES(?,?,?)",
+                              (work_ref, canonical_json(work), work_hash))
+            scheduler.execute(
+                "INSERT INTO scheduler_result_envelopes VALUES(?,?,?,?,?,?,?,?)",
+                (result_ref, work_ref, 1, canonical_json(envelope), envelope_hash,
+                 "succeeded", receipt, created))
+            router.execute("INSERT INTO model_route_decisions VALUES(?,?,?,?,?,?)",
+                           (route_ref, work_ref, work_hash, "selected",
+                            canonical_json(decision), decision["content_hash"]))
+            return route_ref, {
+                "work_order_ref": work_ref, "result_envelope_ref": result_ref,
+                "invocation_ref": invocation_ref, "route_decision_ref": route_ref,
+                "request_id": request_id, "prompt_hash": content_hash(prompt)}
+
+        parent_route, parent_call = record_call(
+            "parent", prompt=draft_prompt, text=parent_text,
+            request_id=parent_request, purpose="dossier")
+        repair_route, repair_call = record_call(
+            "repair", prompt=repair_prompt, text=repaired_text,
+            request_id=repair_request, purpose="dossier")
+        _, verifier_call = record_call(
+            "verifier", prompt=verifier_prompt,
+            text='{"verdict":"pass","findings":[]}',
+            request_id=verifier_request, purpose="dossier_verifier",
+            producer_routes=[parent_route, repair_route])
+        scheduler.commit(); router.commit(); scheduler.close(); router.close()
+        self.unit, self.blocks = unit, blocks
+        self.provenance = {unit: {
+            "producer_input": producer_input,
+            "producer_prior_version_ref": None,
+            "verified_draft_hash": digest,
+            "producer": repair_call,
+            "producer_repair": parent_call,
+            "verifier": verifier_call,
+        }}
+
+    def validate(self, *, current=True):
+        from dalton_core.company_dossier_cli import validate_formal_unit_provenance
+
+        validate_formal_unit_provenance(
+            self.provenance, mission_ref="mission:v14", current_prior_ref=None,
+            current_units={self.unit} if current else set(),
+            current_blocks=self.blocks if current else None,
+            scheduler_db=self.scheduler_path, router_db=self.router_path)
+
+    def test_the_parser_and_the_contract_say_it_in_different_words(self):
+        self.assertEqual([item.rule for item in self.violations],
+                         ["max_items", "validator"])
+
+    def test_a_repair_addressed_on_the_parser_message_resolves(self):
+        self.validate()
+        # And the same unit carried forward into a later version.
+        self.validate(current=False)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

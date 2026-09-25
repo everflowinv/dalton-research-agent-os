@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 from dalton_core.coverage_mission import (
@@ -261,7 +262,8 @@ class AttemptVoidTests(unittest.TestCase):
         return MissionSecQuartersCoordinator._dispatch_attempts(
             type("S", (), {"connection": self.store.connection})())
 
-    def dispatch(self, suffix: str, accession="0001467373-25-000217") -> str:
+    def dispatch(self, suffix: str, accession="0001467373-25-000217",
+                 ticket_ref="sec-lane:aaaa") -> str:
         dispatch_id = f"mission-sec-dispatch:{suffix}"
         with self.authority._transaction() as cur:
             cur.execute(
@@ -270,9 +272,9 @@ class AttemptVoidTests(unittest.TestCase):
                 "actor_ref,form,filed_from,filed_to,expected_accession,observation_ref,"
                 "authorization_json,request_hash,status,ticket_ref,created_at,updated_at) "
                 "VALUES(?,?,?,?,?,?,'10-Q','2025-07-01','2025-07-05',?,'obs','{}','h',"
-                "'launched','sec-lane:aaaa','2026-09-07T18:00:00+00:00','2026-09-07T18:00:00+00:00')",
+                "'launched',?,'2026-09-07T18:00:00+00:00','2026-09-07T18:00:00+00:00')",
                 (dispatch_id, self.mission["id"], self.mission["content_hash"], ACN, "ACN",
-                 "automation:coverage-mission", accession),
+                 "automation:coverage-mission", accession, ticket_ref),
             )
         return dispatch_id
 
@@ -383,6 +385,79 @@ class AttemptVoidTests(unittest.TestCase):
         offered = candidates(self.store, match="idempotency key conflict")
         self.assertEqual([item["dispatch_id"] for item in offered], [conflict])
 
+    def test_a_log_only_failure_can_be_matched_and_narrowed_by_accession(self):
+        from scripts.void_sec_dispatch_attempts import candidates
+
+        root = Path(self._dir.name)
+        issuer = self.dispatch("a", accession="0001018724-26-000026",
+                               ticket_ref="sec-lane-run:one")
+        other = self.dispatch("b", accession="0001018724-25-000123",
+                              ticket_ref="sec-lane-run:two")
+        for dispatch_id, run in ((issuer, "one"), (other, "two")):
+            directory = root / "sec-lane-runs" / run
+            directory.mkdir(parents=True)
+            (directory / "run.log").write_text(
+                "unknown issuer ticker(s): AMZN; use --issuer-cik T=CIK\n",
+                encoding="utf-8")
+            self.authority.settle_sec_dispatch(dispatch_id, outcome="finished",
+                                               detail="failed")
+        offered = candidates(self.store, match="unknown issuer ticker", state_dir=root)
+        self.assertEqual({item["dispatch_id"] for item in offered}, {issuer, other})
+        offered = candidates(self.store, match="unknown issuer ticker", state_dir=root,
+                             accessions=["0001018724-26-000026"])
+        self.assertEqual([item["dispatch_id"] for item in offered], [issuer])
+
+    def test_planning_opens_the_core_read_only(self):
+        import contextlib
+        import io
+
+        from scripts.void_sec_dispatch_attempts import main
+
+        dispatch_id = self.dispatch("a")
+        self.authority.settle_sec_dispatch(
+            dispatch_id, outcome="finished", detail="failed",
+            failure_reason="LeaseRejected: attempt is not the current leased attempt")
+        core = Path(self._dir.name) / "core.sqlite"
+        config = Path(self._dir.name) / "service.json"
+        config.write_text(json.dumps({"core_db": str(core)}), encoding="utf-8")
+        before = core.stat().st_mtime_ns
+        out = io.StringIO()
+        with unittest.mock.patch(
+                "scripts.void_sec_dispatch_attempts.DaltonStore",
+                side_effect=AssertionError("a dry run must not open the authority")), \
+                contextlib.redirect_stdout(out):
+            main(["--config", str(config), "--reason", "lease outage",
+                  "--voided-by", "human:owner", "--match", "Lease"])
+        plan = json.loads(out.getvalue())
+        self.assertEqual((plan["status"], plan["attempts_to_void"]), ("planned", 1))
+        self.assertEqual(plan["selected"][0]["dispatch_id"], dispatch_id)
+        self.assertEqual(core.stat().st_mtime_ns, before)
+        self.assertEqual(len(self.authority.voided_sec_dispatch_attempts()), 0)
+
+    def test_apply_voids_through_the_authority(self):
+        import contextlib
+        import io
+
+        from scripts.void_sec_dispatch_attempts import main
+
+        dispatch_id = self.dispatch("a")
+        self.authority.settle_sec_dispatch(
+            dispatch_id, outcome="finished", detail="failed",
+            failure_reason="LeaseNotUsable: capability approval changed")
+        config = Path(self._dir.name) / "service.json"
+        config.write_text(json.dumps({"core_db": str(Path(self._dir.name) / "core.sqlite")}),
+                          encoding="utf-8")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            main(["--config", str(config), "--reason", "lease outage",
+                  "--voided-by", "human:owner", "--match", "Lease",
+                  "--accession", "0001467373-25-000217", "--apply"])
+        result = json.loads(out.getvalue())
+        self.assertEqual((result["status"], result["applied"]), ("applied", 1))
+        self.assertEqual(result["attempts_after"], {})
+        [row] = self.authority.voided_sec_dispatch_attempts()
+        self.assertEqual((row["dispatch_id"], row["reason"]), (dispatch_id, "lease outage"))
+
     def test_an_already_voided_attempt_is_not_offered_again(self):
         from scripts.void_sec_dispatch_attempts import candidates
 
@@ -431,6 +506,52 @@ class RunErrorOnDiskTests(unittest.TestCase):
 
         self.write("abc", {"ok": False, "issuers": [{"failure": {"status": "failed"}}]})
         self.assertIsNone(run_error(self.root, "sec-lane-run:abc"))
+
+    def log(self, ticket: str, text: str) -> None:
+        directory = self.root / "sec-lane-runs" / ticket
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "run.log").write_text(text, encoding="utf-8")
+
+    def test_a_summary_less_run_is_read_from_the_last_line_of_its_log(self):
+        """ws-7d, 2026-09-25: 47 failed 10-Q runs, each one log line, no summary."""
+
+        from scripts.void_sec_dispatch_attempts import run_error
+
+        self.log("amzn", "unknown issuer ticker(s): AMZN; use --issuer-cik T=CIK\n")
+        self.assertEqual(run_error(self.root, "sec-lane-run:amzn"),
+                         "unknown issuer ticker(s): AMZN; use --issuer-cik T=CIK")
+
+    def test_a_precondition_line_still_wins(self):
+        from scripts.void_sec_dispatch_attempts import run_error
+
+        self.log("pre", "starting\nlane precondition failed: profile conflict\nbye\n")
+        self.assertEqual(run_error(self.root, "sec-lane-run:pre"),
+                         "lane precondition failed: profile conflict")
+
+    def test_a_traceback_names_its_exception(self):
+        from scripts.void_sec_dispatch_attempts import run_error
+
+        self.log("tb", "fetching 10-Q\nTraceback (most recent call last):\n"
+                       '  File "x.py", line 1, in <module>\n    boom()\n'
+                       "    ^^^^^^\nLeaseRejected: attempt is not the current leased attempt\n")
+        self.assertEqual(run_error(self.root, "sec-lane-run:tb"),
+                         "LeaseRejected: attempt is not the current leased attempt")
+
+    def test_an_error_line_is_preferred_over_trailing_noise(self):
+        from scripts.void_sec_dispatch_attempts import run_error
+
+        self.log("err", "fetch failed: 403 from SEC\nshutting down\n")
+        self.assertEqual(run_error(self.root, "sec-lane-run:err"),
+                         "fetch failed: 403 from SEC")
+        self.log("empty", "\n\n")
+        self.assertIsNone(run_error(self.root, "sec-lane-run:empty"))
+
+    def test_a_summary_still_outranks_the_log(self):
+        from scripts.void_sec_dispatch_attempts import run_error
+
+        self.write("both", {"ok": True})
+        self.log("both", "unknown issuer ticker(s): AMZN\n")
+        self.assertIsNone(run_error(self.root, "sec-lane-run:both"))
 
     def test_a_missing_or_unreadable_run_is_not_a_crash(self):
         from scripts.void_sec_dispatch_attempts import run_error

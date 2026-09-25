@@ -241,6 +241,34 @@ def _hint_drift_recovery(
     return recovery
 
 
+class _StoredWorkReader:
+    """Read-only Scheduler Work lookups over the lane's own connection.
+
+    Just enough of the Scheduler for the executor's stored-rebind reader,
+    without opening a Scheduler (which would migrate and write) in the lane.
+    """
+
+    def __init__(self, connection: Any) -> None:
+        self.connection = connection
+
+    def work_order_authority(self, work_order_id: Any) -> dict[str, Any] | None:
+        if not isinstance(work_order_id, str) or not work_order_id:
+            return None
+        row = self.connection.execute(
+            "SELECT work_order_json,work_order_hash FROM scheduler_work_orders "
+            "WHERE work_order_id=?", (work_order_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        from .contracts import WorkOrder
+
+        work = WorkOrder.from_dict(json.loads(row["work_order_json"])).to_dict()
+        if (canonical_json(work) != row["work_order_json"]
+                or content_hash(work) != row["work_order_hash"]):
+            raise ValueError("stored WorkOrder authority drifted")
+        return {"work_order": work, "work_order_hash": row["work_order_hash"]}
+
+
 def _read_holds(path: Path) -> dict[str, dict[str, Any]]:
     if not path.is_file():
         return {}
@@ -1042,8 +1070,90 @@ class MissionDocumentResearchCoordinator:
                     recovery_link_ref=row["recovery_link_id"],
                 )
             refs[stage - 1] = wire["recovery_work_order_ref"]
+            rebound = self._epoch_rebound_hint(admission, stage, wire)
+            if rebound is not None:
+                refs[stage - 1] = rebound
             next_number[stage] += 1
         return refs
+
+    def _epoch_rebound_hint(
+        self, admission: Mapping[str, Any], stage: int,
+        link: Mapping[str, Any],
+    ) -> str | None:
+        """The Work that actually ran a recovery a model-authority roll renamed.
+
+        When a recovery was authorized under one model authority and the
+        authority rolled before it ran, the executor never claims the
+        authorized recovery Work: it records a model-authority epoch rebind
+        and runs the rebound Work instead, and any later link of the stage is
+        rooted at that rebound Work.  The authorized Work stays ``ready``
+        forever.  Watching it made every such admission look resumable, so a
+        refused re-entry was reported as ``reentry_failed_after_automatic_rebind``
+        and the owner was sent to the wrong door (live legacy 6a2bcd, a9e588b0
+        and 918307dc on 2026-09-25, whose rebound Work had in fact failed
+        twice).  The mapping is verified by the executor's own stored-rebind
+        reader, so the lane follows exactly the Work the executor would.
+        """
+
+        try:
+            row = self.store.connection.execute(
+                "SELECT rebind_id,authorized_recovery_work_ref,"
+                "rebound_work_order_ref FROM "
+                "mission_document_research_model_authority_epoch_rebinds "
+                "WHERE recovery_link_ref=?", (link["id"],),
+            ).fetchone()
+        except sqlite3.OperationalError as exc:
+            if "no such table" in str(exc):
+                return None
+            raise
+        if row is None:
+            return None
+        from .mission_document_research_executor import (
+            MissionDocumentResearchExecutorError,
+            _read_stored_epoch_rebind,
+        )
+
+        def drift(exc: BaseException | None = None) -> None:
+            raise MissionDocumentResearchHintDrift(
+                "document research model authority rebind hint drifted",
+                admission_ref=admission["id"],
+                recovery_link_ref=link.get("id"),
+            ) from exc
+
+        rebound_ref = row["rebound_work_order_ref"]
+        if row["authorized_recovery_work_ref"] != link.get(
+                "recovery_work_order_ref"):
+            drift()
+        stored = _StoredWorkReader(self.store.connection).work_order_authority(
+            rebound_ref)
+        if stored is None:
+            # Recorded but not yet enqueued: the executor re-derives and
+            # enqueues it on its next run, which the ready authorized Work
+            # already sends it to.
+            return None
+        work = stored["work_order"]
+        metadata = work.get("metadata") if isinstance(work, Mapping) else None
+        if (not isinstance(metadata, Mapping)
+                or work.get("id") != rebound_ref
+                or metadata.get("mission_document_research_admission_ref")
+                != admission["id"]
+                or metadata.get("mission_document_research_admission_hash")
+                != admission["content_hash"]
+                or metadata.get("stage") != STAGE_NAMES.get(stage)):
+            drift()
+        try:
+            record = _read_stored_epoch_rebind(
+                self.store.connection, _StoredWorkReader(self.store.connection),
+                work,
+            )
+        except (MissionDocumentResearchExecutorError, ValueError,
+                TypeError) as exc:
+            drift(exc)
+        if (record.get("id") != row["rebind_id"]
+                or record.get("recovery_link_ref") != link.get("id")
+                or record.get("stage_ordinal") != stage):
+            drift()
+        return rebound_ref
 
     def _sealed_stage_work(
         self,

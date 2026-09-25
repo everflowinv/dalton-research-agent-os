@@ -307,6 +307,7 @@ def build_unit_prompt(
     _final_text_contract: bool = True,
     _positive_research_purpose: bool = True,
     _quantitative_priority: bool = True,
+    _verbatim_figures_in_chinese: bool = True,
 ) -> str:
     """One unit's prompt: the slots, the rules, the material, the last version.
 
@@ -353,6 +354,12 @@ def build_unit_prompt(
         ])),
         "- Copy any figure verbatim from the tag that carries it. Do not convert units",
         "  or scales, do not round, do not recompute a percentage.",
+        *(([
+            "  That holds in Chinese prose too: a row saying 18857000000 usd is written",
+            "  18857000000 美元 -- never 188.57 亿 or 约 188.6 亿美元, not even in brackets",
+            "  beside the exact figure. A margin, share or growth rate you work out from",
+            "  two rows is a new number: write it only if a row carries it, and cite it.",
+        ] if _verbatim_figures_in_chinese else [])),
         *(([
             "- When a Figures row carries the number a sentence is about, cite that row.",
             "  A statement row saying revenue 'grew strongly' and a figure row carrying the",
@@ -450,7 +457,8 @@ def legacy_unit_prompt_v02(**kwargs: Any) -> str:
     return build_unit_prompt(**kwargs, _variant_conclusion_rule=False,
                              _analytical_contract=False,
                              _positive_research_purpose=False,
-                             _quantitative_priority=False)
+                             _quantitative_priority=False,
+                             _verbatim_figures_in_chinese=False)
 
 
 def legacy_unit_prompt_v03(**kwargs: Any) -> str:
@@ -458,7 +466,8 @@ def legacy_unit_prompt_v03(**kwargs: Any) -> str:
 
     return build_unit_prompt(**kwargs, _analytical_contract=False,
                              _positive_research_purpose=False,
-                             _quantitative_priority=False)
+                             _quantitative_priority=False,
+                             _verbatim_figures_in_chinese=False)
 
 
 def legacy_unit_prompt_v04(**kwargs: Any) -> str:
@@ -466,14 +475,16 @@ def legacy_unit_prompt_v04(**kwargs: Any) -> str:
 
     return build_unit_prompt(**kwargs, _final_text_contract=False,
                              _positive_research_purpose=False,
-                             _quantitative_priority=False)
+                             _quantitative_priority=False,
+                             _verbatim_figures_in_chinese=False)
 
 
 def legacy_unit_prompt_v05(**kwargs: Any) -> str:
     """Rebuild the final-text prompt before its research-purpose wording changed."""
 
     return build_unit_prompt(**kwargs, _positive_research_purpose=False,
-                             _quantitative_priority=False)
+                             _quantitative_priority=False,
+                             _verbatim_figures_in_chinese=False)
 
 
 def legacy_unit_prompt_v06(**kwargs: Any) -> str:
@@ -487,7 +498,21 @@ def legacy_unit_prompt_v06(**kwargs: Any) -> str:
     sentence that gestures at it.
     """
 
-    return build_unit_prompt(**kwargs, _quantitative_priority=False)
+    return build_unit_prompt(**kwargs, _quantitative_priority=False,
+                             _verbatim_figures_in_chinese=False)
+
+
+def legacy_unit_prompt_v07(**kwargs: Any) -> str:
+    """Rebuild the prompt before the verbatim-figure rule named Chinese prose.
+
+    2026-09-25: the rule already said "do not convert units or scales, do not
+    round, do not recompute a percentage", and the drafts still printed
+    "18857000000 美元（约 188.6 亿美元）" (IBM business_model) and a gross
+    margin worked out from two filed lines (CTSH supply_and_cost), each of
+    which ``numbers_without_refs`` refused as a number no cited row carries.
+    """
+
+    return build_unit_prompt(**kwargs, _verbatim_figures_in_chinese=False)
 
 
 # ---------------------------------------------------------------------------
@@ -1089,6 +1114,7 @@ __all__ = [
     "build_verifier_prompt",
     "citable_context",
     "legacy_unit_prompt_v06",
+    "legacy_unit_prompt_v07",
     "unit_contract",
     "unit_contract_reminder",
     "draft_hash",

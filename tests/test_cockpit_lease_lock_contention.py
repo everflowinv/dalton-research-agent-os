@@ -291,6 +291,115 @@ class CockpitLeaseLockContentionTests(unittest.TestCase):
         self.assertIn("answered by", answer["text"])
         self.assertEqual(len(calls), 2)
 
+    def _open_admissions(self):
+        from dalton_core.thesis_impact_budget import ThesisImpactBudgetStore
+
+        with ThesisImpactBudgetStore(self.root / "budget.sqlite") as budget:
+            return [dict(row) for row in budget.connection.execute(
+                "SELECT a.admission_id,a.work_order_ref,a.reserved_micros "
+                "FROM thesis_impact_day_admissions a WHERE NOT EXISTS ("
+                "SELECT 1 FROM thesis_impact_day_settlements s "
+                "WHERE s.admission_id=a.admission_id)").fetchall()]
+
+    def test_a_settlement_lost_to_the_lock_is_replayed_by_the_next_call(self) -> None:
+        # 2026-09-25, legacy: two event judgements and two language calls
+        # finished, their settlements lost to "database is locked", and the
+        # open reservations kept charging the day ledger (~$1.8, $0.9 of it in
+        # the event pool) with nothing left to ever close them.
+        from dalton_core import cockpit_model
+        from dalton_core.thesis_impact_budget import ThesisImpactBudgetStore
+
+        original = ThesisImpactBudgetStore.settle
+        with patch.object(ThesisImpactBudgetStore, "settle",
+                          side_effect=sqlite3.OperationalError("database is locked")), \
+                patch.object(cockpit_model, "_lock_retry_sleep", lambda _s: None), \
+                patch.object(cockpit_model, "LEASE_RELEASE_RETRY_SECONDS", 0):
+            answer = self._ask(fallback.ChainAdapter({}), request_id="settle-locked")
+        self.assertIn("answered by", answer["text"])
+        [stranded] = self._open_admissions()
+        pending = list((self.root / "budget.sqlite.pending-settlements").glob("*.json"))
+        self.assertEqual(len(pending), 1)
+        recorded = json.loads(pending[0].read_text(encoding="utf-8"))
+        self.assertEqual(recorded["admission_id"], stranded["admission_id"])
+
+        # Any later call that opens the ledger writes it, at the cost the
+        # lost settlement carried, before it takes out its own reservation.
+        # (The fixture's event pool is smaller than two reservations, so the
+        # next ask may itself be refused for the pool -- after the replay.)
+        with patch.object(ThesisImpactBudgetStore, "settle", original):
+            try:
+                self._ask(fallback.ChainAdapter({}), request_id="the-next-one")
+            except CockpitModelError:
+                pass
+        self.assertEqual(self._open_admissions(), [])
+        self.assertEqual(
+            list((self.root / "budget.sqlite.pending-settlements").glob("*.json")), [])
+        with ThesisImpactBudgetStore(self.root / "budget.sqlite") as budget:
+            settled = budget.connection.execute(
+                "SELECT actual_micros FROM thesis_impact_day_settlements "
+                "WHERE admission_id=?", (stranded["admission_id"],)).fetchone()
+        self.assertEqual(settled["actual_micros"], recorded["actual_micros"])
+
+    def test_an_admission_the_caller_gave_up_on_is_voided_if_it_landed(self) -> None:
+        # The admit landed, but the lock the caller saw said otherwise: the
+        # caller raised and never called the model under it.
+        from dalton_core import cockpit_model
+        from dalton_core.thesis_impact_budget import ThesisImpactBudgetStore
+
+        original = ThesisImpactBudgetStore.admit
+
+        def landed_then_locked(store, *args, **kwargs):
+            original(store, *args, **kwargs)
+            raise sqlite3.OperationalError("database is locked")
+
+        adapter = fallback.ChainAdapter({})
+        with patch.object(ThesisImpactBudgetStore, "admit", landed_then_locked), \
+                patch.object(cockpit_model, "_lock_retry_sleep", lambda _s: None), \
+                patch.object(cockpit_model, "LEASE_RELEASE_RETRY_SECONDS", 0), \
+                self.assertRaisesRegex(sqlite3.OperationalError, "locked"):
+            self._ask(adapter, request_id="admit-locked")
+        self.assertEqual(adapter.served, [])
+        [stranded] = self._open_admissions()
+
+        self._ask(fallback.ChainAdapter({}), request_id="the-next-one")
+        self.assertEqual(self._open_admissions(), [])
+        with ThesisImpactBudgetStore(self.root / "budget.sqlite") as budget:
+            settled = budget.connection.execute(
+                "SELECT actual_micros FROM thesis_impact_day_settlements "
+                "WHERE admission_id=?", (stranded["admission_id"],)).fetchone()
+        self.assertEqual(settled["actual_micros"], 0)
+
+    def test_a_record_for_an_admission_that_never_landed_is_simply_dropped(self) -> None:
+        from dalton_core.pending_settlement_registry import PendingSettlements
+        from dalton_core.thesis_impact_budget import ThesisImpactBudgetStore
+
+        with ThesisImpactBudgetStore(self.root / "budget.sqlite") as budget:
+            registry = PendingSettlements.for_budget(budget)
+            self.assertTrue(registry.record_unconfirmed_admission(
+                work_order_ref="work:cockpit-event_judgement-" + "0" * 32,
+                attempt_number=1, phase="assessment", reason="locked"))
+            self.assertTrue(registry.record_settlement(
+                admission_id="thesis-impact-admission:" + "0" * 32,
+                actual_micros=5, reason="locked"))
+            results = registry.drain(budget)
+        self.assertEqual(sorted(item["status"] for item in results),
+                         ["never_admitted", "superseded"])
+        self.assertEqual(registry.pending(), [])
+
+    def test_a_still_locked_ledger_keeps_the_record_for_later(self) -> None:
+        from dalton_core.pending_settlement_registry import PendingSettlements
+        from dalton_core.thesis_impact_budget import ThesisImpactBudgetStore
+
+        with ThesisImpactBudgetStore(self.root / "budget.sqlite") as budget:
+            registry = PendingSettlements.for_budget(budget)
+            registry.record_settlement(
+                admission_id="thesis-impact-admission:" + "1" * 32, actual_micros=5)
+            with patch.object(ThesisImpactBudgetStore, "settle",
+                              side_effect=sqlite3.OperationalError("database is locked")):
+                self.assertEqual([item["status"] for item in registry.drain(budget)],
+                                 ["locked"])
+        self.assertEqual(len(registry.pending()), 1)
+
     def test_the_abandon_envelope_names_the_locked_database(self) -> None:
         from dalton_core import model_router
 

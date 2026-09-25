@@ -1023,6 +1023,181 @@ class MissionDocumentResearchLaneTests(unittest.TestCase):
         with self.assertRaises(MissionDocumentResearchHintDrift):
             self.lane._effective_work_hints(admission)
 
+    def _epoch_rebind(self, admission: dict, link: dict, *, stage: int) -> tuple:
+        """Record what the executor writes when a policy roll renames a recovery.
+
+        The authorized recovery Work is enqueued and left ``ready`` for good;
+        the rebound Work next to it is the one that actually runs.
+        """
+
+        from dalton_core.mission_document_research_executor import (
+            SCHEMA_VERSION, _epoch_rebound_work,
+        )
+
+        stage_name = {
+            2: "qualitative_model_draft", 3: "independent_qualitative_verifier",
+        }[stage]
+        scheduler, authorized = self._scheduler_work(
+            admission, stage=stage_name,
+            work_ref=link["recovery_work_order_ref"],
+        )
+        _, current_base = self._refreshed_stage_work_order(
+            admission, stage=stage, tag="09-25")
+        self.store.connection.execute(
+            "CREATE TABLE IF NOT EXISTS "
+            "mission_document_research_model_authority_epoch_rebinds("
+            "rebind_id TEXT PRIMARY KEY,admission_ref TEXT NOT NULL,"
+            "stage_ordinal INTEGER NOT NULL,recovery_link_ref TEXT NOT NULL UNIQUE,"
+            "authorized_recovery_work_ref TEXT NOT NULL UNIQUE,"
+            "current_base_work_ref TEXT NOT NULL,"
+            "rebound_work_order_ref TEXT NOT NULL UNIQUE,record_json TEXT NOT NULL,"
+            "content_hash TEXT NOT NULL UNIQUE,created_at TEXT NOT NULL)"
+        )
+        rebind_ref = "mission-document-model-authority-epoch-rebind:" + content_hash(
+            link["id"])[:32]
+        record = {
+            "schema_version": SCHEMA_VERSION,
+            "id": rebind_ref,
+            "admission_ref": admission["id"],
+            "admission_hash": admission["content_hash"],
+            "stage_ordinal": stage,
+            "recovery_link_ref": link["id"],
+            "recovery_link_hash": link["content_hash"],
+            "recovery_number": link["recovery_number"],
+            "authorized_recovery_work_ref": authorized["id"],
+            "authorized_recovery_work_hash": content_hash(authorized),
+            "current_base_work_ref": current_base["id"],
+            "current_base_work_hash": content_hash(current_base),
+            "current_base_work_order": current_base,
+            "rebound_work_order_ref": "work:mission-document-authority-rebind-"
+            + content_hash(rebind_ref)[:32],
+            "created_at": link["created_at"],
+        }
+        record["content_hash"] = content_hash(record)
+        self.store.connection.execute(
+            "INSERT INTO mission_document_research_model_authority_epoch_rebinds "
+            "VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (record["id"], admission["id"], stage, link["id"], authorized["id"],
+             current_base["id"], record["rebound_work_order_ref"],
+             canonical_json(record), record["content_hash"],
+             record["created_at"]),
+        )
+        self.store.connection.commit()
+        rebound = _epoch_rebound_work(current_base, record)
+        scheduler.enqueue(rebound)
+        return scheduler, authorized, rebound, record
+
+    def _refreshed_stage_work_order(
+        self, admission: dict, *, stage: int, tag: str,
+    ) -> tuple[str, dict]:
+        stage_name = {
+            2: "qualitative_model_draft", 3: "independent_qualitative_verifier",
+        }[stage]
+        work_ref = "work:mission-document-research-" + content_hash({
+            "admission_identity_hash": admission["identity_hash"],
+            "ordinal": stage, "epoch": tag,
+        })[:32]
+        return work_ref, {
+            "schema_version": "0.1", "id": work_ref,
+            "created_at": admission["created_at"],
+            "updated_at": admission["created_at"],
+            "question": "draft the qualitative claim",
+            "requested_capabilities": ["registered_source_retrieval"],
+            "runtime_profile_ref": "runtime:registered-source-local",
+            "budget": {"max_seconds": 60},
+            "idempotency_key": "enqueue:" + work_ref,
+            "declared_side_effects": [], "status": "ready",
+            "input_refs": [admission["id"]],
+            "metadata": {
+                "mission_document_research_admission_ref": admission["id"],
+                "mission_document_research_admission_hash": admission["content_hash"],
+                "stage": stage_name,
+            },
+        }
+
+    def test_recovery_renamed_by_authority_roll_is_followed_to_rebound_work(
+        self,
+    ) -> None:
+        """Live legacy 6a2bcd/a9e588b0/918307dc on 2026-09-25.
+
+        Each had a recovery the automatic door authorized under one model
+        authority; the roll made the executor run a rebound Work instead, which
+        failed again.  The lane kept watching the never-claimed authorized
+        Work, called the admission resumable, and the refused re-entry was
+        filed as ``reentry_failed_after_automatic_rebind`` -- the one door the
+        owner's CLI then refused for the paid and unproved doors.
+        """
+
+        admission = self.store.add(1)
+        self.store.started(admission["id"])
+        failed_ref = "work:mission-document-research-" + content_hash({
+            "admission_identity_hash": admission["identity_hash"], "ordinal": 2,
+        })[:32]
+        link = self._recovery_link(admission, stage=2, failed_ref=failed_ref)
+        scheduler, authorized, rebound, _record = self._epoch_rebind(
+            admission, link, stage=2)
+
+        hints = self.lane._effective_work_hints(admission)
+        self.assertEqual(hints[1], rebound["id"])
+        self.assertNotIn(authorized["id"], hints)
+
+        # Retrieval succeeded; the rebound Work failed; the authorized one is
+        # still ``ready``.
+        _, retrieval = self._scheduler_work(admission)
+        claim = scheduler.claim("worker:test", work_order_id=retrieval["id"])
+        assert claim is not None
+        scheduler.complete(
+            retrieval["id"], 1, "worker:test", claim["lease_token"], {
+                "schema_version": "0.1",
+                "id": "result:retrieval:" + "b" * 24,
+                "created_at": "2026-09-11T12:00:03.000000+00:00",
+                "work_order_ref": retrieval["id"],
+                "invocation_ref": "invocation:retrieval:" + "b" * 24,
+                "status": "succeeded", "outputs": {},
+                "actual_side_effects": [], "usage_refs": [], "artifact_refs": [],
+                "metadata": {},
+            }, idempotency_key="retrieval-terminal",
+        )
+        claim = scheduler.claim("worker:test", work_order_id=rebound["id"])
+        assert claim is not None
+        scheduler.complete(
+            rebound["id"], 1, "worker:test", claim["lease_token"], {
+                "schema_version": "0.1",
+                "id": "result:rebound:" + "a" * 24,
+                "created_at": "2026-09-25T07:04:34.631146+00:00",
+                "work_order_ref": rebound["id"],
+                "invocation_ref": "invocation:rebound:" + "a" * 24,
+                "status": "failed", "outputs": {},
+                "actual_side_effects": [], "usage_refs": [], "artifact_refs": [],
+                "error": {"code": "OUTPUT_CONTRACT"}, "metadata": {},
+            }, idempotency_key="rebound-terminal",
+        )
+        state = self.lane._execution_state(admission)
+        self.assertEqual(state["work_order_ref"], rebound["id"])
+        self.assertNotEqual(state["reason"], "scheduler_ready")
+
+    def test_rebind_hint_must_match_its_recovery_link(self) -> None:
+        from dalton_core.mission_document_research_lane import (
+            MissionDocumentResearchHintDrift,
+        )
+
+        admission = self.store.add(1)
+        failed_ref = "work:mission-document-research-" + content_hash({
+            "admission_identity_hash": admission["identity_hash"], "ordinal": 2,
+        })[:32]
+        link = self._recovery_link(admission, stage=2, failed_ref=failed_ref)
+        _scheduler, _authorized, rebound, record = self._epoch_rebind(
+            admission, link, stage=2)
+        # A record whose body no longer hashes to what the rebound Work names.
+        forged = {**record, "recovery_number": 7}
+        self.store.connection.execute(
+            "UPDATE mission_document_research_model_authority_epoch_rebinds "
+            "SET record_json=? WHERE rebind_id=?",
+            (canonical_json(forged), record["id"]),
+        )
+        with self.assertRaises(MissionDocumentResearchHintDrift):
+            self.lane._effective_work_hints(admission)
+
     def test_unreadable_recovery_chain_holds_only_its_own_admission(self) -> None:
         """One bad record must not be a lane-wide outage.
 
