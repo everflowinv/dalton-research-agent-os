@@ -20,6 +20,7 @@ from dalton_core.debate_map import (
     evidence_fingerprint,
     index_claims,
     map_ref_for,
+    cited_refs,
     novelty,
     polarity,
     publisher_of,
@@ -685,6 +686,35 @@ class DebateMapAuthorityTests(unittest.TestCase):
         self.assertEqual(dropped["reason"], "dropped_debate:debate:stale")
         self.assertEqual(
             [item["debate_ref"] for item in dropped["debates"]], ["debate:bookings"])
+
+    def test_withdrawing_a_retired_claim_is_new_and_dropping_a_good_one_is_not(self) -> None:
+        # 2026-09-25: AMZN's 06:23 map cited 34 of v5's 35 refs -- the 35th a
+        # retired Claim -- and was refused as a duplicate, so v5 kept standing
+        # on it.  The dossier's retired_withdrawals rule, for the debate map.
+        from unittest.mock import patch
+
+        self.publish([valid_debate(bull_refs=("cv-a", "cv-x"))], refs=["cv-a"])
+        prior = self.authority.current(SUBJECT)
+        candidate = copy.deepcopy(prior)
+        candidate["debates"][0]["bull_position"]["claim_refs"] = ["cv-a"]
+        candidate["debates"][0]["our_position"]["refs"] = ["cv-a"]
+        self.assertEqual(novelty(prior, candidate, retired={"cv-x"}),
+                         {"new": True, "reason": "retired_withdrawn:cv-x"})
+        self.assertFalse(novelty(prior, candidate)["new"])
+        self.assertFalse(novelty(prior, candidate, retired={"cv-b"})["new"])
+
+        with patch("dalton_core.claim_retirement.retired_claim_version_refs",
+                   return_value=set()):
+            kept = self.publish([valid_debate()], refs=["cv-a"],
+                                created_at="2026-09-10T00:00:00+00:00")
+        self.assertEqual(kept["status"], "duplicate")
+        with patch("dalton_core.claim_retirement.retired_claim_version_refs",
+                   return_value={"cv-x"}):
+            withdrawn = self.publish([valid_debate()], refs=["cv-a"],
+                                     created_at="2026-09-10T00:00:00+00:00")
+        self.assertEqual((withdrawn["status"], withdrawn["reason"]),
+                         ("fresh", "retired_withdrawn:cv-x"))
+        self.assertNotIn("cv-x", cited_refs(self.authority.current(SUBJECT)))
 
     def test_the_authority_refuses_a_version_whose_reason_names_nothing_new(self) -> None:
         self.publish([valid_debate()], refs=["cv-a"])
