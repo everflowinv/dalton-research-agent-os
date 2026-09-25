@@ -9,7 +9,80 @@
 
 ---
 
-（当前没有待部署批次。）
+## 批次 2026-09-25d（main `03d8f03e` 及之后）
+
+### 这批解决什么（批次 c 部署后验证中发现）
+
+| 主题 | 效果 |
+|---|---|
+| **debate map 撤不掉已退役引用**（`b52dedcb` `4424ba31`） | mission 升版后，新版本按内容判断是否发布，不再一律当作 rebind 判为重复。输出上限提到 8000。 |
+| **网关输出超长，付费后被拒**（`abf3999f`） | CLI 网关的输出超限只记遥测，不再拒绝（钱已经花了）。输入上限和费用上限照常执行。 |
+| **晨报核验被假扣费卡住**（`43b9e617`） | 修复前"没发出却按全额结算"的调用不再计入日上限。回放结果：两个环境当天用量都回到 0。 |
+| **事件判断按文档合批**（`c3d31071`） | 同一文档的 claim 合成一次调用，其中任何一条仍可单独改变判断。14 天回放：调用次数减少 48%，约省 $11/天；3 条历史 THESIS_WEAKENED 仍完整送审。积压约 4 天清完（原来要 14 天）。 |
+| **入账质量**（`ccecfb0e` `70a4633b` `092d41dc` `0ed8795f` `4fc5bb87`） | SEO 统计汇编页、时间上不可能的统计（例如"尚未结束的季度的报告"）、相对年份暂挂不入账；公开网页不再凭标题认定属于某家公司；拒绝谈论系统自身流程的"元结论"；新增人工撤回 CLI；行业规则 v2 规定 capex 须与行业主体词同时出现，自动撤回 6 条 v1 改挂。 |
+| **hold 原因写错**（`44bbe865`） | 6a2bcd、a9e588b0 会被正确判为 unproved，918307dc 判为 contract，CLI 从而接受对应的入口。 |
+| **EPAM dossier 永久卡住**（`4264d59e`） | 修复 repair identity 核对漏掉 parse_error 的问题。 |
+| **dossier 数字引用误报**（`dc96d9c6`） | "15.8 (percent)"、日期里的数字不再误报；"约 188.6 亿"这类换算按仓库规定仍算编造，但 prompt 里补了中文示例。注意：prompt 变了，各 dossier unit 下次重写会各重新付费一次。 |
+| **SEC 归还脚本、锁冲突后留下的预留**（`4f057db4` `25875321`） | 归还脚本改用 run.log 取失败原因，dry-run 只读；锁冲突时没写进去的结算会记下来，之后重放。 |
+
+全量测试结果见文末"测试记录"。
+
+### 部署命令
+
+```zsh
+cd ~/Projects/dalton-research-agent-os
+.venv/bin/python scripts/build_release.py --apply | tee /tmp/dalton-build-20260925d.json
+NEW=$(python3 -c "import json;print(json.load(open('/tmp/dalton-build-20260925d.json'))['release_hash'])"); echo $NEW
+.venv/bin/python scripts/release_switch.py ~/.dalton/runtime/releases/$NEW --source-commit $(git rev-parse HEAD) --apply
+```
+
+release_switch 只改可执行文件的路径，control 的 Standard 优先级会保留，不用重做 C1。
+
+### 部署后执行（与部署命令在同一个终端里执行，需要用到 `$NEW`）
+
+**D1 授权 3 条之前原因写错的 hold**（部署后等 10 分钟，让车道先按新代码重新分类）：
+
+```zsh
+PY=~/.dalton/runtime/releases/$NEW/venv/bin/python
+L=/Volumes/EveSSD/Dalton/legacy-state/dalton-core
+for r in 6a2bcd446237e1bd9732690b4b542b3a a9e588b02de9c7a713167cdafec2d9f1; do
+  $PY -m dalton_core.document_recovery_cli authorize-unproved --state-dir "$L" --admission-ref mission-document-research-admission:$r --max-cost-usd 1.0 --actor human:owner --apply
+done
+$PY -m dalton_core.document_recovery_cli authorize-paid --state-dir "$L" --admission-ref mission-document-research-admission:918307dc4626f6a8d549501eb7e193a9 --max-cost-usd 1.0 --actor human:owner --apply
+```
+
+**D2 撤回 52 条 SEO 统计页上的 claim**（ws-7d）。先 dry-run，把输出里的 `selection_sha256` 填进第二条命令：
+
+```zsh
+W=/Volumes/EveSSD/Dalton/workspaces/ws-7d894366d1132e2930475a60/state/dalton-core
+export DALTON_WORKSPACE_MANIFEST=$HOME/.dalton/workspaces/ws-7d894366d1132e2930475a60/workspace.json
+$PY -m dalton_core.claim_admission_cli retire --state-dir "$W" --from-replay statistics_compilation --from-replay temporal_impossibility --reason "SEO 统计汇编页：数字无原始出处，含未到期报告期的编造统计"
+# 把上面输出的 selection_sha256 填到 <SHA>：
+$PY -m dalton_core.claim_admission_cli retire --state-dir "$W" --from-replay statistics_compilation --from-replay temporal_impossibility --reason "SEO 统计汇编页：数字无原始出处，含未到期报告期的编造统计" --expect-selection <SHA> --apply --actor human:owner
+unset DALTON_WORKSPACE_MANIFEST
+```
+
+**D3 补结算今天锁冲突后留下的 6 笔预留**（约 $1.8，只影响账面）：
+
+```zsh
+S="$HOME/Library/Application Support/Dalton/state/dalton-core"
+cd ~/Projects/dalton-research-agent-os
+.venv/bin/python scripts/settle_orphan_cockpit_reservations.py --budget-db "$S/thesis-impact-budget.sqlite" --scheduler-db "$S/scheduler.sqlite" --broker-journal ~/.openclaw/dalton-model-broker.sock.journal.json --all-cockpit --apply
+```
+
+### 与本批无关、现在就可以做
+
+- **SEC 失败次数归还**（修复已随 efe93904 上线，只是次数额度在修复前就用光了）：命令见巡检消息，或 `scripts/void_sec_dispatch_attempts.py`（ws-7d 用 `--match "unknown issuer ticker"`；legacy 用 `--config "$HOME/Library/Application Support/Dalton/config/service.json" --match Lease --accession 0001058290-26-000031`，二者都加 `--apply`）。
+- **批次 c 的 C2**：5 条 authorize-unproved（legacy b2f1a00d、ddf3a04b；ws-7d bec19d08、c737cc83、4225dbd9）。
+
+### 已知未修
+
+- 行业规则里 "pricing power" 的 "power" 被当成行业词（2bb6a2ec），留待后续。
+- figures/metric 窗口身份绑定 mission 版本（ADR-0006），升版时会整份重读。
+
+### 测试记录
+
+在 main `03d8f03e` 上跑全量：10411 个，1 个失败，是 `test_installer_startup_wait` 的计时断言，因机器负载超时；之前出现过同样情况，单独重跑 3 次都通过，与本批无关。其余全部通过（skipped 4）。
 
 ---
 
