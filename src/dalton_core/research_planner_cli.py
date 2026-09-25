@@ -52,7 +52,12 @@ from .research_planner import (
     project_state_for_prompt,
     prompt_size_report,
 )
-from .research_state import build_research_state, planning_hash as state_planning_hash, state_digest
+from .research_state import (
+    build_research_state,
+    planning_core_hash as state_planning_core_hash,
+    planning_hash as state_planning_hash,
+    state_digest,
+)
 from .service_config_location import service_config_path
 from .store import DaltonStore, canonical_json
 
@@ -412,11 +417,12 @@ def read_last_decision(state_dir: Path) -> dict[str, Any]:
 
 
 def record_decision(state_dir: Path, *, state_hash: str, planning_hash: str,
-                    at: str) -> None:
+                    at: str, planning_core_hash: str | None = None) -> None:
     try:
         _write_owner_only(state_dir / PLAN_LAST_DECISION, {
             "schema_version": "0.1", "at": at, "state_hash": state_hash,
             "planning_hash": planning_hash,
+            "planning_core_hash": planning_core_hash,
         })
     except Exception:  # noqa: BLE001 - a record we cannot write is still no crash
         return
@@ -424,24 +430,49 @@ def record_decision(state_dir: Path, *, state_hash: str, planning_hash: str,
 
 def replan_pacing_hold(
     last: Mapping[str, Any], planning_hash: str, *, now: datetime,
+    planning_core_hash: str | None = None,
 ) -> dict[str, Any] | None:
     """Hold a re-plan whose state moved, but not in any way a plan is about.
 
-    Asked before the model is built, like :func:`attempt_hold`.  A different
-    ``planning_hash`` from the last decision is a material change and is
-    never held; the same one is held until ``MIN_REPLAN_SECONDS`` have passed
-    since that decision, after which the accumulated small changes (new
-    documents readable, counters moved) are worth one fresh plan.
+    Asked before the model is built, like :func:`attempt_hold`.  A material
+    change outside the Dossier feedback (a different ``planning_core_hash``
+    from the last decision) is never held.  A change only in the Dossier
+    feedback -- a new published version, a stable repair target joining or
+    leaving -- is material but paced: live 2026-09-25 Dossier runs landed
+    every five minutes and each one bought a plan.  Both it and non-material
+    movement are held until ``MIN_REPLAN_SECONDS`` have passed since the last
+    decision, after which the accumulated changes are worth one fresh plan.
+
+    A decision recorded before the core hash existed has none; it is judged
+    by the full ``planning_hash`` alone, as before.
     """
 
-    if not last.get("at") or last.get("planning_hash") != planning_hash:
+    if not last.get("at"):
         return None
+    last_core = last.get("planning_core_hash")
+    if planning_core_hash is not None and last_core:
+        if last_core != planning_core_hash:
+            return None
+        feedback_only = last.get("planning_hash") != planning_hash
+    else:
+        if last.get("planning_hash") != planning_hash:
+            return None
+        feedback_only = False
     try:
         since = (now - datetime.fromisoformat(str(last["at"]))).total_seconds()
     except (TypeError, ValueError):
         return None
     if since < 0 or since >= MIN_REPLAN_SECONDS:
         return None
+    if feedback_only:
+        return {
+            "plan_status": "held",
+            "failure_reason": (
+                "只有公司档案（Dossier）的反馈变了（已发布版本或稳定的修补目标）；"
+                f"上一次规划在 {int(since)} 秒前，这类变化 {MIN_REPLAN_SECONDS} 秒内不重新规划"),
+            "held_reason": "dossier_feedback_paced",
+            "held_attempts": 0,
+        }
     return {
         "plan_status": "held",
         "failure_reason": (
@@ -531,8 +562,10 @@ def run_planner(
             summary.update({"status": "held", **held})
             return summary
         summary["planning_hash"] = state_planning_hash(state)
+        summary["planning_core_hash"] = state_planning_core_hash(state)
         paced = replan_pacing_hold(
-            read_last_decision(state_dir), summary["planning_hash"], now=now)
+            read_last_decision(state_dir), summary["planning_hash"], now=now,
+            planning_core_hash=summary["planning_core_hash"])
         if paced is not None and not dry_run:
             summary.update({"status": "held", **paced})
             return summary
@@ -606,6 +639,7 @@ def run_planner(
         summary["cost_micros"] = int(call.get("cost_micros") or 0)
         record_decision(state_dir, state_hash=state["content_hash"],
                         planning_hash=summary["planning_hash"],
+                        planning_core_hash=summary["planning_core_hash"],
                         at=now.isoformat(timespec="microseconds"))
         try:
             plan = plan_from_response(

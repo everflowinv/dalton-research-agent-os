@@ -134,6 +134,10 @@ def company_state(
             "dossier_status": dossier_feedback.get("dossier_status"),
             "source_ticket_ref": dossier_feedback.get("source_ticket_ref"),
             "repair_targets": list(dossier_feedback.get("repair_targets") or ()),
+            # What of the history moves a plan: the published version and the
+            # repair targets that keep being reported (see
+            # ``dossier_repair_feedback._material``), not the last verdict.
+            "material": dict(dossier_feedback.get("material") or {}),
         },
         "readable_documents": [dict(document) for document in readable_documents],
         "unavailable_documents": [dict(document) for document in unavailable_documents],
@@ -379,10 +383,26 @@ def _material_subject(subject: Mapping[str, Any] | None) -> dict[str, Any] | Non
         "metrics_contested": sorted(
             str(item.get("metric_ref")) for item in subject.get("metrics_contested") or ()
         ),
-        "dossier_feedback": None if not isinstance(dossier, Mapping) else {
-            "dossier_status": dossier.get("dossier_status"),
-            "repair_targets": content_hash(list(dossier.get("repair_targets") or ())),
-        },
+        "dossier_feedback": None if not isinstance(dossier, Mapping) else _material_dossier(dossier),
+    }
+
+
+def _material_dossier(dossier: Mapping[str, Any]) -> dict[str, Any]:
+    """The published version and stable repair targets, never the last verdict.
+
+    Live 2026-09-25 06:24-06:49 legacy paid five plans ($2.34) whose prompts
+    differed only in the latest run's ``dossier_status`` flipping between
+    ``partial_published``, ``rubric_refused`` and ``constitution_refused`` or
+    in the ticket-bound ids of the same repair targets.  Neither is a change
+    in what is worth researching.
+    """
+
+    material = dossier.get("material")
+    material = material if isinstance(material, Mapping) else {}
+    return {
+        "published_version_ref": material.get("published_version_ref"),
+        "stable_repair_targets": sorted(
+            str(key) for key in material.get("stable_repair_target_keys") or ()),
     }
 
 
@@ -399,21 +419,45 @@ def planning_hash(state: Mapping[str, Any]) -> str:
     places on one citation) -- and the hashes over omitted rows.  What is
     kept is what a plan is *about*: the goal and sources, each subject's gaps,
     stage, blockers and item status/deficits, the contested measures, the
-    financial model's status, the dossier's status and repair targets,
-    document-research policy and availability, and the budget bands.  A change here is material and asks
-    the planner again at once; a change only outside it waits for the
-    planner's minimum re-plan interval.
+    financial model's status, the dossier's published version and stable
+    repair targets (not the latest run's verdict -- see
+    :func:`_material_dossier`), document-research policy and availability,
+    and the budget bands.  A change here is material; a change only outside
+    it waits for the planner's minimum re-plan interval.  Of the material
+    changes, those only in Dossier feedback are paced too (see
+    :func:`planning_core_hash`).
 
     Works on the full state and on its prompt projection alike, so a recorded
     prompt can be checked after the fact.
     """
 
+    return content_hash(_planning_body(state))
+
+
+def planning_core_hash(state: Mapping[str, Any]) -> str:
+    """:func:`planning_hash` without the Dossier feedback.
+
+    A change here re-plans at once.  A change only in the Dossier feedback
+    (a new published version, a stable repair target joining or leaving) is
+    still material but waits for the planner's minimum re-plan interval:
+    Dossier runs land every few minutes and the plan is not about any one of
+    them.
+    """
+
+    body = _planning_body(state)
+    for subject in [body["industry"], *body["companies"]]:
+        if isinstance(subject, dict):
+            subject.pop("dossier_feedback", None)
+    return content_hash(body)
+
+
+def _planning_body(state: Mapping[str, Any]) -> dict[str, Any]:
     totals = dict(state.get("totals") or {})
     totals.pop("figures_held", None)
     availability = dict(state.get("document_research_availability") or {})
     policy = state.get("document_research_policy")
     feedback_status = dict(state.get("document_research_feedback_status") or {})
-    return content_hash({
+    return {
         "schema_version": state.get("schema_version"),
         "document_research_contract_ref": state.get("document_research_contract_ref"),
         "document_research_policy": (
@@ -435,7 +479,7 @@ def planning_hash(state: Mapping[str, Any]) -> str:
         "totals": totals,
         "budget": state.get("budget"),
         "spend_bands": budget_bands(state.get("spend")),
-    })
+    }
 
 
 def state_digest(state: Mapping[str, Any]) -> str:
@@ -470,6 +514,7 @@ __all__ = [
     "build_research_state",
     "company_state",
     "industry_state",
+    "planning_core_hash",
     "planning_hash",
     "state_content_hash",
     "state_digest",

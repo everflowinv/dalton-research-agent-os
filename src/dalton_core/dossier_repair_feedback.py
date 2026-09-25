@@ -159,10 +159,79 @@ def _outcome(directory: Path) -> dict[str, Any] | None:
         "repair_targets": targets,
     }
     digest = content_hash(body)
+    version_ref = summary.get("version_ref")
     return {
         "id": f"dossier-repair-feedback:{digest[:32]}",
         **body,
         "content_hash": digest,
+        # Outside the hashed body on purpose: the feedback id and hash bind
+        # admitted repair research and must not move with this addition.
+        "published_version_ref": (
+            version_ref
+            if isinstance(version_ref, str) and version_ref
+            and summary.get("version_status") == "fresh"
+            else None
+        ),
+        "target_keys": sorted({_target_key(company_ref, target) for target in _targets(
+            summary.get("repair_targets"))}),
+    }
+
+
+def _target_key(company_ref: str, target: Mapping[str, str]) -> str:
+    """The same gap across runs: the target itself, not the ticket it came from.
+
+    A target's id and hash bind the ticket that reported it, so the same
+    missing figure reported by two runs has two ids.  This key does not.
+    """
+
+    return content_hash({
+        "schema_version": SCHEMA_VERSION, "company_ref": company_ref,
+        "target": dict(target),
+    })
+
+
+def _material(history: list[dict[str, Any]]) -> dict[str, Any]:
+    """What of a company's Dossier history should move a plan.
+
+    Live 2026-09-25 06:24-06:49 legacy paid the planner five times in 25
+    minutes because the latest run flipped IBM, DXC and CTSH between
+    ``partial_published``, ``rubric_refused`` and ``constitution_refused``,
+    and each run minted new target ids for the same gaps.  A run's verdict is
+    not a new fact about the company; two things are:
+
+    * the Dossier version currently published (the latest ``fresh`` one);
+    * the repair targets that are *stable*: a target joins once it has been
+      reported by two consecutive successful runs, and leaves only once two
+      consecutive successful runs have not reported it.  The targets of the
+      run that published the current version count as stable as well.
+
+    ``history`` is chronological, successful outcomes only.
+    """
+
+    published = None
+    published_keys: set[str] = set()
+    stable: set[str] = set()
+    seen_streak: dict[str, int] = {}
+    absent_streak: dict[str, int] = {}
+    for outcome in history:
+        keys = set(outcome.get("target_keys") or ())
+        if outcome.get("published_version_ref"):
+            published = outcome["published_version_ref"]
+            published_keys = keys
+        for key in keys | set(seen_streak) | stable:
+            if key in keys:
+                seen_streak[key] = seen_streak.get(key, 0) + 1
+                absent_streak[key] = 0
+                if seen_streak[key] >= 2:
+                    stable.add(key)
+            else:
+                seen_streak[key] = 0
+                absent_streak[key] = absent_streak.get(key, 0) + 1
+                if absent_streak[key] >= 2:
+                    stable.discard(key)
+    return {
+        "published_version_ref": published,
+        "stable_repair_target_keys": sorted(stable | published_keys),
     }
 
 
@@ -181,20 +250,18 @@ def read_dossier_repair_feedback(state_dir: str | Path) -> dict[str, dict[str, A
     root = state / "company-dossier-runs"
     if not _owner_directory(state) or not _owner_directory(root):
         return {}
-    latest: dict[str, dict[str, Any]] = {}
+    history: dict[str, list[dict[str, Any]]] = {}
     for directory in sorted(root.iterdir(), key=lambda item: item.name):
         if not _owner_directory(directory):
             continue
         outcome = _outcome(directory)
         if outcome is None:
             continue
-        company_ref = outcome["company_ref"]
-        prior = latest.get(company_ref)
-        identity = (outcome["completed_at"], outcome["source_ticket_ref"])
-        if prior is None or identity > (
-            prior["completed_at"], prior["source_ticket_ref"]
-        ):
-            latest[company_ref] = outcome
+        history.setdefault(outcome["company_ref"], []).append(outcome)
+    latest: dict[str, dict[str, Any]] = {}
+    for company_ref, outcomes in history.items():
+        outcomes.sort(key=lambda item: (item["completed_at"], item["source_ticket_ref"]))
+        latest[company_ref] = {**outcomes[-1], "material": _material(outcomes)}
     return latest
 
 

@@ -414,7 +414,47 @@ def _number_differences(source_values: Sequence[str], target_values: Sequence[st
             else:
                 continue
             break
+    for value, count in _written_small_counts(target_joined_raw).items():
+        if missing_counter[value]:
+            missing_counter[value] -= min(count, missing_counter[value])
     return sorted(missing_counter.elements()), sorted(added.elements())
+
+
+# Small counts a Chinese draft may write out: "4 家" -> "四家".  Live
+# 2026-09-25 ACN and CTSH NO_CHANGE judgements failed their only draft on
+# ``missing_tokens ["4"]`` for exactly this.  The rule is deliberately narrow:
+#
+# * values 0-10 (零/〇, 一 ... 十, 两 for 2) and 11-19 (十一 ... 十九) only --
+#   no 二十, 百, 千, 万, no decimals and no percentages (四成 is 40%, and a
+#   "4%" token is never consumed by this);
+# * the written numeral must stand alone (no Chinese numeral or digit on
+#   either side, so 二十四 does not yield 四 and 十四 does not yield 十) and
+#   be a count: followed by a measure word, or preceded by 第;
+# * it only accounts for a *missing* source integer; it never licenses an
+#   added one, and each written occurrence accounts for one token.
+#
+# The independent verifier still checks what each count refers to.
+_WRITTEN_SMALL = {
+    "零": "0", "〇": "0", "一": "1", "二": "2", "两": "2", "三": "3",
+    "四": "4", "五": "5", "六": "6", "七": "7", "八": "8", "九": "9",
+    "十": "10", **{"十" + digit: str(10 + int(value)) for digit, value in (
+        ("一", "1"), ("二", "2"), ("三", "3"), ("四", "4"), ("五", "5"),
+        ("六", "6"), ("七", "7"), ("八", "8"), ("九", "9"))},
+}
+_MEASURE_WORDS = "家个只支项条次名位年季月周天倍类种笔份款轮期段节处步组批件页章"
+_WRITTEN_SMALL_COUNT = re.compile(
+    r"(?<![零〇一二两三四五六七八九十百千万亿0-9])"
+    r"(?:(?<=第)(十[一二三四五六七八九]|[零〇一二两三四五六七八九十])"
+    r"|(十[一二三四五六七八九]|[零〇一二两三四五六七八九十])(?=\s*(?:个\s*)?[" + _MEASURE_WORDS + r"]))"
+    r"(?![零〇一二两三四五六七八九十百千万亿0-9])"
+)
+
+
+def _written_small_counts(text: str) -> Counter[str]:
+    counts: Counter[str] = Counter()
+    for match in _WRITTEN_SMALL_COUNT.finditer(_OPAQUE_ID.sub("", text)):
+        counts[_WRITTEN_SMALL[match.group(1) or match.group(2)]] += 1
+    return counts
 
 
 def build_prompt(product: Mapping[str, Any]) -> str:

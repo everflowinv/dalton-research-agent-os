@@ -139,6 +139,9 @@ UNAVAILABLE_REASONS: tuple[str, ...] = (
     "causal_chain_unmapped",
     # the draft came back outside its contract and was refused whole
     "refused_by_verification",
+    # a section carried forward from an earlier version cited a Claim retired
+    # since; it was dropped rather than republished, and is redrafted first
+    "retired_citation_dropped",
     # the section was not drafted on this run and has no prior version to carry
     "not_drafted_this_run",
 )

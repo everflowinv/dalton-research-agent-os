@@ -104,6 +104,50 @@ from .store import DaltonStore, canonical_json, content_hash
 
 SUMMARY_SCHEMA_VERSION = "0.1"
 
+# 2026-09-25: a unit reserved its calls' configured caps ($1 draft + $1
+# verify) against a $2.50 run bound, while a unit actually cost ~$0.27.  A
+# run drafted one or two units and refused nearly every repair for money
+# (ACN's price-target repair was refused by the constitution on cost).  A
+# call is now reserved at what its route can cost -- the dearest link of the
+# tier chain it will walk, priced by ``cockpit_model``'s own ceiling rule
+# (rate card, the prompt's bytes, and a CLI gateway's hidden system prompt
+# at the cache-write rate) -- never more than its configured cap.
+#: A contract or findings repair re-sends the unit prompt with the previous
+#: reply and its findings; the reply is at most MAX_OUTPUT_TOKENS tokens.
+REPAIR_PROMPT_HEADROOM_BYTES = 16_000
+
+
+def route_call_reserve_micros(model: Any, purpose: str, *, prompt_bytes: int,
+                              max_output_tokens: int, cap_micros: int) -> int:
+    """What one call of ``purpose`` on ``model`` can cost, capped at its cap.
+
+    Reads the router read-only through the same ceiling ``CockpitModel``
+    reserves on the day ledger.  Anything it cannot price -- a model without
+    a router, a single-shot policy with no tier chain, an unreadable router --
+    reserves the configured cap, as before.
+    """
+
+    chain_tier = getattr(model, "_chain_tier", None)
+    chain_ceiling = getattr(model, "_chain_ceiling", None)
+    config = getattr(model, "config", None)
+    if (not callable(chain_tier) or not callable(chain_ceiling)
+            or not isinstance(config, Mapping) or not config.get("model_router_db")):
+        return cap_micros
+    from .model_router import ModelRouter
+
+    try:
+        with ModelRouter(config["model_router_db"], read_only=True) as router:
+            tier = chain_tier(router, purpose)
+            if tier is None:
+                return cap_micros
+            ceiling = int(chain_ceiling(
+                router, tier, int(prompt_bytes), purpose=purpose,
+                call_budget={"max_output_tokens": int(max_output_tokens),
+                             "max_cost_usd": cap_micros / 1_000_000}))
+    except Exception:  # noqa: BLE001 - unpriced is the old, larger reserve
+        return cap_micros
+    return max(1, min(ceiling, cap_micros))
+
 
 def _verifier_contract_pairs(draft_digest, blocks, company, *, current):
     current_pair = (
@@ -597,6 +641,17 @@ def units_citing(record: Mapping[str, Any], refs: set[str]) -> set[str]:
     return out
 
 
+#: 2026-09-25: IBM v10 emptied business_model, supply_and_cost,
+#: management_and_capital_allocation and history_of_price_drivers because the
+#: carried-forward units cited retired Claims -- and labelled them
+#: ``refused_by_verification``, which nothing had refused.  They now say what
+#: happened, and the planner redrafts them ahead of ordinary extensions.
+RETIRED_CITATION_DROPPED = "retired_citation_dropped"
+#: What such a drop was labelled before it had its own reason; read the same
+#: way so versions already published are redrafted too.
+_LEGACY_DROP_REASONS = frozenset({RETIRED_CITATION_DROPPED, "refused_by_verification"})
+
+
 def unavailable_section(aspect: str, reason: str, structure: Sequence[str] = ()) -> dict[str, Any]:
     return {"aspect": aspect, "status": "unavailable", "reason": reason,
             "structure": list(structure), "slots": [], "sources": [], "gaps": [],
@@ -702,6 +757,10 @@ def plan_units(
         entry["new_refs"] = len({row["ref"] for row in material} - cited)
         entry["retired_refs"] = sorted(cited & retired)
         drafted_before = held is not None and held.get("status") != "unavailable"
+        # Emptied because what it cited was retired: owed a redraft first.
+        entry["retired_citation_dropped"] = bool(
+            held is not None and held.get("status") == "unavailable"
+            and held.get("reason") in _LEGACY_DROP_REASONS)
         # When *this* unit was last written, not when the chain last moved.
         # Against the chain head, a unit nobody has ever drafted looks current
         # the moment any other unit is published, and with three units a tick
@@ -1628,15 +1687,18 @@ def stale_units(
                   or (entry.get("stale") and entry["new_refs"] > 0)
                   # A unit resting on a retired Claim is redrafted even with
                   # nothing new to say: the correction is the new thing.
-                  or entry.get("retired_refs"))]
+                  or entry.get("retired_refs")
+                  # ...and so is one already emptied for that reason.
+                  or entry.get("retired_citation_dropped"))]
     ready.sort(key=lambda entry: (
         # Classification supplies the demand template, even when another
         # section has more new references in this bounded batch.
         0 if entry["unit"] == CLASSIFICATION_UNIT else 1,
         0 if entry.get("last_drafted") is None else 1,
         # A correction before an extension, within the same per-run bound:
-        # a published unit citing a disowned fact is the worse defect.
-        0 if entry.get("retired_refs") else 1,
+        # a published unit citing a disowned fact, or emptied because it did,
+        # is the worse defect.
+        0 if entry.get("retired_refs") or entry.get("retired_citation_dropped") else 1,
         -int(entry["new_refs"]),
         order[entry["unit"]],
     ))
@@ -1829,9 +1891,11 @@ def run_dossier(
 
         factory = model_factory or (lambda: build(config))
         verifier_factory = verifier_model_factory
-        if verifier_factory is None and verifier_model_config_path is not None:
+        verifier_config: Mapping[str, Any] = {}
+        if verifier_model_config_path is not None:
             verifier_config = json.loads(
                 Path(verifier_model_config_path).expanduser().read_text(encoding="utf-8"))
+        if verifier_factory is None and verifier_model_config_path is not None:
             verifier_factory = lambda: build(verifier_config)  # noqa: E731
         if verifier_factory is None:
             # Held before a single drafting call. One configuration routes both
@@ -1845,14 +1909,31 @@ def run_dossier(
                                    "from a different model family (D2)")})
             return summary
         model = factory()
-        producer_reserve = int(float(getattr(model, "budget_for", lambda p: {
-            "max_cost_usd": MAX_COST_USD})("dossier")["max_cost_usd"]) * 1_000_000)
+        producer_budget = getattr(model, "budget_for", lambda p: {
+            "max_cost_usd": MAX_COST_USD, "max_output_tokens": MAX_OUTPUT_TOKENS})("dossier")
+        producer_cap = int(float(producer_budget["max_cost_usd"]) * 1_000_000)
+        producer_output_tokens = int(producer_budget.get("max_output_tokens") or MAX_OUTPUT_TOKENS)
+        # Until a unit's prompt exists, its reserve is the cap.
+        producer_reserve = producer_cap
+        unit_reserves: dict[str, int] = {}
         verifier_budget = resolve_call_budget(
-            verifier_config if verifier_model_config_path is not None else {},
-            "dossier_verifier", defaults={"max_input_tokens": MAX_INPUT_TOKENS,
+            verifier_config, "dossier_verifier", defaults={"max_input_tokens": MAX_INPUT_TOKENS,
                 "max_output_tokens": MAX_OUTPUT_TOKENS, "max_cost_usd": MAX_COST_USD,
                 "timeout_seconds": TIMEOUT_SECONDS})
-        verifier_reserve = int(float(verifier_budget["max_cost_usd"]) * 1_000_000)
+        verifier_cap = int(float(verifier_budget["max_cost_usd"]) * 1_000_000)
+        # The verifier's prompt is every drafted block with its evidence; it
+        # is priced at the call's own input bound, which it cannot exceed.
+        verifier_reserve = verifier_cap
+        if verifier_model_config_path is not None:
+            try:
+                priced_verifier = build(verifier_config)
+            except Exception:  # noqa: BLE001 - unpriced keeps the cap
+                priced_verifier = None
+            verifier_reserve = route_call_reserve_micros(
+                priced_verifier, "dossier_verifier",
+                prompt_bytes=int(verifier_budget["max_input_tokens"]),
+                max_output_tokens=int(verifier_budget["max_output_tokens"]),
+                cap_micros=verifier_cap)
         company = {"company_ref": chosen, "ticker": next(
             (member.get("ticker") for member in mission["universe"]
              if member.get("company_ref") == chosen), None)}
@@ -1892,11 +1973,6 @@ def run_dossier(
                           for item in (prior or {}).get("sections") or []}
         cost_bound_units: list[str] = []
         for unit in wanted:
-            if spent + producer_reserve + verifier_reserve > run_cost_micros:
-                run_bound_blocked = True
-                cost_bound_units.append(unit)
-                summary["refused"].append({"unit": unit, "reason": "run cost bound reached"})
-                continue
             entry = plan[unit]
             held = prior_sections.get(unit)
             # A claim row has no ``kind``; a figure or forecast row does. That
@@ -1921,6 +1997,20 @@ def run_dossier(
                 market_view_available=market_view_available,
                 classification=actual_classification,
             )
+            unit_prompt = build_unit_prompt(
+                unit=unit, structure=entry["structure"], material=material,
+                company=company, prior_body=prior_body, profile_table=unit_profile_table,
+                market_view_available=market_view_available,
+                classification=actual_classification)
+            producer_reserve = unit_reserves[unit] = route_call_reserve_micros(
+                model, "dossier",
+                prompt_bytes=len(unit_prompt.encode("utf-8")) + REPAIR_PROMPT_HEADROOM_BYTES,
+                max_output_tokens=producer_output_tokens, cap_micros=producer_cap)
+            if spent + producer_reserve + verifier_reserve > run_cost_micros:
+                run_bound_blocked = True
+                cost_bound_units.append(unit)
+                summary["refused"].append({"unit": unit, "reason": "run cost bound reached"})
+                continue
             unit_inputs[unit] = {
                 "structure": entry["structure"], "material": material,
                 "company": company, "mission": mission,
@@ -1989,12 +2079,16 @@ def run_dossier(
             "run_cost_micros": run_cost_micros,
             "spent_micros": spent,
             "remaining_micros": max(0, run_cost_micros - spent),
-            "unit_reserve_micros": producer_reserve + verifier_reserve,
+            "unit_reserve_micros": max(unit_reserves.values(), default=producer_reserve)
+                                   + verifier_reserve,
+            "unit_reserves_micros": dict(sorted(unit_reserves.items())),
+            "verifier_reserve_micros": verifier_reserve,
             "units_skipped_for_cost": cost_bound_units,
             "reason": (None if not cost_bound_units else
                        f"{len(cost_bound_units)} 个单元未起草：本次运行的成本上限 "
                        f"{run_cost_micros} micros 已经不够再付一次"
-                       f"（起草 {producer_reserve} + 校验 {verifier_reserve}）"),
+                       f"（起草 {max(unit_reserves.values(), default=producer_reserve)}"
+                       f" + 校验 {verifier_reserve}）"),
         }
         if not blocks:
             model_refusals = [item for item in summary["refused"]
@@ -2085,7 +2179,8 @@ def run_dossier(
                     # leave the second verifying call its own or it is refused
                     # unmade, with the numbers.
                     budget_remaining_micros=run_cost_micros - spent,
-                    repair_reserve_micros=producer_reserve + verifier_reserve,
+                    repair_reserve_micros=unit_reserves.get(unit, producer_cap)
+                    + verifier_reserve,
                     **inputs)
                 spent += int(outcome.get("cost_micros") or 0)
                 summary["cost_micros"] = spent
@@ -2396,7 +2491,9 @@ def assemble(
     sections = []
     for aspect in SECTIONS:
         if aspect in drop_units and aspect not in blocks:
-            sections.append(unavailable_section(aspect, "refused_by_verification"))
+            sections.append(unavailable_section(
+                aspect, RETIRED_CITATION_DROPPED,
+                [slot["slot_id"] for slot in (plan.get(aspect) or {}).get("structure") or []]))
             continue
         if aspect in blocks:
             section = dict(blocks[aspect])
@@ -2421,7 +2518,7 @@ def assemble(
     if variant is not None:
         pass
     elif VARIANT_UNIT in drop_units:
-        variant = undrafted_variant("refused_by_verification")
+        variant = undrafted_variant(RETIRED_CITATION_DROPPED)
     else:
         variant = (prior or {}).get("variant_view") or undrafted_variant(
             (plan.get(VARIANT_UNIT) or {}).get("reason") or "not_drafted_this_run")

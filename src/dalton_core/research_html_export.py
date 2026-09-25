@@ -30,6 +30,7 @@ _APPROVAL_LABELS = {
 }
 _REASON_LABELS = {
     "not_drafted_this_run": "本轮尚未起草",
+    "retired_citation_dropped": "所引证据已撤回，待重新起草",
 }
 _METRIC_LABELS = {
     "revenue": "营业收入",

@@ -25,6 +25,7 @@ from dalton_core.research_planner_cli import (
 )
 from dalton_core.research_state import (
     budget_bands,
+    planning_core_hash,
     planning_hash,
     state_content_hash,
 )
@@ -104,6 +105,85 @@ class StateHashTests(unittest.TestCase):
         self.assertEqual(state_content_hash(base), state_content_hash(projected))
 
 
+class DossierFeedbackMaterialityTests(unittest.TestCase):
+    """2026-09-25 06:24-06:49 legacy: five paid plans, $2.34, whose prompts
+    differed only in the latest Dossier run's verdict (IBM, DXC, CTSH flipping
+    between partial_published, rubric_refused and constitution_refused) or in
+    the ticket-bound ids of its repair targets."""
+
+    def feedback(self, status, *, ticket="c", targets=("b",), material=None):
+        base = _planner_fixtures.repair_feedback()
+        base["dossier_status"] = status
+        base["source_ticket_ref"] = "company-dossier-run:" + ticket * 24
+        base["id"] = "dossier-repair-feedback:" + ticket * 32
+        base["content_hash"] = ticket * 64
+        base["repair_targets"] = [
+            dict(base["repair_targets"][0], id="dossier-repair-target:" + t * 32,
+                 content_hash=t * 64) for t in targets]
+        base["material"] = material or {
+            "published_version_ref": "company-dossier-version:acn:6",
+            "stable_repair_target_keys": [],
+        }
+        return base
+
+    def state(self, feedback):
+        return _planner_fixtures.state(
+            dossier_feedback_by_company={_planner_fixtures.ACN: feedback})
+
+    def test_verdict_and_target_ids_flipping_is_not_material(self):
+        states = [
+            self.state(self.feedback("partial_published", ticket="1", targets=())),
+            self.state(self.feedback("rubric_refused", ticket="2", targets=("e",))),
+            self.state(self.feedback("constitution_refused", ticket="3", targets=("f",))),
+        ]
+        self.assertEqual(len({item["content_hash"] for item in states}), 3)
+        self.assertEqual(len({planning_hash(item) for item in states}), 1)
+
+    def test_published_version_or_stable_targets_are_material_but_not_core(self):
+        base = self.state(self.feedback("rubric_refused"))
+        published = self.state(self.feedback("published", material={
+            "published_version_ref": "company-dossier-version:acn:7",
+            "stable_repair_target_keys": []}))
+        stable = self.state(self.feedback("rubric_refused", material={
+            "published_version_ref": "company-dossier-version:acn:6",
+            "stable_repair_target_keys": ["k" * 64]}))
+        self.assertEqual(len({planning_hash(item) for item in (base, published, stable)}), 3)
+        self.assertEqual(len({planning_core_hash(item)
+                              for item in (base, published, stable)}), 1)
+        # A gap in the checklist is core: re-planned at once.
+        item, entry, ACN = (_planner_fixtures.item, _planner_fixtures.entry,
+                            _planner_fixtures.ACN)
+        gap = _planner_fixtures.state(
+            checklist=[entry(ACN, "ACN", item("earnings_calls", have=1, status="partial"),
+                             gaps=["earnings_calls"])],
+            dossier_feedback_by_company={ACN: self.feedback("rubric_refused")})
+        self.assertNotEqual(planning_core_hash(base), planning_core_hash(gap))
+
+    def test_the_tightest_prompt_projection_keeps_the_material_projection(self):
+        from dalton_core.research_planner import project_state_for_prompt
+        tests = _planner_fixtures.FeedbackProjectionTests(
+            "test_twelve_companies_are_all_carried_at_the_live_bound")
+
+        def projected(status, version):
+            built = tests.worst_case(12)
+            for company in built["companies"]:
+                company["dossier_feedback"]["dossier_status"] = status
+                company["dossier_feedback"]["material"] = {
+                    "published_version_ref": version,
+                    "stable_repair_target_keys": ["k" * 64]}
+            return project_state_for_prompt(tests.rebind(built),
+                                            max_input_bytes=tests.BOUND)
+
+        base = projected("rubric_refused", "company-dossier-version:acn:6")
+        # Reduced to each company's checklist core...
+        self.assertIn("repair_target_ids", base["companies"][0]["dossier_feedback"])
+        flipped = projected("constitution_refused", "company-dossier-version:acn:6")
+        published = projected("published", "company-dossier-version:acn:7")
+        self.assertEqual(planning_hash(base), planning_hash(flipped))
+        self.assertNotEqual(planning_hash(base), planning_hash(published))
+        self.assertEqual(planning_core_hash(base), planning_core_hash(published))
+
+
 class PacingHoldTests(unittest.TestCase):
     NOW = datetime(2026, 9, 24, 13, 0, tzinfo=timezone.utc)
 
@@ -123,6 +203,32 @@ class PacingHoldTests(unittest.TestCase):
         self.assertIsNone(replan_pacing_hold({}, "p", now=self.NOW))
         self.assertIsNone(replan_pacing_hold(
             {"at": "not a time", "planning_hash": "p"}, "p", now=self.NOW))
+
+    def test_a_dossier_feedback_only_change_waits_for_the_interval(self):
+        last = {"at": (self.NOW - timedelta(minutes=5)).isoformat(),
+                "planning_hash": "p", "planning_core_hash": "c"}
+        held = replan_pacing_hold(last, "q", now=self.NOW, planning_core_hash="c")
+        self.assertEqual(held["held_reason"], "dossier_feedback_paced")
+        # Same everything: the ordinary hold.
+        self.assertEqual(replan_pacing_hold(
+            last, "p", now=self.NOW, planning_core_hash="c")["held_reason"],
+            "no_material_change")
+        # A core change is asked at once, feedback moved or not.
+        self.assertIsNone(replan_pacing_hold(
+            last, "q", now=self.NOW, planning_core_hash="d"))
+        # After the interval the feedback change buys one plan.
+        old = dict(last, at=(self.NOW - timedelta(seconds=MIN_REPLAN_SECONDS)).isoformat())
+        self.assertIsNone(replan_pacing_hold(
+            old, "q", now=self.NOW, planning_core_hash="c"))
+
+    def test_a_decision_recorded_before_the_core_hash_uses_the_full_hash(self):
+        last = {"at": (self.NOW - timedelta(minutes=5)).isoformat(),
+                "planning_hash": "p"}
+        self.assertIsNone(replan_pacing_hold(
+            last, "q", now=self.NOW, planning_core_hash="c"))
+        self.assertEqual(replan_pacing_hold(
+            last, "p", now=self.NOW, planning_core_hash="c")["held_reason"],
+            "no_material_change")
 
 
 class PacedRunTests(unittest.TestCase):
@@ -201,6 +307,8 @@ class PacedRunTests(unittest.TestCase):
         self.assertEqual(model.return_value.call.call_count, 3)
         self.assertEqual(read_last_decision(self.state)["planning_hash"],
                          results[3]["planning_hash"])
+        self.assertEqual(read_last_decision(self.state)["planning_core_hash"],
+                         results[3]["planning_core_hash"])
 
 
 if __name__ == "__main__":
