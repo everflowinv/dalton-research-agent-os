@@ -105,9 +105,33 @@ def review_reopen_candidate(*, core_db: str | Path, scheduler_db: str | Path,
             from .document_read_completion import review_wire
             prior = review_wire(row)
             if content_hash(prior) != item["prior_review_hash"]: raise ValueError("candidate review drifted")
-            pointer = core.execute("SELECT 1 FROM coverage_mission_pointer WHERE mission_version_id=?",
-                                   (row["mission_version_ref"],)).fetchone()
+            # 2026-09-25b: any version of a mission still pointed at.  P1/P2
+            # publish a new version over the one the review sits on; the
+            # writer carries such a review into the current version before it
+            # reopens it (CoverageMissionAuthority.reopen_document_review).
+            pointer = core.execute(
+                "SELECT p.mission_version_id FROM coverage_mission_versions v "
+                "JOIN coverage_mission_pointer p ON p.mission_ref=v.mission_ref "
+                "WHERE v.mission_version_id=?", (row["mission_version_ref"],)).fetchone()
             if pointer is None: raise ValueError("candidate mission is not current")
+            if pointer["mission_version_id"] != row["mission_version_ref"]:
+                # The newest row of the document speaks for it: a later version
+                # may hold it only under the same dismissal (carried there).
+                newest = core.execute(
+                    "SELECT d.mission_version_ref FROM coverage_mission_discovered_documents d "
+                    "JOIN coverage_mission_versions v ON v.mission_version_id=d.mission_version_ref "
+                    "WHERE v.mission_ref=(SELECT mission_ref FROM coverage_mission_versions "
+                    "WHERE mission_version_id=?) AND d.document_ref=? "
+                    "ORDER BY v.version_number DESC LIMIT 1",
+                    (row["mission_version_ref"], row["document_ref"])).fetchone()
+                if newest is not None and newest["mission_version_ref"] != row["mission_version_ref"]:
+                    held = core.execute(
+                        "SELECT state,rationale,created_at FROM coverage_mission_document_reviews "
+                        "WHERE mission_version_ref=? AND document_ref=?",
+                        (newest["mission_version_ref"], row["document_ref"])).fetchone()
+                    if held is None or (held["state"], held["rationale"], held["created_at"]) != (
+                            "dismissed", row["rationale"], row["created_at"]):
+                        raise ValueError("a later mission version already holds this document; it is decided there")
             accession = row["document_ref"].removeprefix("sec:filing:")
             filing = core.execute("SELECT form FROM coverage_mission_statement_filings WHERE company_ref=? AND accession=?",
                                   (row["company_ref"], accession)).fetchone()

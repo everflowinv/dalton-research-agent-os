@@ -1823,13 +1823,33 @@ class CoverageMissionAuthority:
         rows = self.connection.execute(query, params).fetchall()
         return [self._dispatch_row(row) for row in rows]
 
+    def _version_scope(self, column: str, mission_version_ref: str, across_versions: bool) -> str:
+        """``column`` bound to one version, or to every version of its mission."""
+
+        _text(mission_version_ref, "mission_version_ref")
+        if not across_versions:
+            return f"{column}=?"
+        return (f"{column} IN (SELECT v.mission_version_id FROM coverage_mission_versions v "
+                "JOIN coverage_mission_versions o ON o.mission_ref=v.mission_ref "
+                "WHERE o.mission_version_id=?)")
+
     def discovery_dispatches(
         self, mission_version_ref: str, *, company_ref: str | None = None,
-        spec_ref: str | None = None, limit: int = 100,
+        spec_ref: str | None = None, limit: int = 100, across_versions: bool = False,
     ) -> list[dict[str, Any]]:
+        """Discovery dispatches, newest first.
+
+        ``across_versions`` (2026-09-25b): every version of the mission the
+        given version belongs to.  The cadence asks when a (company, spec) was
+        last searched; P1/P2 publishing a new version does not make last
+        night's search older, and asked of the new version alone it read
+        "never" and searched everything again.
+        """
+
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
             raise CoverageMissionValidationError("discovery dispatch limit must be 1..1000")
-        query = "SELECT * FROM coverage_mission_discovery_dispatches WHERE mission_version_ref=?"
+        query = "SELECT * FROM coverage_mission_discovery_dispatches WHERE " + self._version_scope(
+            "mission_version_ref", mission_version_ref, across_versions)
         params: list[Any] = [_text(mission_version_ref, "mission_version_ref")]
         if company_ref is not None:
             query += " AND company_ref=?"
@@ -1957,7 +1977,9 @@ class CoverageMissionAuthority:
         binds that exact invocation / envelope to the mission, company and
         plan spec, and opens one ``discovered`` document row per ref Core does
         not yet hold.  Documents already in authority are recorded as such
-        and never re-queued.
+        and never re-queued.  A document an earlier version of the mission
+        already decided is carried into this version with its decision
+        (``carried_decided`` in the result), never registered to be read again.
         """
 
         authorization = self._validate_discovery_authorization(authorization)
@@ -2044,6 +2066,31 @@ class CoverageMissionAuthority:
             if wire["id"] != record_id:
                 raise CoverageMissionConflict("source envelope is already bound to another discovery")
             return {**wire, "status": "duplicate"}
+        # 2026-09-25b: a document an earlier version of this mission already
+        # decided is carried in with its decision, not registered afresh.  P1
+        # published ws-7d's v4 and the next searches found documents v3 had
+        # read and closed; each came back as a new row, settled as already
+        # held, opened a new review and was read -- and paid for -- again.
+        # Resolved before the transaction: the grant reads the store itself.
+        decided: dict[str, tuple[Any, str]] = {}
+        grants: dict[tuple[str, str], str | None] = {}
+        for ref, review in self._superseded_decisions(exact["mission_version_ref"], refs).items():
+            key = (review["company_ref"], review["source_ref"])
+            if key not in grants:
+                try:
+                    grants[key] = self.authorize_source_discovery(
+                        company_ref=key[0], source_ref=key[1],
+                        requested_by=exact["requested_by"],
+                        mission_version_ref=exact["mission_version_ref"],
+                    )["actor_ref"]
+                except CoverageMissionError:
+                    # Company left the universe or source disconnected: the
+                    # old decision no longer speaks for this mission, and the
+                    # document registers like any other.
+                    grants[key] = None
+            if grants[key] is not None:
+                decided[ref] = (review, grants[key])
+        carried: list[dict[str, Any]] = []
         created_at = _now()
         record = {"schema_version": SCHEMA_VERSION, "id": record_id, "created_at": created_at, **identity}
         wire = {**record, "content_hash": content_hash(record)}
@@ -2074,6 +2121,21 @@ class CoverageMissionAuthority:
                     (document_id,),
                 ).fetchone() is not None:
                     continue
+                if ref in decided:
+                    review, registered_by = decided[ref]
+                    fresh = cur.execute(
+                        "SELECT * FROM coverage_mission_document_reviews WHERE review_id=?",
+                        (review["review_id"],),
+                    ).fetchone()
+                    if fresh is not None and fresh["state"] == review["state"]:
+                        copy = self._carry_review_into_version(
+                            cur, fresh, exact["mission_version_ref"], registered_by=registered_by,
+                            now=created_at, keep_decision=True)
+                        carried.append({"document_ref": ref,
+                                        "from_version_ref": fresh["mission_version_ref"],
+                                        "from_review_id": fresh["review_id"],
+                                        "state": fresh["state"], **copy})
+                        continue
                 cur.execute(
                     "INSERT INTO coverage_mission_discovered_documents"
                     "(record_id,mission_version_ref,company_ref,source_ref,document_ref,"
@@ -2085,15 +2147,61 @@ class CoverageMissionAuthority:
                         created_at, created_at, hosts.get(ref),
                     ),
                 )
-        return {**wire, "status": "fresh"}
+        # Reported only when it happened, so an ordinary discovery's result
+        # keeps the record's closed shape plus ``status``.
+        return {**wire, "status": "fresh", **({"carried_decided": carried} if carried else {})}
+
+    def _superseded_decisions(
+        self, current_ref: str, document_refs: Sequence[str],
+    ) -> dict[str, Any]:
+        """document_ref -> the closed review an earlier version decided it with.
+
+        Only a document the current version does not hold, and only when the
+        newest row of it under any earlier version of the same mission is an
+        acquired document whose review is closed -- the rule
+        :meth:`carry_forward_superseded_documents` and the P13i re-evaluation
+        use: the newest row of a document speaks for it.  An older version's
+        decision that a later version re-opened, or a row still unfinished,
+        is not a decision and registers as before.
+        """
+
+        version = self.connection.execute(
+            "SELECT mission_ref FROM coverage_mission_versions WHERE mission_version_id=?",
+            (current_ref,),
+        ).fetchone()
+        if version is None:
+            return {}
+        result: dict[str, Any] = {}
+        for ref in dict.fromkeys(document_refs):
+            row = self.connection.execute(
+                "SELECT d.* FROM coverage_mission_discovered_documents d "
+                "JOIN coverage_mission_versions v ON v.mission_version_id=d.mission_version_ref "
+                "WHERE v.mission_ref=? AND d.document_ref=? "
+                "ORDER BY v.version_number DESC LIMIT 1",
+                (version["mission_ref"], ref),
+            ).fetchone()
+            if row is None or row["mission_version_ref"] == current_ref or row["status"] != "acquired":
+                continue
+            review = self.connection.execute(
+                "SELECT * FROM coverage_mission_document_reviews "
+                "WHERE mission_version_ref=? AND document_ref=? AND discovered_document_ref=?",
+                (row["mission_version_ref"], ref, row["record_id"]),
+            ).fetchone()
+            if review is not None and review["state"] != "awaiting_human_extraction":
+                result[ref] = review
+        return result
 
     def source_discoveries(
         self, mission_version_ref: str, *, company_ref: str | None = None,
-        spec_ref: str | None = None, limit: int = 100,
+        spec_ref: str | None = None, limit: int = 100, across_versions: bool = False,
     ) -> list[dict[str, Any]]:
+        """Source discoveries, newest first; ``across_versions`` as for
+        :meth:`discovery_dispatches`."""
+
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
             raise CoverageMissionValidationError("discovery limit must be 1..1000")
-        query = "SELECT * FROM coverage_mission_source_discoveries WHERE mission_version_ref=?"
+        query = "SELECT * FROM coverage_mission_source_discoveries WHERE " + self._version_scope(
+            "mission_version_ref", mission_version_ref, across_versions)
         params: list[Any] = [_text(mission_version_ref, "mission_version_ref")]
         if company_ref is not None:
             query += " AND company_ref=?"
@@ -2679,17 +2787,78 @@ class CoverageMissionAuthority:
 
         return establish_requirements(self.metric_observations(company_ref))
 
-    def document_spec_refs(self, mission_version_ref: str) -> dict[str, str]:
-        """document_ref → the discovery spec that found it (P10a reading order)."""
+    def document_spec_refs(
+        self, mission_version_ref: str, *, across_versions: bool = False,
+        document_refs: Sequence[str] | None = None,
+    ) -> dict[str, str]:
+        """document_ref → the discovery spec that found it (P10a reading order).
 
+        ``across_versions`` (2026-09-25b): every version of the mission, the
+        newest row of a document winning.  A document decided under v3 is
+        still a transcript or a 10-K after P1 publishes v4, and the secondary
+        passes grade and gate by kind -- a kind looked up under v4 alone came
+        back unknown for every document v4 does not hold.  ``document_refs``
+        narrows the lookup to the documents asked about.
+        """
+
+        mission_version_ref = _text(mission_version_ref, "mission_version_ref")
+        narrow = ""
+        params: list[Any] = []
+        if document_refs is not None:
+            wanted = list(dict.fromkeys(_text(ref, "document_ref") for ref in document_refs))
+            if not wanted:
+                return {}
+            narrow = " AND d.document_ref IN (%s)" % ",".join("?" * len(wanted))
+            params = wanted
+        if not across_versions:
+            rows = self.connection.execute(
+                "SELECT d.document_ref AS document_ref, s.spec_ref AS spec_ref "
+                "FROM coverage_mission_discovered_documents d "
+                "JOIN coverage_mission_source_discoveries s ON s.record_id=d.discovery_ref "
+                "WHERE d.mission_version_ref=?" + narrow,
+                (mission_version_ref, *params),
+            ).fetchall()
+            return {row["document_ref"]: row["spec_ref"] for row in rows}
         rows = self.connection.execute(
             "SELECT d.document_ref AS document_ref, s.spec_ref AS spec_ref "
-            "FROM coverage_mission_discovered_documents d "
+            "FROM coverage_mission_versions o "
+            "JOIN coverage_mission_versions v ON v.mission_ref=o.mission_ref "
+            "JOIN coverage_mission_discovered_documents d ON d.mission_version_ref=v.mission_version_id "
             "JOIN coverage_mission_source_discoveries s ON s.record_id=d.discovery_ref "
-            "WHERE d.mission_version_ref=?",
-            (_text(mission_version_ref, "mission_version_ref"),),
+            "WHERE o.mission_version_id=?" + narrow + " ORDER BY v.version_number",
+            (mission_version_ref, *params),
         ).fetchall()
         return {row["document_ref"]: row["spec_ref"] for row in rows}
+
+    def held_document_reviews(self, mission_ref: str, *, limit: int = 500) -> list[dict[str, Any]]:
+        """Every document review of a mission, one per document: the newest.
+
+        2026-09-25b: the secondary passes (figures, metric discovery) read
+        documents the queue has already closed, and read them out of
+        ``document_reviews(current version)``.  P1 published ws-7d's v4 and
+        the 1,100 documents closed under v3 fell out of both passes.  This is
+        every version of the mission, under the rule carry-forward and the
+        P13i re-evaluation use: a review speaks for its document only while
+        no later version holds that document (carried, re-discovered or
+        reopened there) -- so a document is read once, under its newest
+        decision, never once per version.  Ordered like ``document_reviews``.
+        """
+
+        mission_ref = _text(mission_ref, "mission_ref")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 5000:
+            raise CoverageMissionValidationError("document review limit must be 1..5000")
+        rows = self.connection.execute(
+            "SELECT r.* FROM coverage_mission_document_reviews r "
+            "JOIN coverage_mission_versions v ON v.mission_version_id=r.mission_version_ref "
+            "WHERE v.mission_ref=? "
+            "AND NOT EXISTS (SELECT 1 FROM coverage_mission_versions nv "
+            "JOIN coverage_mission_discovered_documents n ON n.mission_version_ref=nv.mission_version_id "
+            "WHERE nv.mission_ref=v.mission_ref AND nv.version_number>v.version_number "
+            "AND n.document_ref=r.document_ref) "
+            "ORDER BY r.created_at,r.review_id LIMIT ?",
+            (mission_ref, limit),
+        ).fetchall()
+        return [self._review_row(row) for row in rows]
 
     def discovered_documents_held_by_skip(
         self, *, source_ref: str | None = None, skip_hosts: Sequence[str] = ()
@@ -3433,7 +3602,22 @@ class CoverageMissionAuthority:
         decision_ref: str, failed_windows: Sequence[Mapping[str, Any]],
         formal_reader: Any,
     ) -> dict[str, Any]:
-        """Human-authorize a supplemental read without erasing the old decision."""
+        """Human-authorize a supplemental read without erasing the old decision.
+
+        2026-09-25b: the review may sit under any version of a mission that is
+        still pointed at.  P1/P2 publish a new version over the old one, and
+        refusing every review not under the version in force left the owner
+        unable to act on a failed formal window decided a day earlier.  A
+        review under a superseded version is carried into the current one
+        first, exactly as :meth:`reopen_unattributed_document_review` carries
+        it (``_carry_review_into_version``: acquired row with its ticket, new
+        review under the current version with the old ``created_at``); the old
+        review stays dismissed and the append-only record names the review
+        that was reopened (``carried_to``).  When the current version already
+        holds the document under a dismissed review carried from this one
+        (same decision), that review is the one reopened; any other hold
+        means the document is decided there and the reopen is refused.
+        """
 
         review_id = _text(review_id, "review_id")
         expected_review_hash = _sha256(expected_review_hash, "expected_review_hash")
@@ -3473,6 +3657,25 @@ class CoverageMissionAuthority:
             if not isinstance(authoritative, Mapping) or dict(authoritative) != item:
                 raise CoverageMissionValidationError("failed formal window authority drifted")
             verified.append(item)
+        # Where the review is carried if its version has been superseded.
+        # Resolved before the transaction: the grant reads the store itself.
+        owner = self.mission(prior_row["mission_version_ref"])
+        current_pointer = self.connection.execute(
+            "SELECT mission_version_id FROM coverage_mission_pointer WHERE mission_ref=?",
+            (owner["mission_ref"],),
+        ).fetchone()
+        if current_pointer is None:
+            raise CoverageMissionConflict("document review mission is not current")
+        current_ref = current_pointer["mission_version_id"]
+        carry_grant: dict[str, Any] | None = None
+        if current_ref != owner["id"]:
+            # Refuses (CoverageMissionConflict) a company that has left the
+            # universe or a source no longer connected, as for a discovery.
+            carry_grant = self.authorize_source_discovery(
+                company_ref=prior_row["company_ref"], source_ref=prior_row["source_ref"],
+                requested_by=self.mission(current_ref)["autonomy"]["automation_principal"],
+                mission_version_ref=current_ref,
+            )
         now = _now()
         with self._transaction() as cur:
             row = cur.execute(
@@ -3480,6 +3683,8 @@ class CoverageMissionAuthority:
             ).fetchone()
             if row is None:
                 raise CoverageMissionNotFound("document review was not found")
+            if row["mission_version_ref"] != owner["id"]:
+                raise CoverageMissionConflict("document review changed concurrently")
             existing = cur.execute(
                 "SELECT record_json FROM coverage_mission_document_review_reopens "
                 "WHERE review_id=? AND prior_review_hash=?", (review_id, expected_review_hash)
@@ -3489,7 +3694,14 @@ class CoverageMissionAuthority:
                 if (saved.get("actor_ref") != actor_ref or saved.get("decision_ref") != decision_ref
                         or saved.get("failed_windows") != verified):
                     raise CoverageMissionConflict("document review reopen payload changed")
-                if row["state"] != "awaiting_human_extraction":
+                reopened = row
+                carried_to = saved.get("carried_to")
+                if isinstance(carried_to, Mapping):
+                    reopened = cur.execute(
+                        "SELECT state FROM coverage_mission_document_reviews WHERE review_id=?",
+                        (carried_to.get("review_id"),),
+                    ).fetchone()
+                if reopened is None or reopened["state"] != "awaiting_human_extraction":
                     raise CoverageMissionConflict("duplicate reopen no longer names an open review")
                 return {"status": "duplicate", **saved}
             prior = self._review_row(row)
@@ -3510,16 +3722,50 @@ class CoverageMissionAuthority:
                     raise CoverageMissionConflict(
                         "supplemental annual reread lacks exact issuer 10-K authority")
             pointer = cur.execute(
-                "SELECT p.mission_version_id FROM coverage_mission_pointer p "
-                "JOIN coverage_mission_versions v ON v.mission_ref=p.mission_ref "
-                "WHERE p.mission_version_id=?", (row["mission_version_ref"],)
+                "SELECT mission_version_id FROM coverage_mission_pointer WHERE mission_version_id=?",
+                (current_ref,),
             ).fetchone()
             if pointer is None:
                 raise CoverageMissionConflict("document review mission is not current")
+            carried: dict[str, Any] | None = None
+            target: str | None = review_id
+            if carry_grant is not None:
+                # The newest row of the document speaks for it, as in
+                # carry-forward.  A later version may hold it under the same
+                # dismissal (a search found it again and the decision was
+                # carried): that copy is the one reopened.  Held any other way,
+                # the document was decided there and this review is moot.
+                newest = cur.execute(
+                    "SELECT d.mission_version_ref FROM coverage_mission_discovered_documents d "
+                    "JOIN coverage_mission_versions v ON v.mission_version_id=d.mission_version_ref "
+                    "WHERE v.mission_ref=? AND d.document_ref=? ORDER BY v.version_number DESC LIMIT 1",
+                    (owner["mission_ref"], row["document_ref"]),
+                ).fetchone()
+                source = row
+                if newest is not None and newest["mission_version_ref"] != row["mission_version_ref"]:
+                    source = cur.execute(
+                        "SELECT * FROM coverage_mission_document_reviews "
+                        "WHERE mission_version_ref=? AND document_ref=?",
+                        (newest["mission_version_ref"], row["document_ref"]),
+                    ).fetchone()
+                    if source is None or (source["state"], source["rationale"], source["created_at"]) != (
+                            "dismissed", row["rationale"], row["created_at"]):
+                        raise CoverageMissionConflict(
+                            "a later mission version already holds this document; it is decided there")
+                if source["mission_version_ref"] == current_ref:
+                    carried = {"mission_version_ref": current_ref, "review_id": source["review_id"],
+                               "discovered_document_ref": source["discovered_document_ref"]}
+                    target = source["review_id"]
+                else:
+                    carried = self._carry_review_into_version(
+                        cur, source, current_ref, registered_by=carry_grant["actor_ref"], now=now)
+                    target = None
             body = {"schema_version": "0.1", "review_id": review_id,
                     "prior_review": prior, "prior_review_hash": expected_review_hash,
                     "decision_ref": decision_ref, "failed_windows": verified,
                     "actor_ref": actor_ref, "created_at": now}
+            if carried is not None:
+                body["carried_to"] = carried
             record = {**body, "reopen_id": _ref("mission-document-review-reopen", body)}
             record["content_hash"] = content_hash(record)
             cur.execute(
@@ -3529,13 +3775,14 @@ class CoverageMissionAuthority:
                 (record["reopen_id"], review_id, expected_review_hash, canonical_json(record),
                  record["content_hash"], actor_ref, now),
             )
-            cur.execute(
-                "UPDATE coverage_mission_document_reviews SET state='awaiting_human_extraction',"
-                "candidate_claim_version_ref=NULL,rationale=NULL,updated_at=? WHERE review_id=? AND state='dismissed'",
-                (now, review_id),
-            )
-            if cur.rowcount != 1:
-                raise CoverageMissionConflict("document review changed concurrently")
+            if target is not None:
+                cur.execute(
+                    "UPDATE coverage_mission_document_reviews SET state='awaiting_human_extraction',"
+                    "candidate_claim_version_ref=NULL,rationale=NULL,updated_at=? WHERE review_id=? AND state='dismissed'",
+                    (now, target),
+                )
+                if cur.rowcount != 1:
+                    raise CoverageMissionConflict("document review changed concurrently")
         return {"status": "fresh", **record}
 
     def reopen_unattributed_document_review(
@@ -3691,6 +3938,7 @@ class CoverageMissionAuthority:
     @staticmethod
     def _carry_review_into_version(
         cur: sqlite3.Cursor, review: Any, current_ref: str, *, registered_by: str, now: str,
+        keep_decision: bool = False,
     ) -> dict[str, Any]:
         """Open ``review``'s document afresh under ``current_ref`` (same transaction).
 
@@ -3700,6 +3948,13 @@ class CoverageMissionAuthority:
         holds that document, in which case the document's fate is decided
         there and this refuses.  The new review keeps the old one's
         ``created_at`` so it re-enters the queue where it was, not at the end.
+
+        ``keep_decision`` (2026-09-25b): the document was decided under the
+        old version and nothing asked for it to be read again -- a search
+        under the new version simply found it again.  The new review carries
+        the old decision (state, staged candidate, rationale, ``updated_at``)
+        instead of opening, so the document is held by the version in force
+        without a second paid read.
         """
 
         held = cur.execute(
@@ -3729,13 +3984,23 @@ class CoverageMissionAuthority:
         )
         new_review_id = _ref("mission-document-review", {
             "mission_version_ref": current_ref, "document_ref": review["document_ref"]})
+        if keep_decision:
+            if review["state"] == "awaiting_human_extraction":
+                raise CoverageMissionConflict("an open review has no decision to carry")
+            state, candidate, rationale, updated_at = (
+                review["state"], review["candidate_claim_version_ref"], review["rationale"],
+                review["updated_at"])
+        else:
+            state, candidate, rationale, updated_at = "awaiting_human_extraction", None, None, now
         cur.execute(
             "INSERT INTO coverage_mission_document_reviews("
             "review_id,mission_version_ref,company_ref,source_ref,document_ref,"
-            "discovered_document_ref,state,registered_by,created_at,updated_at) "
-            "VALUES(?,?,?,?,?,?,'awaiting_human_extraction',?,?,?)",
+            "discovered_document_ref,state,candidate_claim_version_ref,rationale,"
+            "registered_by,created_at,updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
             (new_review_id, current_ref, review["company_ref"], review["source_ref"],
-             review["document_ref"], record_id, registered_by, review["created_at"], now),
+             review["document_ref"], record_id, state, candidate, rationale, registered_by,
+             review["created_at"], updated_at),
         )
         return {"mission_version_ref": current_ref, "review_id": new_review_id,
                 "discovered_document_ref": record_id}

@@ -523,7 +523,13 @@ def run_extraction(
             # prose pass laps them -- 30 windows a tick against their 10 -- and
             # on the open queue alone they are locked out of a document before
             # they have finished reading it.
-            held = host.coverage_mission.document_reviews(mission["id"], limit=500)
+            #
+            # 2026-09-25b: every version of the mission, one review per
+            # document (its newest decision).  Read from the current version
+            # alone, P1's v4 dropped every document v3 had closed out of both
+            # passes; read from all of them, a document carried into v4 would
+            # be read twice.
+            held = host.coverage_mission.held_document_reviews(mission["mission_ref"], limit=500)
             # P10a: read in the mission's own order — the P0 company before the
             # P2 one, and management's own words before someone else's summary
             # of them.  Age only breaks ties.
@@ -550,7 +556,10 @@ def run_extraction(
 
             try:
                 rank = {ref: index for index, ref in enumerate(company_priority_order(mission))}
-                specs = host.coverage_mission.document_spec_refs(mission["id"])
+                # Every version: a held document closed under v3 is still the
+                # kind of document it was when P1 published v4.
+                specs = host.coverage_mission.document_spec_refs(
+                    mission["id"], across_versions=True)
                 thin = _thinness_ranks(host, mission)
                 reviews = sorted(reviews, key=lambda review: (
                     _plan_rank(review, specs),
@@ -1530,6 +1539,9 @@ def _secondary_sweep(
                     context = service.view(
                         review_id=review["review_id"], expected_review_hash=review_hash,
                         offset=offset, actor_ref=actor, require_open=require_open,
+                        # A closed review under a superseded version (held
+                        # across versions) reads under the version in force.
+                        **({} if require_open else {"allow_superseded": True}),
                     )["context"]
                     result = method(
                         review_id=review["review_id"], expected_review_hash=review_hash,

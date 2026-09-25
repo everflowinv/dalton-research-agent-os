@@ -577,7 +577,9 @@ def _context_reader(server: Any) -> Callable[[str, set[str]], dict[str, Any] | N
             return None
         mission_ref = pointer["mission_version_id"]
         mission = server.coverage_mission.mission(mission_ref)
-        specs = server.coverage_mission.document_spec_refs(mission_ref)
+        # 2026-09-25b: every version of the mission.  A broker note read and
+        # closed under v3 is still a broker note after P1 publishes v4.
+        specs = server.coverage_mission.document_spec_refs(mission_ref, across_versions=True)
         names: list[str] = []
         others: list[str] = []
         for row in mission["universe"]:
@@ -594,9 +596,14 @@ def _context_reader(server: Any) -> Callable[[str, set[str]], dict[str, Any] | N
         except Exception:  # noqa: BLE001 - a Core without the table has none
             provenance = None
         service = DocumentExtractionService(server)
-        for review in server.coverage_mission.document_reviews(
-            mission_ref, company_ref=company_ref, limit=500
+        # One review per document across every version of the mission, its
+        # newest -- asked of the version in force alone, every note closed
+        # before the last P1/P2 bump was never offered here again.
+        for review in server.coverage_mission.held_document_reviews(
+            mission["mission_ref"], limit=5000
         ):
+            if review["company_ref"] != company_ref:
+                continue
             document_ref = review["document_ref"]
             if document_ref in scanned:
                 continue
@@ -614,6 +621,7 @@ def _context_reader(server: Any) -> Callable[[str, set[str]], dict[str, Any] | N
             context = service.source_context(
                 review["review_id"], content_hash(review), 0,
                 "automation:coverage-mission", require_open=False,
+                allow_superseded=True,
             )
             return {
                 "company_ref": company_ref,
