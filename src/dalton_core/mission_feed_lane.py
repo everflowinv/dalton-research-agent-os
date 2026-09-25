@@ -1630,6 +1630,13 @@ class FeedDiscoveryCoordinator:
                 # and no review to open for this company. Counted, not hidden.
                 result["already_bound"].append(recorded)
                 continue
+            if recorded.get("carried_decided"):
+                # 2026-09-25b: an earlier version of the mission already read
+                # and decided this note; Core carried the decision into the
+                # version in force (possibly under the company that first
+                # held it).  Nothing to launch and no review to open.
+                result.setdefault("carried_decided", []).extend(recorded["carried_decided"])
+                continue
             # The row the queue keyed by this document, which is not the
             # discovery record's own id: one discovery names one document,
             # but the queue row is keyed by (mission version, document) so
