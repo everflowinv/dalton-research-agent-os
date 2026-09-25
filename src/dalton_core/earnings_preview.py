@@ -61,6 +61,11 @@ MAX_WATCH_ITEMS = 6
 MAX_SIGNAL_ITEMS = 4
 MAX_CITATIONS = 16
 MAX_PROMPT_CHARS = 24_000
+# What the drafting call is told and what ``validate_preview_output`` then
+# holds it to. The earnings lane keys a held preview window on this ref, so a
+# window refused under an older contract (e.g. a prompt that never stated the
+# citation cap) is released once when the contract changes -- and only then.
+PREVIEW_OUTPUT_CONTRACT_REF = "earnings-preview-output:2"
 # The document summary line is the one place a figure of ours may appear, and
 # it appears with the ref of the cell it came from.  ``publish`` caps the
 # field at 2000; this leaves room for the caveat.
@@ -188,10 +193,17 @@ def build_preview_prompt(context: Mapping[str, Any]) -> str:
         f"3. 拿不到的东西写 {GAP_MARKER}，不要猜。consensus 标着 available:false 时，"
         "明说这个 Core 没有街上的数字，不要从新闻里推一个出来。",
         "4. 和市场一致等于没有看法：说清我们和街上/指引差在哪，以及什么可观测量会把差距收掉。",
+        # The cap is enforced by ``validate_preview_output``; a prompt that
+        # shows ~100 citable refs and never states it invites a list the
+        # contract then refuses whole (IBM, 2026-09-25).
+        f"5. citations 最多 {MAX_CITATIONS} 条、不要重复，只列这份前瞻真正依据的 ref："
+        "正文里每个数字对应的 claim-version ref 必须在内，其余挑最直接支撑结论的；"
+        f"不要把下面出现过的 ref 全部列上。每条 what_to_watch / confirms_thesis / "
+        f"breaks_thesis 的 refs 同样最多 {MAX_CITATIONS} 条。超出上限整条回答被拒绝。",
     ]
     if caveat:
         lines.append(
-            f"5. 这场业绩的日期还没被公司确认（{caveat}，{occurrence['date_confidence']}）。"
+            f"6. 这场业绩的日期还没被公司确认（{caveat}，{occurrence['date_confidence']}）。"
             "摘要与正文都要带上这句话。"
         )
     lines += [
@@ -201,7 +213,7 @@ def build_preview_prompt(context: Mapping[str, Any]) -> str:
         ' "what_to_watch": [{"question": "<听什么>", "why": "<为什么这次重要>", "refs": []}],',
         ' "confirms_thesis": [{"observable": "<看到什么算 thesis 被证实>", "thesis_ref": "<thesis 版本 ref>", "refs": []}],',
         ' "breaks_thesis": [{"observable": "<看到什么算 thesis 被打破>", "thesis_ref": "<thesis 版本 ref>", "refs": []}],',
-        ' "citations": ["<这份前瞻依据的 ref>"]}',
+        f' "citations": ["<这份前瞻依据的 ref，最多 {MAX_CITATIONS} 条>"]}}',
         "",
         f"公司：{context['company_ref']}",
         f"预计公布日：{occurrence['expected_date']}（{occurrence['date_confidence']}）"
@@ -666,6 +678,7 @@ def publish_preview(
 
 __all__ = [
     "MAX_CITATIONS",
+    "PREVIEW_OUTPUT_CONTRACT_REF",
     "MAX_SIGNAL_ITEMS",
     "MAX_WATCH_ITEMS",
     "OUTPUT_KEYS",

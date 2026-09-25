@@ -131,9 +131,14 @@ def bounded_text(value: Any, name: str, *, maximum: int) -> str:
 
 
 def ref_list(value: Any, name: str, *, limit: int = 16) -> list[str]:
-    """A bounded list of refs, de-duplicated in the order given."""
+    """A bounded list of refs, de-duplicated in the order given.
 
-    if not isinstance(value, list) or len(value) > limit:
+    The bound applies to distinct refs: a ref named twice cites nothing more
+    than a ref named once. The refusal says how many there were, so a lane
+    summary shows whether the list was one over or several times over.
+    """
+
+    if not isinstance(value, list):
         raise EarningsSeasonValidationError(
             f"{name} must be a list of at most {limit} refs"
         )
@@ -142,7 +147,12 @@ def ref_list(value: Any, name: str, *, limit: int = 16) -> list[str]:
         if not isinstance(item, str) or not item.strip():
             raise EarningsSeasonValidationError(f"{name} entries must be refs")
         refs.append(item.strip())
-    return list(dict.fromkeys(refs))
+    unique = list(dict.fromkeys(refs))
+    if len(unique) > limit:
+        raise EarningsSeasonValidationError(
+            f"{name} must be a list of at most {limit} refs (got {len(unique)})"
+        )
+    return unique
 
 
 # ---------------------------------------------------------------------------

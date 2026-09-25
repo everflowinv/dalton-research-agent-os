@@ -30,6 +30,7 @@ from .lane_child_launcher import (
 )
 from .lane_registry import LaneSpec, register_lane
 from .cockpit_model import verifier_provider_contract_fingerprint
+from .earnings_preview import PREVIEW_OUTPUT_CONTRACT_REF
 from .lane_failure_ledger import lane_budget
 from .store import content_hash
 
@@ -160,6 +161,10 @@ class MissionEarningsSeasonLaneCoordinator:
             source_hash = str(row.get("input_hash") or content_hash(dict(row)))
             batch = (f"{mission['id']}:{occurrence_ref}:{window}:{source_hash}:"
                      f"{config_hash}:{contract}")
+            if window == "preview":
+                # A preview held under an older output contract is a different
+                # item from one refused under the current contract.
+                batch += f":{PREVIEW_OUTPUT_CONTRACT_REF}"
             if batch in self._quiet:
                 continue
             decision = self.budget.blocked(batch)

@@ -118,6 +118,151 @@ class DirectionTests(unittest.TestCase):
         self.assertEqual(result_of(results, DIRECTION).status, PASS)
 
 
+    def test_a_pair_not_proportional_to_revenue_is_not_this_invariants_business(self):
+        rows = self.series([
+            ("2026-08-31", "1000", "200"),
+            ("2026-11-30", "1100", "230"),
+        ])
+        rows[1]["revenue_proportional"] = False
+        verdict = result_of(check({"direction_series": rows}), DIRECTION)
+        self.assertEqual(verdict.status, NOT_APPLICABLE)
+
+
+# EPAM, 2026-09-25: revenue on quarterly_growth, cost of revenue and SG&A as
+# shares of revenue, D&A carried on its own quarterly_growth (a "fixed" line).
+# Operating income = 0.12263 * revenue - D&A, and D&A grows 0.67%/quarter
+# against revenue's 1.12%, so the margin rises ~0.0001 a quarter. Those are the
+# live numbers the gate refused.
+EPAM_QUARTERS = (
+    ("2026-07-01", "2026-09-30", "1430638822.46498043", "143127698.64991832"),
+    ("2026-10-01", "2026-12-31", "1446688705.87452618", "144880281.46723434"),
+    ("2027-01-01", "2027-03-31", "1462918647.83792564", "146653506.14985727"),
+    ("2027-04-01", "2027-06-30", "1479330668.37501251", "148447610.81365893"),
+)
+
+
+def epam_record(*, da_method="quarterly_growth", operating=None):
+    drivers = [
+        {"ref": "concept:rev", "role": "revenue", "structure_line_ref": "revenue"},
+        {"ref": "concept:cor", "role": "cost_of_revenue",
+         "structure_line_ref": "cost-of-revenue"},
+        {"ref": "concept:sga", "role": "operating_expense", "structure_line_ref": "sga"},
+        {"ref": "concept:da", "role": "operating_expense", "structure_line_ref": "d-and-a"},
+    ]
+    values = {"concept:rev": "0.011218682981", "concept:cor": "0.696",
+              "concept:sga": "0.181367423564",
+              "concept:da": ("0.006673502331" if da_method == "quarterly_growth"
+                             else "0.0225")}
+    measures = {"concept:rev": "quarterly_growth", "concept:cor": "share_of_line",
+                "concept:sga": "share_of_line",
+                "concept:da": da_method}
+    assumptions = [{
+        "ref": f"assumption:{driver}:{end}", "driver_ref": driver,
+        "measure": measures[driver], "value": values[driver], "kind": "estimate",
+        "period": {"start": start, "end": end},
+    } for start, end, _rev, _op in EPAM_QUARTERS for driver in values]
+
+    def line(ref, column):
+        return {"ref": ref, "cells": [{
+            "period": {"start": start, "end": end}, "kind": "estimate",
+            "status": "computed", "value": row[column],
+        } for row in EPAM_QUARTERS for start, end in [(row[0], row[1])]]}
+
+    results = [line("result:revenue", 2), line("result:operating_income", 3)]
+    if operating is not None:
+        results[1]["cells"] = [{**cell, "value": value}
+                               for cell, value in zip(results[1]["cells"], operating)]
+    structure = {
+        "lines": [
+            {"ref": "revenue", "kind": "filed", "role": "revenue",
+             "forecast_method": "quarterly_growth", "forecast_base_ref": None},
+            {"ref": "cost-of-revenue", "kind": "filed", "role": "cost_of_revenue",
+             "forecast_method": "share_of_line", "forecast_base_ref": "revenue"},
+            {"ref": "sga", "kind": "filed", "role": "operating_expense",
+             "forecast_method": "share_of_line", "forecast_base_ref": "revenue"},
+            {"ref": "d-and-a", "kind": "filed", "role": "operating_expense",
+             "forecast_method": da_method,
+             "forecast_base_ref": "revenue" if da_method == "share_of_line" else None},
+            {"ref": "operating-income", "kind": "derived", "role": "operating_income",
+             "forecast_method": "formula", "forecast_base_ref": None},
+        ],
+        "formulas": [{"output_ref": "operating-income", "operator": "sum", "terms": [
+            {"coefficient": "1", "line_ref": "revenue"},
+            {"coefficient": "-1", "line_ref": "cost-of-revenue"},
+            {"coefficient": "-1", "line_ref": "sga"},
+            {"coefficient": "-1", "line_ref": "d-and-a"},
+        ]}],
+    }
+    return {
+        "drivers": drivers, "assumptions": assumptions, "results": results,
+        "forecast_periods": [{"start": start, "end": end}
+                             for start, end, _rev, _op in EPAM_QUARTERS],
+        "financial_statement_structure": structure,
+    }
+
+
+class DirectionPremiseTests(unittest.TestCase):
+    """The direction check applies only where operating income is revenue x a constant."""
+
+    def test_epam_fixed_cost_on_its_own_growth_is_operating_leverage_not_a_refusal(self):
+        subject = ei.forecast_subject(epam_record())
+        self.assertTrue(all(row["revenue_proportional"] is False
+                            for row in subject["direction_series"]))
+        verdict = result_of(check({"direction_series": subject["direction_series"]}),
+                            DIRECTION)
+        self.assertNotEqual(verdict.status, FAIL)
+
+    def test_the_old_premise_would_have_refused_the_same_numbers(self):
+        # Guard that the fixture really is the live refusal: with the premise
+        # flag removed the chain check fires on every adjacent pair.
+        subject = ei.forecast_subject(epam_record())
+        rows = [{k: v for k, v in row.items() if k != "revenue_proportional"}
+                for row in subject["direction_series"]]
+        verdict = result_of(check({"direction_series": rows}), DIRECTION)
+        self.assertEqual(verdict.status, FAIL)
+        self.assertEqual(verdict.checked, len(EPAM_QUARTERS) - 1)
+
+    def test_every_cost_a_share_of_revenue_is_still_held_to_the_chain(self):
+        # D&A as a share of revenue: now operating income must be revenue x a
+        # constant, and the same drifting margins are a real contradiction.
+        subject = ei.forecast_subject(epam_record(da_method="share_of_line"))
+        self.assertTrue(all(row["revenue_proportional"]
+                            for row in subject["direction_series"]))
+        verdict = result_of(check({"direction_series": subject["direction_series"]}),
+                            DIRECTION)
+        self.assertEqual(verdict.status, FAIL)
+        self.assertIn("proportional", verdict.findings[0])
+
+    def test_a_proportional_chain_with_constant_margin_passes(self):
+        margin = Decimal("0.1")
+        operating = [str(Decimal(rev) * margin) for _s, _e, rev, _op in EPAM_QUARTERS]
+        subject = ei.forecast_subject(
+            epam_record(da_method="share_of_line", operating=operating))
+        verdict = result_of(check({"direction_series": subject["direction_series"]}),
+                            DIRECTION)
+        self.assertEqual(verdict.status, PASS)
+
+    def test_a_share_of_a_line_that_is_not_revenue_proportional_breaks_the_premise(self):
+        record = epam_record()
+        for line in record["financial_statement_structure"]["lines"]:
+            if line["ref"] == "sga":
+                line["forecast_base_ref"] = "d-and-a"
+        self.assertIs(ei._operating_income_revenue_proportional(record), False)
+
+    def test_a_legacy_record_without_structure_keeps_the_old_premise(self):
+        record = epam_record(da_method="share_of_line")
+        record.pop("financial_statement_structure")
+        self.assertIsNone(ei._operating_income_revenue_proportional(record))
+        subject = ei.forecast_subject(record)
+        self.assertTrue(all(row["revenue_proportional"]
+                            for row in subject["direction_series"]))
+
+    def test_the_premise_change_is_a_new_validator_contract(self):
+        self.assertEqual(ei.FORECAST_INVARIANT_CONTRACT_REF,
+                         "forecast-economic-invariants:7")
+        self.assertIn("direction_premise", ei.FORECAST_INVARIANT_CONTRACT)
+
+
 class ScenarioDirectionTests(unittest.TestCase):
     @staticmethod
     def entry(role, points, **extra):
