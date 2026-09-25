@@ -13,6 +13,12 @@ from typing import Any
 from .cockpit_research_library import research_library
 
 SCHEMA_VERSION = "research-publication-worker-state:0.1"
+#: A product whose check-only preparation used its one deterministic fallback
+#: and still could not be reviewed.  Nothing was published.  Like ``pending``
+#: it is not prepared again for the same hash -- a new source hash or an owner
+#: retry reopens it -- but unlike ``pending`` it is not owed work, so it does
+#: not keep the worker "pending" for ever.
+EXHAUSTED_STATUS = "exhausted"
 
 
 def _canonical(value: Any) -> bytes:
@@ -129,16 +135,17 @@ def poll_once(
             summaries.append({"identity": identity, "product_hash": product_hash,
                               "status": "unchanged"})
             continue
-        if (prior is not None and prior.get("status") == "pending"
+        if (prior is not None and prior.get("status") in {"pending", EXHAUSTED_STATUS}
                 and prior.get("product_hash") == product_hash):
             summaries.append({"identity": identity, "product_hash": product_hash,
-                              "status": "pending"})
+                              "status": prior["status"]})
             continue
         try:
             outcome = prepare(product)
             status = outcome.get("status") if isinstance(outcome, Mapping) else None
             state = {"schema_version": SCHEMA_VERSION,
-                     "status": status if status in {"completed", DEFERRED_STATUS} else "pending",
+                     "status": (status if status in {"completed", DEFERRED_STATUS, EXHAUSTED_STATUS}
+                                else "pending"),
                      "identity": identity, "product_hash": product_hash,
                      "result": dict(outcome) if isinstance(outcome, Mapping) else {
                          "reason": "prepare returned no result"}}
@@ -159,6 +166,7 @@ def poll_once(
             # is only waiting for tomorrow's ceiling.
             "pending": sum(row["status"] == "pending" for row in summaries) + deferred,
             "deferred": deferred,
+            "exhausted": sum(row["status"] == EXHAUSTED_STATUS for row in summaries),
             "unchanged": sum(row["status"] == "unchanged" for row in summaries)}
 
 
@@ -182,4 +190,4 @@ def run_periodic(
     return results
 
 
-__all__ = ["SCHEMA_VERSION", "poll_once", "run_periodic"]
+__all__ = ["EXHAUSTED_STATUS", "SCHEMA_VERSION", "poll_once", "run_periodic"]

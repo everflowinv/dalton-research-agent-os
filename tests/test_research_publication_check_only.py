@@ -195,5 +195,143 @@ class CheckOnlyPreparationTests(unittest.TestCase):
         self.assertTrue(has_reviewed_attachment(out, JUDGEMENT))
 
 
+
+# Already Chinese, like the live NO_CHANGE judgements (2026-09-25).
+ZH = {"kind": "surface_event_judgement", "version_ref": "judgement:zh",
+      "status": "available", "subject_ref": "company:a",
+      "sections": [{"title": "事件研判",
+                    "body": "同组 4 家公司平均下跌 3.2%。盈利兑现这一端没有新信息。",
+                    "gaps": []}]}
+ZH_DRAFT = {"sections": [{"index": 0, "title": "事件研判",
+                          "body": "同组四家公司平均下跌 3.2%。盈利端没有新信息。", "gaps": []}]}
+ZH_DRAFT_STYLE = {"overall": "可读。", "suggestions": [{
+    "section_index": 0, "quote": "盈利端没有新信息。", "assessment": "略简",
+    "suggestion": "盈利兑现端没有新信息。"}]}
+ZH_SOURCE_STYLE = {"overall": "可读。", "suggestions": [{
+    "section_index": 0, "quote": "盈利兑现这一端没有新信息。", "assessment": "略长",
+    "suggestion": "盈利端没有新信息。"}]}
+
+
+class CheckOnlyFallbackTests(unittest.TestCase):
+    """2026-09-25: about eight NO_CHANGE judgements stuck in ``pending``."""
+
+    run_chunk = CheckOnlyPreparationTests.run_chunk
+
+    def setUp(self):
+        CheckOnlyPreparationTests.setUp(self)
+        self.responses["research_localization"] = ZH_DRAFT
+        self.responses[prep.CHECKER_PURPOSE] = [ZH_DRAFT_STYLE, ZH_SOURCE_STYLE]
+
+    def test_a_written_out_count_no_longer_fails_the_draft(self):
+        # ACN/CTSH: missing_tokens ["4"] for "4 家" -> "四家".
+        saved = self.run_chunk(product=ZH)
+        self.assertEqual(saved["status"], "passed")
+        self.assertNotIn("fallback", saved)
+        self.assertIn("四家", saved["localized"]["sections"][0]["body"])
+
+    def test_a_verifier_refusing_revision_and_draft_keeps_the_reviewed_source(self):
+        # IBM: the verifier refused the revision and then the unchanged draft.
+        self.responses["research_localization_verifier"] = [FAILED, FAILED, VERDICT]
+        saved = self.run_chunk(product=ZH)
+        self.assertEqual(saved["status"], "passed")
+        self.assertEqual(saved["fallback"]["rule"], prep.SOURCE_KEPT_FALLBACK)
+        self.assertEqual(saved["localized"]["sections"][0]["body"],
+                         ZH["sections"][0]["body"])
+        # Still reviewed: a checker call on the source and a verifier that is
+        # independent of the draft model; suggestions recorded, none applied.
+        self.assertEqual(self.calls, [
+            "research_localization", prep.CHECKER_PURPOSE,
+            "research_localization_verifier", "research_localization_verifier",
+            prep.CHECKER_PURPOSE, "research_localization_verifier"])
+        self.assertNotIn(prep.BRAIN_PURPOSE, self.calls)
+        self.assertEqual(saved["language_review"]["status"], "ready_for_publication")
+        self.assertEqual(
+            [row["decision"] for row in saved["language_review"]["brain_revision"]["decisions"]],
+            ["reject"])
+        self.assertTrue(saved["independence"]["independent"])
+        # Replayed from disk, no new calls.
+        self.assertEqual(self.run_chunk(product=ZH), saved)
+        self.assertEqual(len(self.calls), 6)
+        # And it publishes under the receipt the required policy checks.
+        from dalton_core.research_localization import build_localization
+        from dalton_core.research_localization_store import (has_reviewed_attachment,
+                                                             publish_reviewed_attachment)
+        out = Path(self.temp.name) / "published"
+        candidate = build_localization(ZH, saved["localized"], saved["verifier"])
+        publish_reviewed_attachment(out, ZH, candidate, [copy.deepcopy(saved)])
+        self.assertTrue(has_reviewed_attachment(out, ZH))
+
+    def test_an_invalid_draft_of_a_chinese_source_keeps_the_source(self):
+        self.responses["research_localization"] = {"sections": [
+            {"index": 0, "title": "事件研判", "body": "同组 5 家公司。", "gaps": []}]}
+        self.responses[prep.CHECKER_PURPOSE] = [ZH_SOURCE_STYLE]
+        saved = self.run_chunk(product=ZH)
+        self.assertEqual(saved["localized"]["sections"][0]["body"], ZH["sections"][0]["body"])
+        self.assertIn("check-only draft failed validation", saved["fallback"]["trigger"])
+        self.assertEqual(self.calls, ["research_localization"] * 3 + [
+            prep.CHECKER_PURPOSE, "research_localization_verifier"])
+
+    def test_the_fallback_is_used_once_and_then_the_chunk_is_exhausted(self):
+        self.responses["research_localization_verifier"] = [FAILED, FAILED, FAILED]
+        with self.assertRaises(prep.CheckOnlyExhausted):
+            self.run_chunk(product=ZH)
+        self.assertEqual(self.calls.count("research_localization_verifier"), 3)
+        with self.assertRaises(prep.CheckOnlyExhausted):
+            self.run_chunk(product=ZH)
+        # No new verifier call for the same source: its answer is on disk.
+        self.assertEqual(self.calls.count("research_localization_verifier"), 3)
+
+    def test_a_source_that_is_not_chinese_is_exhausted_without_publishing(self):
+        self.responses["research_localization"] = {"sections": [
+            {"index": 0, "title": "收入", "body": "收入为 999 美元。", "gaps": []}]}
+        with self.assertRaises(prep.CheckOnlyExhausted):
+            self.run_chunk(product=JUDGEMENT)
+        self.assertEqual(self.calls, ["research_localization"] * 3)
+
+    def test_a_transport_failure_is_not_a_content_failure(self):
+        self.responses["research_localization_verifier"] = [FAILED, FAILED, VERDICT]
+        with patch.object(prep, "selected_identity",
+                          return_value={"provider": "other", "model": "other/x"}):
+            with self.assertRaises(ValueError) as caught:
+                self.run_chunk(product=ZH)
+        self.assertNotIsInstance(caught.exception, prep.CheckOnlyExhausted)
+        self.assertNotIsInstance(caught.exception, prep.CheckOnlyContentFailure)
+        self.assertNotIn("research_localization_verifier", self.calls)
+
+    def test_build_reports_an_exhausted_product_and_the_worker_does_not_redo_it(self):
+        from types import SimpleNamespace
+        from dalton_core.research_publication_worker import EXHAUSTED_STATUS, poll_once
+        self.responses["research_localization_verifier"] = [FAILED, FAILED, FAILED]
+        root = Path(self.temp.name)
+        for name in ("model", "verifier", "checker", "brain"):
+            (root / f"{name}.json").write_text("{}")
+        args = SimpleNamespace(only=None, work_dir=root, workers=1, chunk_chars=4500,
+            model_config=root / "model.json", verifier_config=root / "verifier.json",
+            checker_config=root / "checker.json", brain_config=root / "brain.json",
+            scheduler_db=root / "s", max_cost_per_call=.2, attempts=1,
+            output_directory=root / "published", language_tier="check_only")
+        prepared = []
+
+        def prepare(product):
+            prepared.append(product["version_ref"])
+            code = prep.build(args, {"mission": {}, "products": [product]})
+            receipt = prep.read_json(root / "result.json")
+            return {"status": "completed" if code == 0 else prep._unfinished_status(receipt),
+                    "receipt": receipt}
+
+        mission = {"universe": [{"company_ref": "company:a"}]}
+        reader = lambda con, mis, company: {"products": [ZH]}
+        first = poll_once(None, mission, state_dir=root / "products", prepare=prepare,
+                          library_reader=reader)
+        self.assertEqual(first["exhausted"], 1)
+        self.assertEqual(first["pending"], 0)
+        self.assertEqual(first["products"][0]["status"], EXHAUSTED_STATUS)
+        self.assertFalse((root / "published").exists())
+        again = poll_once(None, mission, state_dir=root / "products", prepare=prepare,
+                          library_reader=reader)
+        self.assertEqual(again["exhausted"], 1)
+        self.assertEqual(prepared, ["judgement:zh"])
+
+
 if __name__ == "__main__":
     unittest.main()

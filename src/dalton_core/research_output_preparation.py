@@ -35,6 +35,8 @@ from dalton_core.research_publication_spend import (PRIORITY_LOW,
     WORKER_CONFIG_FIELD, daily_caps_micros, ledger_gate, publication_priority)
 from dalton_core.cockpit_model import CockpitModelPoolExhausted
 
+from dalton_core.research_publication_worker import EXHAUSTED_STATUS
+
 PIPELINE_VERSION = "localization-with-one-language-review:0.1"
 SEMANTIC_CONTRACT_VERSION = "localization-semantic-verification:0.1"
 
@@ -233,7 +235,54 @@ def redraft_identity(identity, redraft_generation):
     return hashlib.sha256(f'{identity}:redraft:{redraft_generation}'.encode()).hexdigest()
 
 
-def run_chunk(task, *, mission, draft_config, verifier_config, checker_config,
+class CheckOnlyContentFailure(ValueError):
+    """A check-only chunk whose text, not its transport, failed.
+
+    Raised only for content verdicts: the draft never passed the deterministic
+    check, the checker's output could not be used, or the independent verifier
+    rejected the text even after the unchanged-draft fallback.  A spend
+    ceiling, a busy request, an unavailable route or an unexpected transport
+    is never one of these; those stay pending and are retried.
+
+    ``draft_call`` is the drafting call whose model family the fallback's
+    verifier must differ from.
+    """
+
+    def __init__(self, message, *, draft_call=None):
+        super().__init__(message)
+        self.draft_call = copy.deepcopy(draft_call)
+
+
+class CheckOnlyExhausted(ValueError):
+    """A check-only chunk that has used its one deterministic fallback.
+
+    Terminal for this source hash: nothing is published, and the product is
+    not offered again until its source changes or the owner asks for a retry.
+    """
+
+
+#: The one fallback a check-only chunk has after a content failure: keep the
+#: source text, which for these products is already Simplified Chinese, and
+#: review *that* -- checker, suggestions set aside, independent verifier.
+SOURCE_KEPT_FALLBACK = 'check-only-source-kept:0.1'
+
+
+def run_chunk(task, **kwargs):
+    """Prepare one chunk; see :func:`_run_chunk`.
+
+    A ``check_only`` chunk that fails on content falls back once, by a fixed
+    rule, to :func:`_source_kept_chunk`.  Live 2026-09-25 about eight NO_CHANGE
+    judgements sat in ``pending`` for good: ACN and CTSH drafts wrote "4 家"
+    as "四家", and three IBM drafts rewrote an already-Chinese source until
+    the verifier refused both the revision and the unchanged draft.
+    """
+    try:
+        return _run_chunk(task, **kwargs)
+    except CheckOnlyContentFailure as exc:
+        return _source_kept_chunk(task, trigger=exc, **kwargs)
+
+
+def _run_chunk(task, *, mission, draft_config, verifier_config, checker_config,
               brain_config, scheduler_db, work_dir, max_cost, attempts,
               legacy_verifier_config=None, repair_reviewed=False,
               extra_brain_repair=False, redraft_generation=0, spend_gate=None,
@@ -328,9 +377,10 @@ def run_chunk(task, *, mission, draft_config, verifier_config, checker_config,
             if final_validation_error is None or not evidence.get('draft'):
                 raise ValueError('draft validation failed without repairable evidence')
             if check_only:
-                # No brain for a low-value product: it waits for its source
-                # to change rather than buying an Opus draft repair.
-                raise ValueError('check-only draft failed validation: '+str(final_validation_error))
+                # No brain for a low-value product: no Opus draft repair.
+                raise CheckOnlyContentFailure(
+                    'check-only draft failed validation: '+str(final_validation_error),
+                    draft_call=evidence.get('draft'))
             try:last_draft=parse_stage_output(evidence['draft']['text'],stage='draft')
             except ValueError:last_draft={'unparsed_output':evidence['draft']['text']}
             repair_prompt=_draft_brain_repair_prompt(product,last_draft,final_validation_error)
@@ -484,6 +534,9 @@ def run_chunk(task, *, mission, draft_config, verifier_config, checker_config,
     while True:
         if review.get('status') != 'ready_for_publication':
             if repairs_used >= max_repairs:
+                if check_only and _check_only_content_verdict(review, evidence):
+                    raise CheckOnlyContentFailure(review.get('reason') or review['status'],
+                                                  draft_call=evidence.get('draft'))
                 raise ValueError(review.get('reason') or review['status'])
         else:
             revision=_revision_hash(review)
@@ -556,6 +609,10 @@ def run_chunk(task, *, mission, draft_config, verifier_config, checker_config,
                 write_json(stage_path,evidence)
                 failure={'stage':'semantic','reason':str(exc),
                     'verifier':semantic_record.get('verifier')}
+                if (check_only and repairable_semantic_rejection
+                        and repairs_used >= max_repairs):
+                    raise CheckOnlyContentFailure(str(exc),
+                                                  draft_call=evidence.get('draft')) from exc
                 if not repairable_semantic_rejection or repairs_used >= max_repairs:raise
             else:
                 all_calls=[evidence['draft'],evidence['checker_call'],evidence.get('brain_call'),
@@ -626,6 +683,193 @@ def run_chunk(task, *, mission, draft_config, verifier_config, checker_config,
         failure={'stage':'brain_validation','reason':review.get('reason') or review.get('status')}
 
 
+def _check_only_content_verdict(review, evidence):
+    """Whether a not-ready check-only review failed on its text.
+
+    ``pending_brain_revision`` is the deterministic reviser refusing the text.
+    ``pending_language_review`` is content only when the checker *did* answer
+    and its answer cannot be used; a call that never returned is transport.
+    """
+    if review.get('status') == 'pending_brain_revision':
+        return True
+    if review.get('status') != 'pending_language_review' or 'checker_call' not in evidence:
+        return False
+    try:
+        validate_checker_output(
+            parse_stage_output(evidence['checker_call']['text'], stage='checker'),
+            sections=list(evidence['draft_localized']['sections']))
+    except (ResearchLanguageReviewError, ValueError):
+        return True
+    return False
+
+
+def _source_as_localized(product):
+    return {'sections': [{'index': index, 'title': str(row.get('title') or ''),
+                          'body': str(row.get('body') or ''),
+                          'gaps': [str(gap) for gap in row.get('gaps') or []]}
+                         for index, row in enumerate(product.get('sections') or [])]}
+
+
+def _source_is_chinese(localized):
+    """Every non-empty title, body and gap is written in Chinese.
+
+    Stricter than :func:`validate_localized_text`, which accepts a section
+    whose title alone is Chinese: kept source text is shown as it is, so each
+    field must carry Han text and no more Latin letters than Han characters
+    (tickers, file names and product names stay readable; an English body
+    under a Chinese heading does not pass).
+    """
+    import re
+    for row in localized['sections']:
+        for text in (row['title'], row['body'], *row['gaps']):
+            if not text.strip():
+                continue
+            han = len(re.findall(r'[\u3400-\u9fff]', text))
+            latin = len(re.findall(r'[A-Za-z]', text))
+            if han == 0 or latin > han:
+                return False
+    return True
+
+
+def _source_kept_chunk(task, *, trigger, mission, draft_config, verifier_config,
+                       checker_config, brain_config, scheduler_db, work_dir, max_cost,
+                       attempts, legacy_verifier_config=None, repair_reviewed=False,
+                       extra_brain_repair=False, redraft_generation=0, spend_gate=None,
+                       language_tier=LANGUAGE_TIER_FULL):
+    """The single deterministic fallback of a check-only chunk.
+
+    Rule: when the source is already Simplified Chinese (it passes the same
+    structural, numeric and Chinese-text check a translation must pass), the
+    text shown is the source itself.  It is still reviewed like any other
+    text -- a checker call on the source (suggestions recorded, none applied)
+    and the independent semantic verifier, whose family must differ from the
+    failed draft's -- and published only if both pass, under the same
+    receipt the required language policy checks.  A source that is not
+    Chinese, or that fails either review, ends in :class:`CheckOnlyExhausted`:
+    nothing is published and nothing is retried for this source hash.
+    """
+    gate = spend_gate or (lambda purpose: None)
+    product_index, start, product = task
+    style_identity = redraft_identity(style_stage_identity(product, draft_config=draft_config,
+        checker_config=checker_config, brain_config=CHECK_ONLY_REVISER_CONFIG),
+        redraft_generation)
+    identity = hashlib.sha256((style_identity + ':' + SOURCE_KEPT_FALLBACK).encode()).hexdigest()
+    draft_call = getattr(trigger, 'draft_call', None)
+    source_localized = _source_as_localized(product)
+    try:
+        validate_localized_text(product, source_localized)
+        if not _source_is_chinese(source_localized):
+            raise ResearchLocalizationError('the source text is not predominantly Simplified Chinese')
+    except ResearchLocalizationError as exc:
+        raise CheckOnlyExhausted(
+            f'check-only fallback unavailable ({exc}); first failure: {trigger}') from trigger
+    if not isinstance(draft_call, dict) or not draft_call.get('route_decision_ref'):
+        raise CheckOnlyExhausted(
+            f'check-only fallback has no drafting route to prove independence; first failure: {trigger}')
+    stage_path = work_dir / 'stages' / (identity + '.json')
+    semantic_identity = semantic_stage_identity(identity, verifier_config)
+    target = work_dir / 'chunks' / (semantic_identity + '.json')
+    resolve = router_family_resolver(draft_config)
+    routes = [draft_call['route_decision_ref']]
+    if target.exists():
+        saved = read_json(target)
+        if saved.get('pipeline_identity') != identity or saved.get('semantic_identity') != semantic_identity:
+            raise ValueError('saved chunk pipeline changed')
+        validate_localized_text(product, saved['localized'])
+        proof = independence(draft_routes=saved['producer_routes'],
+                             verifier_route=saved['verifier_call']['route_decision_ref'],
+                             resolve=resolve)
+        if not proof['independent'] or saved['language_review']['status'] != 'ready_for_publication':
+            raise ValueError('saved language review or verifier independence could not be confirmed')
+        build_localization(product, saved['localized'], saved['verifier'])
+        return product_index, start, saved
+    evidence = read_json(stage_path) if stage_path.exists() else {
+        'source_hash': source_content_hash(product), 'pipeline_identity': identity,
+        'rules_version': FINAL_TEXT_RULES_VERSION, 'pipeline_version': PIPELINE_VERSION,
+        'language_tier': LANGUAGE_TIER_CHECK_ONLY,
+        'fallback': {'rule': SOURCE_KEPT_FALLBACK, 'style_identity': style_identity,
+                     'trigger': str(trigger)},
+        'draft': copy.deepcopy(draft_call), 'draft_localized': source_localized}
+
+    def model(config, output_tokens):
+        return CockpitModel(config, scheduler_db=scheduler_db, max_cost_usd=max_cost,
+                            max_input_tokens=120000, max_output_tokens=output_tokens,
+                            timeout_seconds=600)
+
+    review_product = dict(product, sections=source_localized['sections'])
+    if 'checker_call' not in evidence:
+        gate(CHECKER_PURPOSE)
+        from dalton_core.research_language_review import build_checker_prompt
+        check_prompt = build_checker_prompt(review_product)
+        check_id = hashlib.sha256((identity + check_prompt).encode()).hexdigest()
+        evidence['checker_call'] = model(checker_config, 12000).call(
+            purpose=CHECKER_PURPOSE, request_id='zh-style-source-kept-' + check_id,
+            prompt=check_prompt, mission=mission)
+        write_json(stage_path, evidence)
+    if selected_identity(checker_config, evidence['checker_call']) != {
+            'provider': CHECKER_PROVIDER, 'model': CHECKER_MODEL}:
+        raise ValueError('language checker served an unexpected transport or model')
+
+    def keep(_):
+        checked = validate_checker_output(
+            parse_stage_output(evidence['checker_call']['text'], stage='checker'),
+            sections=list(review_product['sections']))
+        return deterministic_revision(review_product, checked, numeric_source_product=product,
+                                      apply_suggestions=False)
+
+    review = run_language_review(
+        review_product,
+        checker=lambda _: parse_stage_output(evidence['checker_call']['text'], stage='checker'),
+        brain=keep, checker_identity={'provider': CHECKER_PROVIDER, 'model': CHECKER_MODEL},
+        numeric_source_product=product)
+    evidence['language_review'] = review
+    write_json(stage_path, evidence)
+    if review.get('status') != 'ready_for_publication':
+        raise CheckOnlyExhausted(
+            f'check-only fallback language review failed ({review.get("reason")}); '
+            f'first failure: {trigger}')
+    localized = {'sections': review['brain_revision']['sections']}
+    semantic_path = work_dir / 'semantic-stages' / (semantic_identity + '.json')
+    semantic = read_json(semantic_path) if semantic_path.exists() else {
+        'source_hash': source_content_hash(product), 'pipeline_identity': identity,
+        'semantic_identity': semantic_identity,
+        'semantic_contract_version': SEMANTIC_CONTRACT_VERSION}
+    check_prompt = build_verifier_prompt(product, localized)
+    if 'verifier_call' not in semantic:
+        gate(VERIFIER_PURPOSE)
+        check_id = hashlib.sha256((SEMANTIC_CONTRACT_VERSION + semantic_identity + check_prompt).encode()).hexdigest()
+        semantic['verifier_call'] = independent_model_call(model(verifier_config, 5000),
+            producer_route_decision_refs=routes, purpose='research_localization_verifier',
+            request_id='zh-verify-' + check_id, prompt=check_prompt, mission=mission)
+        write_json(semantic_path, semantic)
+    checked = semantic['verifier_call']
+    proof = independence(draft_routes=routes, verifier_route=checked['route_decision_ref'],
+                         resolve=resolve)
+    if not proof['independent']:
+        raise ValueError('semantic verifier model is not independent of both authors')
+    verdict = unwrap_json_object(checked['text'])
+    try:
+        build_localization(product, localized, verdict)
+    except (ResearchLocalizationError, ValueError) as exc:
+        raise CheckOnlyExhausted(
+            f'check-only fallback was refused by the verifier ({exc}); first failure: {trigger}'
+        ) from exc
+    calls = [row for row in (evidence.get('draft'), evidence['checker_call'], checked)
+             if isinstance(row, dict)]
+    saved = {**evidence, 'semantic_identity': semantic_identity,
+             'semantic_contract_version': SEMANTIC_CONTRACT_VERSION,
+             'brain_call': None, 'language_review': review, 'verifier_call': checked,
+             'localized': localized, 'producer_routes': routes, 'verifier': verdict,
+             'independence': proof, 'review_history': [],
+             'total_cost_micros': sum(int(row.get('cost_micros') or 0) for row in calls),
+             'status': 'passed'}
+    write_json(target, saved)
+    print(json.dumps({'product': product_index, 'section_start': start, 'status': 'passed',
+                      'fallback': SOURCE_KEPT_FALLBACK,
+                      'cost_micros': saved['total_cost_micros']}, ensure_ascii=False), flush=True)
+    return product_index, start, saved
+
+
 def build(args, data=None):
     data = data if data is not None else read_json(args.input)
     products = data['products']
@@ -672,6 +916,9 @@ def build(args, data=None):
                 # nothing counts as an attempt; the next UTC day resumes it.
                 failures.append({'product':task[0],'section_start':task[1],'error':str(exc),
                                  'deferred':True,'reason':getattr(exc,'reason','pool_exhausted')})
+            except CheckOnlyExhausted as exc:
+                failures.append({'product':task[0],'section_start':task[1],'error':str(exc),
+                                 'exhausted':True})
             except Exception as exc:
                 failures.append({'product':task[0],'section_start':task[1],'error':str(exc)})
     published, ui_batches = [], []
@@ -699,7 +946,9 @@ def build(args, data=None):
         target=publish_ui_texts(args.output_directory,ui_batches)
         published.append({'source':'ui_text','file':str(target),'batches':len(ui_batches)})
     deferred_only=bool(failures) and all(f.get('deferred') for f in failures)
-    result={'status':'passed' if not failures else DEFERRED_STATUS if deferred_only else 'incomplete',
+    exhausted=bool(failures) and all(f.get('exhausted') for f in failures)
+    result={'status':'passed' if not failures else DEFERRED_STATUS if deferred_only
+            else EXHAUSTED_STATUS if exhausted else 'incomplete',
             'products':len(products),
             'chunks':len(tasks),'published':published,'failures':failures}
     write_json(getattr(args, 'result_output', None) or work_dir/'result.json',result)
@@ -726,8 +975,13 @@ def prepare_ui_batch(args, mission, product, *, redraft_generation=0):
 
 
 def _unfinished_status(receipt):
-    """``deferred`` when every failure was a spend ceiling, else ``pending``."""
-    return DEFERRED_STATUS if receipt.get('status') == DEFERRED_STATUS else 'pending'
+    """``deferred`` when every failure was a spend ceiling, ``exhausted`` when
+    every failure used its one check-only fallback, else ``pending``."""
+    if receipt.get('status') == DEFERRED_STATUS:
+        return DEFERRED_STATUS
+    if receipt.get('status') == EXHAUSTED_STATUS:
+        return EXHAUSTED_STATUS
+    return 'pending'
 
 
 def with_spend_gate(args, gate, priority):
