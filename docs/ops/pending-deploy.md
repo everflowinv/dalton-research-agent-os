@@ -9,7 +9,7 @@
 
 ---
 
-## 批次 2026-09-25d（main `03d8f03e` 及之后）
+## 批次 2026-09-25d（main `e2656686` 及之后）
 
 ### 这批解决什么（批次 c 部署后验证中发现）
 
@@ -23,6 +23,7 @@
 | **hold 原因写错**（`44bbe865`） | 6a2bcd、a9e588b0 会被正确判为 unproved，918307dc 判为 contract，CLI 从而接受对应的入口。 |
 | **EPAM dossier 永久卡住**（`4264d59e`） | 修复 repair identity 核对漏掉 parse_error 的问题。 |
 | **dossier 数字引用误报**（`dc96d9c6`） | "15.8 (percent)"、日期里的数字不再误报；"约 188.6 亿"这类换算按仓库规定仍算编造，但 prompt 里补了中文示例。注意：prompt 变了，各 dossier unit 下次重写会各重新付费一次。 |
+| **quality_scoring 车道一直返回 forbidden**（`2487d28d`） | 批次 b 新增了这个车道，但 core principal 的权限只在 bootstrap 时写入，release_switch 不会重写，所以从部署起每个 tick 都 forbidden。修复后，core principal 自动拥有所有已注册车道的权限（等同于 bootstrap 会授予的内容），其他 principal 仍严格按各自的权限列表执行。 |
 | **SEC 归还脚本、锁冲突后留下的预留**（`4f057db4` `25875321`） | 归还脚本改用 run.log 取失败原因，dry-run 只读；锁冲突时没写进去的结算会记下来，之后重放。 |
 
 全量测试结果见文末"测试记录"。
@@ -76,6 +77,9 @@ cd ~/Projects/dalton-research-agent-os
 - **批次 c 的 C2**：5 条 authorize-unproved（legacy b2f1a00d、ddf3a04b；ws-7d bec19d08、c737cc83、4225dbd9）。
 
 ### 已知未修
+
+- 09-25 16:30 起 legacy 研究停摆的主因：晨报核验 $0.15/天的日上限被修复前的假扣费占满，文档抽取因此全部推迟。本批的 `43b9e617` 会修复；即使不部署，UTC 零点也会自愈。event_judgement 在 $50 池用完后停止属于按设计。
+- EPAM forecast 的 direction_consistency（利润率相差约 0.0001）、IBM earnings preview 的 citations 超过 16 条，正在另查。
 
 - 行业规则里 "pricing power" 的 "power" 被当成行业词（2bb6a2ec），留待后续。
 - figures/metric 窗口身份绑定 mission 版本（ADR-0006），升版时会整份重读。
