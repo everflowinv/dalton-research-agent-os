@@ -196,6 +196,104 @@ def document_key(event: dict[str, Any]) -> tuple[str, ...] | None:
     return ("document", str(event.get("company_ref")), str(event.get("kind")), document)
 
 
+# 2026-09-25: a Claim event carries no ``document_ref``, so "one document, one
+# read" never applied to Claims: the 28 risk factors extracted from one DXC
+# 10-K page were judged one Opus call each (09-25, ~7.8 USD, all NO_CHANGE),
+# and the backlog holds 1,521 public_web and 792 alphaengine Claims from 225
+# and 92 documents.  A Claim's document is found the way the Claim index finds
+# it: evidence -> the transcript correction set its lineage names (directly or
+# through its citation binding) -> that set's ``document_ref``; failing that,
+# the source envelope the evidence was captured in.  The Claims of one document
+# then share one slot of at most MAX_DOCUMENT_CLAIMS -- every one printed in
+# full, the prompt saying any single one can decide -- and nothing is skipped:
+# unlike a repeated document event, a Claim is never answered from another
+# Claim's judgement.
+#
+# public_web stays out of LOW_TIER_CLAIM_SOURCES (every decision other than
+# NO_CHANGE so far was a public_web Claim), and so does alphaengine: two thirds
+# of its Claims are earnings-call transcripts -- management on its own results,
+# the same kind of statement as the ACN bookings Claims that moved a view --
+# and batching by document saves more than a day batch would (8.6 Claims a
+# document against at most six a day batch).
+
+#: A slot of Claims drawn from one document holds at most this many.
+MAX_DOCUMENT_CLAIMS = MAX_GROUP_INPUTS
+_CORRECTION_SET_PREFIX = "transcript-correction-set-version:"
+_CITATION_BINDING_PREFIX = "transcript-claim-citation-binding:"
+
+
+class ClaimDocuments:
+    """A Claim event -> the document its Claim was drawn from, read once per run."""
+
+    def __init__(self, connection: Any) -> None:
+        self.connection = connection
+        self._claims: dict[str, str | None] = {}
+        self._sets: dict[str, str | None] = {}
+
+    def __call__(self, event: dict[str, Any]) -> str | None:
+        if event.get("kind") != "claim":
+            return None
+        ref = (event.get("payload") or {}).get("claim_version_ref")
+        if not isinstance(ref, str) or not ref:
+            return None
+        if ref not in self._claims:
+            self._claims[ref] = self._resolve(ref)
+        return self._claims[ref]
+
+    def _query(self, sql: str, params: tuple[Any, ...]) -> list[Any]:
+        try:
+            return self.connection.execute(sql, params).fetchall()
+        except Exception:  # noqa: BLE001 - a Core without these tables has no documents
+            return []
+
+    def _correction_set_document(self, version_ref: str) -> str | None:
+        if version_ref not in self._sets:
+            rows = self._query(
+                "SELECT record_json FROM transcript_correction_set_versions "
+                "WHERE version_id=?", (version_ref,))
+            document = None
+            if rows:
+                try:
+                    document = json.loads(rows[0][0]).get("document_ref")
+                except (TypeError, ValueError, AttributeError):
+                    document = None
+            self._sets[version_ref] = (
+                document if isinstance(document, str) and document else None)
+        return self._sets[version_ref]
+
+    def _resolve(self, claim_version_ref: str) -> str | None:
+        found: list[str] = []
+        envelopes: list[str] = []
+        for (evidence_json,) in self._query(
+                "SELECT v.evidence_json FROM evidence_relations r "
+                "JOIN evidence_versions v ON v.evidence_version_id=r.evidence_version_id "
+                "WHERE r.claim_version_id=?", (claim_version_ref,)):
+            try:
+                evidence = json.loads(evidence_json)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(evidence, dict):
+                continue
+            sets = [item for item in evidence.get("source_lineage") or ()
+                    if isinstance(item, str) and item.startswith(_CORRECTION_SET_PREFIX)]
+            for artifact in evidence.get("artifact_refs") or ():
+                binding = artifact.get("ref") if isinstance(artifact, dict) else None
+                if isinstance(binding, str) and binding.startswith(_CITATION_BINDING_PREFIX):
+                    sets.extend(row[0] for row in self._query(
+                        "SELECT correction_set_version_ref FROM "
+                        "transcript_claim_citation_bindings WHERE binding_id=?", (binding,)))
+            found.extend(document for document in map(self._correction_set_document, sets)
+                         if document)
+            envelope = evidence.get("source_envelope_ref")
+            if isinstance(envelope, str) and envelope:
+                envelopes.append(envelope)
+        # A Claim several documents support is read with the first of them in a
+        # fixed order, so the same Claim lands in the same slot every run.
+        if found:
+            return sorted(found)[0]
+        return sorted(envelopes)[0] if envelopes else None
+
+
 def _utc_day(value: Any) -> str:
     try:
         moment = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
@@ -206,25 +304,50 @@ def _utc_day(value: Any) -> str:
     return moment.astimezone(timezone.utc).date().isoformat()
 
 
-def event_group_key(event: dict[str, Any]) -> tuple[str, ...]:
-    """The slot an event is judged in: a filing, a closed HK week, a low-tier day, or itself."""
+def event_group_key(
+    event: dict[str, Any], document_of: Any = None,
+) -> tuple[str, ...]:
+    """The slot an event is judged in: a filing, a closed HK week, a Claim's
+    document, a low-tier day, or itself.
+
+    ``document_of`` (a :class:`ClaimDocuments`) finds a Claim's document; the
+    Claims of one document share a slot, unless they are low-tier Claims,
+    which keep their day batch.
+    """
 
     key = buyback_group_key(event)
     if key is not None:
         return key
+    # A low-tier Claim keeps its day batch: a sales note yields a Claim or two,
+    # and six of a day's in one call is fewer calls than one call a note.
+    document = (None if document_of is None or is_low_tier(event)
+                else document_of(event))
+    if document:
+        return ("claim_document", str(event.get("company_ref")), document)
     if is_low_tier(event):
         return ("low_tier", str(event.get("company_ref")), _utc_day(event.get("occurred_at")))
     return ("event", event["id"])
 
 
-def _coherent_group(group: list[dict[str, Any]]) -> bool:
+def _slot_cap(key: tuple[str, ...]) -> int | None:
+    if key[0] == "low_tier":
+        return MAX_LOW_TIER_BATCH
+    if key[0] == "claim_document":
+        return MAX_DOCUMENT_CLAIMS
+    return None
+
+
+def _coherent_group(group: list[dict[str, Any]], document_of: Any = None) -> bool:
     """Every member shares the primary's slot or repeats a document already in it."""
 
-    key = event_group_key(group[0])
+    key = event_group_key(group[0], document_of)
+    cap = _slot_cap(key)
+    if cap is not None and key[0] == "claim_document" and len(group) > cap:
+        return False
     documents: set[tuple[str, ...]] = set()
     for index, item in enumerate(group):
         document = document_key(item)
-        if index and event_group_key(item) != key and document not in documents:
+        if index and event_group_key(item, document_of) != key and document not in documents:
             return False
         if document is not None:
             documents.add(document)
@@ -396,8 +519,10 @@ def unjudged_event_groups(
     judgement. HK daily rows remain raw while the current Hong Kong week is
     open, then share one company/week judgement slot. One company's low-tier
     inputs (:func:`is_low_tier`) from one UTC day share a slot of at most
-    :data:`MAX_LOW_TIER_BATCH`, and an input repeating a document already in
-    the selection joins that document's slot. Other kinds, including Form 4
+    :data:`MAX_LOW_TIER_BATCH`, the Claims drawn from one document
+    (:class:`ClaimDocuments`) share one of at most :data:`MAX_DOCUMENT_CLAIMS`,
+    and an input repeating a document already in the selection joins that
+    document's slot. Other kinds, including Form 4
     insider transactions, retain one slot each.
     """
 
@@ -429,6 +554,7 @@ def unjudged_event_groups(
     # retired 10:49).  It is skipped, not judged: a later revoked retirement
     # (a reinstatement) makes it eligible again: the set is read every time.
     retired = retired_claim_version_refs(events.connection)
+    document_of = ClaimDocuments(events.connection)
     for row in rows:
         event = events.event(row["event_id"])
         if retired and retired.intersection(
@@ -445,16 +571,15 @@ def unjudged_event_groups(
         grouped_key = buyback_group_key(event)
         if not _closed_hk_week(grouped_key, moment):
             continue
-        key = event_group_key(event)
+        key = event_group_key(event, document_of)
         document = document_key(event)
         if (document is not None and document in documents
                 and len(groups[documents[document]]) < MAX_GROUP_INPUTS):
             # The same document found again: one read, whatever slot it is in.
             groups[documents[document]].append(event)
             continue
-        if key in positions and (
-                key[0] != "low_tier"
-                or len(groups[positions[key]]) < MAX_LOW_TIER_BATCH):
+        cap = _slot_cap(key)
+        if key in positions and (cap is None or len(groups[positions[key]]) < cap):
             groups[positions[key]].append(event)
             if document is not None:
                 documents[document] = positions[key]
@@ -728,7 +853,7 @@ def run_judgement(
                     and all(item["company_ref"] == company_ref for item in target)
                     and all(item.get("mission_version_ref") in allowed_versions
                             for item in target)
-                    and _coherent_group(target)
+                    and _coherent_group(target, ClaimDocuments(events.connection))
                     and _closed_hk_week(buyback_group_key(target[0]), moment)
                     and incremental_group_hash(target) == event_group_hash
                     and all(item["id"] not in judged_refs for item in target)
@@ -806,6 +931,7 @@ def run_judgement(
             })
             return summary
         spent = 0
+        claim_documents = ClaimDocuments(store.connection)
         # Four calls, not two: a divergence or a revise-shaped decision owes a
         # reflection and its verification as well. Reserving the pair only
         # would admit an event whose reflection then has nothing left to spend,
@@ -860,6 +986,8 @@ def run_judgement(
             )
             evidence_group = group_evidence_events(events, event_group)
             context["grouped_events"] = evidence_group
+            context["grouped_by_document"] = len(evidence_group) > 1 and (
+                event_group_key(event, claim_documents)[0] == "claim_document")
             request_id = f"{fingerprint}{incremental_group_hash(evidence_group)[:24]}"
             decided = judge(
                 context, model=judge_model, mission=mission, request_id=request_id
@@ -1152,7 +1280,9 @@ if __name__ == "__main__":  # pragma: no cover - exercised as a subprocess
 
 
 __all__ = [
+    "ClaimDocuments",
     "JUDGE_MODEL_CONFIG",
+    "MAX_DOCUMENT_CLAIMS",
     "config_fingerprint",
     "same_routing_policy",
     "MAX_COST_USD",

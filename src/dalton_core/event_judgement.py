@@ -303,20 +303,58 @@ EVIDENCE_KIND_LINES: tuple[str, ...] = tuple(
 )
 
 
+def _claim_source(event: Mapping[str, Any]) -> str | None:
+    parts = str((event.get("payload") or {}).get("claim_ref") or "").split(":")
+    return parts[1] if len(parts) >= 3 and parts[0] == "claim" else None
+
+
 def _grouped_input_lines(context: Mapping[str, Any], *, heading: str) -> list[str]:
     """The other members of the event's group, as the judge and verifier read them.
 
     A buyback group is one filing's monthly rows or one closed HK week and is
-    printed as the table it is.  Any other group is a batch of low-tier inputs
-    on one company and day, or one document found twice: every input is
-    printed in full, and the instruction says the batch is not a vote -- one
-    input that matters is the decision.
+    printed as the table it is.  The Claims drawn from one document
+    (``context["grouped_by_document"]``) are printed in full under an
+    instruction that any single one can change the decision.  Any other group
+    is a batch of low-tier inputs on one company and day, or one document found
+    twice: every input is printed in full, and the instruction says the batch
+    is not a vote -- one input that matters is the decision.
     """
 
     event = context["event"]
     grouped = context.get("grouped_events") or ()
     if len(grouped) <= 1:
         return []
+    if context.get("grouped_by_document"):
+        # 2026-09-25: the Claims of one document share a call.  Every decision
+        # other than NO_CHANGE so far was one public_web Claim among its
+        # document's many (ACN: bookings down, a risk factor), so the judge and
+        # the verifier are told, before they read them, that each stands alone.
+        sources = {_claim_source(row) for row in grouped}
+        lines = [
+            "", f"{heading}Other Claims drawn from the same document (same judgement)"
+            + ("" if heading else ":"),
+            "These Claims were extracted from the same source document as this one.",
+            "Each is a separate finding and every one was read in full. Judge each",
+            "Claim on its own: ANY SINGLE Claim can change the decision by itself.",
+            "If any one of them warrants a decision other than NO_CHANGE, the decision",
+            "is taken on that Claim and cites its ref. How many of the others say",
+            "nothing new does not matter; they do not dilute it, and the batch is",
+            "not a vote.",
+        ]
+        if "public_web" in sources:
+            lines.extend([
+                "Claims from public web pages on the company's own results and risk",
+                "disclosures (bookings, orders, risk factors) have moved views here",
+                "before: read each of them as if it had arrived alone.",
+            ])
+        for row in grouped[1:]:
+            lines.append(
+                f"- ref: {row['id']} ({row.get('kind')}, evidence tier: "
+                f"{row.get('evidence_tier')}, occurred_at: {row.get('occurred_at')})"
+            )
+            lines.extend(f"  {line}" for line in _payload_lines(row))
+            lines.append(f"    source refs: {', '.join(row.get('source_refs') or ())}")
+        return lines
     if event.get("kind") != "buyback_disclosure":
         lines = [
             "", f"{heading}Other inputs judged together with this one (same judgement)"
