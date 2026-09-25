@@ -153,6 +153,7 @@ def validate_checker_output(value: Mapping[str, Any], *, sections: list[Mapping[
     if not isinstance(value["suggestions"], list):
         raise ResearchLanguageReviewError("language checker suggestions must be a list")
     suggestions = []
+    unanchored = []
     for item in value["suggestions"]:
         required = {"section_index", "quote", "assessment", "suggestion"}
         body_alias = {"section_index", "quote", "body", "suggestion"}
@@ -196,6 +197,8 @@ def validate_checker_output(value: Mapping[str, Any], *, sections: list[Mapping[
         def matches(source: Mapping[str, Any]) -> bool:
             text = visible_quote(source_text(source))
             return bool(excerpt.strip()) and (visible in text or excerpt in text)
+        if not visible.strip():
+            raise ResearchLanguageReviewError("language checker quote is not in its source section")
         if not matches(sections[index]):
             # A checker may cite the right sentence with the wrong chapter
             # number. Re-anchor only an exact, uniquely located excerpt.
@@ -203,11 +206,59 @@ def validate_checker_output(value: Mapping[str, Any], *, sections: list[Mapping[
             if len(locations) == 1:
                 index = locations[0]
             else:
-                raise ResearchLanguageReviewError("language checker quote is not in its source section")
-        if not visible.strip():
-            raise ResearchLanguageReviewError("language checker quote is not in its source section")
+                anchored = _whitespace_anchor(
+                    excerpt, [visible_quote(source_text(source)) for source in sections],
+                    preferred=index)
+                if anchored is None:
+                    unanchored.append({"section_index": item["section_index"], **fields})
+                    continue
+                index, fields["quote"] = anchored
         suggestions.append({"section_index": index, **fields})
-    return {"overall": value["overall"].strip(), "suggestions": suggestions}
+    # 2026-09-25: 114 prepared stages were stuck on this one reason, among them
+    # the IBM initial screen and the weekly brief.  Half of the offending
+    # quotes differed from the section only in the spacing a checker drops or
+    # adds between Chinese and Latin text ("lane状态" for "lane 状态"); those
+    # are re-anchored above to the exact source text.  The rest paraphrase a
+    # sentence the section does contain.  A suggestion nobody can locate
+    # cannot be applied by any reviser, so it is set aside, on the record,
+    # instead of failing the whole review -- unless it is most of the review,
+    # which means the checker read some other text.
+    if unanchored and len(unanchored) * 2 > len(value["suggestions"]):
+        raise ResearchLanguageReviewError("language checker quote is not in its source section")
+    result = {"overall": value["overall"].strip(), "suggestions": suggestions}
+    if unanchored:
+        result["unanchored_suggestions"] = unanchored
+    return result
+
+
+def _whitespace_anchor(excerpt: str, texts: list[str], *, preferred: int) -> tuple[int, str] | None:
+    """``(section, exact source text)`` for a quote that differs only in spacing.
+
+    Unique or nothing: the stated section first, then exactly one section.
+    Within the section the spacing-free quote must occur exactly once, and the
+    returned quote is the section's own text, so a reviser replacing it
+    verbatim edits what the checker read.
+    """
+
+    target = re.sub(r"\s+", "", excerpt)
+    if not target:
+        return None
+
+    def locate(text: str) -> str | None:
+        positions = [i for i, char in enumerate(text) if not char.isspace()]
+        compact = "".join(text[i] for i in positions)
+        start = compact.find(target)
+        if start < 0 or compact.find(target, start + 1) >= 0:
+            return None
+        return text[positions[start]:positions[start + len(target) - 1] + 1]
+
+    if 0 <= preferred < len(texts):
+        found = locate(texts[preferred])
+        if found is not None:
+            return preferred, found
+    hits = [(i, found) for i, text in enumerate(texts)
+            if (found := locate(text)) is not None]
+    return hits[0] if len(hits) == 1 else None
 
 
 def render_suggestions_markdown(review: Mapping[str, Any]) -> str:
@@ -241,7 +292,9 @@ def build_brain_prompt(product: Mapping[str, Any], review: Mapping[str, Any]) ->
         '"sections":[{"index":0,"title":"...","body":"...","gaps":[]}]}',
         "原文展示字段与不可变身份：" + json.dumps(
             source, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
-        "语言建议：" + json.dumps(review, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        "语言建议：" + json.dumps(
+            {key: review[key] for key in ("overall", "suggestions")},
+            ensure_ascii=False, sort_keys=True, separators=(",", ":")),
     ))
 
 

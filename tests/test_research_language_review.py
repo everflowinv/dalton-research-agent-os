@@ -276,3 +276,55 @@ class BrainOnlyEofRecoveryTests(unittest.TestCase):
         from dalton_core.research_language_review import parse_stage_output_with_proof
         with self.assertRaisesRegex(ValueError, "no unique complete"):
             parse_stage_output_with_proof('{"overall":"好","suggestions":[]',stage='checker')
+
+
+class CheckerQuoteAnchoringTests(unittest.TestCase):
+    """2026-09-25: 114 prepared stages stuck on "language checker quote is not
+    in its source section", among them the IBM initial screen and the weekly
+    brief.  Half differed only in spacing between Chinese and Latin text."""
+
+    SECTIONS = [
+        {"title": "改进", "body": "tick 摘要应当落到 Core 的一张 append-only 表（每 tick 一行：状态、各 lane 状态、耗时）。另有说明。", "gaps": []},
+        {"title": "其他", "body": "本周没有新的问题。", "gaps": []},
+    ]
+
+    def suggestion(self, quote, index=0):
+        return {"section_index": index, "quote": quote, "assessment": "拗口",
+                "suggestion": "改写"}
+
+    def test_a_quote_differing_only_in_spacing_is_anchored_to_the_source_text(self):
+        from dalton_core.research_language_review import validate_checker_output
+        result = validate_checker_output({"overall": "可", "suggestions": [
+            self.suggestion("各 lane状态、耗时"), self.suggestion("append-only表")]},
+            sections=self.SECTIONS)
+        self.assertEqual([row["quote"] for row in result["suggestions"]],
+                         ["各 lane 状态、耗时", "append-only 表"])
+        self.assertNotIn("unanchored_suggestions", result)
+
+    def test_a_minority_of_unlocatable_quotes_is_set_aside_on_the_record(self):
+        from dalton_core.research_language_review import validate_checker_output
+        result = validate_checker_output({"overall": "可", "suggestions": [
+            self.suggestion("另有说明。"), self.suggestion("本周没有新的问题。", 1),
+            self.suggestion("这句原文里没有")]}, sections=self.SECTIONS)
+        self.assertEqual(len(result["suggestions"]), 2)
+        self.assertEqual(result["unanchored_suggestions"][0]["quote"], "这句原文里没有")
+
+    def test_mostly_unlocatable_quotes_still_fail_the_review(self):
+        from dalton_core.research_language_review import (
+            ResearchLanguageReviewError, validate_checker_output)
+        with self.assertRaisesRegex(ResearchLanguageReviewError, "not in its source section"):
+            validate_checker_output({"overall": "可", "suggestions": [
+                self.suggestion("另有说明。"), self.suggestion("不存在一"),
+                self.suggestion("不存在二")]}, sections=self.SECTIONS)
+
+    def test_an_ambiguous_spacing_match_is_not_anchored(self):
+        from dalton_core.research_language_review import _whitespace_anchor
+        self.assertIsNone(_whitespace_anchor("a b", ["ab 和 a b"], preferred=0))
+        self.assertEqual(_whitespace_anchor("ab", ["x", "a b"], preferred=0), (1, "a b"))
+
+    def test_the_brain_prompt_does_not_carry_set_aside_suggestions(self):
+        from dalton_core.research_language_review import build_brain_prompt
+        review = {"overall": "可", "suggestions": [],
+                  "unanchored_suggestions": [self.suggestion("不存在")]}
+        prompt = build_brain_prompt({"kind": "x", "version_ref": "v", "sections": []}, review)
+        self.assertNotIn("不存在", prompt)

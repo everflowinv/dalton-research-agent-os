@@ -1222,9 +1222,21 @@ def main():
     run.add_argument('--max-cost-per-call',type=float,default=1.0)
     run.add_argument('--attempts',type=int,default=3,choices=range(1,6))
     run.add_argument('--only',nargs='+')
+    from dalton_core.research_publication_worker import add_retry_arguments, run_retry_command
+    retry=sub.add_parser('retry-products',
+        help='owner retry of one pending or exhausted publication product (dry run unless --apply)')
+    where=retry.add_mutually_exclusive_group(required=True)
+    where.add_argument('--config',type=Path,help='the worker configuration (work_dir/products)')
+    where.add_argument('--state-dir',type=Path,help='…/research-publication-work/products')
+    add_retry_arguments(retry)
     args=parser.parse_args()
     if args.command=='run-worker':
         return run_worker(args.config)
+    if args.command=='retry-products':
+        state_dir=args.state_dir or Path(read_json(args.config)['work_dir'])/'products'
+        print(json.dumps(run_retry_command(state_dir,args),ensure_ascii=False,indent=1,
+                         sort_keys=True))
+        return 0
     if args.command=='snapshot':
         data=snapshot(args.core_db,include_surfaces=args.include_surfaces);write_json(args.output,data)
         print(json.dumps({'products':len(data['products']),'sections':sum(len(p['sections']) for p in data['products'])}))
