@@ -9,7 +9,7 @@
 
 ---
 
-## 批次 2026-09-25d（main `e2656686` 及之后）
+## 批次 2026-09-25d（main `e3184159` 及之后）
 
 ### 这批解决什么（批次 c 部署后验证中发现）
 
@@ -24,6 +24,7 @@
 | **EPAM dossier 永久卡住**（`4264d59e`） | 修复 repair identity 核对漏掉 parse_error 的问题。 |
 | **dossier 数字引用误报**（`dc96d9c6`） | "15.8 (percent)"、日期里的数字不再误报；"约 188.6 亿"这类换算按仓库规定仍算编造，但 prompt 里补了中文示例。注意：prompt 变了，各 dossier unit 下次重写会各重新付费一次。 |
 | **quality_scoring 车道一直返回 forbidden**（`2487d28d`） | 批次 b 新增了这个车道，但 core principal 的权限只在 bootstrap 时写入，release_switch 不会重写，所以从部署起每个 tick 都 forbidden。修复后，core principal 自动拥有所有已注册车道的权限（等同于 bootstrap 会授予的内容），其他 principal 仍严格按各自的权限列表执行。 |
+| **EPAM forecast、IBM earnings preview**（`c62e6b06`） | 方向一致性规则原来默认"成本全部占收入比例"，D&A 按自身增速预测时利润率本来就会变，却被判为矛盾；现在先按报表结构判断这个前提是否成立。preview 的 prompt 写明引用最多 16 条，契约计数时对重复 ref 去重。两个被 hold 的车道各放行重跑一次。 |
 | **SEC 归还脚本、锁冲突后留下的预留**（`4f057db4` `25875321`） | 归还脚本改用 run.log 取失败原因，dry-run 只读；锁冲突时没写进去的结算会记下来，之后重放。 |
 
 全量测试结果见文末"测试记录"。
@@ -79,14 +80,13 @@ cd ~/Projects/dalton-research-agent-os
 ### 已知未修
 
 - 09-25 16:30 起 legacy 研究停摆的主因：晨报核验 $0.15/天的日上限被修复前的假扣费占满，文档抽取因此全部推迟。本批的 `43b9e617` 会修复；即使不部署，UTC 零点也会自愈。event_judgement 在 $50 池用完后停止属于按设计。
-- EPAM forecast 的 direction_consistency（利润率相差约 0.0001）、IBM earnings preview 的 citations 超过 16 条，正在另查。
 
 - 行业规则里 "pricing power" 的 "power" 被当成行业词（2bb6a2ec），留待后续。
 - figures/metric 窗口身份绑定 mission 版本（ADR-0006），升版时会整份重读。
 
 ### 测试记录
 
-在 main `03d8f03e` 上跑全量：10411 个，1 个失败，是 `test_installer_startup_wait` 的计时断言，因机器负载超时；之前出现过同样情况，单独重跑 3 次都通过，与本批无关。其余全部通过（skipped 4）。
+在 main `e3184159` 上跑全量：10427 个，全部通过（skipped 4）。此前 `03d8f03e` 上跑过 10411 个，1 个失败，是 `test_installer_startup_wait` 的计时断言，因机器负载超时；之前出现过同样情况，单独重跑 3 次都通过，与本批无关。其余全部通过（skipped 4）。
 
 ---
 
