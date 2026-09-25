@@ -303,6 +303,57 @@ EVIDENCE_KIND_LINES: tuple[str, ...] = tuple(
 )
 
 
+def _grouped_input_lines(context: Mapping[str, Any], *, heading: str) -> list[str]:
+    """The other members of the event's group, as the judge and verifier read them.
+
+    A buyback group is one filing's monthly rows or one closed HK week and is
+    printed as the table it is.  Any other group is a batch of low-tier inputs
+    on one company and day, or one document found twice: every input is
+    printed in full, and the instruction says the batch is not a vote -- one
+    input that matters is the decision.
+    """
+
+    event = context["event"]
+    grouped = context.get("grouped_events") or ()
+    if len(grouped) <= 1:
+        return []
+    if event.get("kind") != "buyback_disclosure":
+        lines = [
+            "", f"{heading}Other inputs judged together with this one (same judgement)"
+            + ("" if heading else ":"),
+            "These are further inputs on this company from the same day, or the same",
+            "document found again. Every one was read: the decision covers all of them.",
+            "If any single input warrants a decision other than NO_CHANGE, the decision",
+            "is taken on that input and cites its ref; the others do not dilute it.",
+        ]
+        for row in grouped[1:]:
+            lines.append(
+                f"- ref: {row['id']} ({row.get('kind')}, evidence tier: "
+                f"{row.get('evidence_tier')}, occurred_at: {row.get('occurred_at')})"
+            )
+            lines.extend(f"  {line}" for line in _payload_lines(row))
+            lines.append(f"    source refs: {', '.join(row.get('source_refs') or ())}")
+        return lines
+    market = ((event.get("payload") or {}).get("market"))
+    label = ("HK daily rows in this closed ISO week (same judgement)"
+             if market == "HK"
+             else "Other monthly rows in this filing (same judgement)")
+    lines = ["", f"{heading}{label}" + ("" if heading else ":")]
+    for row in grouped[1:]:
+        payload = row.get("payload") or {}
+        lines.append(
+            f"- ref: {row['id']}; period_label={payload.get('period_label')}; "
+            f"period_end={payload.get('period_end')}; "
+            f"shares_purchased={payload.get('shares_purchased')}; "
+            f"average_price_paid={payload.get('average_price_paid')}; "
+            f"total_paid={payload.get('total_paid')}; "
+            f"shares_purchased_under_plans="
+            f"{payload.get('shares_purchased_under_plans')}; "
+            f"remaining_authorisation={payload.get('remaining_authorisation')}"
+        )
+    return lines
+
+
 def build_judge_prompt(
     context: Mapping[str, Any], *, max_prompt_bytes: int = MAX_PROMPT_BYTES
 ) -> str:
@@ -358,25 +409,7 @@ def build_judge_prompt(
         "",
         f"## Company: {context.get('ticker') or context['company_ref']} ({context['company_ref']})",
     ]
-    grouped = context.get("grouped_events") or ()
-    if len(grouped) > 1:
-        market = ((event.get("payload") or {}).get("market"))
-        label = ("## HK daily rows in this closed ISO week (same judgement)"
-                 if market == "HK"
-                 else "## Other monthly rows in this filing (same judgement)")
-        lines.extend(["", label])
-        for row in grouped[1:]:
-            payload = row.get("payload") or {}
-            lines.append(
-                f"- ref: {row['id']}; period_label={payload.get('period_label')}; "
-                f"period_end={payload.get('period_end')}; "
-                f"shares_purchased={payload.get('shares_purchased')}; "
-                f"average_price_paid={payload.get('average_price_paid')}; "
-                f"total_paid={payload.get('total_paid')}; "
-                f"shares_purchased_under_plans="
-                f"{payload.get('shares_purchased_under_plans')}; "
-                f"remaining_authorisation={payload.get('remaining_authorisation')}"
-            )
+    lines.extend(_grouped_input_lines(context, heading="## "))
     theses = context.get("theses") or ()
     lines.append("")
     lines.append("## Theses in force")
@@ -1111,25 +1144,7 @@ def build_verifier_prompt(
         f"Event ({event['kind']}, evidence tier {event['evidence_tier']}, ref {event['id']}):",
         *_payload_lines(event),
     ]
-    grouped = context.get("grouped_events") or ()
-    if len(grouped) > 1:
-        market = ((event.get("payload") or {}).get("market"))
-        label = ("HK daily rows in this closed ISO week (same judgement):"
-                 if market == "HK"
-                 else "Other monthly rows in this filing (same judgement):")
-        lines.extend(["", label])
-        for row in grouped[1:]:
-            payload = row.get("payload") or {}
-            lines.append(
-                f"- ref: {row['id']}; period_label={payload.get('period_label')}; "
-                f"period_end={payload.get('period_end')}; "
-                f"shares_purchased={payload.get('shares_purchased')}; "
-                f"average_price_paid={payload.get('average_price_paid')}; "
-                f"total_paid={payload.get('total_paid')}; "
-                f"shares_purchased_under_plans="
-                f"{payload.get('shares_purchased_under_plans')}; "
-                f"remaining_authorisation={payload.get('remaining_authorisation')}"
-            )
+    lines.extend(_grouped_input_lines(context, heading=""))
     lines.extend([
         "",
         f"Decision: {judgement['decision']} / {judgement['action']}",

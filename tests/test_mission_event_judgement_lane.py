@@ -425,7 +425,7 @@ class SelectionTests(P14aHarness):
     def test_child_selection_reads_only_the_group_named_by_the_ticket(self):
         self.pass_screen(ACN)
         first = self.event(document="alphaengine-doc:first",
-                           occurred="2026-09-09T10:00:00+00:00")
+                           occurred="2026-09-08T10:00:00+00:00")
         second = self.event(document="alphaengine-doc:second",
                             occurred="2026-09-09T11:00:00+00:00")
         summary = run_judgement(
@@ -538,10 +538,12 @@ class ChildTests(P14aHarness):
         self.judgements = EventJudgementAuthority(self.store)
         self.pass_screen(ACN)
 
-    def event(self, document="alphaengine-doc:1"):
+    def event(self, document="alphaengine-doc:1", day=9):
+        # One news item per UTC day unless a test says otherwise: two on one
+        # day are one low-tier batch and share a call.
         return record_event(
             self.events, company_ref=ACN, kind="news",
-            occurred_at="2026-09-09T10:00:00+00:00",
+            occurred_at=f"2026-09-{day:02d}T10:00:00+00:00",
             source_refs=["source:alphaengine", document],
             payload={"document_ref": document, "source_ref": "source:alphaengine",
                      "spec_ref": "sell-side-reports", "discovery_ref": "d",
@@ -731,7 +733,7 @@ class ChildTests(P14aHarness):
         self.assertIn("did not return an object", summary["effects"][0]["reason"])
 
     def test_mixed_success_and_refusal_remains_a_partial_success(self):
-        self.event(document="alphaengine-doc:1")
+        self.event(document="alphaengine-doc:1", day=8)
         self.event(document="alphaengine-doc:2")
         summary = self.run_child(
             judge_replies=["not json", decision()], verifier_replies=[PASS, PASS])
@@ -761,7 +763,7 @@ class ChildTests(P14aHarness):
 
     def test_an_exhausted_pool_stops_the_batch_with_the_c2_word(self):
         for index in range(3):
-            self.event(document=f"alphaengine-doc:{index}")
+            self.event(document=f"alphaengine-doc:{index}", day=7 + index)
         # Spend the whole pool first.
         expensive = FakeModel([decision()] * 3, route=JUDGE_ROUTE,
                               cost_micros=int(MAX_COST_USD * 1_000_000) * 200)

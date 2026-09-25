@@ -138,6 +138,127 @@ def buyback_group_key(event: dict[str, Any]) -> tuple[str, ...] | None:
     return None
 
 
+# -- what may share a call ---------------------------------------------------
+#
+# 2026-09-25: every judgement is an Opus call at about 0.28 USD, and across the
+# fourteen days of the ledger 1,638 of 1,641 came back NO_CHANGE.  The three
+# that did not were Claims drawn from public web pages on the company's own
+# results and risk disclosures; none was a sales note, an expert excerpt, a
+# headline, a crowd post or a Claim drawn from those.  So those low-tier inputs
+# still reach the judge in full -- nothing is skipped, and no cheaper model
+# decides anything -- but one company's low-tier inputs from one day share one
+# call, a few at a time.  And a document found again under another discovery
+# is the same document: it is judged once.
+
+#: Event kinds whose tier is what the desk heard, an expert said, a headline
+#: or a crowd post.  Filings, transcripts, prices, ownership and Claims from
+#: anywhere else keep a call of their own.
+LOW_TIER_KINDS: frozenset[str] = frozenset({
+    "news", "sales_note", "expert_excerpt", "crowd_post",
+})
+#: Claim sources that are those same low-tier documents, by the source segment
+#: of ``claim:<source>:<id>``.  ``public_web`` is deliberately absent: every
+#: decision other than NO_CHANGE in the ledger so far was one of those.
+LOW_TIER_CLAIM_SOURCES: frozenset[str] = frozenset({
+    "sales_notes", "company_wiki", "guidepoint",
+})
+#: At most this many low-tier inputs in one call, so a busy day is several
+#: small batches rather than one prompt nobody reads to the end.
+MAX_LOW_TIER_BATCH = 6
+#: And no slot other than a buyback's grows past this, repeated documents
+#: included: every member is printed in full and the prompt has a byte bound.
+MAX_GROUP_INPUTS = 12
+
+
+def claim_source(event: dict[str, Any]) -> str | None:
+    ref = (event.get("payload") or {}).get("claim_ref")
+    if not isinstance(ref, str):
+        return None
+    parts = ref.split(":")
+    return parts[1] if len(parts) >= 3 and parts[0] == "claim" and parts[1] else None
+
+
+def is_low_tier(event: dict[str, Any]) -> bool:
+    """A low-tier input that may share a call with its company's same-day peers."""
+
+    kind = event.get("kind")
+    if kind in LOW_TIER_KINDS:
+        return True
+    return kind == "claim" and claim_source(event) in LOW_TIER_CLAIM_SOURCES
+
+
+def document_key(event: dict[str, Any]) -> tuple[str, ...] | None:
+    """One company, one kind, one document -- whatever discovery found it."""
+
+    document = (event.get("payload") or {}).get("document_ref")
+    if not isinstance(document, str) or not document:
+        return None
+    return ("document", str(event.get("company_ref")), str(event.get("kind")), document)
+
+
+def _utc_day(value: Any) -> str:
+    try:
+        moment = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return str(value)[:10]
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(timezone.utc).date().isoformat()
+
+
+def event_group_key(event: dict[str, Any]) -> tuple[str, ...]:
+    """The slot an event is judged in: a filing, a closed HK week, a low-tier day, or itself."""
+
+    key = buyback_group_key(event)
+    if key is not None:
+        return key
+    if is_low_tier(event):
+        return ("low_tier", str(event.get("company_ref")), _utc_day(event.get("occurred_at")))
+    return ("event", event["id"])
+
+
+def _coherent_group(group: list[dict[str, Any]]) -> bool:
+    """Every member shares the primary's slot or repeats a document already in it."""
+
+    key = event_group_key(group[0])
+    documents: set[tuple[str, ...]] = set()
+    for index, item in enumerate(group):
+        document = document_key(item)
+        if index and event_group_key(item) != key and document not in documents:
+            return False
+        if document is not None:
+            documents.add(document)
+    return True
+
+
+def prior_no_change_judgements(
+    connection: Any, event_group: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Members whose document was already judged, and only ever judged NO_CHANGE.
+
+    Keyed by event id, valued by the earlier judgement record.  A document
+    that was ever judged anything else is judged again in full: the saving is
+    only taken where the answer is already known to be "nothing changes".
+    """
+
+    found: dict[str, dict[str, Any]] = {}
+    for item in event_group:
+        key = document_key(item)
+        if key is None:
+            continue
+        rows = connection.execute(
+            "SELECT j.decision AS decision, j.record_json AS record_json "
+            "FROM event_judgements j JOIN research_events e ON e.event_id = j.event_ref "
+            "WHERE e.company_ref=? AND e.kind=? "
+            "AND json_extract(e.record_json, '$.payload.document_ref')=? "
+            "AND e.event_id<>? ORDER BY j.created_at, j.judgement_id",
+            (key[1], key[2], key[3], item["id"]),
+        ).fetchall()
+        if rows and all(row["decision"] == "NO_CHANGE" for row in rows):
+            found[item["id"]] = json.loads(rows[0]["record_json"])
+    return found
+
+
 def _closed_hk_week(group_key: tuple[str, ...] | None, now: datetime) -> bool:
     if group_key is None or group_key[0] != "hk_week":
         return True
@@ -170,6 +291,32 @@ def incremental_group_hash(event_group: list[dict[str, Any]]) -> str:
         {"id": event["id"], "content_hash": event.get("content_hash")}
         for event in sorted(event_group, key=lambda item: item["id"])
     ]})
+
+
+def _record_repeat(
+    judgements: EventJudgementAuthority, event: dict[str, Any],
+    prior: dict[str, Any], *, mission: Any, actor_ref: str,
+) -> dict[str, Any]:
+    """Bind a repeated document to the NO_CHANGE its first reading got, at no cost."""
+
+    marker = {"cost_micros": 0, "repeat_of_event_ref": prior["event_ref"],
+              "repeat_of_judgement_ref": prior["id"]}
+    judgement = {
+        key: prior.get(key) for key in (
+            "decision", "action", "driver_refs", "thesis_refs", "because",
+            "citations", "note", "research_question", "forecast_change")
+    }
+    judgement["model"] = {**(prior.get("model") or {}), **marker}
+    verifier = prior.get("verifier") or {}
+    verification = {**verifier,
+                    "model": {**(prior.get("verifier_model") or {}), **marker}}
+    return judgements.record(
+        event=event, judgement=judgement, verification=verification,
+        effect={"kind": "repeated_document", "status": "recorded",
+                "primary_event_ref": prior["event_ref"],
+                "judgement_ref": prior["id"]},
+        mission=mission, actor_ref=actor_ref,
+    )
 
 
 def _write_owner_only(path: Path, value: dict[str, Any]) -> None:
@@ -241,14 +388,17 @@ def unjudged_event_groups(
     mission_version_refs: tuple[str, ...] | None = None,
     newest_first: bool = False,
 ) -> list[list[dict[str, Any]]]:
-    """Oldest eligible events, grouped by one filing or closed HK ISO week.
+    """Oldest eligible events, grouped by one filing, closed HK ISO week or low-tier day.
 
     A US 10-Q normally contributes three monthly rows. They remain three
     immutable events because the month in which purchases stopped is evidence,
     but the analyst reads their common accession as one table and makes one
     judgement. HK daily rows remain raw while the current Hong Kong week is
-    open, then share one company/week judgement slot. Other kinds, including
-    Form 4 insider transactions, retain one slot each.
+    open, then share one company/week judgement slot. One company's low-tier
+    inputs (:func:`is_low_tier`) from one UTC day share a slot of at most
+    :data:`MAX_LOW_TIER_BATCH`, and an input repeating a document already in
+    the selection joins that document's slot. Other kinds, including Form 4
+    insider transactions, retain one slot each.
     """
 
     mission_sql = ""
@@ -269,6 +419,7 @@ def unjudged_event_groups(
     ).fetchall()
     groups: list[list[dict[str, Any]]] = []
     positions: dict[tuple[str, ...], int] = {}
+    documents: dict[tuple[str, ...], int] = {}
     moment = now or datetime.now(timezone.utc)
     from .claim_retirement import retired_claim_version_refs
 
@@ -294,13 +445,25 @@ def unjudged_event_groups(
         grouped_key = buyback_group_key(event)
         if not _closed_hk_week(grouped_key, moment):
             continue
-        key = grouped_key or ("event", event["id"])
-        if key in positions:
+        key = event_group_key(event)
+        document = document_key(event)
+        if (document is not None and document in documents
+                and len(groups[documents[document]]) < MAX_GROUP_INPUTS):
+            # The same document found again: one read, whatever slot it is in.
+            groups[documents[document]].append(event)
+            continue
+        if key in positions and (
+                key[0] != "low_tier"
+                or len(groups[positions[key]]) < MAX_LOW_TIER_BATCH):
             groups[positions[key]].append(event)
+            if document is not None:
+                documents[document] = positions[key]
             continue
         if limit is not None and len(groups) >= max(1, int(limit)):
             continue
         positions[key] = len(groups)
+        if document is not None:
+            documents[document] = len(groups)
         groups.append([event])
     return groups
 
@@ -489,6 +652,7 @@ def run_judgement(
         "config_fingerprint": None,
         "reflections": 0,
         "reflections_refused": 0,
+        "repeats": 0,
         "followups": [],
         "effects": [],
         "failed_model_traces": [],
@@ -550,7 +714,6 @@ def run_judgement(
                         if expected_refs.intersection(item["id"] for item in group)]
             target = matching[0] if len(matching) == 1 else []
             if target:
-                key = buyback_group_key(target[0]) or ("event", target[0]["id"])
                 judged_refs = {
                     row["event_ref"] for row in events.connection.execute(
                         "SELECT event_ref FROM event_judgements"
@@ -563,8 +726,7 @@ def run_judgement(
                     and all(item["company_ref"] == company_ref for item in target)
                     and all(item.get("mission_version_ref") in allowed_versions
                             for item in target)
-                    and all((buyback_group_key(item) or ("event", item["id"])) == key
-                            for item in target)
+                    and _coherent_group(target)
                     and _closed_hk_week(buyback_group_key(target[0]), moment)
                     and incremental_group_hash(target) == event_group_hash
                     and all(item["id"] not in judged_refs for item in target)
@@ -666,6 +828,18 @@ def run_judgement(
                 remaining = state["remaining_micros"]
             else:
                 remaining = state["remaining_micros"] - spent
+            # A document already judged, and only ever judged NO_CHANGE, is not
+            # paid for again: the member is recorded against the earlier
+            # judgement at no cost and the rest of the group goes on.
+            repeated = prior_no_change_judgements(store.connection, event_group)
+            for item in event_group:
+                if item["id"] in repeated:
+                    _record_repeat(judgements, item, repeated[item["id"]],
+                                   mission=mission, actor_ref=actor)
+                    summary["repeats"] += 1
+            event_group = [item for item in event_group if item["id"] not in repeated]
+            if not event_group:
+                continue
             if remaining < reservation:
                 summary["judgement_status"] = "skipped:pool_exhausted"
                 break
@@ -843,7 +1017,7 @@ def run_judgement(
                 "event_ref": event["id"], "judgement_ref": written["id"], **effect,
             })
         summary["cost_micros"] = spent
-        summary["formal_authority_writes"] = summary["judged"]
+        summary["formal_authority_writes"] = summary["judged"] + summary["repeats"]
         if summary["judged"] == 0 and summary["refused"]:
             reasons = [str(item.get("reason") or "judgement contract refused")
                        for item in summary["effects"]
