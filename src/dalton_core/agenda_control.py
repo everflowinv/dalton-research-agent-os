@@ -34,6 +34,7 @@ from .cockpit_plane import (
     CockpitConflict,
     CockpitError,
     CockpitPlane,
+    OVERVIEW_STALE_SECONDS,
     OVERVIEW_TTL_SECONDS,
 )
 from .governance_cli import GovernanceCliError, ephemeral_call
@@ -1339,11 +1340,26 @@ def serve(config: AgendaControlConfig) -> None:
             # this plane is a test or a one-shot command and keeps exact
             # read-after-write by taking the zero default.
             overview_ttl_seconds=OVERVIEW_TTL_SECONDS,
+            # 2026-09-25: past the TTL, answer from the last snapshot and
+            # rebuild once in the background instead of making the page wait
+            # out a rebuild longer than its own 30 s timeout.
+            overview_stale_seconds=OVERVIEW_STALE_SECONDS,
         )
     application = AgendaControlApplication(
         config, plane, review_plane, intent_plane, cockpit_plane
     )
     stop = threading.Event()
+    if cockpit_plane is not None:
+        # 2026-09-25: build the first overview while the port opens, so the
+        # first page load after a restart is not the one that waits for it.
+        def warm_overview() -> None:
+            try:
+                cockpit_plane.overview()
+            except Exception:
+                pass
+
+        threading.Thread(target=warm_overview, name="dalton-cockpit-overview-warm",
+                         daemon=True).start()
 
     def sweep_loop() -> None:
         while not stop.is_set():

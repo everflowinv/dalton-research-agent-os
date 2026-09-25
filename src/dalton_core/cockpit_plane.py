@@ -31,6 +31,7 @@ import os
 import re
 import secrets
 import sqlite3
+import sys
 import threading
 import time
 from collections.abc import Mapping
@@ -2350,6 +2351,17 @@ def _trimmed_summary(summary: Any) -> dict[str, Any] | None:
 #: three overlapping readers from each paying for a full rebuild.  Small
 #: enough that a person who clicks refresh after an action still sees it.
 OVERVIEW_TTL_SECONDS = 8.0
+#: 2026-09-25: how long a built overview may still answer a reader at once
+#: while a single background build replaces it (stale-while-revalidate).
+#:
+#: Live on 2026-09-25 a rebuild took one to seven minutes in the control
+#: process and the page abandons the request after thirty seconds, so the
+#: owner who came back to the tab after a minute saw nothing.  Five minutes is
+#: the controller's own tick: the snapshot a reader gets is never more than
+#: one tick of work behind plus one build, it carries its own ``as_of``, and
+#: the page's next poll receives the rebuilt one.  Writes through the plane
+#: still invalidate outright, so acting and then looking is exact.
+OVERVIEW_STALE_SECONDS = 300.0
 #: ...and the process that serves HTTP opts in, once, where it builds the
 #: plane.  The default is zero so that a plane built in a test, a script or a
 #: one-shot command keeps exact read-after-write: a caller that just wrote
@@ -2474,6 +2486,7 @@ class CockpitPlane:
                  model_factory: Callable[[Mapping[str, Any]], CockpitModel] | None = None,
                  clock: Callable[[], datetime] | None = None,
                  overview_ttl_seconds: float = 0.0,
+                 overview_stale_seconds: float = 0.0,
                  monotonic: Callable[[], float] | None = None) -> None:
         self.config = config
         from .workspace_cockpit import cockpit_workspace_context
@@ -2507,6 +2520,15 @@ class CockpitPlane:
         self._overview_ttl_seconds = float(overview_ttl_seconds)
         self._overview_built_at: float | None = None
         self._overview_monotonic = monotonic or time.monotonic
+        # Bumped by every write through this plane; a snapshot is current only
+        # if it was built in the epoch the reader is in.
+        self._overview_epoch = 0
+        self._overview_result_epoch = 0
+        # 2026-09-25: how old a snapshot may be and still answer at once while
+        # one background build replaces it.  Zero (the default) keeps every
+        # plane outside the serving process on the exact prior behaviour.
+        self._overview_stale_seconds = max(float(overview_stale_seconds),
+                                           self._overview_ttl_seconds)
         self._lane_governance_cache: dict[tuple[str, str], str | None] = {}
         # Prime the two immutable/read-only indexes while the control service
         # starts.  The first browser request should project current state, not
@@ -3512,6 +3534,30 @@ class CockpitPlane:
     # -- overview ------------------------------------------------------------------
 
     def overview(self) -> dict[str, Any]:
+        """The overview snapshot, naming the UI text mapping as it is now.
+
+        A snapshot is reused for seconds (TTL) or minutes (stale window), and
+        ``ui-texts.json`` is republished every minute or two.  If a reused
+        snapshot named the revision it was built under, the page -- which also
+        learns the current revision from every ui-texts answer -- would see the
+        two alternate and re-ask every string of the view on each flip.  The
+        revision is one ``stat`` and a cached index, so it is read per answer.
+        """
+
+        result = self._overview_snapshot()
+        if not isinstance(result, dict) or "text_localization_revision" not in result:
+            return result
+        config = getattr(self, "config", None)
+        try:
+            from .research_localization_store import ui_texts_revision
+            revision = ui_texts_revision(config.core_db)
+        except (AttributeError, ImportError, OSError, sqlite3.Error, ValueError, TypeError):
+            return result
+        if revision == result["text_localization_revision"]:
+            return result
+        return {**result, "text_localization_revision": revision}
+
+    def _overview_snapshot(self) -> dict[str, Any]:
         """Build one overview at a time, share it, and keep it briefly.
 
         Two mechanisms, and they answer different questions.
@@ -3534,22 +3580,50 @@ class CockpitPlane:
         A plane built without the TTL attributes -- the singleflight tests
         construct one directly -- has a TTL of zero and the exact prior
         behaviour: every sequential caller rebuilds.
+
+        2026-09-25, stale-while-revalidate: past the TTL a reader was still
+        made to wait for a full rebuild, and live a rebuild took one to seven
+        minutes while the page gives up after thirty seconds -- so a refresh
+        after a minute away showed nothing at all.  A plane that opts in with
+        ``_overview_stale_seconds`` now answers such a reader at once with the
+        last snapshot (its ``as_of`` says when it was built) and rebuilds once
+        in the background.  A write through this plane still forces the next
+        reader to wait for a build that started after the write: see
+        ``invalidate_overview`` and ``_overview_epoch``.
         """
 
         ttl = float(getattr(self, "_overview_ttl_seconds", 0.0) or 0.0)
+        stale = float(getattr(self, "_overview_stale_seconds", 0.0) or 0.0)
         monotonic = getattr(self, "_overview_monotonic", None) or time.monotonic
         with self._overview_condition:
-            if ttl > 0.0 and self._overview_result is not None:
-                built_at = getattr(self, "_overview_built_at", None)
-                if built_at is not None and monotonic() - built_at < ttl:
+            epoch = getattr(self, "_overview_epoch", 0)
+            current = (self._overview_result is not None
+                       and getattr(self, "_overview_result_epoch", 0) == epoch)
+            built_at = getattr(self, "_overview_built_at", None)
+            if ttl > 0.0 and current and built_at is not None:
+                age = monotonic() - built_at
+                if age < ttl:
                     return self._overview_result
+                if age < stale:
+                    if not self._overview_building:
+                        self._overview_building = True
+                        threading.Thread(
+                            target=self._refresh_overview, args=(epoch,),
+                            name="dalton-cockpit-overview-refresh", daemon=True,
+                        ).start()
+                    # Tells the page a newer snapshot is being built, so it
+                    # asks again shortly instead of at its next minute poll.
+                    return {**self._overview_result, "refreshing": True}
             observed_generation = self._overview_generation
             while self._overview_building:
                 self._overview_condition.wait()
                 if (self._overview_generation > observed_generation
-                        and self._overview_result is not None):
+                        and self._overview_result is not None
+                        and getattr(self, "_overview_result_epoch", 0)
+                        == getattr(self, "_overview_epoch", 0)):
                     return self._overview_result
             self._overview_building = True
+            epoch = getattr(self, "_overview_epoch", 0)
         try:
             result = self._build_overview()
         except BaseException:
@@ -3557,13 +3631,38 @@ class CockpitPlane:
                 self._overview_building = False
                 self._overview_condition.notify_all()
             raise
+        self._store_overview(result, epoch, monotonic)
+        return result
+
+    def _store_overview(self, result: dict[str, Any], epoch: int,
+                        monotonic: Callable[[], float]) -> None:
+        """Publish a finished build.  One that started before a write is
+        handed to the readers already waiting for it but is not kept as
+        current, so the next reader rebuilds."""
+
         with self._overview_condition:
             self._overview_result = result
+            self._overview_result_epoch = epoch
             self._overview_built_at = monotonic()
             self._overview_generation += 1
             self._overview_building = False
             self._overview_condition.notify_all()
-        return result
+
+    def _refresh_overview(self, epoch: int) -> None:
+        """The background rebuild behind a stale answer.  A failure keeps the
+        last good snapshot; the next reader past the TTL tries again."""
+
+        monotonic = getattr(self, "_overview_monotonic", None) or time.monotonic
+        try:
+            result = self._build_overview()
+        except Exception as exc:  # noqa: BLE001 -- a reader already has an answer
+            print(f"cockpit overview background refresh failed: {type(exc).__name__}: {exc}",
+                  file=sys.stderr, flush=True)
+            with self._overview_condition:
+                self._overview_building = False
+                self._overview_condition.notify_all()
+            return
+        self._store_overview(result, epoch, monotonic)
 
     def ui_texts(self, keys: str) -> dict[str, Any]:
         """Reviewed UI translations for the keys one view holds.  Read-only.
@@ -3590,6 +3689,9 @@ class CockpitPlane:
 
         with self._overview_condition:
             self._overview_built_at = None
+            # A build already running started before this write; readers
+            # after it must not be handed that build, even to wait on.
+            self._overview_epoch = getattr(self, "_overview_epoch", 0) + 1
 
     def _build_overview(self) -> dict[str, Any]:
         # UI translations are a read-only adjunct to authority text.  The

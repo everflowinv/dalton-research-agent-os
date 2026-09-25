@@ -15,6 +15,7 @@ from tempfile import TemporaryDirectory
 
 from dalton_core.cockpit_plane import (
     MAX_CACHED_TICKETS,
+    OVERVIEW_STALE_SECONDS,
     OVERVIEW_TTL_SECONDS,
     TICKET_SCAN_TTL_SECONDS,
     SUMMARY_FIELDS_THE_COCKPIT_READS,
@@ -128,11 +129,100 @@ class OverviewTtlTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(results, [{"snapshot": 1}, {"snapshot": 1}])
 
+    def stale_plane(self, build):
+        plane = self.plane()
+        plane._overview_stale_seconds = OVERVIEW_STALE_SECONDS
+        plane._build_overview = build
+        return plane
+
+    def test_past_the_ttl_the_last_snapshot_answers_at_once_and_one_rebuild_runs(self):
+        # 2026-09-25: a rebuild took minutes live and the page waits 30 s.
+        started, release = threading.Event(), threading.Event()
+        builds = []
+
+        def build():
+            builds.append(1)
+            if len(builds) > 1:
+                started.set()
+                self.assertTrue(release.wait(5))
+            return {"snapshot": len(builds)}
+
+        plane = self.stale_plane(build)
+        self.assertEqual(plane.overview(), {"snapshot": 1})
+        self.clock.advance(OVERVIEW_TTL_SECONDS + 1)
+        self.assertEqual(plane.overview(), {"snapshot": 1, "refreshing": True})
+        self.assertTrue(started.wait(5))
+        # A second reader while that rebuild runs does not start another.
+        self.assertEqual(plane.overview(), {"snapshot": 1, "refreshing": True})
+        release.set()
+        for _ in range(500):
+            if plane._overview_generation == 2:
+                break
+            threading.Event().wait(0.01)
+        self.assertEqual(plane.overview(), {"snapshot": 2})
+        self.assertEqual(len(builds), 2)
+
+    def test_past_the_stale_window_the_reader_waits_for_a_rebuild(self):
+        plane = self.stale_plane(lambda: {"snapshot": len(self.builds.append(1) or self.builds)})
+        plane.overview()
+        self.clock.advance(OVERVIEW_STALE_SECONDS + 1)
+        self.assertEqual(plane.overview(), {"snapshot": 2})
+
+    def test_a_write_during_a_background_rebuild_is_not_answered_by_it(self):
+        started, release = threading.Event(), threading.Event()
+        builds = []
+
+        def build():
+            builds.append(1)
+            if len(builds) == 2:
+                started.set()
+                self.assertTrue(release.wait(5))
+            return {"snapshot": len(builds)}
+
+        plane = self.stale_plane(build)
+        plane.overview()
+        self.clock.advance(OVERVIEW_TTL_SECONDS + 1)
+        plane.overview()  # stale answer; rebuild 2 starts before the write
+        self.assertTrue(started.wait(5))
+        plane.invalidate_overview()
+        result = []
+        reader = threading.Thread(target=lambda: result.append(plane.overview()))
+        reader.start()
+        release.set()
+        reader.join(5)
+        # Build 2 began before the write; the reader after it gets build 3.
+        self.assertEqual(result, [{"snapshot": 3}])
+
+    def test_a_failed_background_rebuild_keeps_the_last_snapshot(self):
+        builds = []
+
+        def build():
+            builds.append(1)
+            if len(builds) == 2:
+                raise RuntimeError("broken snapshot")
+            return {"snapshot": len(builds)}
+
+        plane = self.stale_plane(build)
+        plane.overview()
+        self.clock.advance(OVERVIEW_TTL_SECONDS + 1)
+        self.assertEqual(plane.overview(), {"snapshot": 1, "refreshing": True})
+        for _ in range(500):
+            if not plane._overview_building:
+                break
+            threading.Event().wait(0.01)
+        self.assertEqual(plane.overview(), {"snapshot": 1, "refreshing": True})
+        for _ in range(500):
+            if plane._overview_generation == 2:
+                break
+            threading.Event().wait(0.01)
+        self.assertEqual(plane.overview(), {"snapshot": 3})
+
     def test_the_serving_process_opts_in(self):
         # agenda_control builds the one plane that serves HTTP and is the only
         # construction that turns the cache on.
         source = Path("src/dalton_core/agenda_control.py").read_text(encoding="utf-8")
         self.assertIn("overview_ttl_seconds=OVERVIEW_TTL_SECONDS", source)
+        self.assertIn("overview_stale_seconds=OVERVIEW_STALE_SECONDS", source)
         self.assertIn('getattr(plane, "invalidate_overview", None)', source)
 
 

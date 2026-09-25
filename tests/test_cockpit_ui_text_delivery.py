@@ -217,6 +217,33 @@ class OverviewCarriesRevisionOnlyTests(unittest.TestCase):
         self.assertIn('"text_localization_revision": text_localization_revision', source)
 
 
+class ReusedOverviewNamesTheCurrentRevisionTests(_Store):
+    def test_a_reused_snapshot_names_the_mapping_as_it_is_now(self) -> None:
+        # A snapshot reused across a publish used to name the old revision
+        # while ui-texts answers named the new one; the page flipped between
+        # them and re-asked every string of the view on each flip.
+        publish_ui_texts(self.directory, [batch("Revenue increased.", "收入增长。")])
+        plane = CockpitPlane.__new__(CockpitPlane)
+        plane.config = types.SimpleNamespace(core_db=self.db)
+        plane._overview_condition = threading.Condition()
+        plane._overview_building = False
+        plane._overview_generation = 0
+        plane._overview_result = None
+        plane._overview_built_at = None
+        plane._overview_ttl_seconds = 60.0
+        builds = []
+        plane._build_overview = lambda: builds.append(1) or {
+            "text_localization_revision": ui_texts_revision(self.db), "goal": "g"}
+        first = plane.overview()
+        publish_ui_texts(self.directory, [batch("Revenue fell.", "收入下降。")])
+        second = plane.overview()
+        self.assertEqual(len(builds), 1)
+        self.assertNotEqual(first["text_localization_revision"],
+                            second["text_localization_revision"])
+        self.assertEqual(second, {"text_localization_revision": ui_texts_revision(self.db),
+                                  "goal": "g"})
+
+
 def _javascript_block() -> str:
     source = HTML.read_text(encoding="utf-8")
     start = source.index("const UI_TEXT_ENDPOINT=")
