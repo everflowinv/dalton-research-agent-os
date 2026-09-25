@@ -54,6 +54,8 @@ for p in space.lumos.dalton.control space.lumos.dalton.workspace.ws-7d894366d113
   f=~/Library/LaunchAgents/$p.plist
   plutil -replace ProcessType -string Standard "$f" && plutil -lint "$f"
   launchctl bootout gui/$(id -u)/$p
+  # bootout 是异步的，立刻 bootstrap 会报 "5: Input/output error"
+  sleep 2
   launchctl bootstrap gui/$(id -u) "$f"
 done
 # 应输出 3 行 "Standard"
