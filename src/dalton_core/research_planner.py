@@ -156,6 +156,7 @@ PROMPT_PROJECTION_RULE = {
         "gaps", "blocked_on", "source_base_ready", "figures",
         "readable_documents", "readable_documents_summary",
         "document_research_feedback_summary", "dossier_feedback.repair_target_ids",
+        "dossier_feedback.material",
     ],
     "company_order": "checklist order; the leading companies that fit are "
                      "carried, the rest aggregated by count and hash",
@@ -811,6 +812,9 @@ def project_state_for_prompt(
                         target.get("id") for target in feedback.get("repair_targets") or ()
                         if isinstance(target, Mapping)
                     ],
+                    # Kept so ``research_state.planning_hash`` reads the same
+                    # on the projection as on the state.
+                    "material": feedback.get("material"),
                 }
             core["items"] = [
                 {key: item.get(key) for key in (

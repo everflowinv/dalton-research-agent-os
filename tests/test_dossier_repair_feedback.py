@@ -27,7 +27,9 @@ class DossierRepairFeedbackTests(unittest.TestCase):
 
     def _write(self, marker: str, *, completed_at: str, targets: list[dict],
                ticket_status: str = "succeeded", summary_status: str = "succeeded",
-               summary_company: str = COMPANY, mode: int = 0o600) -> Path:
+               summary_company: str = COMPANY, mode: int = 0o600,
+               dossier_status: str | None = None,
+               version_ref: str | None = None) -> Path:
         signature = f"ledger:{marker}"
         suffix = run_digest(COMPANY, signature)
         directory = self.runs / suffix
@@ -45,8 +47,11 @@ class DossierRepairFeedbackTests(unittest.TestCase):
             "summary.json": {
                 "status": summary_status,
                 "company_ref": summary_company,
-                "dossier_status": "insufficient_evidence" if targets else "published",
+                "dossier_status": dossier_status or (
+                    "insufficient_evidence" if targets else "published"),
                 "repair_targets": targets,
+                "version_ref": version_ref,
+                "version_status": "fresh" if version_ref else None,
             },
         }
         for name, value in values.items():
@@ -166,6 +171,91 @@ class DossierRepairFeedbackTests(unittest.TestCase):
         path.write_text(json.dumps(ticket), encoding="utf-8")
         os.chmod(path, 0o600)
         self.assertEqual(read_dossier_repair_feedback(self.state), {})
+
+
+class DossierMaterialTests(unittest.TestCase):
+    """2026-09-25 06:24-06:49: five paid plans over run verdicts flipping."""
+
+    setUp = DossierRepairFeedbackTests.setUp
+    _write = DossierRepairFeedbackTests._write
+
+    GAP = {"check": "numbers_without_refs", "figure": "30",
+           "section": "history_of_price_drivers"}
+    OTHER = {"check": "numbers_without_refs", "figure": "7",
+             "section": "demand_drivers"}
+
+    def _material(self):
+        return read_dossier_repair_feedback(self.state)[COMPANY]["material"]
+
+    def test_verdict_flipping_between_runs_is_not_material(self) -> None:
+        # The live IBM sequence: partial_published, rubric_refused (one gap),
+        # constitution_refused, rubric_refused (a different gap).
+        self._write("p", completed_at="2026-09-25T06:43:55+00:00", targets=[],
+                    dossier_status="partial_published",
+                    version_ref="company-dossier-version:ibm:6")
+        first = self._material()
+        self._write("r", completed_at="2026-09-25T06:48:55+00:00",
+                    targets=[self.GAP], dossier_status="rubric_refused")
+        second = self._material()
+        self._write("c", completed_at="2026-09-25T06:53:55+00:00",
+                    targets=[], dossier_status="constitution_refused")
+        third = self._material()
+        self._write("r2", completed_at="2026-09-25T06:58:55+00:00",
+                    targets=[self.OTHER], dossier_status="rubric_refused")
+        fourth = self._material()
+        self.assertEqual(first, second)
+        self.assertEqual(first, third)
+        self.assertEqual(first, fourth)
+        self.assertEqual(first, {
+            "published_version_ref": "company-dossier-version:ibm:6",
+            "stable_repair_target_keys": [],
+        })
+        # The latest verdict and targets are still exact for the prompt.
+        feedback = read_dossier_repair_feedback(self.state)[COMPANY]
+        self.assertEqual(feedback["dossier_status"], "rubric_refused")
+        self.assertEqual(feedback["repair_targets"][0]["figure"], "7")
+
+    def test_a_target_reported_twice_running_is_stable_until_absent_twice(self) -> None:
+        self._write("a", completed_at="2026-09-25T01:00:00+00:00",
+                    targets=[self.GAP], dossier_status="rubric_refused")
+        self.assertEqual(self._material()["stable_repair_target_keys"], [])
+        self._write("b", completed_at="2026-09-25T02:00:00+00:00",
+                    targets=[self.GAP], dossier_status="constitution_refused")
+        [key] = self._material()["stable_repair_target_keys"]
+        # The same gap from two tickets has two ids but one key.
+        self._write("c", completed_at="2026-09-25T03:00:00+00:00",
+                    targets=[], dossier_status="constitution_refused")
+        self.assertEqual(self._material()["stable_repair_target_keys"], [key])
+        self._write("d", completed_at="2026-09-25T04:00:00+00:00",
+                    targets=[self.GAP], dossier_status="rubric_refused")
+        self.assertEqual(self._material()["stable_repair_target_keys"], [key])
+        self._write("e", completed_at="2026-09-25T05:00:00+00:00",
+                    targets=[], dossier_status="rubric_refused")
+        self._write("f", completed_at="2026-09-25T06:00:00+00:00",
+                    targets=[], dossier_status="rubric_refused")
+        self.assertEqual(self._material()["stable_repair_target_keys"], [])
+
+    def test_a_new_published_version_and_its_targets_are_material(self) -> None:
+        self._write("v1", completed_at="2026-09-25T01:00:00+00:00", targets=[],
+                    version_ref="company-dossier-version:x:1")
+        before = self._material()
+        self._write("v2", completed_at="2026-09-25T02:00:00+00:00",
+                    targets=[self.GAP], dossier_status="partial_published",
+                    version_ref="company-dossier-version:x:2")
+        after = self._material()
+        self.assertEqual(after["published_version_ref"], "company-dossier-version:x:2")
+        self.assertEqual(len(after["stable_repair_target_keys"]), 1)
+        self.assertNotEqual(before, after)
+
+    def test_feedback_id_and_hash_are_unchanged_by_the_material_projection(self) -> None:
+        self._write("a", completed_at="2026-09-25T01:00:00+00:00",
+                    targets=[self.GAP], dossier_status="rubric_refused")
+        feedback = read_dossier_repair_feedback(self.state)[COMPANY]
+        from dalton_core.store import content_hash
+        body = {key: feedback[key] for key in (
+            "schema_version", "source_ticket_ref", "source_ticket_signature",
+            "company_ref", "dossier_status", "completed_at", "repair_targets")}
+        self.assertEqual(feedback["content_hash"], content_hash(body))
 
 
 if __name__ == "__main__":
