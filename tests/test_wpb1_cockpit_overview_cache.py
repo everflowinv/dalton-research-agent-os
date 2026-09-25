@@ -220,7 +220,29 @@ class TicketCacheBoundsTests(unittest.TestCase):
         # Every ticket is still returned -- the cap bounds what is remembered,
         # not what is read.
         self.assertEqual(len(cache.tickets()), 6)
+        # What is remembered is never more than the last scan returned (and
+        # holds in ``_scan`` anyway), so deleting runs still frees them.
+        for index in range(4):
+            item = self.state / "discoveries" / f"run-{index}"
+            (item / "ticket.json").unlink()
+            item.rmdir()
+        self.assertEqual(len(cache.tickets()), 2)
         self.assertLessEqual(len(cache._entries), 4)
+
+    def test_a_tree_larger_than_the_cap_is_not_re_read_on_every_scan(self):
+        # 2026-09-25: 7,819 runs against a cap of 4,000.  Each scan evicted
+        # the oldest 3,819 and the next scan parsed all of them again -- the
+        # ticket and the summary -- every five seconds.
+        for index in range(6):
+            self._ticket("discoveries", f"run-{index}")
+        cache = _TicketCache(self.state, max_entries=4)
+        self.assertEqual(len(cache.tickets()), 6)
+        from unittest import mock
+        from dalton_core import cockpit_plane
+        with mock.patch.object(cockpit_plane, "_load_json",
+                               wraps=cockpit_plane._load_json) as load:
+            self.assertEqual(len(cache.tickets()), 6)
+        self.assertEqual(load.call_count, 0)
 
     def test_the_cap_is_a_real_number_and_the_window_is_shorter_than_the_overview(self):
         self.assertGreater(MAX_CACHED_TICKETS, 0)

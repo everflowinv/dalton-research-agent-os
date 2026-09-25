@@ -2399,12 +2399,22 @@ class _TicketCache:
         return result
 
     def _prune(self, seen: set[str]) -> None:
-        """Forget deleted runs, then the oldest ones past the cap."""
+        """Forget deleted runs, then the oldest ones past the cap.
+
+        2026-09-25: the cap never evicts a run the scan just returned.  Live
+        there were 7,819 run directories against a cap of 4,000, so every
+        scan dropped the oldest 3,819 parsed tickets and the next scan -- one
+        per overview, log read and URL map, every five seconds -- opened and
+        parsed all of them again, including their summaries.  Evicting them
+        saved nothing: the scan itself (``self._scan``) holds every record it
+        returned until the next one.  What the cap still bounds is the part
+        that is only in ``_entries``, which the loop above already empties.
+        """
 
         with self._lock:
             for key in [key for key in self._entries if key not in seen]:
                 del self._entries[key]
-            excess = len(self._entries) - self.max_entries
+            excess = len(self._entries) - max(self.max_entries, len(seen))
             if excess <= 0:
                 return
             oldest = sorted(self._entries, key=lambda key: self._entries[key][0])
