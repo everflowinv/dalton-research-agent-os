@@ -9,7 +9,7 @@ about the *industry*.  ``claim_industry_reattribution`` records such a Claim
 against the mission's industry; this module decides which ones qualify.
 
 Strict on purpose -- a Claim the rule is unsure about stays retired and
-nowhere else.  All of these must hold (``RULE_REF`` v1):
+nowhere else.  All of these must hold (``RULE_REF`` v2):
 
 1. **Nothing leans on a single company.**  The statement has no antecedent
    word ("management", "the company", "he", "我们", "管理层" ...) and no
@@ -35,7 +35,12 @@ nowhere else.  All of these must hold (``RULE_REF`` v1):
    in the statement's main clause -- before a trailing gloss such as
    "..., relevant to hyperscaler capex" (:func:`main_clause`).  An industry
    with no lexicon here reattributes nothing: a missing vocabulary is a
-   configuration gap, not evidence.
+   configuration gap, not evidence.  v2 (2026-09-25b): a spending word on its
+   own (:data:`CO_OCCURRENCE_TERMS` -- "capex", "capital expenditure") is not
+   the industry's; everybody has capex.  It counts only next to one of the
+   industry's subject words in the same main clause (a hyperscaler, cloud,
+   data center, AI infrastructure ...).  GS on capital markets being "heavily
+   supported by AI capex spend" is about banks, not hyperscalers.
 5. **It is a statement.**  At least :data:`MIN_STATEMENT_CHARS` characters,
    and a Chinese statement must put its collective term in the first
    :data:`CJK_SUBJECT_WINDOW` characters (the grammatical subject), because
@@ -65,7 +70,9 @@ from .claim_subject import (
     text_names_word,
 )
 
-RULE_REF = "claim-industry-reattribution:industry-level:v1"
+RULE_REF = "claim-industry-reattribution:industry-level:v2"
+#: Reattributions made under these may be withdrawn when today's rule refuses them.
+PRIOR_RULE_REFS = frozenset({"claim-industry-reattribution:industry-level:v1"})
 MIN_STATEMENT_CHARS = 40
 MIN_COVERED_FOR_COMPARISON = 2
 CJK_SUBJECT_WINDOW = 14
@@ -110,6 +117,16 @@ INDUSTRY_LEXICONS: Mapping[str, tuple[str, ...]] = {
         "ai infrastructure", "ai compute", "compute", "gpu", "gpus",
         "accelerator", "accelerators", "ai chips", "power", "electricity",
         "资本开支", "资本支出", "数据中心", "云", "算力", "gpu", "电力",
+    ),
+}
+#: Lexicon terms that are the industry's only next to one of its subject words
+#: (v2).  "capex" alone is any company's spending; "hyperscaler capex",
+#: "cloud capex", "data center capex" are this industry's.  Every other term
+#: of the lexicon -- and the industry's own collectives -- is a subject word.
+CO_OCCURRENCE_TERMS: Mapping[str, tuple[str, ...]] = {
+    "hyperscaler": (
+        "capex", "capital expenditure", "capital expenditures", "capital spending",
+        "资本开支", "资本支出",
     ),
 }
 #: Collective subjects particular to one industry: nouns that name the whole
@@ -366,6 +383,16 @@ def judge(
         return refuse("no_collective_term")
     if not domain:
         return refuse("no_industry_term")
+    key = lexicon_key(industry_ref) or ""
+    dependent = set(CO_OCCURRENCE_TERMS.get(key, ()))
+    if dependent and set(domain) <= dependent:
+        # v2: only a spending word.  It needs one of the industry's subject
+        # words beside it; an industry collective ("big tech", "data center")
+        # is one.
+        subjects = _hits(finding, INDUSTRY_COLLECTIVES.get(key, ()))
+        verdict["co_occurrence_subjects"] = subjects
+        if not subjects:
+            return refuse("spending_term_without_industry_subject:" + ",".join(domain))
     if _CJK_RE.search(statement) and not re.search(r"[A-Za-z]{4,}.*[A-Za-z]{4,}", statement):
         head = statement[:CJK_SUBJECT_WINDOW]
         if not any(word in head for word in collective if _CJK_RE.search(word)):
@@ -377,12 +404,14 @@ def judge(
 
 
 __all__ = [
+    "CO_OCCURRENCE_TERMS",
     "COLLECTIVE_TERMS",
     "INDUSTRY_COLLECTIVES",
     "INDUSTRY_LEXICONS",
     "MIN_COVERED_FOR_COMPARISON",
     "MIN_STATEMENT_CHARS",
     "NEUTRAL_WORDS",
+    "PRIOR_RULE_REFS",
     "RULE_REF",
     "judge",
     "lexicon_for",

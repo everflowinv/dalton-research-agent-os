@@ -341,6 +341,14 @@ def retirement_state_probe(connection: Any) -> str:
             continue
         row = connection.execute(f"SELECT COUNT(*), MAX(rowid) FROM {table}").fetchone()
         parts.append(f"{table}:{row[0]}:{row[1]}")
+    # 2026-09-25b: a withdrawn industry reattribution moves the industry reads
+    # too.  Named only once one exists, so a Core without any keeps the probe
+    # (and every lane change key built on it) it had.
+    table = "claim_industry_reattribution_withdrawals"
+    if _table_exists(connection, table):
+        row = connection.execute(f"SELECT COUNT(*), MAX(rowid) FROM {table}").fetchone()
+        if row[0]:
+            parts.append(f"{table}:{row[0]}:{row[1]}")
     return "|".join(parts)
 
 

@@ -799,12 +799,17 @@ class ClaimReviewDriver:
         # here, so the retirement stands again before the industry pass reads.
         summary["reinstatement_recheck"] = self.recheck_reinstatements(
             principal=principal, roster=roster, citations=citations, texts=texts)
+        # 2026-09-25b: reattributions an earlier industry rule made and today's
+        # refuses (a lone "capex") are withdrawn before the backfill runs.
+        summary["industry_reattribution_recheck"] = self.recheck_industry_reattributions(
+            principal=principal, citations=citations, texts=texts)
         # After the re-review, so a retirement withdrawn this tick is its
         # company's again and never also the industry's.
         summary["industry_reattribution"] = self.reattribute_industry_findings(
             principal=principal, citations=citations, texts=texts)
         if (summary["challenged"] or summary["retired"] or summary["rereview"]["reinstated"]
                 or summary["reinstatement_recheck"]["withdrawn"]
+                or summary["industry_reattribution_recheck"].get("withdrawn")
                 or summary["industry_reattribution"]["reattributed"]):
             summary["status"] = "acted"
         return summary
@@ -978,6 +983,40 @@ class ClaimReviewDriver:
         except Exception as exc:  # noqa: BLE001 - the patrol's own pass stands
             return {"rule_ref": REATTRIBUTION_RULE_REF, "reattributed": [],
                     "would_reattribute": [],
+                    "skipped": [{"reason": f"{type(exc).__name__}: {exc}"}]}
+
+    def recheck_industry_reattributions(
+        self,
+        *,
+        principal: str | None,
+        citations: Mapping[str, Mapping[str, Any]] | None = None,
+        texts: dict[str, str | None] | None = None,
+        max_documents: int | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Withdraw automatic reattributions today's industry rule refuses.
+
+        ``claim_industry_reattribution.run_recheck`` under the mission's
+        ``claim_challenge`` grant; without it (or on ``dry_run``) it reports
+        what it would withdraw.  A failure here never costs the patrol its
+        pass.
+        """
+
+        from .claim_industry_reattribution import (
+            DEFAULT_MAX_DOCUMENTS as REATTRIBUTION_DOCUMENTS,
+            RULE_REF as REATTRIBUTION_RULE_REF,
+            run_recheck,
+        )
+
+        try:
+            return run_recheck(
+                self, authority=getattr(self, "reattributions", None), principal=principal,
+                citations=citations, texts=texts,
+                max_documents=REATTRIBUTION_DOCUMENTS if max_documents is None else max_documents,
+                dry_run=dry_run,
+            )
+        except Exception as exc:  # noqa: BLE001 - the patrol's own pass stands
+            return {"rule_ref": REATTRIBUTION_RULE_REF, "withdrawn": [], "would_withdraw": [],
                     "skipped": [{"reason": f"{type(exc).__name__}: {exc}"}]}
 
     # -- re-review of past span retirements (2026-09-24 audit) ---------------

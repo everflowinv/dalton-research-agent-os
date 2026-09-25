@@ -77,3 +77,41 @@ CREATE TRIGGER IF NOT EXISTS claim_industry_reattribution_reviews_no_delete
 BEFORE DELETE ON claim_industry_reattribution_reviews BEGIN
     SELECT RAISE(ABORT, 'claim reattribution reviews cannot be deleted');
 END;
+
+-- 2026-09-25b: a reattribution withdrawn, by a further append-only record.
+--
+-- Rule v2 of claim_industry_rule no longer counts "capex" on its own as the
+-- hyperscaler industry's word (GS on capital markets "supported by AI capex
+-- spend" was kept as hyperscaler evidence).  A reattribution is one row per
+-- claim version for ever, so the ones v1 kept and v2 refuses are withdrawn
+-- the way a reinstatement is: this row names the exact reattribution and its
+-- hash; ``claim_industry_reattribution.industry_reattributions`` counts only
+-- reattributions that stand, so every industry-level read drops the Claim at
+-- once.  The retirement is untouched; the Claim is simply retired again, and
+-- nobody's.  One row per reattribution; update/delete refused.
+CREATE TABLE IF NOT EXISTS claim_industry_reattribution_withdrawals (
+    withdrawal_id TEXT PRIMARY KEY,
+    claim_version_ref TEXT NOT NULL,
+    reattribution_ref TEXT NOT NULL UNIQUE REFERENCES claim_industry_reattributions(reattribution_id),
+    reattribution_hash TEXT NOT NULL,
+    reason_code TEXT NOT NULL CHECK(reason_code IN (
+        'not_industry_level_under_current_rule',
+        'human_judgment'
+    )),
+    rule_ref TEXT,
+    actor_ref TEXT NOT NULL,
+    rationale TEXT NOT NULL,
+    record_json TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS claim_industry_reattribution_withdrawals_authorized_insert
+BEFORE INSERT ON claim_industry_reattribution_withdrawals
+WHEN dalton_claim_reattribution_authorized() = 0 BEGIN
+    SELECT RAISE(ABORT, 'claim reattribution withdrawal insert requires ClaimIndustryReattributionAuthority'); END;
+CREATE TRIGGER IF NOT EXISTS claim_industry_reattribution_withdrawals_no_update
+BEFORE UPDATE ON claim_industry_reattribution_withdrawals BEGIN
+    SELECT RAISE(ABORT, 'claim reattribution withdrawals are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS claim_industry_reattribution_withdrawals_no_delete
+BEFORE DELETE ON claim_industry_reattribution_withdrawals BEGIN
+    SELECT RAISE(ABORT, 'claim reattribution withdrawals are append-only'); END;
