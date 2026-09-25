@@ -196,7 +196,7 @@ def subject_absent_from_citation(
 #: any mention of a person file a Claim under a company.  Surnames appear
 #: alone only when they are distinctive; common ones only with a first name.
 EXECUTIVE_NAMES: Mapping[str, tuple[str, ...]] = {
-    "AMZN": ("Andy Jassy", "Jassy", "Jeff Bezos", "Bezos", "Matt Garman",
+    "AMZN": ("Andy Jassy", "Jassy", "Jeff Bezos", "Bezos", "Matt Garman", "Garman",
              "Brian Olsavsky", "Olsavsky", "贾西", "贝索斯"),
     "GOOGL": ("Sundar Pichai", "Pichai", "Demis Hassabis", "Hassabis",
               "Thomas Kurian", "Anat Ashkenazi", "Ruth Porat", "皮查伊"),
@@ -253,6 +253,8 @@ _XBRL_COVER_RE = re.compile(r"(?<![a-z0-9])([a-z]{2,6})-(20\d{6})(?![0-9])")
 _FILING_COVER_RE = re.compile(
     r"form\s+10-[kq](?![a-z])|annual report pursuant to section 1[35]"
     r"|quarterly report pursuant to section 1[35]"
+    # 2026-09-25b: a current report is the issuer's own as much as a 10-Q.
+    r"|form\s+8-k(?![a-z])|current report pursuant to section 1[35]"
 )
 _CIK_RE = re.compile(r"sec-cik:0*(\d+)")
 _WORD_CACHE: dict[str, re.Pattern[str]] = {}
@@ -404,7 +406,10 @@ def own_document_evidence(
       cover;
     * ``filing_cover`` -- "FORM 10-K" / "Annual report pursuant to Section 13"
       on the cover *and* a name of the subject there too;
-    * ``density`` -- the subject is named throughout (see the thresholds).
+    * ``density`` -- the subject is named throughout (see the thresholds);
+    * ``event_cover`` -- the head is the subject's own earnings call or
+      results release (:func:`event_cover_names_subject`, 2026-09-25b; not a
+      strong reason for a reinstatement).
 
     ``include_head=False`` (2026-09-25, reinstatement only) skips the head
     test: a listicle ("Top 35 Social Media Platforms ... Facebook") or a
@@ -444,7 +449,48 @@ def own_document_evidence(
             and mine * 10_000 / max(1, len(lowered)) >= DENSITY_MIN_PER_10K_CHARS
             and mine >= DENSITY_MIN_SHARE * (mine + _mentions(lowered, peer_needles))):
         return "density"
+    # After density on purpose: the reinstatement rule's answer for a
+    # document it already judged does not move (``event_cover`` is not one of
+    # the strong reasons), and wherever the head test runs it has already
+    # answered, because the event cover *is* the head.
+    if event_cover_names_subject(text, needles):
+        return "event_cover"
     return None
+
+
+def event_cover_names_subject(text: Any, needles: Sequence[str]) -> bool:
+    """The document's head is the subject's own earnings call or results release.
+
+    2026-09-25b.  A fetched page is no longer the subject's own because its
+    title or head merely names it ("Google Cloud Statistics: Market Share &
+    Competition Report").  What still makes it the subject's own is a head
+    that is the company's own event, with the company as its grammatical
+    owner: "Cognizant (CTSH) Q2 2026 Earnings Call Transcript", "DXC
+    Technology Reports Fourth Quarter and Full Fiscal Year 2026 Results".
+    There "we" and "management" are the company.  A listicle, a comparison or
+    a third party's statistics page has no such head.
+    """
+
+    if not isinstance(text, str) or not text:
+        return False
+    head = _cut(text, HEAD_CHARS).lower()
+    tickers = [needle for needle in needles
+               if isinstance(needle, str) and re.fullmatch(r"[a-z]{2,5}", needle)]
+    for ticker in tickers:
+        if re.search(
+                r"\(\s*(?:(?:nasdaq|nyse)\s*:\s*)?" + re.escape(ticker) + r"\s*\)[^\n]{0,60}?"
+                r"\b(?:earnings(?:\s+conference)?(?:\s+call)?|conference\s+call)\s+transcripts?\b",
+                head):
+            return True
+    for needle in _usable(needles):
+        if len(needle) < 4 or _CJK_RE.search(needle):
+            continue
+        if re.search(
+                r"(?:^|\n)\s*" + re.escape(needle) + r"\b[^\n]{0,40}?\b(?:reports|announces)\b"
+                r"[^\n]{0,60}?\b(?:quarter|fiscal year|full[- ]year)\b[^\n]{0,50}?\bresults\b",
+                head):
+            return True
+    return False
 
 
 #: The own-document reasons strong enough to put a retired Claim back.
@@ -523,6 +569,31 @@ def span_names_subject_for_admission(
     if not needles:
         return True
     return text_names_word(span, needles)
+
+
+def web_span_names_subject_strictly(
+    *, span: Any, text: Any, needles: Sequence[str], subject_ref: Any = None,
+    peer_needles: Sequence[str] = (), issuer_document: bool = False,
+) -> bool:
+    """The admission rule for a fetched public-web page (2026-09-25b).
+
+    A page is the subject's own only on the evidence a reinstatement may rest
+    on -- issuer, filing cover, density, or an event cover (its own earnings
+    call or results release) -- never on its title or its head: "Google Cloud
+    Statistics: Market Share & Competition Report" names Google in both and
+    is a third party's compilation.  Otherwise the span must name the
+    subject, or its executive: once the title no longer vouches for a news
+    story about AWS, "Garman told Bloomberg" has to.
+    """
+
+    if not needles:
+        return True
+    if text_names_word(span, needles) or text_names_word(span, executive_needles(needles)):
+        return True
+    return own_document_evidence(
+        title=None, text=text, needles=needles, issuer_document=issuer_document,
+        subject_ref=subject_ref, peer_needles=peer_needles, include_head=False,
+    ) is not None
 
 
 def mission_subject_needles(
@@ -636,6 +707,7 @@ __all__ = [
     "citation_context_names_subject",
     "citation_names_subject",
     "document_is_subjects",
+    "event_cover_names_subject",
     "executive_needles",
     "mission_subject_needles",
     "own_document_evidence",
@@ -645,6 +717,7 @@ __all__ = [
     "span_names_subject_for_admission",
     "subject_absent_from_citation",
     "text_names_any",
+    "web_span_names_subject_strictly",
     "text_names_word",
     "writer_feed_plans",
 ]

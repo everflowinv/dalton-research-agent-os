@@ -2783,6 +2783,9 @@ class DocumentExtractionService:
         ``names`` and the discovery plans' ``search_terms``).  The subject's own
         document -- a filing attributed by accession, a transcript or note whose
         title or head names it -- is exempt: there "we" is the subject.  A
+        fetched public-web page is the subject's own only by issuer, filing
+        cover or density, never by its title or head (2026-09-25b, as the
+        reinstatement side has read it since 390e0d3d).  A
         statement about an industry subject is not checked; it is about no
         company.  The answer is a hold, never a drop.
         """
@@ -2803,7 +2806,28 @@ class DocumentExtractionService:
             ticker = str(member.get("ticker") or "").strip().upper()
             if ref and names.get(ticker):
                 table[ref] = sorted(set(table.get(ref, ())) | set(name_needles(names[ticker])))
-        own_cache: dict[str, bool] = {}
+        own_cache: dict[str, Any] = {}
+        issuer = attribution_for(spec_ref) is not None
+        web = context.get("source_ref") == PUBLIC_WEB_SOURCE_REF
+
+        def web_span_names(subject_ref, needles, span):
+            # 2026-09-25b: a fetched page is the subject's own only on the
+            # evidence a reinstatement may rest on, never on its title or
+            # head; otherwise the span names the subject or its executive
+            # (claim_subject.web_span_names_subject_strictly).
+            from .claim_subject import web_span_names_subject_strictly
+
+            key = "web-text"
+            if key not in own_cache:
+                try:
+                    own_cache[key] = self._document_text(context)
+                except Exception:  # noqa: BLE001 - unreadable page: not the subject's own
+                    own_cache[key] = None
+            peers = sorted({needle for ref, values in table.items()
+                            if ref != subject_ref for needle in values})
+            return web_span_names_subject_strictly(
+                span=span, text=own_cache[key], needles=needles, subject_ref=subject_ref,
+                peer_needles=peers, issuer_document=issuer)
 
         def document_is_own(needles):
             key = "|".join(needles)
@@ -2833,9 +2857,15 @@ class DocumentExtractionService:
             if str(subject_ref).startswith("industry:"):
                 return None
             needles = table.get(subject_ref, [])
+            if web and needles:
+                # The strict rule is the whole answer for a fetched page; the
+                # rejection below then only words the hold.
+                own = web_span_names(subject_ref, needles, span)
+            else:
+                own = document_is_own(needles)
             return document_qualitative_subject_rejection(
                 subject_ref=subject_ref, cited_span=span, needles=needles,
-                document_is_own=document_is_own(needles))
+                document_is_own=own)
 
         return check
 
