@@ -425,6 +425,16 @@ def render(
     if service_config is not None and service_config.control is not None:
         control = common | {
             "Label": labels["control"],
+            # 2026-09-25: the control process answers the owner's browser.
+            # Under ``Background`` launchd clamps its CPU and throttles its
+            # disk reads behind every other process's I/O; live, the same
+            # overview that a Standard process built in 7 s took 1 to 7
+            # minutes there (a ticket-tree scan alone: 0.34 s Standard, 2.3
+            # to 10 s under ``taskpolicy -b``), and the page gives up at 30 s.
+            # It is read-mostly and idle between requests, so ``Standard``
+            # costs nothing while nobody is looking -- the writer moved for
+            # the same reason (see above).
+            "ProcessType": "Standard",
             "ProgramArguments": [str(bin_dir / "python"), "-m", "dalton_core.agenda_control",
                                  "--config", str(config)],
             "StandardOutPath": str(logs / "control.stdout.log"),
