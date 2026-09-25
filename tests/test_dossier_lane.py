@@ -852,13 +852,30 @@ class GateTests(unittest.TestCase):
         after = self.authority.latest(ACN)
         dropped = next(item for item in after["sections"]
                        if item["aspect"] == "business_model")
+        # 2026-09-25 (IBM v10): nothing refused it; what it cited was retired.
         self.assertEqual((dropped["status"], dropped["reason"]),
-                         ("unavailable", "refused_by_verification"))
+                         ("unavailable", "retired_citation_dropped"))
+        self.assertTrue(dropped["structure"])
         # And the old version still says what it said.
         before = self.authority.versions(ACN)[0]
         kept = next(item for item in before["sections"]
                     if item["aspect"] == "business_model")
         self.assertEqual(kept["status"], "drafted")
+        # With material again it is redrafted first, ahead of other units
+        # that merely have something new to add -- not left empty.
+        self.harness.tag("d-8", "business_model",
+                         statement="公司的收入主要来自多年期托管合同。")
+        self.harness.tag("d-9", "segments_and_mix",
+                         statement="咨询业务占比继续下降。")
+        self.harness.tag("d-10", "demand_drivers",
+                         statement="客户把预算转向生成式 AI 项目。")
+        # (The classification always leads: it frames the rest.)
+        again = self.harness.run(max_units=2)
+        self.assertEqual(sorted(again["units_drafted"]),
+                         ["business_model", "industry_classification"])
+        redrafted = next(item for item in self.authority.latest(ACN)["sections"]
+                         if item["aspect"] == "business_model")
+        self.assertEqual(redrafted["status"], "drafted")
 
     def test_a_freshly_drafted_unresolvable_ref_still_refuses_the_run(self):
         from dalton_core.company_dossier_cli import unresolved_refs

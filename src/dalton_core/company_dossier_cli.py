@@ -641,6 +641,17 @@ def units_citing(record: Mapping[str, Any], refs: set[str]) -> set[str]:
     return out
 
 
+#: 2026-09-25: IBM v10 emptied business_model, supply_and_cost,
+#: management_and_capital_allocation and history_of_price_drivers because the
+#: carried-forward units cited retired Claims -- and labelled them
+#: ``refused_by_verification``, which nothing had refused.  They now say what
+#: happened, and the planner redrafts them ahead of ordinary extensions.
+RETIRED_CITATION_DROPPED = "retired_citation_dropped"
+#: What such a drop was labelled before it had its own reason; read the same
+#: way so versions already published are redrafted too.
+_LEGACY_DROP_REASONS = frozenset({RETIRED_CITATION_DROPPED, "refused_by_verification"})
+
+
 def unavailable_section(aspect: str, reason: str, structure: Sequence[str] = ()) -> dict[str, Any]:
     return {"aspect": aspect, "status": "unavailable", "reason": reason,
             "structure": list(structure), "slots": [], "sources": [], "gaps": [],
@@ -746,6 +757,10 @@ def plan_units(
         entry["new_refs"] = len({row["ref"] for row in material} - cited)
         entry["retired_refs"] = sorted(cited & retired)
         drafted_before = held is not None and held.get("status") != "unavailable"
+        # Emptied because what it cited was retired: owed a redraft first.
+        entry["retired_citation_dropped"] = bool(
+            held is not None and held.get("status") == "unavailable"
+            and held.get("reason") in _LEGACY_DROP_REASONS)
         # When *this* unit was last written, not when the chain last moved.
         # Against the chain head, a unit nobody has ever drafted looks current
         # the moment any other unit is published, and with three units a tick
@@ -1672,15 +1687,18 @@ def stale_units(
                   or (entry.get("stale") and entry["new_refs"] > 0)
                   # A unit resting on a retired Claim is redrafted even with
                   # nothing new to say: the correction is the new thing.
-                  or entry.get("retired_refs"))]
+                  or entry.get("retired_refs")
+                  # ...and so is one already emptied for that reason.
+                  or entry.get("retired_citation_dropped"))]
     ready.sort(key=lambda entry: (
         # Classification supplies the demand template, even when another
         # section has more new references in this bounded batch.
         0 if entry["unit"] == CLASSIFICATION_UNIT else 1,
         0 if entry.get("last_drafted") is None else 1,
         # A correction before an extension, within the same per-run bound:
-        # a published unit citing a disowned fact is the worse defect.
-        0 if entry.get("retired_refs") else 1,
+        # a published unit citing a disowned fact, or emptied because it did,
+        # is the worse defect.
+        0 if entry.get("retired_refs") or entry.get("retired_citation_dropped") else 1,
         -int(entry["new_refs"]),
         order[entry["unit"]],
     ))
@@ -2473,7 +2491,9 @@ def assemble(
     sections = []
     for aspect in SECTIONS:
         if aspect in drop_units and aspect not in blocks:
-            sections.append(unavailable_section(aspect, "refused_by_verification"))
+            sections.append(unavailable_section(
+                aspect, RETIRED_CITATION_DROPPED,
+                [slot["slot_id"] for slot in (plan.get(aspect) or {}).get("structure") or []]))
             continue
         if aspect in blocks:
             section = dict(blocks[aspect])
@@ -2498,7 +2518,7 @@ def assemble(
     if variant is not None:
         pass
     elif VARIANT_UNIT in drop_units:
-        variant = undrafted_variant("refused_by_verification")
+        variant = undrafted_variant(RETIRED_CITATION_DROPPED)
     else:
         variant = (prior or {}).get("variant_view") or undrafted_variant(
             (plan.get(VARIANT_UNIT) or {}).get("reason") or "not_drafted_this_run")

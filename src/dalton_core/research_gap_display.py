@@ -54,6 +54,7 @@ _DISPLAY_TERMS = {
     **_EVIDENCE,
     "insufficient_data": "资料不足",
     "not_drafted_this_run": "本轮尚未起草",
+    "retired_citation_dropped": "所引证据已撤回，待重新起草",
     "cost_structure": "成本结构",
     "unit_economics": "单位经济性",
     "milestones": "关键里程碑",
