@@ -41,6 +41,7 @@ from .model_accounting import ModelAccountingError, _route_estimate_micros
 from .model_router import ModelRouter, RoutingPolicyNotFound, independent_families
 from .openclaw_model_adapter import (
     BrokerDefinitelyNotSent,
+    ModelAdmissionError,
     OpenClawModelAdapter,
     OpenClawModelAdapterError,
 )
@@ -160,6 +161,17 @@ _VERIFIER_PROVIDER_CONTRACTS = {
     "research_localization_verifier": (
         "research-localization-verifier-provider-output-0.1",
         "research-localization-verifier-provider-output-v0.1.schema.json"),
+    # 2026-09-25: the statement-support check (e41b4df8, 52393693) always
+    # names its producers, so its route is an independent verifier -- and
+    # without a contract here its WorkOrder carried no output schema version
+    # and the adapter refused every call before sending it ("independent
+    # verifier WorkOrder lacks the required output schema version").
+    "claim_support_verifier": (
+        "claim-support-verifier-provider-output-0.1",
+        "claim-support-verifier-provider-output-v0.1.schema.json"),
+    "claim_support_backfill": (
+        "claim-support-verifier-provider-output-0.1",
+        "claim-support-verifier-provider-output-v0.1.schema.json"),
 }
 
 
@@ -2714,7 +2726,19 @@ class CockpitModel:
                     work, route, profile,
                 )
             except OpenClawModelAdapterError as exc:
-                definitely_not_sent = isinstance(exc, BrokerDefinitelyNotSent)
+                # 2026-09-25: an adapter admission refusal is raised while the
+                # adapter is still building the broker request -- every
+                # ``ModelAdmissionError`` site precedes the exchange -- so the
+                # call was never sent and cost nothing.  Settled at the full
+                # reservation instead, the claim-support check's refusals
+                # (no output schema version) charged $0.102 apiece with no
+                # usage entry.  Nothing is released that could have been
+                # spent: an error that carries post-send evidence is still
+                # charged the reservation.
+                definitely_not_sent = isinstance(exc, BrokerDefinitelyNotSent) or (
+                    isinstance(exc, ModelAdmissionError)
+                    and getattr(exc, "post_send_unknown_evidence", None) is None
+                )
                 spend[route["id"]] = (
                     (0, "not_sent") if definitely_not_sent else (ceiling, "reserved")
                 )

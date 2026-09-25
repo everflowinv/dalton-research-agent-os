@@ -152,6 +152,38 @@ class BackfillTests(BackfillHarness):
             (PASS_REF,)).fetchall()
         self.assertEqual({row[0]: row[1] for row in marks}, {"unverifiable": 2, "unreadable": 1})
 
+    def test_claims_held_only_by_the_contract_wiring_bug_are_asked_again(self) -> None:
+        # 2026-09-25: before the output contract was wired, every backfill call
+        # was refused before it was sent, and after three such refusals a batch
+        # was marked unverifiable -- permanently, as far as this pass went.
+        from dalton_core.claim_support_backfill import RETRY_PASS_REF
+
+        good, bad, _lost, _numeric, _contested = self.claims()
+        wiring = ("the support check failed 3 times (last: CockpitModelError: the cheap chain "
+                  "halted on unclassified_failure: ... the model call failed: independent "
+                  "verifier WorkOrder lacks the required output schema version)")
+        self.verifier.records.mark(claim_version_ref=good["ref"], claim_version_hash=good["hash"],
+                                   pass_ref=PASS_REF, outcome="unverifiable", detail=wiring)
+        self.verifier.records.mark(claim_version_ref=bad["ref"], claim_version_hash=bad["hash"],
+                                   pass_ref=PASS_REF, outcome="unverifiable",
+                                   detail="the drafting model family 'unclassified:x' is unclassified")
+        self.model.replies.append(_reply(("not_supported", "about_subject", None)))
+        result = self.backfill().run_once(max_items=10)
+        # ``good`` is asked again; ``bad``'s hold was about its drafter and stands.
+        self.assertEqual(len(self.model.calls), 1)
+        self.assertEqual((result["examined"], result["rejected"]), (1, 1), result)
+        marks = {(row[0], row[1]): row[2] for row in self.store.connection.execute(
+            "SELECT claim_version_ref, pass_ref, outcome FROM claim_support_backfill_marks")}
+        self.assertEqual(marks[(good["ref"], RETRY_PASS_REF)], "verdict")
+        self.assertNotIn((bad["ref"], RETRY_PASS_REF), marks)
+        # Settled: the next run has nothing left to ask, and the rejection is
+        # acted on exactly as a first-pass one would be.
+        self.assertEqual(result["remaining_after"], 0)
+        self.assertEqual(result["detected"], 1)
+        self.grant_claim_challenge()
+        again = self.backfill().run_once(max_items=10)
+        self.assertEqual((again["calls"], again["retired"]), (0, [good["ref"]]))
+
 
 class AuthorityTests(BackfillHarness):
     def test_automation_cannot_retire_on_the_reason_without_a_recorded_rejection(self) -> None:

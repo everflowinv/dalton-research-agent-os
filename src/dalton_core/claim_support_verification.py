@@ -111,6 +111,22 @@ MAX_ITEMS_PER_CALL = 20
 FORWARD_ITEMS_PER_CALL = 12
 # Failed attempts at one set of statements before they are held for a person.
 MAX_ATTEMPTS = 3
+# 2026-09-25: failures that say nothing about the statements.  The adapter
+# refuses an independent-verifier WorkOrder whose output contract is not wired
+# ("... lacks the required output schema version") before anything is sent;
+# every call fails that way until a deploy fixes the wiring, so counting them
+# would hold every batch for a person over a bug in this code.  They defer to
+# the next hour instead, and a batch already exhausted by them is asked again.
+_CONTRACT_WIRING_PHRASES = ("output schema", "provider contract", "provider schema hash")
+# Where those failures are counted, apart from the attempts that exhaust.
+_WIRING_KEY_SUFFIX = ":contract-wiring"
+
+
+def contract_wiring_failure(text: Any) -> bool:
+    """Whether a failure is the verifier's own output-contract wiring, not the items."""
+
+    return (isinstance(text, str) and "independent verifier" in text
+            and any(phrase in text for phrase in _CONTRACT_WIRING_PHRASES))
 MAX_CITED_CHARS = 2400
 MAX_STATEMENT_CHARS = 2000
 SUPPORT_VALUES = ("supported", "not_supported")
@@ -490,6 +506,12 @@ class ClaimSupportVerifier:
         self.records.write(sql, params)
 
     def _record_attempt(self, request_key: str, bucket: str, reason: str) -> int:
+        if contract_wiring_failure(reason) and not request_key.endswith(_WIRING_KEY_SUFFIX):
+            # Kept, for the hourly deferral and for anyone reading why, but
+            # under a key the exhaustion check never reads.
+            self._record_attempt(request_key + _WIRING_KEY_SUFFIX, bucket, reason)
+            prior = self._attempts(request_key)
+            return 0 if prior is None else int(prior["attempts"])
         self._write(
             "INSERT INTO claim_support_attempts(request_key,purpose,attempts,last_bucket,last_reason,updated_at) "
             "VALUES(?,?,1,?,?,?) ON CONFLICT(request_key) DO UPDATE SET "
@@ -611,13 +633,17 @@ class ClaimSupportVerifier:
         request_key = content_hash({"purpose": self.purpose, "items": keys})[:32]
         bucket = now.strftime("%Y-%m-%dT%H")
         prior = self._attempts(request_key)
-        if prior is not None and prior["attempts"] >= self.max_attempts:
+        wiring = self._attempts(request_key + _WIRING_KEY_SUFFIX)
+        # A batch whose last counted failure was contract wiring was exhausted
+        # by a bug, not by its statements: it is asked again.
+        if (prior is not None and prior["attempts"] >= self.max_attempts
+                and not contract_wiring_failure(prior["last_reason"])):
             for item in chunk:
                 outcome["unverifiable"][item["item_key"]] = (
                     f"the support check failed {prior['attempts']} times "
                     f"(last: {prior['last_reason']})")
             return "exhausted"
-        if prior is not None and prior["last_bucket"] == bucket:
+        if any(row is not None and row["last_bucket"] == bucket for row in (prior, wiring)):
             outcome["reason"] = "the support check already failed this hour; retried next hour"
             return "deferred"
         try:
@@ -643,6 +669,8 @@ class ClaimSupportVerifier:
         except Exception as exc:  # noqa: BLE001 - any failure is a failed attempt
             attempts = self._record_attempt(request_key, bucket, f"{type(exc).__name__}: {exc}")
             outcome["reason"] = f"{type(exc).__name__}: {exc}"
+            if contract_wiring_failure(outcome["reason"]):
+                return "deferred"
             if attempts >= self.max_attempts:
                 for item in chunk:
                     outcome["unverifiable"][item["item_key"]] = (
@@ -718,6 +746,7 @@ __all__ = [
     "admissible",
     "build_prompt",
     "build_verifier",
+    "contract_wiring_failure",
     "hold_reason",
     "item_key",
     "load_settings",
