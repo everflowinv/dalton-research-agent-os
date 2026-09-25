@@ -167,6 +167,76 @@ class NumberDisciplineTests(unittest.TestCase):
         self.assertEqual(
             unsourced_numbers("RBC覆盖31个客户。", [source]), ["31"])
 
+    # Live legacy dossier rounds of 2026-09-25.  Two of the figures that
+    # refused a round were the cited row's own figure in another spelling;
+    # the others were numbers no cited row carries, and still are.
+
+    def test_a_percent_word_sources_the_percent_sign(self) -> None:
+        # CTSH supply_and_cost (15d15c9b, 8d8ba91f): "15.8%".
+        source = {"text": ("Adjusted Operating Margin for year ended December 31, "
+                           "2025 was 15.8 (percent), as published by the company"),
+                  "period": "year ended December 31, 2025"}
+        self.assertEqual(
+            unsourced_numbers("公司2025年调整后营业利润率为15.8%。", [source]), [])
+        self.assertEqual(unsourced_numbers(
+            "利润率 18.04%。", [{"text": "revenue was up 18.04 percent"}]), [])
+        # The digits still have to be the cited digits, and a bare number is
+        # never a percentage.
+        self.assertEqual(unsourced_numbers(
+            "利润率约15.8%。", [{"text": "margin was 15.76 percent"}]), ["15.8%"])
+        self.assertEqual(unsourced_numbers(
+            "利润率约15.8%。", [{"text": "revenue was 15.8 usd"}]), ["15.8%"])
+
+    def test_a_filed_figure_restated_in_yi_is_still_not_the_filed_figure(self) -> None:
+        # IBM business_model (d73d6b47): "18857000000 美元（约 188.6 亿美元）".
+        # Right, and not a number in the Ledger (golden ``unit-rewrite``).
+        numbers = [{"text": "Gross profit for 2026-01-01..2026-06-30 was "
+                            "18857000000 usd", "period": "2026-01-01..2026-06-30"}]
+        self.assertEqual(unsourced_numbers(
+            "毛利为 18857000000 美元（约 188.6 亿美元）。", numbers), ["188.6"])
+        self.assertEqual(unsourced_numbers("毛利为 18857000000 美元。", numbers), [])
+
+    def test_a_ratio_the_draft_computed_is_still_unsourced(self) -> None:
+        # CTSH supply_and_cost (008cb72d, a 09-18 reply replayed): gross margin
+        # worked out from two filed lines is a number no cited row carries.
+        numbers = [{"text": "Revenues for 2026-01-01..2026-06-30 was 10894000000 usd"},
+                   {"text": "Cost of revenues for 2026-01-01..2026-06-30 was 7290000000 usd"}]
+        self.assertEqual(unsourced_numbers(
+            "营收10894000000美元、收入成本7290000000美元，对应毛利率约33.1%。", numbers),
+            ["33.1%"])
+
+    def test_a_chinese_or_slash_month_day_is_a_date_only_when_a_period_names_it(
+        self,
+    ) -> None:
+        # DXC history_of_price_drivers (588dc5aa, 9fae5104): "30".
+        dxc = {"text": "DXC's Adjusted EBIT margin contracted.",
+               "period": "Three months ended June 30, 2026 vs June 30, 2025"}
+        body = "截至 2026 年 6 月 30 日的季度，调整后 EBIT 利润率同比收缩。"
+        self.assertEqual(unsourced_numbers(body, [dxc]), [])
+        self.assertEqual(unsourced_numbers(body, []), ["30"])
+        self.assertEqual(unsourced_numbers(
+            body, [{**dxc, "period": "Three months ended June 29, 2026"}]), ["30"])
+        # ACN catalyst_calendar and management (bf7676d5, 01d0009c): "14", "19".
+        self.assertEqual(unsourced_numbers(
+            "10月14日投资者日是唯一有明确日期的催化剂。",
+            [{"text": "Citi expects", "period": "October 14 Investor Day"}]), [])
+        self.assertEqual(unsourced_numbers(
+            "下一个检验点是10月14日投资者日。",
+            [{"text": "x", "period": "near-term, Investor Day 10/14"}]), [])
+        self.assertEqual(unsourced_numbers(
+            "卖方在一次日期标为 3/19 的业绩发布前征集预期；财报在3月19日发布。",
+            [{"text": "x", "period": "Upcoming ACN results (dated 3/19)"}]), [])
+        self.assertEqual(unsourced_numbers(
+            "财报在3月19日发布。", [{"text": "x", "period": "Q2"}]), ["19"])
+        # A date period does not excuse a same-valued quantity.
+        self.assertEqual(unsourced_numbers(
+            "覆盖14个客户。",
+            [{"text": "x", "period": "October 14 Investor Day"}]), ["14"])
+        # And the contract identity moves, so held companies are retried.
+        from dalton_core.mission_deliverable import NUMBER_SOURCE_CONTRACT_VERSION
+
+        self.assertEqual(NUMBER_SOURCE_CONTRACT_VERSION, "number-source-contract:0.4")
+
 
 class AuthorityTests(DeliverableHarness):
     def test_an_unsourced_figure_fails_the_publish(self) -> None:
