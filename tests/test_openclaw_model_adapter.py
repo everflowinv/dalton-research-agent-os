@@ -1209,6 +1209,51 @@ class OpenClawModelAdapterTests(unittest.TestCase):
                           profile=profile, before_send=lambda: sent.append(True))
         self.assertEqual(sent, [])
 
+    def test_cli_gateway_output_overrun_is_kept_not_refused(self) -> None:
+        """Live 2026-09-25 14:42 (ws-7d GOOGL debate map): the gateway ignores
+        maxTokens, so claude-opus-5 wrote 4,032 tokens against 4,000 and muse
+        5,078; both were paid and then refused, and the chain paid the next
+        model for the same answer.  On a gateway the overrun is telemetry."""
+
+        work, route, profile = self._claude_gateway_case("overrun", "x" * 20_000)
+        over_output = {"inputTokens": 2, "outputTokens": 9_000, "cacheReadTokens": 2_991,
+                       "cacheWriteTokens": 33_456, "totalTokens": 45_449}
+        (invocation, result), broker = self.run_with(
+            self._claude_gateway_response(over_output), work=work, route=route,
+            profile=profile)
+        broker.close()
+        self.assertEqual(result.status, "succeeded")
+        self.assertTrue(result.outputs["text"])
+        self.assertEqual(invocation.usage["output_tokens"], 9_000)
+
+        # What bounds it is still what it cost, and the input it was sent.
+        def over_cost(request):
+            response = success_response(request, usage=over_output,
+                                        cost={"available": True, "usd": 1.2})
+            response.update({"provider": "claude-cli-gateway", "model": "claude-opus-5-5",
+                             "canonicalModel": "claude-cli-gateway/claude-opus-5-5"})
+            response.pop("contentHash")
+            return seal(response)
+
+        over_input = {**over_output, "cacheWriteTokens": 96_500,
+                      "totalTokens": 96_500 + 2 + 2_991 + 9_000}
+        for respond in (over_cost, self._claude_gateway_response(over_input)):
+            with self.subTest(respond=respond):
+                (_, refused), broker = self.run_with(
+                    respond, work=work, route=route, profile=profile)
+                broker.close()
+                self.assertEqual(refused.status, "failed")
+                self.assertEqual(refused.error["code"], "PROVIDER_BUDGET_EXCEEDED")
+
+    def test_a_provider_that_honors_max_tokens_is_still_held_to_it(self) -> None:
+        usage = {"inputTokens": 10, "outputTokens": 5_000, "cacheReadTokens": None,
+                 "cacheWriteTokens": None, "totalTokens": 5_010}
+        (_, result), broker = self.run_with(
+            lambda request: success_response(request, usage=usage))
+        broker.close()
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.error["code"], "PROVIDER_BUDGET_EXCEEDED")
+
     def test_non_gateway_profiles_are_not_given_the_gateway_prefix(self) -> None:
         # 1,001 cached-plus-uncached input tokens break a 1,000-token budget.
         usage = {"inputTokens": 1, "outputTokens": 1, "cacheReadTokens": 1_000,

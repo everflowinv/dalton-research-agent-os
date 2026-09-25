@@ -47,6 +47,7 @@ from .model_router import (
 from .model_profile_bounds import (
     actual_prompt_bytes,
     cli_gateway_budget_refusal,
+    is_cli_gateway_profile,
     measured_input_bound,
     provider_token_ceilings,
 )
@@ -1199,14 +1200,32 @@ class OpenClawModelAdapter:
             None if all(value is None for value in input_parts)
             else sum(value or 0 for value in input_parts)
         )
-        checks = (
-            (provider_input, "max_input_tokens"),
-            (output_tokens, "max_output_tokens"),
-            (total_tokens, "max_total_tokens"),
-        )
         ceilings = (
             (provider_token_ceilings(work.budget, profile), "WorkOrder"),
             (provider_token_ceilings(profile["limits"], profile), "profile"),
+        )
+        # 2026-09-25: a CLI gateway does not pass ``maxTokens`` on to the
+        # vendor CLI, so its reply is as long as the model makes it, and by the
+        # time the telemetry says so the call has been paid for.  Refusing it
+        # then bought nothing: the chain paid the next model for the same
+        # answer (ws-7d GOOGL debate map, 14:42, four models refused on output
+        # and 0.526 USD settled; 42 debate-map and 30 plan WorkOrders in ws-7d
+        # since 09-11, 19 event judgements and 12 dossiers in legacy).  On a
+        # gateway the output overrun is kept as telemetry, not a refusal, and
+        # the total is held to its ceiling less that overrun.  What still
+        # bounds the call is what it cost -- the cost ceilings below are
+        # unchanged -- and its input, which the gateway does send as asked.
+        # A provider that honors ``maxTokens`` is held to it exactly as before.
+        overrun = 0
+        output_checked = output_tokens
+        if is_cli_gateway_profile(profile) and output_tokens is not None:
+            allowed = min([max_tokens] + [limits["max_output_tokens"] for limits, _ in ceilings])
+            overrun = max(0, output_tokens - allowed)
+            output_checked = None
+        checks = (
+            (provider_input, "max_input_tokens"),
+            (output_checked, "max_output_tokens"),
+            (None if total_tokens is None else total_tokens - overrun, "max_total_tokens"),
         )
         for used, limit_name in checks:
             if used is None:
@@ -1216,7 +1235,7 @@ class OpenClawModelAdapter:
                     raise BrokerBudgetExceeded(
                         f"provider {limit_name} telemetry exceeds {source} budget"
                     )
-        if output_tokens is not None and output_tokens > max_tokens:
+        if output_checked is not None and output_checked > max_tokens:
             raise BrokerBudgetExceeded("provider output usage exceeds requested maxTokens")
         if cost["available"]:
             usd = float(cost["usd"])
