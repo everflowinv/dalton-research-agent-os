@@ -85,10 +85,13 @@ $PY scripts/sign_auto_commit_rules.py --state-dir "$W" --rule research-auto-comm
 ```zsh
 S="$HOME/Library/Application Support/Dalton/state/dalton-core"
 C="$HOME/Library/Application Support/Dalton/config/service.json"
-PYTHONPATH=$PWD/src $PY scripts/switch_weekly_brief_plan.py --state-dir "$S" --service-config "$C"                          # dry-run：应为 runtime_ready=true、would-publish
+# dry-run：应为 runtime_ready=true、would-publish
+PYTHONPATH=$PWD/src $PY scripts/switch_weekly_brief_plan.py --state-dir "$S" --service-config "$C"
 PYTHONPATH=$PWD/src $PY scripts/switch_weekly_brief_plan.py --state-dir "$S" --service-config "$C" --apply --actor human:owner
-launchctl kickstart -k gui/$(id -u)/space.lumos.dalton.controller                                                          # 只重启 controller，writer 不用重启
-PYTHONPATH=$PWD/src $PY scripts/switch_weekly_brief_plan.py --state-dir "$S" --service-config "$C" --verify                 # 应为 switched，heartbeat 显示 v4 且状态为 waiting
+# 只重启 controller，writer 不用重启
+launchctl kickstart -k gui/$(id -u)/space.lumos.dalton.controller
+# 应为 switched，heartbeat 显示 v4 且状态为 waiting
+PYTHONPATH=$PWD/src $PY scripts/switch_weekly_brief_plan.py --state-dir "$S" --service-config "$C" --verify
 ```
 
 注意：刷新机制本身不会产生新内容。W40 能不能出现新 claim，取决于 SEC 季度修复部署后 CTSH 2026Q2 等数据能否入账。
@@ -96,7 +99,8 @@ PYTHONPATH=$PWD/src $PY scripts/switch_weekly_brief_plan.py --state-dir "$S" --s
 **P3 恢复 document-research 的 hold**（legacy 15 条、ws-7d 5 条，muse 修好后才能成功）。先确认核验预检通过：
 
 ```zsh
-.venv/bin/python scripts/check_model_family_independence.py   # 三个环境 document_verifier_preflight.status 都应为 ok，unclassified_profile_ids 都为 []
+# 三个环境 document_verifier_preflight.status 都应为 ok，unclassified_profile_ids 都为 []
+.venv/bin/python scripts/check_model_family_independence.py
 L="$HOME/Library/Application Support/Dalton/state/dalton-core"
 $PY -m dalton_core.document_recovery_cli authorize-all-escalated --state-dir "$L" --max-total-cost-usd 0
 $PY -m dalton_core.document_recovery_cli authorize-all-escalated --state-dir "$L" --max-total-cost-usd 0 --apply --actor human:owner
