@@ -617,14 +617,44 @@ class LaneTests(unittest.TestCase):
         self.assertEqual(summary["issuers"][0]["status"], "committed")
         self.assertEqual(oct(os.stat(summary_dir / "summary.json").st_mode & 0o777), "0o600")
 
-    def test_agenda_binding_with_different_issuer_set_is_refused(self) -> None:
+    def test_agenda_binding_replayed_by_a_different_actor_is_refused(self) -> None:
         install_lane_rules(self.state)
         with self._lane() as lane:
             lane.ensure_agenda_bindings(actor_ref="human:tester")
-        other = Issuer("MSFT", "789019", "company:sec-cik:0000789019", "Microsoft")
-        with self._lane(issuers=(other,)) as lane:
+        with self._lane(governance=RehearsalGovernance(approved_by="human:someone-else")) as lane:
             with self.assertRaises(LanePreconditionError):
                 lane.ensure_agenda_bindings(actor_ref="human:tester")
+
+    def test_mission_companies_outside_the_package_each_bind_their_own_scope(self) -> None:
+        # 2026-09-25: ws-7d's AMZN, GOOGL, META and MSFT are not packaged
+        # issuers.  One shared immutable binding would take whichever ran first
+        # and refuse the other three; each gets a binding of its own instead,
+        # and the packaged v3 binding is untouched.
+        install_lane_rules(self.state)
+        with self._lane() as lane:
+            packaged = lane.ensure_agenda_bindings(actor_ref="human:tester")
+        amzn = Issuer("AMZN", "0001018724", "company:ticker:amzn", "AMZN")
+        msft = Issuer("MSFT", "0000789019", "company:ticker:msft", "MSFT")
+        with self._lane(issuers=(amzn, msft)) as lane:
+            first = lane.ensure_agenda_bindings(actor_ref="human:tester", issuer=amzn)
+            second = lane.ensure_agenda_bindings(actor_ref="human:tester", issuer=msft)
+            again = lane.ensure_agenda_bindings(actor_ref="human:tester", issuer=amzn)
+            self.assertEqual(lane.ensure_agenda_bindings(actor_ref="human:tester", issuer=US_IT_SERVICES_ISSUERS[1]),
+                             packaged)
+        self.assertEqual(first, again)
+        self.assertNotEqual(first, second)
+        self.assertNotEqual(first, packaged)
+        self.assertTrue(packaged["agenda_policy_version_ref"].endswith(":v3"))
+        from dalton_core.store import DaltonStore
+
+        core = DaltonStore(str(self.state / "core.sqlite"))
+        try:
+            row = core.connection.execute(
+                "SELECT scope_refs_json FROM mandate_versions WHERE version_id=?",
+                (first["mandate_version_ref"],)).fetchone()
+            self.assertEqual(json.loads(row["scope_refs_json"]), ["company:ticker:amzn"])
+        finally:
+            core.close()
 
     def test_partial_issuer_runs_within_the_universe_share_one_binding(self) -> None:
         # v2+ binding: a later run for a different in-universe ticker must

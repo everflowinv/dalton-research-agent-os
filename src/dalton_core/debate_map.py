@@ -44,7 +44,7 @@ import json
 import re
 import sqlite3
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Collection, Iterable, Mapping, Sequence
 
 from .claim_index_tagging import fold
 from .store import canonical_json, content_hash
@@ -1405,7 +1405,10 @@ class DebateMapAuthority:
                 body, version=1 if latest is None else latest["version"] + 1,
                 prior_version_ref=None if latest is None else latest["id"],
                 created_at=created_at)
-            decision = novelty(latest, candidate_wire)
+            from .claim_retirement import retired_claim_version_refs
+
+            decision = novelty(latest, candidate_wire,
+                               retired=retired_claim_version_refs(self.store.connection))
             if not decision["new"]:
                 return {"status": "duplicate", "reason": decision["reason"], **latest}
             cur.execute(
@@ -1481,9 +1484,21 @@ class DebateMapAuthority:
 
 
 def novelty(
-    prior: Mapping[str, Any] | None, candidate: Mapping[str, Any]
+    prior: Mapping[str, Any] | None, candidate: Mapping[str, Any],
+    *, retired: Collection[str] = (),
 ) -> dict[str, Any]:
-    """ADR-0008's test, as one function so both sides read the same rule."""
+    """ADR-0008's test, as one function so both sides read the same rule.
+
+    ``retired`` is the set of Claim versions retired *now*
+    (``claim_retirement.retired_claim_version_refs``: retired less
+    reinstated).  2026-09-25: a version that stops citing a Claim the current
+    one cites and the Ledger has since retired has learned something, as the
+    dossier's ``retired_withdrawals`` already knows.  Refused as a duplicate,
+    AMZN's 06:23 map kept its v5 -- 35 refs, one of them retired -- over a
+    candidate that cited the other 34; GOOGL's and MSFT's newest versions
+    still stand on 3 and 8.  Dropping a citation that is still good remains a
+    duplicate.
+    """
 
     if prior is None:
         return {"new": True, "reason": "first_version"}
@@ -1519,9 +1534,13 @@ def novelty(
         # nothing would be refused as a duplicate, and the only way to retire a
         # debate would be to never draw it again -- which the chain cannot show.
         return {"new": True, "reason": "dropped_debate:" + dropped[0]}
-    new_refs = sorted(cited_refs(candidate) - cited_refs(prior))
+    candidate_refs = cited_refs(candidate)
+    new_refs = sorted(candidate_refs - cited_refs(prior))
     if new_refs:
         return {"new": True, "reason": "new_ref:" + new_refs[0]}
+    withdrawn = sorted((cited_refs(prior) - candidate_refs) & set(retired))
+    if withdrawn:
+        return {"new": True, "reason": "retired_withdrawn:" + withdrawn[0]}
     return {
         "new": False,
         "reason": "no debate added or dropped, no status change and no "

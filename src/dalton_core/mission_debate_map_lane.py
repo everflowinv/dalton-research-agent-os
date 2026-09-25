@@ -23,6 +23,10 @@ thing summarised.  The first subject whose evidence moved wins the slot.
 
 from __future__ import annotations
 
+import json
+import os
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Callable
 
 from .lane_child_launcher import (
@@ -55,6 +59,17 @@ TRANSIENT_STATUSES: frozenset[str] = frozenset({"busy", "model_unavailable"})
 # version's fingerprint equals the evidence's, so the selector skips the
 # subject on its own and no hold is needed.
 PUBLISHED_STATUS = "fresh"
+
+#: 2026-09-25: how often one subject may be redrawn.  ws-7d's AMZN was
+#: drafted eleven times between 06:13 and 07:25 (~$0.52 each), alternating
+#: between a duplicate and invalid JSON: every Claim that arrived moved the
+#: fingerprint, and a moved fingerprint launched at once.
+MIN_REDRAW_SECONDS = 6 * 3600
+#: After a draft that published nothing (a duplicate, invalid JSON, a verifier
+#: rejection), the wait doubles per consecutive failure, up to this.
+MAX_BACKOFF_SECONDS = 48 * 3600
+#: Where the pacing survives a restart: a deploy must not reopen the tap.
+PACING_FILE = "debate-map-lane-pacing.json"
 
 LAUNCHER_KWARG = "debate_map_launcher"
 DEBATE_MAP_MODEL_CONFIG = "initial-screen-model-config.json"
@@ -109,6 +124,50 @@ def subject_change_keys(connection: Any, subjects: Any) -> dict[str, str]:
     return keys
 
 
+class RedrawPacing:
+    """When each subject was last drafted, and how many drafts failed since.
+
+    Owner-only JSON beside the change-key memo; an unreadable file is an empty
+    one (the lane then paces from its next draft on).
+    """
+
+    def __init__(self, path: Any | None) -> None:
+        self.path = None if path is None else Path(path)
+        self.state: dict[str, dict[str, Any]] = {}
+        if self.path is not None:
+            try:
+                raw = json.loads(self.path.read_text(encoding="utf-8"))
+                if isinstance(raw, dict):
+                    self.state = {str(k): dict(v) for k, v in raw.items() if isinstance(v, dict)}
+            except (OSError, ValueError):
+                self.state = {}
+
+    def get(self, subject_ref: str) -> dict[str, Any]:
+        return dict(self.state.get(subject_ref) or {})
+
+    def put(self, subject_ref: str, value: dict[str, Any]) -> None:
+        self.state[subject_ref] = dict(value)
+        if self.path is None:
+            return
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.path.with_name(self.path.name + ".tmp")
+            fd = os.open(str(temporary), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(self.state, stream, sort_keys=True)
+            os.replace(temporary, self.path)
+        except OSError:
+            pass  # pacing is a brake, not an authority: held in memory still
+
+
+def _parse(value: Any) -> datetime | None:
+    try:
+        moment = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    return moment if moment.tzinfo is not None else None
+
+
 class MissionDebateMapLaneCoordinator:
     """Launch and settle the debate-map lane."""
 
@@ -119,12 +178,16 @@ class MissionDebateMapLaneCoordinator:
         launcher: Any,
         mission: Callable[[], dict[str, Any] | None],
         failure_ledger_dir: Any | None = None,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.store = store
         self.launcher = launcher
         self.mission = mission
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
         self._open: str | None = None
         self._open_business_key: str | None = None
+        self.pacing = RedrawPacing(
+            None if failure_ledger_dir is None else Path(failure_ledger_dir) / PACING_FILE)
         # Runs that failed, keyed by (subject, fingerprint), so a doomed
         # subject does not consume the slot every five minutes.  Held for this
         # process only: a restart is nearly always a deploy, which is the most
@@ -203,6 +266,10 @@ class MissionDebateMapLaneCoordinator:
         hold = not published
         subject_ref = settled.get("subject_ref")
         fingerprint = settled.get("evidence_fingerprint")
+        if subject_ref:
+            self._pace_settled(str(subject_ref), published=published,
+                               transient=str(map_status or settled.get("status"))
+                               in TRANSIENT_STATUSES)
         if hold and subject_ref and fingerprint:
             key = business_key or f"{subject_ref}|{fingerprint}"
             reason = settled.get("failure_reason") or f"last run: {map_status or settled.get('status')}"
@@ -216,6 +283,72 @@ class MissionDebateMapLaneCoordinator:
             settled["resumed"] = self.budget.clear(
                 business_key or f"{subject_ref}|{fingerprint}")
         return settled
+
+    # -- pacing -----------------------------------------------------------
+
+    def _pace_settled(self, subject_ref: str, *, published: bool, transient: bool) -> None:
+        """Book a finished run: a draft that published, or one that did not."""
+
+        entry = self.pacing.get(subject_ref)
+        launched = entry.pop("open_launched_at", None)
+        if transient or launched is None:
+            # No route, the scheduler busy: nothing was drafted, so nothing is
+            # paced -- the lane's own probe rule decides when to ask again.
+            self.pacing.put(subject_ref, entry)
+            return
+        entry["last_draft_at"] = launched
+        entry["failures"] = 0 if published else int(entry.get("failures") or 0) + 1
+        self.pacing.put(subject_ref, entry)
+
+    def _pace_launched(self, subject_ref: str, urgent_key: str | None) -> None:
+        entry = self.pacing.get(subject_ref)
+        entry["open_launched_at"] = self.clock().astimezone(timezone.utc).isoformat()
+        if urgent_key is not None:
+            entry["urgent_key"] = urgent_key
+        self.pacing.put(subject_ref, entry)
+
+    @staticmethod
+    def _retired_cited(current: Any, retired: set[str]) -> str | None:
+        """A key for the retired Claims the published version still cites, or None."""
+
+        if current is None or not retired:
+            return None
+        from .debate_map import cited_refs
+
+        stale = sorted(cited_refs(current) & retired)
+        return None if not stale else "retired:" + ",".join(stale)
+
+    def _paced(self, subject_ref: str, urgent_key: str | None) -> str | None:
+        """Why this subject may not be drafted yet, or None.
+
+        At most one draft per subject every ``MIN_REDRAW_SECONDS``; after a
+        draft that published nothing the wait doubles per consecutive failure
+        (6 h, 12 h, 24 h, capped at 48 h).  The one exception to the minimum:
+        the published version still cites a Claim that has since been retired
+        (or whose reinstatement was withdrawn) -- that is redrawn at once, once
+        per such set, and a failed attempt at it still backs off.
+        """
+
+        entry = self.pacing.get(subject_ref)
+        last = _parse(entry.get("last_draft_at"))
+        if last is None:
+            return None
+        failures = int(entry.get("failures") or 0)
+        now = self.clock().astimezone(timezone.utc)
+        if failures:
+            wait = min(MIN_REDRAW_SECONDS * (2 ** (failures - 1)), MAX_BACKOFF_SECONDS)
+            until = last + timedelta(seconds=wait)
+            if now < until:
+                return (f"backing off after {failures} draft(s) that published nothing; "
+                        f"next draft after {until.isoformat()}")
+            return None
+        if urgent_key is not None and entry.get("urgent_key") != urgent_key:
+            return None
+        until = last + timedelta(seconds=MIN_REDRAW_SECONDS)
+        if now < until:
+            return (f"drawn at {last.isoformat()}; the next redraw is due after "
+                    f"{until.isoformat()}")
+        return None
 
     # -- the tick ---------------------------------------------------------
 
@@ -267,6 +400,8 @@ class MissionDebateMapLaneCoordinator:
 
         authority = DebateMapAuthority(self.store)
         blocked: tuple[str, str, str] | None = None
+        retired: set[str] | None = None
+        self._urgent: dict[str, str | None] = {}
         subjects = self._subjects(mission)
         # B1-5: one grouped scan says which subjects could have moved, before
         # a single fingerprint is built.  Six subjects each read and hashed
@@ -306,6 +441,14 @@ class MissionDebateMapLaneCoordinator:
                     and current.get("mission_version_ref") == mission.get("id")
                     and current.get("mission_version_hash") == mission.get("content_hash")):
                 continue
+            if retired is None:
+                try:
+                    from .claim_retirement import retired_claim_version_refs
+
+                    retired = retired_claim_version_refs(self.store.connection)
+                except Exception:  # noqa: BLE001 - no retirement read: no urgency
+                    retired = set()
+            urgent_key = self._retired_cited(current, retired)
             # A mission roll is a distinct authorized input even when its
             # claim set is byte-identical.  Keeping it in the persistent
             # signature also prevents an old terminal/permission outcome from
@@ -326,6 +469,11 @@ class MissionDebateMapLaneCoordinator:
                 blocked = blocked or (subject_ref, fingerprint,
                                       decision.classification.reason)
                 continue
+            paced = self._paced(str(subject_ref), urgent_key)
+            if paced is not None:
+                blocked = blocked or (subject_ref, fingerprint, paced)
+                continue
+            self._urgent[str(subject_ref)] = urgent_key
             return subject_ref, fingerprint, None
         if blocked is not None:
             return blocked
@@ -362,6 +510,7 @@ class MissionDebateMapLaneCoordinator:
                     "settled": settled, "reason": f"{type(exc).__name__}: {exc}"}
         self._open = ticket["id"]
         self._open_business_key = _business_key(subject_ref, fingerprint, mission, self.launcher)
+        self._pace_launched(str(subject_ref), getattr(self, "_urgent", {}).get(str(subject_ref)))
         return {
             "status": "launched", "subject_ref": subject_ref,
             "evidence_fingerprint": fingerprint, "ticket_ref": ticket["id"],

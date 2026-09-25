@@ -1,0 +1,58 @@
+{
+  "$id": "https://dalton.local/schemas/claim-support-verifier-provider-output-v0.1.schema.json",
+  "title": "ClaimSupportVerifierProviderOutputV0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "verdicts"
+  ],
+  "properties": {
+    "schema_version": {
+      "enum": [
+        "0.1"
+      ]
+    },
+    "verdicts": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "item_id",
+          "support",
+          "subject",
+          "other_subject"
+        ],
+        "properties": {
+          "item_id": {
+            "type": "string"
+          },
+          "support": {
+            "enum": [
+              "supported",
+              "not_supported"
+            ]
+          },
+          "subject": {
+            "enum": [
+              "about_subject",
+              "about_other"
+            ]
+          },
+          "other_subject": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}

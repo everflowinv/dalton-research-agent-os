@@ -1034,6 +1034,14 @@ def _reevaluate_unattributed(
     that now names its company is reopened (an append-only reopen record, the
     review back in the queue); one that still does not is written down in the
     review-exhaustion ledger for this rule, so it is not re-read next tick.
+
+    2026-09-25: candidates are every version of the mission, not only the one
+    pointed at.  P1 published ws-7d's v4 at 06:13 and the 244 dismissals on
+    v2/v3 fell out of a query that asked for v4 alone -- every tick after read
+    ``checked 0, remaining 0``.  Only the newest decision about a document
+    counts: a dismissal whose document a later version holds again (carried,
+    re-discovered or already reopened) is decided there.  A reopen carries the
+    review into the current version (``reopen_unattributed_document_review``).
     """
 
     from .document_extraction import SUBJECT_RULE_REF
@@ -1046,10 +1054,16 @@ def _reevaluate_unattributed(
                               "unreadable": 0, "remaining": 0, "stop_reason": None}
     try:
         rows = host.store.connection.execute(
-            "SELECT review_id FROM coverage_mission_document_reviews "
-            "WHERE mission_version_ref=? AND state='dismissed' AND rationale LIKE 'P13i:%' "
-            "AND instr(rationale, ?)=0 ORDER BY updated_at DESC, review_id",
-            (mission["id"], f"[{SUBJECT_RULE_REF}]"),
+            "SELECT r.review_id FROM coverage_mission_document_reviews r "
+            "JOIN coverage_mission_versions v ON v.mission_version_id=r.mission_version_ref "
+            "WHERE v.mission_ref=? AND r.state='dismissed' AND r.rationale LIKE 'P13i:%' "
+            "AND instr(r.rationale, ?)=0 "
+            "AND NOT EXISTS (SELECT 1 FROM coverage_mission_discovered_documents d "
+            "JOIN coverage_mission_versions dv ON dv.mission_version_id=d.mission_version_ref "
+            "WHERE dv.mission_ref=v.mission_ref AND dv.version_number>v.version_number "
+            "AND d.document_ref=r.document_ref) "
+            "ORDER BY r.updated_at DESC, r.review_id",
+            (mission["mission_ref"], f"[{SUBJECT_RULE_REF}]"),
         ).fetchall()
         done = windows.exhausted_reviews(pass_ref)
         reopened_today = host.coverage_mission.subject_reevaluation_reopens_since(
@@ -1077,24 +1091,30 @@ def _reevaluate_unattributed(
         result["checked"] += 1
         try:
             context = service.source_context(
-                review["review_id"], review_hash, 0, actor, require_open=False)
+                review["review_id"], review_hash, 0, actor, require_open=False,
+                allow_superseded=True)
             subject = service.document_names_subject(context)
         except Exception as exc:  # noqa: BLE001 - unreadable: stays dismissed
             subject = {"checked": False, "names_subject": False, "matched": [],
                        "error": f"{type(exc).__name__}: {exc}"[:300]}
         if subject.get("names_subject") and subject.get("matched"):
             try:
-                host.coverage_mission.reopen_unattributed_document_review(
+                reopened = host.coverage_mission.reopen_unattributed_document_review(
                     review["review_id"], expected_review_hash=review_hash, actor_ref=actor,
                     rule_ref=SUBJECT_RULE_REF, matched=list(subject["matched"]))
             except Exception as exc:  # noqa: BLE001 - one refusal must not stop the rest
                 result.setdefault("refused", []).append(
                     {"review_id": review["review_id"], "reason": f"{type(exc).__name__}: {exc}"[:300]})
                 continue
-            result["reopened"].append({"review_id": review["review_id"],
-                                       "document_ref": review["document_ref"],
-                                       "company_ref": review["company_ref"],
-                                       "matched": list(subject["matched"])[:5]})
+            item = {"review_id": review["review_id"],
+                    "document_ref": review["document_ref"],
+                    "company_ref": review["company_ref"],
+                    "matched": list(subject["matched"])[:5]}
+            carried = reopened.get("carried_to") if isinstance(reopened, Mapping) else None
+            if carried:
+                item["from_version_ref"] = review["mission_version_ref"]
+                item["carried_to"] = carried
+            result["reopened"].append(item)
             continue
         if subject.get("error"):
             result["unreadable"] += 1

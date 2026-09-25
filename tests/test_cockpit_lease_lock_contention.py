@@ -199,6 +199,98 @@ class CockpitLeaseLockContentionTests(unittest.TestCase):
         _, status = self._history(work_id)
         self.assertEqual(status["state"], "leased")
 
+    def _past_one_call_inside_the_lease(self, work_id):
+        """A moment older than one call of the work, before its lease runs out."""
+
+        from datetime import datetime, timedelta
+
+        from dalton_core import cockpit_model
+        from dalton_core.sqlite_contention import LEASE_RELEASE_RETRY_SECONDS
+
+        with Scheduler(self.root / "scheduler.sqlite") as scheduler:
+            work = scheduler.work_order_authority(work_id)["work_order"]
+            expires = datetime.fromisoformat(scheduler.connection.execute(
+                "SELECT expires_at FROM scheduler_leases WHERE work_order_id=? "
+                "ORDER BY lease_version DESC LIMIT 1", (work_id,)).fetchone()[0])
+        moment = fallback.NOW + timedelta(seconds=float(work["budget"]["max_seconds"])
+                                          + cockpit_model._LEASE_GRACE_SECONDS
+                                          + LEASE_RELEASE_RETRY_SECONDS + 1)
+        self.assertLess(moment, expires)
+        return moment
+
+    def test_an_unrecorded_lease_from_before_this_process_is_reclaimed(self) -> None:
+        # 2026-09-25: the release before 2026-09-24b never wrote holder
+        # records, so a lease it left behind at the switch could only wait out
+        # its frozen lifetime.
+        from datetime import timedelta
+
+        from dalton_core import cockpit_model
+
+        work_id, record_path = self._strand_a_lease()
+        record_path.unlink()  # what the old release left: no record at all
+        later = self._past_one_call_inside_the_lease(work_id)
+        # Claimed before this process started, and older than one call.
+        with patch.object(cockpit_model, "_PROCESS_STARTED_AT",
+                          fallback.NOW + timedelta(minutes=1)):
+            answer = self._model(fallback.ChainAdapter({}), policy_version_ref=self.chain_policy,
+                                 clock=lambda: later).call(
+                purpose="event_judgement", request_id="locked", prompt="judge",
+                mission=self.mission)
+        self.assertIn("answered by", answer["text"])
+        history, status = self._history(work_id)
+        self.assertEqual(status["state"], "succeeded")
+        self.assertIn((1, "expired", "lease_holder_gone:unrecorded_before_process_start"),
+                      history)
+
+    def test_an_unrecorded_lease_that_may_be_live_is_left_alone(self) -> None:
+        from datetime import timedelta
+
+        from dalton_core import cockpit_model
+
+        work_id, record_path = self._strand_a_lease()
+        record_path.unlink()
+        later = self._past_one_call_inside_the_lease(work_id)
+        # Claimed after this process started: a sibling of this release that
+        # is (for whatever reason) unrecorded is not presumed gone.
+        with patch.object(cockpit_model, "_PROCESS_STARTED_AT",
+                          fallback.NOW - timedelta(minutes=1)), \
+                self.assertRaisesRegex(CockpitModelError, "already running"):
+            self._model(fallback.ChainAdapter({}), policy_version_ref=self.chain_policy,
+                        clock=lambda: later).call(
+                purpose="event_judgement", request_id="locked", prompt="judge",
+                mission=self.mission)
+        # Claimed before it, but no older than one call could take.
+        with patch.object(cockpit_model, "_PROCESS_STARTED_AT",
+                          fallback.NOW + timedelta(minutes=1)), \
+                self.assertRaisesRegex(CockpitModelError, "already running"):
+            self._model(fallback.ChainAdapter({}), policy_version_ref=self.chain_policy,
+                        clock=lambda: fallback.NOW + timedelta(seconds=20)).call(
+                purpose="event_judgement", request_id="locked", prompt="judge",
+                mission=self.mission)
+        _, status = self._history(work_id)
+        self.assertEqual(status["state"], "leased")
+
+    def test_a_locked_budget_ledger_is_waited_out_on_admission(self) -> None:
+        # 2026-09-25 06:19: the planner's admission timed out at BEGIN
+        # IMMEDIATE on the budget file and the call failed without a retry.
+        from dalton_core import cockpit_model
+        from dalton_core.thesis_impact_budget import ThesisImpactBudgetStore
+
+        original = ThesisImpactBudgetStore.admit
+        calls = []
+
+        def locked_once(store, *args, **kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                raise sqlite3.OperationalError("database is locked")
+            return original(store, *args, **kwargs)
+
+        with patch.object(ThesisImpactBudgetStore, "admit", locked_once), \
+                patch.object(cockpit_model, "_lock_retry_sleep", lambda _s: None):
+            answer = self._ask(fallback.ChainAdapter({}), request_id="budget-locked")
+        self.assertIn("answered by", answer["text"])
+        self.assertEqual(len(calls), 2)
+
     def test_the_abandon_envelope_names_the_locked_database(self) -> None:
         from dalton_core import model_router
 

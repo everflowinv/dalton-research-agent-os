@@ -37,10 +37,18 @@ from typing import Any
 from .claim_support_verification import (
     ClaimSupportVerifier,
     admissible,
+    contract_wiring_failure,
     support_item,
 )
 
 PASS_REF = "claim-support-backfill:v1"
+# 2026-09-25: a Claim this pass marked ``unverifiable`` only because the
+# verifier's own output contract was not wired (the adapter refused every call
+# before sending it) was never looked at.  Marks are append-only, so such a
+# Claim is re-opened under this second pass ref -- the schema's own mechanism,
+# "a new pass ref re-opens every Claim that is not settled by a verdict" --
+# and its next mark is written there.
+RETRY_PASS_REF = "claim-support-backfill:v1:after-contract-wiring"
 SUPPORT_REASON = "citation_support_rejected"
 WRITE_SCOPE = "claim_challenge"
 DEFAULT_MAX_DOCUMENTS = 60
@@ -101,17 +109,29 @@ class ClaimSupportBackfill:
             return []
         prefixes = " OR ".join("json_extract(c.claim_json,'$.claim_ref') LIKE ?"
                                for _ in self.claim_sources)
+        # A first-pass mark settles a Claim unless it is an ``unverifiable``
+        # the verifier's contract wiring caused; that Claim is re-opened once,
+        # under RETRY_PASS_REF, and whatever it is marked there settles it.
+        self.connection.create_function(
+            "dalton_contract_wiring_failure", 1,
+            lambda text: 1 if contract_wiring_failure(text) else 0, deterministic=True)
         return self.connection.execute(
-            "SELECT c.claim_version_id AS ref, c.claim_json AS claim_json, c.content_hash AS hash "
+            "SELECT c.claim_version_id AS ref, c.claim_json AS claim_json, c.content_hash AS hash, "
+            "EXISTS (SELECT 1 FROM claim_support_backfill_marks f "
+            "  WHERE f.claim_version_ref=c.claim_version_id AND f.pass_ref=?) AS reopened "
             "FROM claim_versions c "
             "WHERE json_extract(c.claim_json,'$.claim_kind')='qualitative' "
             f"AND ({prefixes}) "
             "AND NOT EXISTS (SELECT 1 FROM claim_retirement_challenges h "
             "  WHERE h.claim_version_ref=c.claim_version_id) "
             "AND NOT EXISTS (SELECT 1 FROM claim_support_backfill_marks m "
-            "  WHERE m.claim_version_ref=c.claim_version_id AND m.pass_ref=?) "
+            "  WHERE m.claim_version_ref=c.claim_version_id AND m.pass_ref=? "
+            "  AND NOT (m.outcome='unverifiable' AND dalton_contract_wiring_failure(m.detail))) "
+            "AND NOT EXISTS (SELECT 1 FROM claim_support_backfill_marks r "
+            "  WHERE r.claim_version_ref=c.claim_version_id AND r.pass_ref=?) "
             "ORDER BY c.created_at DESC, c.claim_version_id",
-            (*(f"claim:{source}:%" for source in self.claim_sources), PASS_REF),
+            (PASS_REF, *(f"claim:{source}:%" for source in self.claim_sources), PASS_REF,
+             RETRY_PASS_REF),
         ).fetchall()
 
     @staticmethod
@@ -134,7 +154,8 @@ class ClaimSupportBackfill:
     def _mark(self, row: Mapping[str, Any], outcome: str, *, item_key: str | None = None,
               detail: str | None = None) -> None:
         self.verifier.records.mark(
-            claim_version_ref=row["ref"], claim_version_hash=row["hash"], pass_ref=PASS_REF,
+            claim_version_ref=row["ref"], claim_version_hash=row["hash"],
+            pass_ref=RETRY_PASS_REF if row["reopened"] else PASS_REF,
             outcome=outcome, item_key=item_key, detail=detail)
 
     # -- the pass -------------------------------------------------------------

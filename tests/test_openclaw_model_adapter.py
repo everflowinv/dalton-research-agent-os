@@ -621,6 +621,13 @@ class OpenClawModelAdapterTests(unittest.TestCase):
              "research-localization-verifier-provider-output-0.1",
              "research-localization-verifier-provider-output-v0.1.schema.json",
              "research_localization_verifier_provider_output_v0_1", None),
+            # 2026-09-25: the statement-support check, forward and backfill.
+            ("claim_support_verifier", "claim-support-verifier-provider-output-0.1",
+             "claim-support-verifier-provider-output-v0.1.schema.json",
+             "claim_support_verifier_provider_output_v0_1", None),
+            ("claim_support_backfill", "claim-support-verifier-provider-output-0.1",
+             "claim-support-verifier-provider-output-v0.1.schema.json",
+             "claim_support_verifier_provider_output_v0_1", None),
         )
         for index, (purpose, contract, resource, schema_name, locator) in enumerate(cases, 1):
             with self.subTest(purpose=purpose):

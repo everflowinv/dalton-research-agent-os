@@ -338,6 +338,45 @@ class CockpitChainTests(unittest.TestCase):
         self.assertEqual(settlement["actual_micros"], admission["reserved_micros"])
         self.assertGreater(settlement["actual_micros"], 0)
 
+    def test_an_adapter_admission_refusal_settles_zero_and_halts(self) -> None:
+        # 2026-09-25: the claim-support verifier's WorkOrders lacked an output
+        # schema version; the adapter refused each before building the broker
+        # request, and each refusal was settled at the full $0.102 reservation
+        # with no usage entry.  Nothing was sent, so nothing is charged -- and
+        # a contract refusal is no reason to try another model.
+        from dalton_core.openclaw_model_adapter import ModelAdmissionError
+
+        adapter = ChainAdapter({"profile:gpt-6-astra": ModelAdmissionError(
+            "independent verifier WorkOrder lacks the required output schema version")})
+        with self.assertRaisesRegex(CockpitModelError, "contract_violation"):
+            self._model(adapter, policy_version_ref=self.chain_policy).call(
+                purpose="plan", request_id="admission-refused", prompt="draft",
+                mission=self.mission)
+        self.assertEqual(adapter.served, ["profile:gpt-6-astra"])
+        with ThesisImpactBudgetStore(self.root / "budget.sqlite") as ledger:
+            settlements = ledger.connection.execute(
+                "SELECT actual_micros, usage_entry_ref FROM thesis_impact_day_settlements"
+            ).fetchall()
+        self.assertEqual([tuple(row) for row in settlements], [(0, None)])
+
+    def test_an_admission_error_with_post_send_evidence_keeps_the_reservation(self) -> None:
+        from dalton_core.openclaw_model_adapter import ModelAdmissionError
+
+        error = ModelAdmissionError("refused after the frame left")
+        error.post_send_unknown_evidence = object()
+        adapter = ChainAdapter({"profile:gpt-6-astra": error})
+        with self.assertRaises(CockpitModelError):
+            self._model(adapter, policy_version_ref=self.chain_policy).call(
+                purpose="plan", request_id="admission-after-send", prompt="draft",
+                mission=self.mission)
+        with ThesisImpactBudgetStore(self.root / "budget.sqlite") as ledger:
+            admission = json.loads(ledger.connection.execute(
+                "SELECT record_json FROM thesis_impact_day_admissions").fetchone()[0])
+            settlement = json.loads(ledger.connection.execute(
+                "SELECT record_json FROM thesis_impact_day_settlements").fetchone()[0])
+        self.assertEqual(settlement["actual_micros"], admission["reserved_micros"])
+        self.assertGreater(settlement["actual_micros"], 0)
+
     def test_host_completion_failure_falls_back_without_charging_the_day(self) -> None:
         # 2026-09-15: a host-frame failure (the CLI gateway's weekly-limit
         # text, wrapped by the broker) carries no usage and no model content,
@@ -1722,9 +1761,15 @@ class CockpitChainTests(unittest.TestCase):
             ChainAdapter({}), policy_version_ref=self.chain_policy
         ).call(purpose="plan", request_id="argument-contract-producer",
                prompt="draft", mission=self.mission)
+        import dalton_core.claim_support_verification  # noqa: F401 - registers its purposes
+
         cases = (
             ("debate_map_verifier", "debate-map-verifier-provider-output-0.1"),
             ("conviction_call_verifier", "conviction-call-verifier-provider-output-0.1"),
+            # 2026-09-25: without a contract the support check's WorkOrder
+            # carried no output schema version and the adapter refused it.
+            ("claim_support_verifier", "claim-support-verifier-provider-output-0.1"),
+            ("claim_support_backfill", "claim-support-verifier-provider-output-0.1"),
         )
         for purpose, contract in cases:
             with self.subTest(purpose=purpose):
@@ -1741,6 +1786,7 @@ class CockpitChainTests(unittest.TestCase):
                     stored = scheduler.work_order_authority(result["work_order_ref"])
                 metadata = stored["work_order"]["metadata"]
                 self.assertEqual(metadata["verifier_provider_contract"], contract)
+                self.assertEqual(metadata["verifier_output_schema_version"], "0.1")
                 self.assertRegex(
                     metadata["verifier_provider_schema_hash"], r"^[0-9a-f]{64}$"
                 )

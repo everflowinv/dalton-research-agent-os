@@ -71,6 +71,54 @@ DEFAULT_ANNUAL_PROCESS_RESTART_BACKOFF_SECONDS = 2
 DEFAULT_ANNUAL_PROCESS_RESTART_ELAPSED_SECONDS = 7200
 
 
+def mission_issuer_cik(state_dir: Path, company_ref: str) -> str | None:
+    """The SEC CIK this workspace has already resolved for ``company_ref``.
+
+    2026-09-25: the lane CLI knows only its packaged US IT services tuple, so
+    every ws-7d dispatch (AMZN, GOOGL, META, MSFT) died on ``unknown issuer
+    ticker(s)`` while the statement lane, in the same state directory, had
+    already been served AMZN's filings under CIK 0001018724.  Read, in order:
+    the CIKs SEC itself stamped on the statement filings the mission ingested,
+    then the SEC discovery plan the workspace setup resolved from the ticker.
+    Exactly one distinct CIK or nothing: an ambiguous company is not guessed.
+    """
+
+    ciks: set[str] = set()
+    core = Path(state_dir) / "core.sqlite"
+    if core.is_file():
+        try:
+            from .readonly_sqlite import connect_read_only
+
+            connection = connect_read_only(core)
+            try:
+                rows = connection.execute(
+                    "SELECT DISTINCT cik FROM coverage_mission_statement_filings WHERE company_ref=?",
+                    (company_ref,),
+                ).fetchall()
+            finally:
+                connection.close()
+            ciks = {str(row[0]).zfill(10) for row in rows
+                    if row[0] is not None and str(row[0]).isdigit()}
+        except sqlite3.Error:
+            ciks = set()
+    if not ciks:
+        plans = Path(state_dir) / "discovery-plans"
+        if plans.is_dir():
+            from .mission_source_discovery import SEC_SOURCE_REF, load_discovery_plan
+
+            for path in sorted(plans.glob("*.json")):
+                try:
+                    plan = load_discovery_plan(path)
+                except Exception:  # noqa: BLE001 - another lane's plan shape
+                    continue
+                if plan.get("source_ref") != SEC_SOURCE_REF:
+                    continue
+                entry = (plan.get("companies") or {}).get(company_ref)
+                if isinstance(entry, Mapping) and str(entry.get("cik", "")).isdigit():
+                    ciks.add(str(entry["cik"]).zfill(10))
+    return next(iter(ciks)) if len(ciks) == 1 else None
+
+
 class LaneLaunchError(RuntimeError):
     """Launcher configuration or filesystem failure."""
 
@@ -291,6 +339,12 @@ class SecLaneLauncher:
             ]
         for ticker in issuers:
             command += ["--issuer", ticker]
+        if mission_context is not None:
+            # The mission's company, not the packaged tuple: pass the CIK the
+            # workspace already resolved, so any mission's company can run.
+            cik = mission_issuer_cik(self.state_dir, mission_context["company_ref"])
+            if cik is not None:
+                command += ["--issuer-cik", f"{mission_context['ticker']}={cik}"]
         if self.spool_dir is not None:
             command += ["--spool-dir", str(self.spool_dir)]
         if self.user_agent is not None:

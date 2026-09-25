@@ -966,6 +966,34 @@ class ResearchPlanExecutorTests(unittest.TestCase):
         )
         self.assertEqual(harness.staging_counts()["candidate_claim_versions"], 1)
 
+    def test_a_slow_claim_index_does_not_eat_the_scheduler_lease(self) -> None:
+        # 2026-09-25, legacy CTSH 2026Q2: the ClaimIndex projection over the
+        # whole Ledger took longer than the 60-second Scheduler lease.  Built
+        # after the claim, the lease had expired by the time the transport ran
+        # ("attempt is not the current leased attempt").  It is built first.
+        from unittest.mock import patch
+
+        import dalton_core.research_plan_executor as module
+
+        harness = self.harness(suffix="slow-claim-index")
+        original = module.build_claim_index
+        seen: list[str] = []
+
+        def slow(*args, **kwargs):
+            work = harness.scheduler().connection.execute(
+                "SELECT work_order_id FROM scheduler_work_orders ORDER BY rowid LIMIT 1"
+            ).fetchone()[0]
+            seen.append(harness.scheduler().status(work)["state"])
+            harness.clock.advance(90)
+            return original(*args, **kwargs)
+
+        with patch.object(module, "build_claim_index", side_effect=slow):
+            first = harness.executor.run_once(plan_version_ref=harness.plan_wire["id"])
+        self.assertEqual(first["status"], "admitted", first)
+        self.assertEqual(seen[0], "ready")
+        outcomes = harness.run_to_complete()
+        self.assertEqual(outcomes[-1]["status"], "complete")
+
     def test_unapproved_or_unstarted_plan_is_rejected(self) -> None:
         harness = self.harness(suffix="gated")
         created = harness.planner._create_plan(suffix="gated-extra")

@@ -362,10 +362,39 @@ def _sec_permissions() -> dict[str, Any]:
     return copy.deepcopy(PUBLIC_PERMISSIONS)
 
 
+#: The operations of the SEC research surface the company-facts and
+#: filings-index approvals were granted over (governance v1..v3, 2026-08-26 ..
+#: 2026-09-09).  Their fixture evidence is what those approvals bind.
+SEC_RESEARCH_FIXTURE_OPERATIONS = (
+    "list_filings", "list_official_attachments", "get_official_attachment",
+    "read_item", "get_company_facts",
+)
+
+
 def _sec_fixture_hash() -> str:
-    return load_packaged_connector_inventory()["templates"]["sec"][
-        "fixture_manifest_hash"
-    ]
+    """The SEC fixture manifest as the company-facts / filings-index approvals see it.
+
+    2026-09-25: S5 (2026-09-09) added four ownership operations and their
+    fixture cases to the shared ``sec`` template -- each approved on its own,
+    under its own kinds -- and the template's whole-manifest hash moved from
+    8f88e649... to 2990cae1....  Every approval receipt resolved after that
+    stopped matching the descriptors published on 2026-08-26 and 2026-09-09,
+    so each company-facts run failed at lease use with "capability approval
+    changed after lease issuance" (live: CTSH 2026Q2, 06:23), and the filings
+    index would have too.  Adding a separately approved operation must not
+    revoke an existing approval any more than it may widen one (S5's own rule),
+    so this approval binds the manifest projected onto its own operations: a
+    changed fixture for any of those still changes the hash and still needs
+    the owner; a new neighbour does not.  Byte-for-byte, the projection of
+    today's manifest is the manifest the owner approved.
+    """
+
+    manifest = load_packaged_connector_inventory()["fixtures"]["sec"]
+    keep = set(SEC_RESEARCH_FIXTURE_OPERATIONS)
+    body = {key: value for key, value in manifest.items() if key != "content_hash"}
+    body["operations"] = [item for item in manifest["operations"] if item["operation"] in keep]
+    body["cases"] = [item for item in manifest["cases"] if item["operation"] in keep]
+    return content_hash(body)
 
 
 def _web_search_source_hash() -> str:

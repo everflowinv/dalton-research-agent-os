@@ -549,3 +549,101 @@ class SecLaneLauncherTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MissionIssuerCikTests(unittest.TestCase):
+    """2026-09-25: a mission's own companies reach the lane with their CIK.
+
+    ws-7d's six company-facts tickets for AMZN all exited 1 with ``unknown
+    issuer ticker(s): AMZN`` -- the CLI knew only the packaged IT services
+    tuple, and the launcher passed a bare ticker although the statement lane
+    had long since been served AMZN's filings under CIK 0001018724.
+    """
+
+    AMZN = "company:ticker:amzn"
+
+    def _state(self, root: Path, filings=(), plan_companies=None) -> Path:
+        import sqlite3
+
+        state = root / "state"
+        state.mkdir(exist_ok=True)
+        connection = sqlite3.connect(state / "core.sqlite")  # rollback journal: no sidecars
+        connection.execute("CREATE TABLE coverage_mission_statement_filings(company_ref TEXT, cik TEXT)")
+        connection.executemany("INSERT INTO coverage_mission_statement_filings VALUES(?,?)", filings)
+        connection.commit()
+        connection.close()
+        if plan_companies is not None:
+            from dalton_core.mission_source_discovery import validate_discovery_plan
+            from dalton_core.store import content_hash
+
+            body = {
+                "schema_version": "0.4", "id": "discovery-plan:ws:sec-filings:1",
+                "created_at": "2026-09-17T00:00:00.000000+00:00",
+                "mission_ref": "coverage-mission:ws", "source_ref": "source:sec-edgar",
+                "budget": {"max_calls_24h": 50}, "companies": plan_companies,
+                "specs": [{"spec_ref": "quarterly-report-10q", "form": "10-Q", "lookback_days": 400,
+                           "rediscovery_interval_days": 30, "retry_interval_days": 2}],
+            }
+            body["content_hash"] = content_hash(body)
+            validate_discovery_plan(body)
+            (state / "discovery-plans").mkdir()
+            (state / "discovery-plans" / "sec.json").write_text(json.dumps(body), encoding="utf-8")
+        return state
+
+    def test_the_cik_comes_from_the_statement_filings_then_the_sec_plan(self) -> None:
+        from dalton_core.sec_lane_launcher import mission_issuer_cik
+
+        with tempfile.TemporaryDirectory() as directory:
+            state = self._state(Path(directory),
+                                filings=[(self.AMZN, "0001018724"), (self.AMZN, "1018724")])
+            self.assertEqual(mission_issuer_cik(state, self.AMZN), "0001018724")
+            self.assertIsNone(mission_issuer_cik(state, "company:ticker:nope"))
+        with tempfile.TemporaryDirectory() as directory:
+            state = self._state(Path(directory), plan_companies={self.AMZN: {"cik": "0001018724"}})
+            self.assertEqual(mission_issuer_cik(state, self.AMZN), "0001018724")
+        with tempfile.TemporaryDirectory() as directory:
+            # Two different CIKs for one company is not guessed between.
+            state = self._state(Path(directory), filings=[(self.AMZN, "0001018724"), (self.AMZN, "0000000001")])
+            self.assertIsNone(mission_issuer_cik(state, self.AMZN))
+
+    def test_the_launcher_passes_the_mission_companys_cik(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = self._state(root, filings=[(self.AMZN, "0001018724")])
+            staging = root / "review" / "candidate-staging.sqlite"
+            staging.parent.mkdir()
+            gov = root / "sec-gov.json"
+            gov.write_text("{}\n", encoding="utf-8")
+            launcher = SecLaneLauncher(
+                state_dir=state, governance_path=gov, staging_path=staging,
+                governance_loader=lambda _path: _governance(),
+                python_executable=str(_stub_child(root)),
+                mode_args=("--fixture-company-facts", str(root / "facts.json")))
+            self.addCleanup(launcher.close)
+            context = {**_mission_context(), "company_ref": self.AMZN, "ticker": "AMZN",
+                       "mission_ref": "coverage-mission:ws-7d",
+                       "mission_version_ref": "coverage-mission-version:ws-7d:4"}
+            ticket = launcher.start(
+                issuers=["AMZN"], filed_from="2026-06-01", filed_to="2026-10-31",
+                actor_ref=AUTOMATION, expected_accession="0001018724-26-000031",
+                mission_context=context)
+            self.assertEqual(launcher.wait(timeout=30), 0)
+            argv = json.loads((state / "sec-lane-runs" / ticket["id"].split(":", 1)[1]
+                               / "argv.json").read_text())
+            self.assertEqual(argv[argv.index("--issuer") + 1], "AMZN")
+            self.assertEqual(argv[argv.index("--issuer-cik") + 1], "AMZN=0001018724")
+            launcher.close()
+
+    def test_the_cli_runs_a_mission_company_under_the_missions_own_ref(self) -> None:
+        from dalton_core.sec_company_facts_lane import US_IT_SERVICES_ISSUERS
+        from dalton_core.sec_lane_cli import select_issuers
+
+        [amzn] = select_issuers(["AMZN"], {"AMZN": "0001018724"}, {"AMZN": self.AMZN})
+        self.assertEqual((amzn.ticker, amzn.cik, amzn.company_ref), ("AMZN", "0001018724", self.AMZN))
+        # A packaged issuer restated with its own CIK is the packaged issuer,
+        # so the legacy mission's question and plan keys stay where they were.
+        ctsh = next(i for i in US_IT_SERVICES_ISSUERS if i.ticker == "CTSH")
+        self.assertEqual(select_issuers(["CTSH"], {"CTSH": "0001058290"},
+                                        {"CTSH": ctsh.company_ref}), (ctsh,))
+        with self.assertRaises(SystemExit):
+            select_issuers(["AMZN"], {})

@@ -24,7 +24,7 @@ import math
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from .sec_company_facts_lane import (
     DEFAULT_USER_AGENT,
@@ -189,10 +189,28 @@ def load_governance(path: Path):
     return load_connector_governance(path)
 
 
-def select_issuers(tickers: list[str] | None, overrides: dict[str, str]) -> tuple[Issuer, ...]:
+def select_issuers(tickers: list[str] | None, overrides: dict[str, str],
+                   company_refs: Mapping[str, str] | None = None) -> tuple[Issuer, ...]:
+    """The issuers to run: the packaged tuple plus ``--issuer-cik`` overrides.
+
+    ``company_refs`` names the mission company an override stands for.  A
+    mission outside US IT services keys its companies its own way (ws-7d:
+    ``company:ticker:amzn``), and the lane refuses an issuer whose company_ref
+    is not the mission's, so the override takes the mission's ref.  An
+    override that restates a packaged issuer's own CIK keeps that issuer
+    exactly, so the legacy mission's question and plan keys do not move.
+    """
+
     catalog = {issuer.ticker: issuer for issuer in US_IT_SERVICES_ISSUERS}
+    company_refs = company_refs or {}
     for ticker, cik in overrides.items():
-        catalog[ticker] = Issuer(ticker, cik, f"company:sec-cik:{int(cik):010d}", ticker)
+        packaged = catalog.get(ticker)
+        if packaged is not None and int(packaged.cik) == int(cik) and (
+                company_refs.get(ticker) in (None, packaged.company_ref)):
+            continue
+        catalog[ticker] = Issuer(
+            ticker, cik, company_refs.get(ticker) or f"company:sec-cik:{int(cik):010d}",
+            packaged.name if packaged is not None else ticker)
     if not tickers:
         return US_IT_SERVICES_ISSUERS
     missing = [t for t in tickers if t not in catalog]
@@ -300,7 +318,11 @@ def main(argv: list[str] | None = None) -> int:
         if not ticker or not cik.isdigit():
             parser.error("--issuer-cik expects TICKER=CIK")
         overrides[ticker] = cik
-    issuers = select_issuers(args.issuer, overrides)
+    company_refs = (
+        {args.issuer[0]: args.mission_company_ref}
+        if args.mission_company_ref and args.issuer and len(args.issuer) == 1 else {}
+    )
+    issuers = select_issuers(args.issuer, overrides, company_refs)
     governance = (
         RehearsalGovernance(approved_by=args.rehearsal_approved_by)
         if args.rehearsal_approved_by else load_governance(args.governance)

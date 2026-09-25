@@ -41,6 +41,7 @@ from .model_accounting import ModelAccountingError, _route_estimate_micros
 from .model_router import ModelRouter, RoutingPolicyNotFound, independent_families
 from .openclaw_model_adapter import (
     BrokerDefinitelyNotSent,
+    ModelAdmissionError,
     OpenClawModelAdapter,
     OpenClawModelAdapterError,
 )
@@ -160,6 +161,17 @@ _VERIFIER_PROVIDER_CONTRACTS = {
     "research_localization_verifier": (
         "research-localization-verifier-provider-output-0.1",
         "research-localization-verifier-provider-output-v0.1.schema.json"),
+    # 2026-09-25: the statement-support check (e41b4df8, 52393693) always
+    # names its producers, so its route is an independent verifier -- and
+    # without a contract here its WorkOrder carried no output schema version
+    # and the adapter refused every call before sending it ("independent
+    # verifier WorkOrder lacks the required output schema version").
+    "claim_support_verifier": (
+        "claim-support-verifier-provider-output-0.1",
+        "claim-support-verifier-provider-output-v0.1.schema.json"),
+    "claim_support_backfill": (
+        "claim-support-verifier-provider-output-0.1",
+        "claim-support-verifier-provider-output-v0.1.schema.json"),
 }
 
 
@@ -547,7 +559,7 @@ def admit_day_ledger(
     """
 
     try:
-        admission = budget.admit(
+        admission = _admit_through_lock(lambda: budget.admit(
             policy_version_id=policy_version_id,
             day=day,
             work_order_ref=work_order_ref,
@@ -556,7 +568,7 @@ def admit_day_ledger(
             route_decision_ref=route_decision_ref,
             reserved_micros=reserved_micros,
             mission_binding=mission_binding,
-        )
+        ), work_order_ref)
     except ThesisImpactBudgetError as exc:
         return {
             "status": "refused",
@@ -710,6 +722,13 @@ class _ReleaseLeaseOnError:
 
 # _call_once's answer when it freed an attempt whose holder is gone: ask again.
 _RECLAIMED_LEASE = "_reclaimed_orphaned_lease"
+# When this process started running cockpit work -- taken at import, which is
+# no earlier than the process itself, so it can only err towards "younger".
+_PROCESS_STARTED_AT = datetime.now(timezone.utc)
+# How long before this process started an unrecorded lease must have been
+# claimed.  Every holder since the 2026-09-24b release records itself right
+# after its claim (milliseconds); this is the slack for that write.
+_UNRECORDED_LEASE_MARGIN_SECONDS = 5.0
 
 
 def _lock_retry_sleep(seconds: float) -> None:
@@ -798,7 +817,92 @@ def _reclaim_orphaned_lease(scheduler: Scheduler, work: WorkOrder) -> str | None
             print(f"cockpit-model: expired {work.id} attempt {attempt}; its holder "
                   f"is gone ({reason})", file=sys.stderr)
             return f"expired_orphaned_lease:{reason}"
+    if holders.enabled and not holders.holders_for(work.id):
+        return _reclaim_unrecorded_lease(scheduler, work)
     return None
+
+
+def _reclaim_unrecorded_lease(scheduler: Scheduler, work: WorkOrder,
+                              *, now: datetime | None = None,
+                              started_at: datetime | None = None) -> str | None:
+    """Expire a lease claimed by a release that never recorded its holders.
+
+    2026-09-25: the release before 2026-09-24b claimed without writing the
+    holder registry, so a lease it left behind at the release switch could
+    only wait out its whole frozen lifetime -- nothing proved its holder gone.
+    Three facts together prove it here, and each rules out a live holder:
+
+    * no holder record exists for the work at all -- every process of this
+      release records one right after its claim;
+    * the lease was claimed before this process started (with a margin for
+      that record to be written), so it is not a claim racing this one;
+    * it has been held longer than one call of it could take -- the
+      WorkOrder's timeout, the completion grace and the bounded
+      locked-completion retry -- so it is not a claim made in the moments
+      around this process's start.
+
+    The release switch restarts the writer, so the old holder is gone.  The
+    one case this can misjudge is an old-release child still walking a long
+    fallback chain after the switch: its late completion is then refused, as
+    after any expiry, and the work is asked again -- one call's cost, against
+    the lease's whole frozen lifetime (2h10m live) of "already running".
+    """
+
+    clock = getattr(scheduler, "_now", None)
+    now = now or (clock() if callable(clock) else datetime.now(timezone.utc))
+    started_at = started_at or _PROCESS_STARTED_AT
+    event = scheduler.connection.execute(
+        "SELECT * FROM scheduler_attempt_events WHERE work_order_id=? "
+        "ORDER BY event_seq DESC LIMIT 1", (work.id,),
+    ).fetchone()
+    if event is None or event["state"] != "leased" or not event["lease_revision_id"]:
+        return None
+    if str(event["reason"] or "").startswith("operator_model_recovery_reserved:"):
+        return None
+    try:
+        claimed_at = datetime.fromisoformat(str(event["created_at"]))
+    except ValueError:
+        return None
+    if claimed_at.tzinfo is None:
+        return None
+    if claimed_at > started_at - timedelta(seconds=_UNRECORDED_LEASE_MARGIN_SECONDS):
+        return None
+    maximum = work.budget.get("max_seconds")
+    if isinstance(maximum, bool) or not isinstance(maximum, (int, float)) or maximum <= 0:
+        return None
+    longest = float(maximum) + _LEASE_GRACE_SECONDS + LEASE_RELEASE_RETRY_SECONDS
+    if (now - claimed_at).total_seconds() <= longest:
+        return None
+    attempt = int(event["attempt_number"])
+    revision = str(event["lease_revision_id"])
+    outcome = retry_on_sqlite_lock(
+        lambda: scheduler.expire_orphaned_lease(
+            work.id, attempt, revision, reason="unrecorded_before_process_start"),
+        deadline_seconds=LEASE_RELEASE_RETRY_SECONDS, sleep=_lock_retry_sleep)
+    if outcome["status"] == "expired":
+        print(f"cockpit-model: expired {work.id} attempt {attempt}; it was claimed at "
+              f"{claimed_at.isoformat()} by a process that recorded no holder, before "
+              f"this one started", file=sys.stderr)
+        return "expired_orphaned_lease:unrecorded_before_process_start"
+    return None
+
+
+def _admit_through_lock(admit: Callable[[], Any], work_order_ref: str) -> Any:
+    """A day-ledger admission that waits out a locked budget file.
+
+    2026-09-25 06:19: the planner's admission hit the budget database's
+    ``BEGIN IMMEDIATE`` busy timeout (30 s) while another writer held it, and
+    the call failed outright.  An admission is keyed on (WorkOrder, attempt,
+    phase) and replays as the same admission, and a lock error at BEGIN or
+    COMMIT leaves nothing written, so it is retried like the scheduler's own
+    completion, for the same bounded time.
+    """
+
+    return retry_on_sqlite_lock(
+        admit, deadline_seconds=LEASE_RELEASE_RETRY_SECONDS, sleep=_lock_retry_sleep,
+        on_retry=lambda n, exc, wait: print(
+            f"cockpit-model: admitting {work_order_ref} to the day budget hit {exc}; "
+            f"retry {n} in {wait:.2f}s", file=sys.stderr))
 
 
 def _settle_without_losing_the_lease(budget: Any, admission: Mapping[str, Any], *,
@@ -2686,12 +2790,12 @@ class CockpitModel:
                 # under the reservation the first one took out.
                 return {"status": "admitted"}
             try:
-                admission = budget.admit(
+                admission = _admit_through_lock(lambda: budget.admit(
                     policy_version_id=self.config["budget_policy_ref"], day=day,
                     work_order_ref=work.id, attempt_number=attempt, phase="assessment",
                     route_decision_ref=route["id"],
                     reserved_micros=max(ceiling, micros), mission_binding=scope,
-                )
+                ), work.id)
             except ThesisImpactBudgetError as exc:
                 refusal.append(str(exc))
                 return None
@@ -2714,7 +2818,19 @@ class CockpitModel:
                     work, route, profile,
                 )
             except OpenClawModelAdapterError as exc:
-                definitely_not_sent = isinstance(exc, BrokerDefinitelyNotSent)
+                # 2026-09-25: an adapter admission refusal is raised while the
+                # adapter is still building the broker request -- every
+                # ``ModelAdmissionError`` site precedes the exchange -- so the
+                # call was never sent and cost nothing.  Settled at the full
+                # reservation instead, the claim-support check's refusals
+                # (no output schema version) charged $0.102 apiece with no
+                # usage entry.  Nothing is released that could have been
+                # spent: an error that carries post-send evidence is still
+                # charged the reservation.
+                definitely_not_sent = isinstance(exc, BrokerDefinitelyNotSent) or (
+                    isinstance(exc, ModelAdmissionError)
+                    and getattr(exc, "post_send_unknown_evidence", None) is None
+                )
                 spend[route["id"]] = (
                     (0, "not_sent") if definitely_not_sent else (ceiling, "reserved")
                 )

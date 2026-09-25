@@ -131,6 +131,12 @@ _VERIFIER_PROVIDER_CONTRACTS = {
         "research_localization_verifier_provider_output_v0_1",
         frozenset({"research_localization_verifier"}),
     ),
+    "claim-support-verifier-provider-output-0.1": (
+        "0.1",
+        "claim-support-verifier-provider-output-v0.1.schema.json",
+        "claim_support_verifier_provider_output_v0_1",
+        frozenset({"claim_support_verifier", "claim_support_backfill"}),
+    ),
 }
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _BROKER_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")

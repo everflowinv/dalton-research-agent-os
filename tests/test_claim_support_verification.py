@@ -38,6 +38,7 @@ from dalton_core.cockpit_model import CockpitModelError, CockpitModelPoolExhaust
 from dalton_core.document_extraction import DocumentExtractionService
 from dalton_core.document_extraction_cli import run_extraction
 from dalton_core.research_review import HumanReviewAuthority
+from dalton_core.store import content_hash
 from tests.test_document_extraction_automation import AutomationDraftingTests
 
 MISSION = {"id": "coverage-mission-version:fixture:1", "mission_ref": "coverage-mission:fixture",
@@ -269,6 +270,51 @@ class VerifierTests(unittest.TestCase):
         self.clock.now += timedelta(hours=1)
         self.assertEqual(verifier.verify(mission=MISSION, items=items)["status"], "exhausted")
         self.assertEqual(len(model.calls), MAX_ATTEMPTS)
+
+    WIRING = ("CockpitModelError: the cheap chain halted on unclassified_failure: "
+              "profile:gemini-3-8-flash-antigravity (unclassified_failure); broker details: "
+              "profile:gemini-3-8-flash-antigravity [unclassified_failure]: the model call failed: "
+              "independent verifier WorkOrder lacks the required output schema version")
+
+    def test_contract_wiring_failures_defer_hourly_and_never_hold(self) -> None:
+        # 2026-09-25: the live failure, verbatim.  It is about this code, not
+        # the statements; counting it held every batch for a person.
+        model = FakeModel(*[CockpitModelError(self.WIRING.split(": ", 1)[1])] * (MAX_ATTEMPTS + 1),
+                          _reply(("supported", "about_subject", None)))
+        verifier = self.verifier(model)
+        items = [_item(1)]
+        for _ in range(MAX_ATTEMPTS + 1):
+            outcome = verifier.verify(mission=MISSION, items=items)
+            self.assertEqual(outcome["status"], "deferred", outcome)
+            self.assertEqual(outcome["unverifiable"], {})
+            # Still once an hour, not every tick.
+            self.assertEqual(verifier.verify(mission=MISSION, items=items)["status"], "deferred")
+            self.clock.now += timedelta(hours=1)
+        self.assertEqual(len(model.calls), MAX_ATTEMPTS + 1)
+        self.assertEqual(verifier.verify(mission=MISSION, items=items)["status"], "verified")
+
+    def test_a_batch_exhausted_by_contract_wiring_is_asked_again(self) -> None:
+        # What a deploy before this fix could leave behind: three counted
+        # failures, the last of them the wiring refusal.
+        verifier = self.verifier(FakeModel(_reply(("supported", "about_subject", None))))
+        items = [_item(1)]
+        request_key = content_hash(
+            {"purpose": PURPOSE, "items": [items[0]["item_key"]]})[:32]
+        verifier.records.write(
+            "INSERT INTO claim_support_attempts(request_key,purpose,attempts,last_bucket,last_reason,updated_at) "
+            "VALUES(?,?,?,?,?,?)",
+            (request_key, PURPOSE, MAX_ATTEMPTS, "2026-09-24T07", self.WIRING, "2026-09-24T07:00:00+00:00"))
+        self.assertEqual(verifier.verify(mission=MISSION, items=items)["status"], "verified")
+        # A batch exhausted by anything else stays held.
+        other = [_item(2)]
+        other_key = content_hash(
+            {"purpose": PURPOSE, "items": [other[0]["item_key"]]})[:32]
+        verifier.records.write(
+            "INSERT INTO claim_support_attempts(request_key,purpose,attempts,last_bucket,last_reason,updated_at) "
+            "VALUES(?,?,?,?,?,?)",
+            (other_key, PURPOSE, MAX_ATTEMPTS, "2026-09-24T07", "CockpitModelError: provider down",
+             "2026-09-24T07:00:00+00:00"))
+        self.assertEqual(verifier.verify(mission=MISSION, items=other)["status"], "exhausted")
 
     def test_a_partial_answer_keeps_what_was_answered_and_defers_the_rest(self) -> None:
         model = FakeModel(_reply(("supported", "about_subject", None)),

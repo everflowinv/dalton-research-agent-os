@@ -817,8 +817,42 @@ class SecCompanyFactsLane:
 
     # ------------------------------------------------------------------ #
 
-    def ensure_agenda_bindings(self, *, actor_ref: str) -> dict[str, str]:
-        """Create the lane's inactive agenda policy + mandate once (idempotent)."""
+    @staticmethod
+    def agenda_binding_for(issuer: Issuer | None) -> dict[str, Any]:
+        """Which inactive agenda policy + mandate a run for ``issuer`` binds.
+
+        The packaged US IT services issuers share the one ``v3`` binding over
+        the packaged universe, byte-identical to what every legacy run has
+        replayed since 2026-08-26.
+
+        2026-09-25: any other issuer -- a mission's own company, e.g. ws-7d's
+        AMZN -- gets a binding of its own, scoped to that company alone.  A
+        shared binding cannot serve an open-ended set of missions: it is
+        immutable, so the first ws-7d run would have bound "packaged + AMZN"
+        and every later GOOGL/META/MSFT run would have been refused as "a
+        different issuer universe".  A per-company binding never changes.
+        """
+
+        packaged = {item.company_ref for item in US_IT_SERVICES_ISSUERS}
+        if issuer is None or issuer.company_ref in packaged:
+            return {
+                "agenda_policy_version_ref": AGENDA_POLICY_VERSION_ID,
+                "mandate_version_ref": MANDATE_VERSION_ID,
+                "mandate_ref": MANDATE_REF,
+                "key": f"{LANE_SLUG}:{AGENDA_BINDING_VERSION}",
+                "company_refs": sorted(packaged),
+            }
+        tag = content_hash({"company_ref": issuer.company_ref})[:16]
+        return {
+            "agenda_policy_version_ref": f"{AGENDA_POLICY_VERSION_ID}:company:{tag}",
+            "mandate_version_ref": f"{MANDATE_VERSION_ID}:company:{tag}",
+            "mandate_ref": f"{MANDATE_REF}:company:{tag}",
+            "key": f"{LANE_SLUG}:{AGENDA_BINDING_VERSION}:company:{tag}",
+            "company_refs": [issuer.company_ref],
+        }
+
+    def ensure_agenda_bindings(self, *, actor_ref: str, issuer: Issuer | None = None) -> dict[str, str]:
+        """Create the run's inactive agenda policy + mandate once (idempotent)."""
 
         if not actor_ref.startswith(("human:", "automation:")):
             raise LanePreconditionError(
@@ -830,44 +864,43 @@ class SecCompanyFactsLane:
         binding_actor = self.governance.approved_by
         # Bind the coverage universe, not this run's subset: a later run for a
         # different ticker must replay the same idempotent binding request.
-        company_refs = sorted(
-            {issuer.company_ref for issuer in US_IT_SERVICES_ISSUERS}
-            | {issuer.company_ref for issuer in self.issuers}
-        )
+        binding = self.agenda_binding_for(issuer)
         # Fixed effective window keeps the idempotent request hash stable
         # across runs; the lane only ever binds cycles to these exact versions.
         effective_from = "2026-08-01T00:00:00+00:00"
         effective_until = "2036-08-01T00:00:00+00:00"
         try:
-            self._bind_agenda(company_refs, binding_actor, effective_from, effective_until)
+            self._bind_agenda(binding, binding_actor, effective_from, effective_until)
         except AgendaConflict as exc:
             raise LanePreconditionError(
-                f"lane agenda binding {AGENDA_POLICY_VERSION_ID!r} / {MANDATE_VERSION_ID!r} "
+                f"lane agenda binding {binding['agenda_policy_version_ref']!r} / "
+                f"{binding['mandate_version_ref']!r} "
                 "already exists for a different issuer universe or actor; the "
                 f"{AGENDA_BINDING_VERSION} binding is immutable, pass the same "
                 f"issuers/actor or bump AGENDA_BINDING_VERSION: {exc}"
             ) from exc
         return {
-            "agenda_policy_version_ref": AGENDA_POLICY_VERSION_ID,
-            "mandate_version_ref": MANDATE_VERSION_ID,
+            "agenda_policy_version_ref": binding["agenda_policy_version_ref"],
+            "mandate_version_ref": binding["mandate_version_ref"],
         }
 
     def _bind_agenda(
-        self, company_refs: list[str], actor_ref: str, effective_from: str, effective_until: str
+        self, binding: Mapping[str, Any], actor_ref: str, effective_from: str, effective_until: str
     ) -> None:
+        company_refs = list(binding["company_refs"])
         policy_result = self.agenda.create_policy(
             _agenda_policy(company_refs),
             effective_from=effective_from,
             effective_until=effective_until,
             actor_ref=actor_ref,
             activate=False,
-            version_id=AGENDA_POLICY_VERSION_ID,
-            idempotency_key=f"agenda-policy:{LANE_SLUG}:{AGENDA_BINDING_VERSION}",
+            version_id=binding["agenda_policy_version_ref"],
+            idempotency_key=f"agenda-policy:{binding['key']}",
         )
         if policy_result.get("status") == "conflict":
             raise AgendaConflict("agenda policy idempotency conflict")
         mandate_result = self.agenda.create_mandate(
-            MANDATE_REF,
+            binding["mandate_ref"],
             objective="Track reported quarterly revenue for US IT services issuers from SEC company facts",
             scope_refs=company_refs,
             constraints={"mode": "core_hosted_public_read_only_lane"},
@@ -876,8 +909,8 @@ class SecCompanyFactsLane:
             effective_until=effective_until,
             actor_ref=actor_ref,
             activate=False,
-            version_id=MANDATE_VERSION_ID,
-            idempotency_key=f"mandate:{LANE_SLUG}:{AGENDA_BINDING_VERSION}",
+            version_id=binding["mandate_version_ref"],
+            idempotency_key=f"mandate:{binding['key']}",
         )
         if mandate_result.get("status") == "conflict":
             raise AgendaConflict("mandate idempotency conflict")
@@ -942,8 +975,9 @@ class SecCompanyFactsLane:
 
     def _register_question(
         self, issuer: Issuer, *, filed_from: str, filed_to: str, run_key: str,
-        form: str = "10-Q",
+        form: str = "10-Q", binding: Mapping[str, str] | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any], str]:
+        binding = binding or self.agenda_binding_for(issuer)
         identity = self.question_identity(
             issuer, filed_from=filed_from, filed_to=filed_to,
             run_key=run_key, form=form,
@@ -982,8 +1016,8 @@ class SecCompanyFactsLane:
             f"agenda:{LANE_SLUG}:{suffix}",
             perception_snapshot_ref=snapshot["snapshot_id"],
             perception_snapshot_hash=snapshot["content_hash"],
-            mandate_version_ref=MANDATE_VERSION_ID,
-            policy_version_ref=AGENDA_POLICY_VERSION_ID,
+            mandate_version_ref=binding["mandate_version_ref"],
+            policy_version_ref=binding["agenda_policy_version_ref"],
             company_ref=issuer.company_ref,
             actor_ref="core",
             cycle_id=f"agenda-cycle:{LANE_SLUG}:{suffix}",
@@ -1013,7 +1047,7 @@ class SecCompanyFactsLane:
             idempotency_key=f"decision:{LANE_SLUG}:{suffix}",
         )
         record = self.backlog.record_question(
-            mandate_version_ref=MANDATE_VERSION_ID,
+            mandate_version_ref=binding["mandate_version_ref"],
             company_ref=issuer.company_ref,
             question=question_text,
             answer_criteria=ANSWER_CRITERIA,
@@ -1092,10 +1126,10 @@ class SecCompanyFactsLane:
                 raise LanePreconditionError("CoverageMission company binding does not match issuer")
         elif mission_context is not None:
             raise LanePreconditionError("human lane runs must not carry mission automation context")
-        self.ensure_agenda_bindings(actor_ref=actor_ref)
+        binding = self.ensure_agenda_bindings(actor_ref=actor_ref, issuer=issuer)
         decision, record, suffix = self._register_question(
             issuer, filed_from=filed_from, filed_to=filed_to, run_key=run_key,
-            form=form,
+            form=form, binding=binding,
         )
         created = self.plans.create_company_facts_plan(
             question_ref=record["question_ref"],
