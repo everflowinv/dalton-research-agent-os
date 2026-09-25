@@ -46,7 +46,9 @@ from .model_router import (
 )
 from .model_profile_bounds import (
     actual_prompt_bytes,
+    cli_gateway_budget_refusal,
     measured_input_bound,
+    provider_token_ceilings,
 )
 from .model_transport import DEFAULT_BROKER_MAX_FRAME_BYTES
 from .thesis_impact import (
@@ -1176,15 +1178,34 @@ class OpenClawModelAdapter:
         known_io = sum(value or 0 for value in (input_tokens, output_tokens))
         if total_tokens is not None and total_tokens < known_io:
             raise BrokerProtocolError("broker totalTokens is smaller than known input/output")
+        # 2026-09-25: the input the provider read is its uncached input plus
+        # the cache it read and wrote -- the same tokens ``totalTokens``
+        # counts.  A CLI gateway reports 2 uncached input tokens and puts the
+        # whole prompt in the cache, so comparing ``inputTokens`` alone made
+        # the input ceiling a no-op while the total, which does include the
+        # cache *and* the gateway's hidden prefix, was held to a ceiling sized
+        # for the prompt alone.  Both are now measured the same way, and the
+        # ceilings carry the gateway prefix (``provider_token_ceilings``).
+        input_parts = [
+            usage.get(key) for key in ("inputTokens", "cacheReadTokens", "cacheWriteTokens")
+        ]
+        provider_input = (
+            None if all(value is None for value in input_parts)
+            else sum(value or 0 for value in input_parts)
+        )
         checks = (
-            (input_tokens, "max_input_tokens"),
+            (provider_input, "max_input_tokens"),
             (output_tokens, "max_output_tokens"),
             (total_tokens, "max_total_tokens"),
+        )
+        ceilings = (
+            (provider_token_ceilings(work.budget, profile), "WorkOrder"),
+            (provider_token_ceilings(profile["limits"], profile), "profile"),
         )
         for used, limit_name in checks:
             if used is None:
                 continue
-            for limits, source in ((work.budget, "WorkOrder"), (profile["limits"], "profile")):
+            for limits, source in ceilings:
                 if used > limits[limit_name]:
                     raise BrokerBudgetExceeded(
                         f"provider {limit_name} telemetry exceeds {source} budget"
@@ -1379,6 +1400,21 @@ class OpenClawModelAdapter:
         if not _SAFE_MODEL_RE.fullmatch(exact_model):
             raise ModelAdmissionError("selected exact provider/model is not broker-safe")
         max_tokens, _ = _budget(work, profile)
+        if not replay_only:
+            # A CLI-gateway call is sized with its hidden prefix before it is
+            # sent, against the ceilings its telemetry will be held to after:
+            # a call that cannot fit is refused here, for free, rather than
+            # paid for and then refused.  The router already skips such a
+            # profile; this is the final local preflight.
+            try:
+                refusal = cli_gateway_budget_refusal(
+                    profile, work.question, max_tokens,
+                    {"WorkOrder": work.budget, "profile": profile["limits"]},
+                )
+            except (TypeError, ValueError) as exc:
+                raise ModelAdmissionError("model prompt is not valid UTF-8") from exc
+            if refusal is not None:
+                raise ModelAdmissionError(refusal)
         timeout = self._timeout_seconds
         for key in ("max_seconds", "time_limit"):
             if key in work.budget:

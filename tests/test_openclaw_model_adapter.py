@@ -11,6 +11,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 from importlib import resources
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1094,6 +1095,122 @@ class OpenClawModelAdapterTests(unittest.TestCase):
             len(broker.requests[0]["prompt"].encode("utf-8")), 169_998
         )
         self.assertEqual(result.status, "succeeded")
+
+    def _claude_gateway_case(self, suffix: str, prompt: str, *, route: bool = True):
+        """The live mission-document draft shape on the claude CLI gateway."""
+
+        profile_wire = endpoint_profile()
+        profile_wire.update({
+            "profile_version_ref": "model-profile-version:claude-gateway:1",
+            "id": "profile:claude-opus-5",
+            "provider": "claude-cli-gateway",
+            "model": "claude-opus-5-5",
+            "family": "anthropic-claude-5",
+            "credential_slot_ref": "credential-slot:openclaw:claude-cli-gateway",
+            "context": {"max_context_tokens": 1_000_000, "max_output_tokens": 128_000},
+            "limits": {"max_input_tokens": 872_000, "max_output_tokens": 128_000,
+                       "max_total_tokens": 1_000_000, "max_cost_usd": 250.0},
+            "cost": {"currency": "USD", "input_per_million_usd": 4.0,
+                     "output_per_million_usd": 20.0},
+        })
+        if not getattr(self, "_claude_gateway_registered", False):
+            self._claude_gateway_registered = True
+            self.router.register_profile(profile_wire)
+            policy = routing_policy()
+            policy.update({
+                "policy_version_ref": "model-routing-policy-version:claude-gateway:1",
+                "id": "model-routing-policy:claude-gateway",
+                "filters": {**policy["filters"],
+                            "allowed_profile_ids": [profile_wire["id"]],
+                            "allowed_providers": [profile_wire["provider"]]},
+            })
+            self.router.register_policy(policy)
+        wire = work_order().to_dict()
+        wire.update({
+            "id": f"work:claude-gateway-{suffix}", "question": prompt,
+            "idempotency_key": f"work-key:claude-gateway-{suffix}",
+            # Exactly the mission document draft budget: 64,000 + 4,096.
+            "budget": {"max_input_tokens": 64_000, "max_output_tokens": 4_096,
+                       "max_total_tokens": 68_096, "max_cost_usd": 1.0},
+        })
+        work = WorkOrder.from_dict(wire)
+        decision = self.router.route(
+            work, attempt_number=1, capability="research",
+            policy_version_ref="model-routing-policy-version:claude-gateway:1",
+            credential_slot_refs=[profile_wire["credential_slot_ref"]],
+            required_modalities=["text"], required_context_tokens=70_000,
+            estimated_input_tokens=40_000, estimated_output_tokens=4_096,
+            idempotency_key=f"route-key:claude-gateway-{suffix}",
+        )["decision"]
+        return work, decision, self.router.get_profile(profile_wire["profile_version_ref"])
+
+    @staticmethod
+    def _claude_gateway_response(usage):
+        def respond(request):
+            response = success_response(request, usage=usage,
+                                        cost={"available": True, "usd": 0.54})
+            response.update({"provider": "claude-cli-gateway", "model": "claude-opus-5-5",
+                             "canonicalModel": "claude-cli-gateway/claude-opus-5-5"})
+            response.pop("contentHash")
+            return seal(response)
+        return respond
+
+    def test_cli_gateway_prefix_counts_against_budget_plus_prefix(self) -> None:
+        """Live d55cd04d: 69,627 provider tokens against a 68,096 total, refused.
+
+        The claude gateway wraps the prompt in ~27,300 tokens of its own and
+        reports it as cache.  The telemetry is held to the WorkOrder budget
+        plus that prefix, measured the same way on input and total.
+        """
+
+        work, route, profile = self._claude_gateway_case("live", "x" * 122_918)
+        self.assertEqual(route["outcome"], "selected")
+        live = {"inputTokens": 2, "outputTokens": 803, "cacheReadTokens": 2_991,
+                "cacheWriteTokens": 65_831, "totalTokens": 69_627}
+        (_, result), broker = self.run_with(
+            self._claude_gateway_response(live), work=work, route=route, profile=profile)
+        broker.close()
+        self.assertEqual(result.status, "succeeded")
+
+        # Input counts the cache: 2 uncached tokens no longer hide 96,502.
+        over_input = {"inputTokens": 2, "outputTokens": 10, "cacheReadTokens": 0,
+                      "cacheWriteTokens": 96_500, "totalTokens": 96_512}
+        over_total = {"inputTokens": 2, "outputTokens": 4_000, "cacheReadTokens": 2_991,
+                      "cacheWriteTokens": 93_500, "totalTokens": 100_493}
+        for usage in (over_input, over_total):
+            with self.subTest(usage=usage):
+                (_, refused), broker = self.run_with(
+                    self._claude_gateway_response(usage), work=work, route=route,
+                    profile=profile)
+                broker.close()
+                self.assertEqual(refused.status, "failed")
+                self.assertEqual(refused.error["code"], "PROVIDER_BUDGET_EXCEEDED")
+
+    def test_cli_gateway_call_that_cannot_fit_is_refused_before_it_is_paid(self) -> None:
+        # 130,000 bytes -> 65,000 prompt tokens + 32,000 prefix > 64,000 + 32,000.
+        work, route, _profile = self._claude_gateway_case("big", "x" * 130_000)
+        self.assertNotEqual(route["outcome"], "selected")
+        self.assertIn("cli_gateway_token_budget_exceeded", route["rejection_reasons"])
+        # The adapter holds the same line on its own if a route ever gets through.
+        with patch("dalton_core.model_router.cli_gateway_budget_refusal",
+                   return_value=None):
+            work, route, profile = self._claude_gateway_case("backstop", "y" * 130_000)
+        self.assertEqual(route["outcome"], "selected")
+        sent: list[bool] = []
+        with self.assertRaisesRegex(ModelAdmissionError, "gateway prefix"):
+            self.run_with(self._claude_gateway_response(None), work=work, route=route,
+                          profile=profile, before_send=lambda: sent.append(True))
+        self.assertEqual(sent, [])
+
+    def test_non_gateway_profiles_are_not_given_the_gateway_prefix(self) -> None:
+        # 1,001 cached-plus-uncached input tokens break a 1,000-token budget.
+        usage = {"inputTokens": 1, "outputTokens": 1, "cacheReadTokens": 1_000,
+                 "cacheWriteTokens": None, "totalTokens": 1_002}
+        (_, result), broker = self.run_with(
+            lambda request: success_response(request, usage=usage))
+        broker.close()
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.error["code"], "PROVIDER_BUDGET_EXCEEDED")
 
     def test_timeout_is_hard_wall_clock_boundary(self) -> None:
         def slow(_request: dict[str, Any]):
