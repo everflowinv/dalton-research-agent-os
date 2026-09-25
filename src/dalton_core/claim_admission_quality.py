@@ -16,6 +16,9 @@ at the statement's own words and at whether the span names the company:
   outcome of a period not yet over (:func:`temporal_impossibility`).  A
   forecast stated as a forecast -- in the statement *and* in the span -- is
   admitted as one.
+* **Statements about the system itself** -- "figures 抽取为零应解释为未执行"
+  is a note about Dalton's own pipeline, not about the company
+  (:func:`statement_is_system_meta`).
 * **Relative years.**  "declined to forecast its spending for the following
   year" filed with period 2026 from a page published in August 2026.  A
   relative year is anchored to the document's *published* date and written
@@ -462,15 +465,51 @@ def anchor_relative_years(
     return result
 
 
+# -- statements about the system ---------------------------------------------
+
+#: What only a note about Dalton's own extraction pipeline says.  Each
+#: pattern names the pipeline's own objects (its figures pass, an extraction
+#: result, a lane, a work order); ordinary business prose ("oil extraction",
+#: "the deal pipeline") does not match.
+_SYSTEM_META_RES = (
+    re.compile(r"(?i)\bfigures?\s*(?:抽取|提取|extraction|pass|lane)"),
+    re.compile(r"(?:数字|数值|图表|figures?)\s*(?:抽取|提取)"),
+    re.compile(r"(?:抽取|提取)(?:结果|流程|任务|步骤|尚未|未执行|为零|为空)"),
+    re.compile(r"(?i)\bextraction\s+(?:result|output|pass|lane|run|job|step|pipeline)s?\b"),
+    re.compile(r"(?i)\b(?:numeric|figure|metric)\s+(?:extraction\s+)?(?:pass|lane)\b"),
+    re.compile(r"(?i)\b(?:was|were|has|have|is|are)\s+(?:not|never)\s+(?:yet\s+)?(?:been\s+)?"
+               r"(?:extracted|parsed|ingested)\b"),
+    re.compile(r"(?i)\b(?:contains?|包含)\s+extractable\b|可提取的(?:财务)?(?:数字|数据|数值)"),
+    re.compile(r"本系统|本流程|抽取器|解析器|流水线"),
+)
+
+
+def statement_is_system_meta(statement: Any) -> bool:
+    """True when the statement is about Dalton's own process, not a company."""
+
+    if not isinstance(statement, str):
+        return False
+    return any(pattern.search(statement) for pattern in _SYSTEM_META_RES)
+
+
+SYSTEM_META_REJECTION = (
+    "document qualitative rule admits no statement about the research system's own "
+    "process (extraction, figures pass, pipeline state); that is not a finding about "
+    "the company"
+)
+
+
 __all__ = [
     "FORECAST_RE",
     "MIN_NUMERIC_PARAGRAPHS",
     "RULE_REF",
     "STATISTICS_TITLE_RE",
+    "SYSTEM_META_REJECTION",
     "anchor_relative_years",
     "document_title",
     "period_intervals",
     "relative_year_mentions",
+    "statement_is_system_meta",
     "statistics_compilation_evidence",
     "statistics_compilation_hold",
     "temporal_impossibility",

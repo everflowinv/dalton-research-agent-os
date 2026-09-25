@@ -4806,7 +4806,14 @@ class MissionDocumentResearchExecutor:
                 idempotency_key=(
                     f"mission-document-research-candidate:{admission['id']}"))["claim"]
             reason = document_qualitative_content_rejection(claim)
-            if reason is not None:
+            # A candidate promoted before a content rule was added keeps its
+            # promotion: the rule decides what enters, and a replay of an
+            # admission already in the Ledger must converge on the same record
+            # (a wrong one is retired through the retirement authority).
+            promoted = self.connection.execute(
+                "SELECT 1 FROM mission_document_research_promotions WHERE admission_ref=?",
+                (admission["id"],)).fetchone()
+            if reason is not None and promoted is None:
                 return self._candidate_rejection(admission, records, outcome, reason)
         return promote_document_candidate(self, admission, works, records, outcome)
 
