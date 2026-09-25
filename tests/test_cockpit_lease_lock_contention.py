@@ -270,6 +270,27 @@ class CockpitLeaseLockContentionTests(unittest.TestCase):
         _, status = self._history(work_id)
         self.assertEqual(status["state"], "leased")
 
+    def test_a_locked_budget_ledger_is_waited_out_on_admission(self) -> None:
+        # 2026-09-25 06:19: the planner's admission timed out at BEGIN
+        # IMMEDIATE on the budget file and the call failed without a retry.
+        from dalton_core import cockpit_model
+        from dalton_core.thesis_impact_budget import ThesisImpactBudgetStore
+
+        original = ThesisImpactBudgetStore.admit
+        calls = []
+
+        def locked_once(store, *args, **kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                raise sqlite3.OperationalError("database is locked")
+            return original(store, *args, **kwargs)
+
+        with patch.object(ThesisImpactBudgetStore, "admit", locked_once), \
+                patch.object(cockpit_model, "_lock_retry_sleep", lambda _s: None):
+            answer = self._ask(fallback.ChainAdapter({}), request_id="budget-locked")
+        self.assertIn("answered by", answer["text"])
+        self.assertEqual(len(calls), 2)
+
     def test_the_abandon_envelope_names_the_locked_database(self) -> None:
         from dalton_core import model_router
 

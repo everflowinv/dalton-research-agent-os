@@ -559,7 +559,7 @@ def admit_day_ledger(
     """
 
     try:
-        admission = budget.admit(
+        admission = _admit_through_lock(lambda: budget.admit(
             policy_version_id=policy_version_id,
             day=day,
             work_order_ref=work_order_ref,
@@ -568,7 +568,7 @@ def admit_day_ledger(
             route_decision_ref=route_decision_ref,
             reserved_micros=reserved_micros,
             mission_binding=mission_binding,
-        )
+        ), work_order_ref)
     except ThesisImpactBudgetError as exc:
         return {
             "status": "refused",
@@ -885,6 +885,24 @@ def _reclaim_unrecorded_lease(scheduler: Scheduler, work: WorkOrder,
               f"this one started", file=sys.stderr)
         return "expired_orphaned_lease:unrecorded_before_process_start"
     return None
+
+
+def _admit_through_lock(admit: Callable[[], Any], work_order_ref: str) -> Any:
+    """A day-ledger admission that waits out a locked budget file.
+
+    2026-09-25 06:19: the planner's admission hit the budget database's
+    ``BEGIN IMMEDIATE`` busy timeout (30 s) while another writer held it, and
+    the call failed outright.  An admission is keyed on (WorkOrder, attempt,
+    phase) and replays as the same admission, and a lock error at BEGIN or
+    COMMIT leaves nothing written, so it is retried like the scheduler's own
+    completion, for the same bounded time.
+    """
+
+    return retry_on_sqlite_lock(
+        admit, deadline_seconds=LEASE_RELEASE_RETRY_SECONDS, sleep=_lock_retry_sleep,
+        on_retry=lambda n, exc, wait: print(
+            f"cockpit-model: admitting {work_order_ref} to the day budget hit {exc}; "
+            f"retry {n} in {wait:.2f}s", file=sys.stderr))
 
 
 def _settle_without_losing_the_lease(budget: Any, admission: Mapping[str, Any], *,
@@ -2772,12 +2790,12 @@ class CockpitModel:
                 # under the reservation the first one took out.
                 return {"status": "admitted"}
             try:
-                admission = budget.admit(
+                admission = _admit_through_lock(lambda: budget.admit(
                     policy_version_id=self.config["budget_policy_ref"], day=day,
                     work_order_ref=work.id, attempt_number=attempt, phase="assessment",
                     route_decision_ref=route["id"],
                     reserved_micros=max(ceiling, micros), mission_binding=scope,
-                )
+                ), work.id)
             except ThesisImpactBudgetError as exc:
                 refusal.append(str(exc))
                 return None
