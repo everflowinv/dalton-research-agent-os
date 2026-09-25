@@ -517,7 +517,14 @@ class IndustryResearchAuthority:
                 if claim.get("metric_or_aspect") != metric_ref:
                     raise IndustryResearchConflict("claim metric does not match evidence binding")
                 if claim.get("subject_ref") not in coverage_refs | {request["industry_ref"]}:
-                    raise IndustryResearchConflict("claim subject is outside the coverage universe")
+                    # A retired Claim recorded as evidence about this very
+                    # industry is the industry's, whoever it was filed under.
+                    from .claim_industry_reattribution import reattributed_claim_version_refs
+
+                    if binding["claim_version_ref"] not in reattributed_claim_version_refs(
+                            cur.connection, request["industry_ref"]):
+                        raise IndustryResearchConflict(
+                            "claim subject is outside the coverage universe")
                 for relation in binding["relation_refs"]:
                     self._relation(cur, relation["ref"], relation["hash"], binding["claim_version_ref"])
                 bound_claims[binding["claim_version_ref"]] = claim

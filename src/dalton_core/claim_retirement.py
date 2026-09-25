@@ -304,7 +304,11 @@ def retirement_state_probe(connection: Any) -> str:
     """
 
     parts = []
-    for table in ("claim_retirement_decisions", "claim_retirement_reinstatements"):
+    # 2026-09-25: an industry reattribution moves what an industry subject
+    # reads (``company_research_view`` answers an industry with them), so the
+    # lanes' change keys see it too.
+    for table in ("claim_retirement_decisions", "claim_retirement_reinstatements",
+                  "claim_industry_reattributions"):
         if not _table_exists(connection, table):
             parts.append(f"{table}:absent")
             continue

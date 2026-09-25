@@ -17,6 +17,7 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 from dalton_core.claim_industry_reattribution import (
@@ -31,7 +32,7 @@ from dalton_core.claim_industry_reattribution import (
     run_backfill,
 )
 from dalton_core.claim_industry_rule import judge, main_clause
-from dalton_core.claim_retirement import retired_claim_version_refs
+from dalton_core.claim_retirement import retired_claim_version_refs, retirement_state_probe
 from tests.test_claim_retirement import ACN, AUTOMATION, EPAM, OWNER, ClaimRetirementHarness
 
 CTSH = "company:sec-cik:0001058290"
@@ -352,6 +353,70 @@ class BackfillTests(_Reattribution):
             summary = driver.reattribute_industry_findings(principal=None, dry_run=True)
         self.assertEqual([item["claim_version_ref"] for item in summary["would_reattribute"]],
                          [self.survey["ref"]])
+
+
+class ReadPathTests(_Reattribution):
+    """Industry-level reads pick it up; company-level reads never do."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.survey = self.retired()
+        self.reattributions.reattribute(claim_version_ref=self.survey["ref"],
+                                        actor_ref=OWNER, rationale="r")
+
+    def test_the_research_query_answers_the_industry_not_the_company(self) -> None:
+        from dalton_core.company_research_view import query_company_research
+
+        rows = query_company_research(self.store, company_ref=INDUSTRY, exclude_retired=True)
+        self.assertEqual([row["claim_version_ref"] for row in rows], [self.survey["ref"]])
+        self.assertEqual(rows[0]["subject_ref"], CTSH)  # the frozen subject stays
+        self.assertEqual(rows[0]["attributed_subject_ref"], INDUSTRY)
+        self.assertTrue(rows[0]["industry_reattribution_ref"].startswith(
+            "claim-industry-reattribution:"))
+        company = query_company_research(self.store, company_ref=CTSH, exclude_retired=True)
+        self.assertEqual(company, [])
+        # Without the filter a company's projection is exactly what it was:
+        # its own rows, no industry markers.
+        unfiltered = query_company_research(self.store, company_ref=CTSH)
+        self.assertTrue(all("attributed_subject_ref" not in row for row in unfiltered))
+
+    def test_the_debate_map_and_the_framework_read_it_as_the_industrys(self) -> None:
+        from dalton_core.debate_map_draft import subject_claim_refs
+
+        self.assertEqual(subject_claim_refs(self.store, INDUSTRY), [self.survey["ref"]])
+        self.assertEqual(subject_claim_refs(self.store, CTSH), [])
+
+    def test_the_evidence_refresh_takes_it_under_the_industry_only(self) -> None:
+        from dalton_core.industry_evidence_refresh import _candidates
+
+        when = datetime(2026, 9, 30, tzinfo=timezone.utc)
+        found = _candidates(self.store.connection, metric_refs={"aspect:test"},
+                            subject_refs={INDUSTRY, CTSH}, scheduled_for=when,
+                            window_days=365, industry_ref=INDUSTRY)
+        self.assertEqual([(item["claim_version_ref"], item["subject_ref"]) for item in found],
+                         [(self.survey["ref"], INDUSTRY)])
+        company_only = _candidates(self.store.connection, metric_refs={"aspect:test"},
+                                   subject_refs={CTSH}, scheduled_for=when, window_days=365,
+                                   industry_ref=INDUSTRY)
+        self.assertEqual(company_only, [])
+        no_industry = _candidates(self.store.connection, metric_refs={"aspect:test"},
+                                  subject_refs={INDUSTRY, CTSH}, scheduled_for=when,
+                                  window_days=365)
+        self.assertEqual(no_industry, [])
+
+    def test_the_change_keys_move_on_a_reattribution(self) -> None:
+        other = self.retired(statement=SURVEY.replace("2026", "2028"),
+                             source=SURVEY_DOC.replace("2026", "2028"))
+        probe = retirement_state_probe(self.store.connection)
+        self.reattributions.reattribute(claim_version_ref=other["ref"], actor_ref=OWNER,
+                                        rationale="r")
+        self.assertNotEqual(probe, retirement_state_probe(self.store.connection))
+
+    def test_a_core_without_the_table_reads_as_nothing(self) -> None:
+        connection = sqlite3.connect(":memory:")
+        self.addCleanup(connection.close)
+        self.assertEqual(industry_reattributions(connection), {})
+        self.assertIn("absent", reattribution_state_probe(connection))
 
 
 class DoorTests(unittest.TestCase):

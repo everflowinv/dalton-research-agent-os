@@ -154,13 +154,22 @@ def _claim_rows(
         for row in snapshot.get("claim_versions") or []
     }
     connection = store.connection
+    # 2026-09-25: an industry is also answered by the retired Claims recorded
+    # as evidence about it (``claim_industry_reattribution``).  Only an
+    # industry ref ever reads them, so a company never gets them back.
+    attributed: dict[str, dict[str, str]] = {}
+    if isinstance(company_ref, str) and company_ref.startswith("industry:"):
+        from .claim_industry_reattribution import industry_reattributions
+
+        attributed = industry_reattributions(connection, company_ref)
     selected: list[tuple[str, str, dict[str, Any]]] = []
     for claim_ref, version_ref in sorted(latest.items()):
         row = versions.get(version_ref)
         if row is None:
             raise CompanyResearchViewError("ledger snapshot lost a claim version")
         claim = row["claim"]
-        if company_ref is not None and claim.get("subject_ref") != company_ref:
+        if (company_ref is not None and claim.get("subject_ref") != company_ref
+                and version_ref not in attributed):
             continue
         selected.append((claim_ref, version_ref, row))
 
@@ -215,7 +224,26 @@ def _claim_rows(
             "source_types": sorted(set(source_types)),
             "created_at": row.get("created_at"),
         })
+        if version_ref in attributed and claim.get("subject_ref") != company_ref:
+            # The frozen subject stays what it is; these two say under which
+            # industry the Claim is read, and by which record.
+            rows[-1]["attributed_subject_ref"] = company_ref
+            rows[-1]["industry_reattribution_ref"] = attributed[version_ref]["reattribution_ref"]
     return rows
+
+
+def _rescoped_group(row: Mapping[str, Any]) -> str:
+    """An industry-level dedupe group: the same sentence under the industry.
+
+    ``claim_index_tagging.dedupe_group_key`` for prose is "the same subject
+    saying the same sentence"; read under an industry, the subject is the
+    industry, so the same survey finding filed under CTSH and under EPAM is
+    one fact here.
+    """
+
+    text = " ".join(str(row.get("normalized_statement") or "").lower().split())
+    return "industry-reattribution-group:" + content_hash(
+        {"subject": row.get("attributed_subject_ref"), "statement": text})[:32]
 
 
 def _thesis_id_for(connection: Any, company_ref: str) -> str | None:
@@ -493,8 +521,16 @@ def annotate_with_index(
     canonical_only: bool = True,
     entries: Mapping[str, Mapping[str, Any]] | None = None,
     retired_refs: set[str] | frozenset[str] = frozenset(),
+    rescoped: Mapping[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Join P12b index entries onto claim rows and filter by them.
+
+    ``rescoped`` (2026-09-25) maps the claim version refs read under an
+    industry they were reattributed to onto an industry-level dedupe group.
+    Their index entry was written for the company they are filed under, so
+    here their aspect is the industry aspect (the rule that tags every
+    industry-subject Claim) and one copy per group is canonical, whatever the
+    company-level group said.
 
     ``retired_refs`` are Claims the caller is about to drop as retired.  When
     one of them is the canonical copy of its dedupe group, ``canonical_only``
@@ -575,6 +611,28 @@ def annotate_with_index(
             if group not in best or key < best[group][0]:
                 best[group] = (key, row[ref_key])
         stand_in = {group: ref for group, (_key, ref) in best.items()}
+    if rescoped:
+        from .claim_aspect_vocabulary import INDUSTRY_ASPECT
+
+        best_rescoped: dict[str, tuple[tuple[Any, ...], str]] = {}
+        for row in rows:
+            ref = row[ref_key]
+            entry = entries.get(ref)
+            if ref not in rescoped or entry is None or ref in retired_refs:
+                continue
+            key = canonical_order_key(entry)
+            group = rescoped[ref]
+            if group not in best_rescoped or key < best_rescoped[group][0]:
+                best_rescoped[group] = (key, ref)
+        entries = dict(entries)
+        for ref, group in rescoped.items():
+            entry = entries.get(ref)
+            if entry is None:
+                continue
+            entries[ref] = {
+                **entry, "aspect": INDUSTRY_ASPECT, "dedupe_group_ref": group,
+                "is_canonical": best_rescoped.get(group, (None, None))[1] == ref,
+            }
     result: list[dict[str, Any]] = []
     for row in rows:
         entry = entries.get(row[ref_key])
@@ -701,10 +759,19 @@ def query_company_research(
     # Read before the index join, so a retired canonical copy can hand its
     # place to a live duplicate instead of taking the fact with it.
     retired = retired_claim_version_refs(store.connection) if exclude_retired else set()
+    # A Claim reattributed to this industry is retired at company level and
+    # live here; it is read as the industry's, so its aspect is the industry
+    # aspect and its duplicates are the industry's duplicates.
+    rescoped = {
+        str(row["claim_version_ref"]): _rescoped_group(row)
+        for row in filtered if row.get("attributed_subject_ref") == company_ref
+    } if company_ref is not None else {}
+    if rescoped:
+        retired = retired - set(rescoped)
     joined = annotate_with_index(
         store.connection, filtered, index_aspect=index_aspect,
         as_of_from=as_of_from, as_of_to=as_of_to, importance=importance,
-        canonical_only=canonical_only, retired_refs=retired,
+        canonical_only=canonical_only, retired_refs=retired, rescoped=rescoped,
         # The context's rows are exactly what ``filtered`` was drawn from, so
         # its index read covers them and is shared by every aspect asked of
         # the same context.
