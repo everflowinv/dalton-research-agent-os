@@ -273,7 +273,7 @@ class MissionDocumentResearchLauncher(LaneChildLauncher):
 
         from .lane_reentry_claim import (
             claim_consumed, consume_grant, marker, read_claim,
-            record_systemic_completion,
+            record_systemic_completion, refund_systemic_grant,
         )
 
         if read_claim(self, claim_ticket_ref, authorization) is None:
@@ -286,7 +286,10 @@ class MissionDocumentResearchLauncher(LaneChildLauncher):
             # write it down before spending it.
             record_systemic_completion(self, claim_ticket_ref, authorization)
             return None
-        if consume_grant(self, admission_ref, marker(authorization)) is None:
+        # A grant whose run died on a systemic condition bought nothing; it is
+        # honoured once more before a fresh grant is spent on the same fault.
+        if (refund_systemic_grant(self, admission_ref, claim_ticket_ref) is None
+                and consume_grant(self, admission_ref, marker(authorization)) is None):
             raise LaneChildRejected("controlled reentry was already attempted")
         return None
 

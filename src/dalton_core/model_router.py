@@ -24,7 +24,9 @@ from typing import Any, Iterator
 
 from .contracts import WorkOrder
 from .model_profile_bounds import (
+    CLI_GATEWAY_BUDGET_SKIP_REASON,
     INPUT_BOUND_SKIP_REASON,
+    cli_gateway_budget_refusal,
     exceeds_input_bound,
 )
 from .model_profile_health import COOLDOWN_SKIP_REASON
@@ -2351,6 +2353,21 @@ class ModelRouter:
                     # ceiling a live gateway has already proved.
                     reasons.append(INPUT_BOUND_SKIP_REASON)
                 limits = profile["limits"]
+                if budget and isinstance(wire.get("question"), str):
+                    # A CLI gateway adds its own system prompt to every call,
+                    # and its telemetry is held to the WorkOrder budget plus
+                    # exactly that prefix.  Size the call the same way here so
+                    # a call that cannot fit falls through to the next model
+                    # instead of being paid for and then refused.
+                    try:
+                        gateway_refusal = cli_gateway_budget_refusal(
+                            profile, wire["question"], estimated_output_tokens,
+                            {"WorkOrder": budget, "profile": limits},
+                        )
+                    except (TypeError, ValueError):
+                        gateway_refusal = None
+                    if gateway_refusal is not None:
+                        reasons.append(CLI_GATEWAY_BUDGET_SKIP_REASON)
                 if estimated_input_tokens > limits["max_input_tokens"]:
                     reasons.append("profile_input_limit_exceeded")
                 if estimated_output_tokens > limits["max_output_tokens"]:

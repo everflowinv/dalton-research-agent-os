@@ -157,6 +157,27 @@ class AlwaysUnprovedSendAdapter(CountingFakeAdapter):
         raise BrokerConnectionError("socket failed after an unknown boundary")
 
 
+class ProviderBudgetExceededAdapter(CountingFakeAdapter):
+    """Every call is sent, charged, and then refused on its token telemetry.
+
+    Live, 2026-09-25: a claude-cli-gateway draft reported 65,831 cache-write +
+    2,991 cache-read + 2 input + 803 output tokens against a 68,096-token
+    WorkOrder total, and the adapter refused the paid result with
+    ``PROVIDER_BUDGET_EXCEEDED``.
+    """
+
+    def execute(self, work, route, selected):
+        from dataclasses import replace
+        from tests.test_transcript_polish_model_worker import FakeAdapter
+        self.calls += 1
+        invocation, result = FakeAdapter.execute(self, work, route, selected)
+        return invocation, replace(
+            result, status="failed", outputs={},
+            error={"code": "PROVIDER_BUDGET_EXCEEDED",
+                   "message": "provider max_total_tokens telemetry exceeds WorkOrder budget",
+                   "source": "openclaw-model-adapter"})
+
+
 class RouteBoundCountingFakeAdapter(CountingFakeAdapter):
     """Keep the shared fixture adapter's invocation faithful to the selected route."""
 
@@ -745,6 +766,48 @@ class MissionDocumentResearchTests(unittest.TestCase):
             verifier_worker=executor.verifier_worker,
         )
         self.assertEqual(works[1]["id"], old_draft_ref)
+
+    def test_model_roll_after_staging_reuses_the_finished_staging_stage(self):
+        """Live 2026-09-25: ``staging completion did not converge`` on re-entry.
+
+        All four stages had succeeded before a model-policy roll.  The roll's
+        refresh hash renamed the staging stage, so the next run enqueued a
+        second staging Work whose completion collided with the first one's
+        admission-scoped completion key (legacy 16a7a137, 28632c70; ws-7d
+        d02eaa60, 42459ee5).
+        """
+
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        admission = authority.admit_from_plan(**args)
+        executor, draft, verifier = self._executor(fixture, authority)
+        finished = self._run_until(
+            executor, admission,
+            lambda item: item.get("research_status") == "candidate_staged")
+        staged_before = effective_mission_document_work_orders(
+            authority, executor.scheduler, admission["id"],
+            draft_worker=executor.draft_worker, verifier_worker=executor.verifier_worker)
+        current_execution = copy.deepcopy(admission["model_execution"])
+        current_authority = copy.deepcopy(admission["model_authority"])
+        current_authority["draft"]["routing_policy_hash"] = "5" * 64
+        current_authority["verifier"]["routing_policy_hash"] = "6" * 64
+        authority.model_execution_resolver = lambda: (current_execution, current_authority)
+        refreshed = authority.resolve_for_execution(admission["id"])
+        self.assertIsInstance(refreshed.get("model_authority_refresh"), dict)
+
+        again = executor.run_once(admission["id"])
+
+        self.assertEqual(again["status"], "complete")
+        self.assertEqual(again["research_status"], finished["research_status"])
+        self.assertEqual((draft.calls, verifier.calls), (1, 1))
+        works = effective_mission_document_work_orders(
+            authority, executor.scheduler, admission["id"],
+            draft_worker=executor.draft_worker, verifier_worker=executor.verifier_worker)
+        self.assertEqual([work["id"] for work in works],
+                         [work["id"] for work in staged_before])
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM scheduler_work_orders WHERE json_extract("
+            "work_order_json,'$.metadata.stage')='qualitative_candidate_staging'"
+        ).fetchone()[0], 1)
 
     def test_model_roll_reuses_exact_pre_numeric_prompt_draft(self):
         fixture, authority, args, _registration, _launcher = self._fixture()
@@ -1723,6 +1786,47 @@ class MissionDocumentResearchTests(unittest.TestCase):
             "mission_document_research_model_authority_epoch_rebinds"
         ).fetchone()[0], 1)
 
+    def test_intermediate_epoch_recovery_chain_survives_a_second_model_roll(self):
+        """Live 6a2bcd: ``recovery link authority drifted`` after two rolls.
+
+        The verifier first ran -- and failed, and spent its automatic retry --
+        under an intermediate model-authority epoch (09-22).  A later roll
+        (09-25) renamed the stage again, so its recovery chain no longer
+        started at any Work the executor could derive.  The chain's root is
+        still this admission's own sealed stage Work, exactly as the lane
+        already accepts it; the escalation it ended in must stay readable.
+        """
+
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        self._enable_recovery(fixture, maximum=2)
+        admission = authority.admit_from_plan(**args)
+        first_execution = copy.deepcopy(admission["model_execution"])
+        first_authority = copy.deepcopy(admission["model_authority"])
+        first_authority["verifier"]["routing_policy_hash"] = "3" * 64
+        authority.model_execution_resolver = lambda: (first_execution, first_authority)
+        adapter = AlwaysUnprovedSendAdapter({"unused": True})
+        executor, draft, _verifier = self._executor(
+            fixture, authority, verifier_adapter=adapter)
+        escalated = self._run_until(
+            executor, admission,
+            lambda item: item.get("reason")
+            == "unproved_send_failed_after_automatic_retry")
+        self.assertEqual(escalated["stage"], "independent_qualitative_verifier")
+        calls = (draft.calls, adapter.calls)
+        second_execution = copy.deepcopy(admission["model_execution"])
+        second_authority = copy.deepcopy(admission["model_authority"])
+        second_authority["verifier"]["routing_policy_hash"] = "4" * 64
+        authority.model_execution_resolver = lambda: (second_execution, second_authority)
+        # And, as live, a signing rolled the budget envelope in between.
+        self._roll_mission(fixture, budget={
+            **fixture.mission["budget"], "max_daily_cost_usd": 9.0})
+
+        again = executor.run_once(admission["id"])
+
+        self.assertEqual(again["status"], "stopped")
+        self.assertEqual(again["reason"], "unproved_send_failed_after_automatic_retry")
+        self.assertEqual((draft.calls, adapter.calls), calls)
+
     def test_epoch_inspector_classifies_an_unenqueued_model_prefix(self):
         fixture, authority, args, _registration, _launcher = self._fixture()
         admission = authority.admit_from_plan(**args)
@@ -2335,6 +2439,49 @@ class MissionDocumentResearchTests(unittest.TestCase):
         self.assertIn("already issued", escalation["meaning"])
         self.assertIn("only an owner authorization", escalation["meaning"])
 
+    def test_provider_budget_refusal_is_held_not_retried_on_the_same_route(self):
+        """Live: paid 0.54 USD, refused, retried automatically, paid again."""
+
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        self._enable_recovery(fixture, maximum=2)
+        admission = authority.admit_from_plan(**args)
+        adapter = ProviderBudgetExceededAdapter({"unused": True})
+        executor, _draft, _verifier = self._executor(
+            fixture, authority, draft_adapter=adapter)
+        stopped = self._run_until(
+            executor, admission,
+            lambda item: item.get("status") == "stopped")
+        self.assertEqual(stopped["reason"],
+                         executor_module.PROVIDER_BUDGET_EXCEEDED_NOT_RETRIED)
+        calls = adapter.calls
+        for _ in range(3):
+            self.assertEqual(executor.run_once(admission["id"])["reason"],
+                             executor_module.PROVIDER_BUDGET_EXCEEDED_NOT_RETRIED)
+        self.assertEqual(adapter.calls, calls)
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM mission_document_research_recovery_links"
+        ).fetchone()[0], 0)
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM "
+            "mission_document_research_controlled_recovery_authorizations"
+        ).fetchone()[0], 0)
+        lane = MissionDocumentResearchCoordinator(
+            store=fixture.store, launcher=None, clock=fixture.harness.clock)
+        work_ref = next(
+            item["work_order_ref"] for item in read_mission_document_research_observations(
+                fixture.store.connection)
+            if item["recovery"] and item["recovery"]["reason"]
+            == executor_module.PROVIDER_BUDGET_EXCEEDED_NOT_RETRIED)
+        self.assertEqual(lane._typed_recovery_state(admission, work_ref)["action"],
+                         "recovery_required")
+        # The owner's one-call door is the unproved-send door.
+        from dalton_core.mission_document_research_lane import (
+            _escalated_stage_ordinal, _recovery_doors,
+        )
+        self.assertEqual(_escalated_stage_ordinal(
+            fixture.store.connection, admission,
+            _recovery_doors()["unproved"]["reasons"]), 2)
+
     def test_unproved_send_retry_stops_at_its_own_daily_cap_and_waits(self):
         """The cap is a spending bound, so its answer is tomorrow, not a person."""
 
@@ -2864,6 +3011,131 @@ class MissionDocumentResearchTests(unittest.TestCase):
                     admission_hash=admission["content_hash"],
                     prior_ticket_ref=prior_ref, authorization=authorization)
         self.assertEqual(len(spawned), 1)
+
+    def test_owner_grant_spent_on_a_systemic_death_is_honoured_once_more(self):
+        """Live 2026-09-25: five owner grants bought only ``binding drifted``.
+
+        The grant is spent when the child starts, before the child can know
+        whether the admission is executable.  A child that then dies
+        re-verifying authority -- before any send -- bought nothing, so the
+        same grant re-enters once more without asking the owner again.  Once:
+        a second systemic death is a fault that goes back to a person.  A child
+        that failed on its own research work spends the grant for good.
+        """
+
+        from dalton_core.lane_child_launcher import LaneChildRejected, write_owner_only
+        from dalton_core.lane_reentry_claim import claim_path, systemic_path
+        from dalton_core.mission_document_research_launcher import (
+            MissionDocumentResearchLauncher,
+        )
+
+        for final_error, refunded in (
+            ("MissionDocumentResearchExecutorError: model budget binding drifted", True),
+            ("MissionDocumentResearchExecutorError: historical recovery link "
+             "authority drifted", True),
+            ("ResearchAutoCommitRejected: document qualitative rule admits no "
+             "numeric statement", False),
+        ):
+            with self.subTest(final_error=final_error):
+                fixture, authority, args, _registration, _launcher = self._fixture()
+                admission = authority.admit_from_plan(**args)
+                for name, body in (("grant-staging.sqlite", b"staging"),
+                                   ("grant-core.sqlite", b"core")):
+                    (fixture.state / name).write_bytes(body)
+                for name in ("grant-planner.json", "grant-document.json",
+                             "grant-draft.json", "grant-verifier.json"):
+                    (fixture.state / name).write_text("{}\n", encoding="utf-8")
+                launcher = MissionDocumentResearchLauncher(
+                    state_dir=fixture.state,
+                    staging_path=fixture.state / "grant-staging.sqlite",
+                    planner_scheduler_db=fixture.state / "grant-core.sqlite",
+                    planner_model_config_path=fixture.state / "grant-planner.json",
+                    draft_model_config_path=fixture.state / "grant-draft.json",
+                    verifier_model_config_path=fixture.state / "grant-verifier.json",
+                    document_config_path=fixture.state / "grant-document.json",
+                )
+                self.addCleanup(launcher.close)
+                configuration = launcher.configuration()
+                signature = {"admission_ref": admission["id"],
+                             "admission_hash": admission["content_hash"],
+                             "configuration": configuration}
+                prior_ref = "mission-document-research:" + content_hash(signature)[:24]
+                ticket_path = launcher._ticket_path(prior_ref)
+                ticket_path.parent.mkdir(parents=True, exist_ok=True)
+
+                def finished_run(error):
+                    moment = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+                    write_owner_only(ticket_path, {
+                        "schema_version": "0.1", "id": prior_ref, **signature,
+                        "configuration_hash": content_hash(configuration),
+                        "started_at": moment, "pid": 1, "command": ["true"],
+                        "status": "failed", "exit_code": 1, "completed_at": moment,
+                    })
+                    summary = {
+                        "schema_version": "0.1", "created_at": moment,
+                        "admission_ref": admission["id"],
+                        "admission_hash": admission["content_hash"],
+                        "status": "failed", "outcomes": [], "error": error,
+                    }
+                    write_owner_only(ticket_path.with_name("summary.json"),
+                                     {**summary, "content_hash": content_hash(summary)})
+
+                authorization = "test:exact-scheduler-replay"
+                # The lane's own automatic attempt: claimed, ran, and died on
+                # its own work -- so it is spent and the owner was asked.
+                write_owner_only(claim_path(launcher, prior_ref, authorization), {
+                    "schema_version": "0.3", "ticket_ref": prior_ref,
+                    "authorization": authorization,
+                    "claimed_at": "2026-09-24T08:00:00+00:00",
+                    "lane_input": None, "prior_log_base64": "",
+                    "prior_log_sha256": "0" * 64,
+                    "prior_summary_base64": "", "prior_summary_sha256": "0" * 64,
+                })
+                # ... and its one systemic completion was spent long ago too.
+                write_owner_only(systemic_path(launcher, prior_ref, authorization), {
+                    "schema_version": "0.1", "kind": "systemic_failure_completion",
+                    "prior_ticket_ref": prior_ref, "marker": "x",
+                    "reason": "requires the active mission",
+                    "completed_at": "2026-09-24T08:00:01+00:00",
+                })
+                finished_run("MissionDocumentModelAuthorityError: installed mission "
+                             "document verifier cannot remain independent")
+                spawned = []
+
+                def fake_spawn(*, digest, record, _controlled_reentry=None, **kwargs):
+                    spawned.append(digest)
+                    return {"id": f"mission-document-research:{digest}",
+                            "status": "running", **dict(record)}
+
+                def resume():
+                    with patch.object(launcher, "spawn", side_effect=fake_spawn):
+                        return launcher.resume(
+                            admission_ref=admission["id"],
+                            admission_hash=admission["content_hash"],
+                            prior_ticket_ref=prior_ref, authorization=authorization)
+
+                with self.assertRaisesRegex(LaneChildRejected, "already attempted"):
+                    resume()
+                launcher.authorize_controlled_reentry(
+                    admission["id"], actor_ref="human:owner",
+                    granted_at=datetime.now(timezone.utc).isoformat())
+                resume()
+                self.assertEqual(len(spawned), 1)
+                finished_run(final_error)
+                if not refunded:
+                    with self.assertRaisesRegex(LaneChildRejected, "already attempted"):
+                        resume()
+                    self.assertEqual(len(spawned), 1)
+                    continue
+                # No new grant: the spent one is honoured once more.
+                resume()
+                self.assertEqual(len(spawned), 2)
+                self.assertEqual(len(list(launcher.tickets_dir.glob(
+                    "controlled-reentry-grant-*-refund-*.json"))), 1)
+                finished_run(final_error)
+                with self.assertRaisesRegex(LaneChildRejected, "already attempted"):
+                    resume()
+                self.assertEqual(len(spawned), 2)
 
     def test_a_child_that_failed_on_its_own_work_is_not_completed_again(self):
         """Only a systemic condition buys the extra completion."""
@@ -3646,6 +3918,158 @@ class MissionDocumentResearchTests(unittest.TestCase):
                     item for item in inspected["stages"] if item["stage"] == "draft")
                 self.assertEqual(stage["status"], "blocked")
                 self.assertEqual(stage["reason"], "recovery refusal proof drifted")
+
+    def _completed_draft_then_roll(self):
+        """A draft paid under mission v1, then a signing rolls the envelope."""
+
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        admission = authority.admit_from_plan(**args)
+        executor, draft, verifier = self._executor(fixture, authority)
+        draft_done = self._run_until(
+            executor, admission,
+            lambda item: item.get("status") == "succeeded"
+            and item.get("stage") == "qualitative_model_draft")
+        self.assertEqual((draft.calls, verifier.calls), (1, 0))
+        rolled = self._roll_mission(fixture, budget={
+            **fixture.mission["budget"], "max_daily_cost_usd": 9.0,
+            "max_daily_paid_calls": 7})
+        self.assertNotEqual(rolled["id"], fixture.mission["id"])
+        return fixture, authority, admission, executor, draft, verifier, draft_done
+
+    def _draft_budget_binding(self, fixture, work_ref):
+        return fixture.budget.connection.execute(
+            "SELECT b.admission_id,b.record_json FROM model_mission_budget_bindings b "
+            "JOIN thesis_impact_day_admissions a ON a.admission_id=b.admission_id "
+            "WHERE a.work_order_ref=?", (work_ref,),
+        ).fetchone()
+
+    def test_completed_stage_bound_under_old_mission_version_reenters_after_roll(self):
+        """Live 2026-09-25: every owner re-entry died on ``binding drifted``.
+
+        6a2bcd's draft was paid under mission v14 / policy-17; the current
+        envelope is policy-18 / governing mission v26.  The completed stage
+        keeps the envelope it ran under, and the admission finishes without
+        buying the draft again.
+        """
+
+        (fixture, authority, admission, executor, draft, verifier,
+         draft_done) = self._completed_draft_then_roll()
+        row = self._draft_budget_binding(fixture, draft_done["work_order_ref"])
+        recorded = json.loads(row["record_json"])
+        current = executor_module._expected_budget_binding(authority, admission, 1)
+        # The envelope really did roll under the completed stage ...
+        self.assertNotEqual(canonical_json(recorded), canonical_json(current))
+        self.assertEqual(recorded["mission_version_ref"], current["mission_version_ref"])
+        # ... and the completed stage is still exact authority.
+        work = fixture.harness.scheduler().work_order_authority(
+            draft_done["work_order_ref"])["work_order"]
+        formal = fixture.harness.scheduler().formal_result(work["id"])
+        proof = exact_mission_document_model_execution_authority(
+            work, formal, executor.draft_worker)
+        self.assertEqual(proof["execution_proof"]["budget_mission_binding_hash"],
+                         content_hash(recorded))
+        finished = self._run_until(
+            executor, admission, lambda item: item.get("status") == "complete")
+        self.assertEqual(finished["research_status"], "candidate_staged")
+        self.assertEqual((draft.calls, verifier.calls), (1, 1))
+
+    def test_binding_written_before_pool_enforcement_existed_is_still_exact(self):
+        """Live 3953fd12 / 49d92fa7: drafts paid on 2026-09-11 carry no
+        ``pool_enforcement``; the envelope gained that field afterwards."""
+
+        (fixture, authority, admission, executor, _draft, _verifier,
+         draft_done) = self._completed_draft_then_roll()
+        older = json.loads(self._draft_budget_binding(
+            fixture, draft_done["work_order_ref"])["record_json"])
+        current = executor_module._expected_budget_binding(authority, admission, 1)
+        self.assertNotIn("pool_enforcement", older)
+        later = {**current, "pool_enforcement": "off"}
+        authentic = executor_module._historical_budget_binding_authentic
+        self.assertTrue(authentic(authority, later, older))
+        # A field the envelope never had is not an older shape; it is refused.
+        self.assertFalse(authentic(authority, later, {**older, "extra": 1}))
+        self.assertFalse(authentic(authority, current, {**older, "pool_enforcement": "on"}))
+
+    def test_rolled_binding_tampering_is_still_refused(self):
+        tampers = {
+            "mission_version_hash": lambda b: {**b, "mission_version_hash": "0" * 64},
+            "other_mission": lambda b: {
+                **b, "mission_ref": "coverage-mission:someone-else",
+                "mission_version_ref": "coverage-mission-version:someone-else:1"},
+            "policy_hash": lambda b: {**b, "outer_budget": {
+                **b["outer_budget"], "governance_policy_version_hash": "1" * 64}},
+            "mandate_version": lambda b: {**b, "outer_budget": {
+                **b["outer_budget"], "mandate_version_ref": "mandate-version:forged:9"}},
+            "caps_above_outer": lambda b: {
+                **b, "max_daily_cost_micros": b["outer_budget"]["max_daily_cost_micros"] + 1},
+            "pool": lambda b: {**b, "pool": "coverage"},
+        }
+        for name, tamper in tampers.items():
+            with self.subTest(tamper=name):
+                (fixture, authority, admission, executor, draft, verifier,
+                 draft_done) = self._completed_draft_then_roll()
+                row = self._draft_budget_binding(fixture, draft_done["work_order_ref"])
+                forged = tamper(json.loads(row["record_json"]))
+                connection = fixture.budget.connection
+                connection.execute("DROP TRIGGER model_mission_budget_no_update")
+                connection.execute(
+                    "UPDATE model_mission_budget_bindings SET mission_ref=?,record_json=? "
+                    "WHERE admission_id=?",
+                    (forged["mission_ref"], canonical_json(forged), row["admission_id"]))
+                connection.commit()
+                work = fixture.harness.scheduler().work_order_authority(
+                    draft_done["work_order_ref"])["work_order"]
+                formal = fixture.harness.scheduler().formal_result(work["id"])
+                with self.assertRaisesRegex(MissionDocumentResearchExecutorError,
+                                            "model budget binding drifted"):
+                    exact_mission_document_model_execution_authority(
+                        work, formal, executor.draft_worker)
+                with self.assertRaisesRegex(MissionDocumentResearchExecutorError,
+                                            "model budget binding drifted"):
+                    self._run_until(executor, admission,
+                                    lambda item: item.get("status") == "complete")
+                self.assertEqual((draft.calls, verifier.calls), (1, 0))
+
+    def test_contract_retry_recovery_work_survives_an_envelope_roll(self):
+        """Live ws-7d ...e5967f6d: ``historical recovery link authority drifted``.
+
+        A RecoveryWork bought by the automatic contract retry succeeded under
+        the old envelope.  Its link is intact; it is simply not an atomic
+        day-budget recovery, which is no reason to refuse it.
+        """
+
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        self._enable_recovery(fixture, maximum=2)
+        admission = authority.admit_from_plan(**args)
+        executor, draft, verifier = self._executor(
+            fixture, authority, draft_adapter=ContractRejectOnceAdapter({
+                "schema_version": "0.1", "status": "answered",
+                "answer": "Managed services revenue is recognized over time.",
+                "candidate": {
+                    "normalized_statement":
+                        "Managed services revenue is recognized over time.",
+                    "metric_or_aspect": "managed services revenue recognition",
+                    "period": "current policy", "basis": "reported",
+                    "cited_match_indexes": [0]}, "missing": []},
+                {"schema_version": "0.1", "status": "answered"}))
+        recovered = self._run_until(
+            executor, admission,
+            lambda item: item.get("status") == "succeeded"
+            and item.get("stage") == "qualitative_model_draft")
+        self.assertTrue(recovered["work_order_ref"].startswith(
+            "work:mission-document-recovery-"))
+        link = json.loads(fixture.store.connection.execute(
+            "SELECT record_json FROM mission_document_research_recovery_links"
+        ).fetchone()[0])
+        self.assertEqual(link["failure_proof"]["classification"],
+                         "automation_bounded_contract_retry")
+        calls = draft.calls
+        self._roll_mission(fixture, budget={
+            **fixture.mission["budget"], "max_daily_cost_usd": 9.0})
+        finished = self._run_until(
+            executor, admission, lambda item: item.get("status") == "complete")
+        self.assertEqual(finished["research_status"], "candidate_staged")
+        self.assertEqual(draft.calls, calls)
 
     def test_pre_change_contract_hold_is_picked_up_by_the_automatic_retry(self):
         """The nineteen live holds: recorded before the retry existed, not spent."""

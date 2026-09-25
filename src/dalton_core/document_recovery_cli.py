@@ -46,6 +46,7 @@ UNPROVED_OPERATION = "authorize_mission_document_unproved_recovery"
 DOORS: dict[str, str] = {
     "contract_failed_after_automatic_retry": PAID_OPERATION,
     "unproved_send_failed_after_automatic_retry": UNPROVED_OPERATION,
+    "provider_budget_exceeded_not_retried": UNPROVED_OPERATION,
     "reentry_failed_after_automatic_rebind": OPERATION,
 }
 COMMANDS: dict[str, str] = {

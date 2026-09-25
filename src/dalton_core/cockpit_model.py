@@ -210,39 +210,22 @@ _LOCAL_NOT_SENT_PROOF = {
     "state": "definitely_not_sent",
     "version": "0.1",
 }
-# 2026-09-24: what a CLI-gateway call costs that its prompt does not show.
-# A ``*-cli-gateway`` provider runs a vendor CLI behind the broker, and the CLI
-# wraps Dalton's prompt in its own system prompt and tool definitions on every
-# call.  Measured from the live broker journal (2026-09-24, last 1,000 calls):
-#
-# * claude-cli-gateway: cacheWriteTokens ~= 24,300 + 0.4 x prompt bytes
-#   (25,534 at 3,068 bytes; 33,924 at 23,686 bytes), plus a constant 2,991
-#   cacheReadTokens and 2 uncached input tokens.  Metered cost 0.2739862 USD
-#   for 32,250 written + 2,991 read + 769 output tokens on a 4 / 20 USD per
-#   million card: the cache write is billed at twice the input rate (the
-#   one-hour cache-write price), within 0.3 %.
-# * antigravity-cli-gateway: ~13,500 input tokens beyond the prompt.
-# * muse-cli-gateway: ~26,000 input tokens beyond the prompt.
-#
-# The old ceiling, ``input_rate * prompt_bytes + output_rate * max_output``,
-# reserved 0.1128 USD for event judgements that cost 0.27-0.28 USD, and every
-# one overran.  The profile schema is closed and content-hashed and has no
-# field for this, so the provider name -- already on every profile -- selects
-# the overhead and these constants carry it: 32,000 tokens covers the largest
-# fixed part seen (claude, ~27,300 including the cache read) with headroom,
-# the prompt's bytes are counted on top (a byte over-counts a token), and all
-# of the input is priced at the cache-write multiplier, which is exact for
-# claude and conservative for the gateways that bill it as plain input.
-CLI_GATEWAY_PROVIDER_SUFFIX = "-cli-gateway"
-CLI_GATEWAY_SYSTEM_PROMPT_TOKENS = 32_000
-CLI_GATEWAY_CACHE_WRITE_MULTIPLIER = Decimal(2)
-
-
-def is_cli_gateway_profile(profile: Mapping[str, Any]) -> bool:
-    """True when the profile is served by a vendor CLI behind the broker."""
-
-    provider = profile.get("provider")
-    return isinstance(provider, str) and provider.endswith(CLI_GATEWAY_PROVIDER_SUFFIX)
+# 2026-09-24: what a CLI-gateway call costs that its prompt does not show --
+# the vendor CLI's own system prompt and tools, measured per gateway and kept
+# with the rule in ``model_profile_bounds`` so the WorkOrder token ceilings the
+# router and adapter enforce use the same number.  The old ceiling,
+# ``input_rate * prompt_bytes + output_rate * max_output``, reserved 0.1128 USD
+# for event judgements that cost 0.27-0.28 USD, and every one overran.  Here
+# the prompt's bytes are counted on top of the fixed part (a byte over-counts a
+# token), and all of the input is priced at the cache-write multiplier, which is
+# exact for claude and conservative for the gateways that bill it as plain
+# input.
+from .model_profile_bounds import (  # noqa: E402 - re-exported for callers
+    CLI_GATEWAY_CACHE_WRITE_MULTIPLIER,
+    CLI_GATEWAY_PROVIDER_SUFFIX,
+    CLI_GATEWAY_SYSTEM_PROMPT_TOKENS,
+    is_cli_gateway_profile,
+)
 
 
 def profile_call_ceiling_usd(profile: Mapping[str, Any], *, prompt_bytes: int,

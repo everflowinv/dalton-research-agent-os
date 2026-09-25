@@ -53,6 +53,8 @@ DISPATCH_ERROR_REASON = "dispatch_error"
 # had already rebound this admission onto a new ticket identity by itself.
 # Automatic once, then a person -- the same rule the two retry doors follow.
 REENTRY_ESCALATED_REASON = "reentry_failed_after_automatic_rebind"
+# Research feedback outcomes that settle an admission for good.
+TERMINAL_RESEARCH_OUTCOMES = frozenset({"query_miss", "no_verified_claim"})
 MODEL_AUTHORITY_PREEXECUTION_ERROR = (
     "MissionDocumentResearchError: mission document admission is no longer executable"
 )
@@ -155,6 +157,22 @@ CONTRACT_ESCALATION_NOTE = (
     "--apply --actor human:<owner>`"
     "（不加 --apply 是只读预览；--max-cost-usd 是愿意花的上限，"
     "那一阶段自己的预算超过它就直接拒绝，不会偷偷少买。）"
+)
+
+# The words for a paid call the adapter refused because the provider's own
+# token telemetry exceeded the WorkOrder budget.  Nothing is retried on the
+# same route automatically: the identical WorkOrder would route to the same
+# model and pay for the same refusal again.
+PROVIDER_BUDGET_ESCALATION_NOTE = (
+    "这条的模型调用已经送达并计费，但供应商回报的 token 用量超过了 WorkOrder 冻结的"
+    "预算（PROVIDER_BUDGET_EXCEEDED），所以结果被拒。同一条路由再试一次只会同样超出、"
+    "再付一次钱，因此系统不做自动重试，直接停下来等人。"
+    "先确认已部署的版本把 CLI 网关的固定开销算进了预算（否则再买一次还是同样结果）；"
+    "确认值得再买一次时，由 owner 授权最后一次受控恢复，执行："
+    "`python -m dalton_core.document_recovery_cli authorize-unproved "
+    "--state-dir <state> --admission-ref <ref> --max-cost-usd <上限美元> "
+    "--apply --actor human:<owner>`"
+    "（不加 --apply 是只读预览；--max-cost-usd 是愿意花的上限。）"
 )
 
 
@@ -365,12 +383,14 @@ class MissionDocumentResearchCoordinator:
 
         from .mission_document_research_executor import (
             CONTRACT_FAILED_AFTER_AUTOMATIC_RETRY,
+            PROVIDER_BUDGET_EXCEEDED_NOT_RETRIED,
             UNPROVED_SEND_FAILED_AFTER_AUTOMATIC_RETRY,
         )
 
         escalation_notes = {
             CONTRACT_FAILED_AFTER_AUTOMATIC_RETRY: CONTRACT_ESCALATION_NOTE,
             UNPROVED_SEND_FAILED_AFTER_AUTOMATIC_RETRY: UNPROVED_SEND_ESCALATION_NOTE,
+            PROVIDER_BUDGET_EXCEEDED_NOT_RETRIED: PROVIDER_BUDGET_ESCALATION_NOTE,
             HINT_DRIFT_HOLD_REASON: HINT_DRIFT_ESCALATION_NOTE,
         }
 
@@ -1609,23 +1629,27 @@ class MissionDocumentResearchCoordinator:
         # as an immutable observation.  Older dispatches could later recreate a
         # generic started_without_owned_live_ticket hold because those terminal
         # outcomes intentionally do not occupy the promoted-outcome table.
-        # Reconcile only from the latest fully validated observation; a later
-        # recovery_required observation must remain visible.
+        #
+        # Any validated terminal research feedback settles its admission.  It
+        # used to take only the *latest* observation, but the feedback is
+        # stamped with the admission's own ``created_at`` (its identity is
+        # deterministic), so it always sorts before the recovery observations
+        # of any admission that needed a recovery first.  Live on 2026-09-25,
+        # ca9bac39 completed ``no_verified_claim`` at 06:29 and stayed in the
+        # hold ledger as ``reentry_failed_after_automatic_rebind`` behind its
+        # 2026-09-11 recovery observations.  The executor writes feedback only
+        # once every model stage has succeeded, and nothing re-enters an
+        # admission after it, so no recovery can follow it.
         from .mission_document_research_executor import (
             read_mission_document_research_candidate_rejections,
             read_mission_document_research_observations,
         )
-        latest_observation: dict[str, Mapping[str, Any]] = {}
-        for observation in read_mission_document_research_observations(
-            self.store.connection
-        ):
-            latest_observation[observation["admission_ref"]] = observation
         completed_refs = {
-            admission_ref
-            for admission_ref, observation in latest_observation.items()
-            if observation["outcome"] in {
-                "query_miss", "no_verified_claim",
-            }
+            observation["admission_ref"]
+            for observation in read_mission_document_research_observations(
+                self.store.connection
+            )
+            if observation["outcome"] in TERMINAL_RESEARCH_OUTCOMES
         }
         # A candidate the governance rule refused settles its admission the
         # same way: the child completed, the refusal is written down, and a
@@ -2059,18 +2083,24 @@ STAGE_ORDINALS: Mapping[str, int] = {
 def _recovery_doors() -> dict[str, dict[str, Any]]:
     from .mission_document_research_executor import (
         CONTRACT_FAILED_AFTER_AUTOMATIC_RETRY,
+        PROVIDER_BUDGET_EXCEEDED_NOT_RETRIED,
         UNPROVED_SEND_FAILED_AFTER_AUTOMATIC_RETRY,
     )
 
     return {
         "paid": {
             "reason": CONTRACT_FAILED_AFTER_AUTOMATIC_RETRY,
+            "reasons": (CONTRACT_FAILED_AFTER_AUTOMATIC_RETRY,),
             "prefix": "mission-document-paid-recovery-authorization",
             "method": "authorize_paid_contract_recovery",
             "cli": "authorize-paid",
         },
         "unproved": {
             "reason": UNPROVED_SEND_FAILED_AFTER_AUTOMATIC_RETRY,
+            # A provider-budget refusal was sent and charged like an unproved
+            # send is feared to be, and this door buys exactly one more call.
+            "reasons": (UNPROVED_SEND_FAILED_AFTER_AUTOMATIC_RETRY,
+                        PROVIDER_BUDGET_EXCEEDED_NOT_RETRIED),
             "prefix": "mission-document-unproved-send-recovery-authorization",
             "method": "authorize_unproved_send_recovery",
             "cli": "authorize-unproved",
@@ -2079,10 +2109,11 @@ def _recovery_doors() -> dict[str, dict[str, Any]]:
 
 
 def _escalated_stage_ordinal(
-    connection: Any, admission: Mapping[str, Any], reason: str,
+    connection: Any, admission: Mapping[str, Any], reason: str | Sequence[str],
 ) -> int | None:
     """The stage whose *second* failure is the one waiting on a person."""
 
+    reasons = {reason} if isinstance(reason, str) else set(reason)
     from .mission_document_research_executor import (
         read_mission_document_research_observations,
     )
@@ -2093,7 +2124,7 @@ def _escalated_stage_ordinal(
         if item["admission_ref"] == admission["id"]
         and item["outcome"] == "recovery_required"
         and isinstance(item.get("recovery"), Mapping)
-        and item["recovery"].get("reason") == reason
+        and item["recovery"].get("reason") in reasons
     ]
     if not matching:
         return None
@@ -2161,7 +2192,7 @@ def authorize_owner_recovery(
     spec = _recovery_doors()[door]
     admission = executor.authority.resolve_for_execution(admission_ref)
     ordinal = _escalated_stage_ordinal(
-        executor.authority.connection, admission, spec["reason"])
+        executor.authority.connection, admission, spec["reasons"])
     if ordinal is None:
         # Not a refusal of the owner: this admission is not in the state this
         # door opens, and authorising it would buy a call for a failure that

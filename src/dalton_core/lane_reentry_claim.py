@@ -44,10 +44,24 @@ SYSTEMIC_PREFIX = "controlled-reentry-systemic-"
 # so it may be completed once more after the condition is repaired -- once,
 # because a condition that is still there on the second run is a real fault
 # and does belong in front of a person.
+#
+# 2026-09-25: the same holds for a run that dies re-verifying the authority of
+# work that already happened -- a completed stage, or a recovery link --
+# against an envelope that has rolled since.  Live, all five owner grants
+# consumed that morning bought exactly this and nothing else: ``model budget
+# binding drifted`` (four) and ``historical recovery link authority drifted``
+# (one), each raised before the run could send anything.  And for a finished
+# staging stage renamed by a model-policy roll (``staging completion did not
+# converge``): the run re-stages nothing new and calls no model.
 SYSTEMIC_CHILD_FAILURES = (
     "requires the active mission",
     "is no longer executable",
+    "model budget binding drifted",
+    "historical recovery link authority drifted",
+    "recovery mission binding drifted",
+    "staging completion did not converge",
 )
+GRANT_REFUND_INFIX = "-refund-"
 
 
 def _moment(value: Any) -> datetime | None:
@@ -220,7 +234,11 @@ def write_grant(launcher: Any, admission_ref: str, *, actor_ref: str,
 
 
 def consume_grant(launcher: Any, admission_ref: str, marker: str) -> dict[str, Any] | None:
-    """Spend the owner's grant, atomically, and keep it as a used record."""
+    """Spend the owner's grant, atomically, and keep it as a used record.
+
+    The used record also says when it was spent, which is what ties it to the
+    one run it bought (see ``refund_systemic_grant``).
+    """
 
     path = grant_path(launcher, admission_ref)
     record = _record(path)
@@ -231,6 +249,91 @@ def consume_grant(launcher: Any, admission_ref: str, marker: str) -> dict[str, A
         os.rename(path, used)
     except OSError:
         return None
+    from .lane_child_launcher import write_owner_only
+
+    try:
+        write_owner_only(used, {
+            **record, "consumed_at": datetime.now(timezone.utc).isoformat(
+                timespec="microseconds"),
+        })
+    except OSError:
+        pass  # the rename already spent it; the timestamp is only a hint
+    return record
+
+
+def _used_grants(launcher: Any, admission_ref: str) -> list[Path]:
+    stem = grant_path(launcher, admission_ref).name[:-5]
+    return [
+        path for path in Path(launcher.tickets_dir).glob(f"{stem}-used-*.json")
+        if len(path.name) == len(stem) + len("-used-") + 24 + len(".json")
+    ]
+
+
+def refund_systemic_grant(launcher: Any, admission_ref: str,
+                          claim_ticket_ref: str) -> dict[str, Any] | None:
+    """Give back the owner's last grant when all it bought was a systemic death.
+
+    A grant is spent the moment the launcher starts the child, before the
+    child can know whether the admission is executable at all.  When that
+    child then dies re-verifying authority -- a condition of the system (see
+    ``SYSTEMIC_CHILD_FAILURES``), raised before anything is sent -- the grant
+    bought nothing and the owner's decision has not been exercised.  So the
+    most recent used grant is honoured once more, exactly once: the refund is
+    an exclusive marker beside it, and a second systemic death after the
+    refund is a real fault that belongs in front of a person again.
+    """
+
+    used = []
+    for path in _used_grants(launcher, admission_ref):
+        record = _record(path)
+        if record is None or record.get("admission_ref") != admission_ref:
+            continue
+        since = _moment(record.get("consumed_at")) or _moment(record.get("granted_at"))
+        if since is not None:
+            used.append((since, path, record))
+    if not used:
+        return None
+    since, path, record = max(used, key=lambda item: item[0])
+    refund = path.with_name(
+        path.name[:-5].replace("-used-", GRANT_REFUND_INFIX, 1) + ".json")
+    if refund.exists():
+        return None
+    run = _started_run(launcher, claim_ticket_ref, since)
+    reason = systemic_failure(run)
+    if reason is None:
+        return None
+    # The run must be the one this grant bought: nothing else that can buy a
+    # run -- a fresh one-shot claim or a systemic completion -- may sit
+    # between the grant being spent and the run starting.
+    run_record = _record(Path(run) / "ticket.json") or {}
+    started = _moment(run_record.get("started_at"))
+    if started is None:
+        return None
+    for directory in {Path(run), Path(launcher._ticket_path(claim_ticket_ref)).parent}:
+        for other in directory.glob(f"{CLAIM_PREFIX}*.json"):
+            other_record = _record(other) or {}
+            bought_at = (_moment(other_record.get("claimed_at"))
+                         or _moment(other_record.get("completed_at")))
+            if bought_at is not None and since < bought_at <= started:
+                return None
+    body = json.dumps({
+        "schema_version": SCHEMA_VERSION,
+        "kind": "systemic_failure_grant_refund",
+        "admission_ref": str(admission_ref),
+        "used_grant": path.name,
+        "claim_ticket_ref": str(claim_ticket_ref),
+        "reason": reason,
+        "refunded_at": datetime.now(timezone.utc).isoformat(timespec="microseconds"),
+    }, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n"
+    try:
+        descriptor = os.open(str(refund), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return None
+    try:
+        os.write(descriptor, body)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
     return record
 
 
@@ -247,6 +350,7 @@ __all__ = [
     "marker",
     "read_claim",
     "record_systemic_completion",
+    "refund_systemic_grant",
     "systemic_failure",
     "systemic_path",
     "write_grant",
