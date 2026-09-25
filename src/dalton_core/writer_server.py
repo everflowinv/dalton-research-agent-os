@@ -1395,6 +1395,29 @@ def require_lane_handlers(server: type) -> None:
             )
 
 
+def principal_may_call(principal: Principal, operation: str) -> bool:
+    """Whether ``principal`` may call ``operation``.
+
+    The token config's operation list decides, with one exception: the core
+    principal holds every operation in ``CORE_OPERATIONS``, whatever its list
+    says.  That list is only rewritten by ``bootstrap`` (install.sh), and a
+    deploy -- ``release_switch`` repointing each LaunchAgent's interpreter --
+    never runs it, so a lane registered after the last install was refused to
+    the very principal bootstrap would have granted it to.  Live 2026-09-25:
+    ``dispatch_quality_scoring`` (8deec67c) answered ``unavailable:forbidden``
+    on every tick in both environments from its deploy on.  The core
+    principal is the only one config may mark unrestricted and bootstrap
+    always rewrites it to exactly ``CORE_OPERATIONS``, so reading that set
+    here grants nothing an install would not.  Every other principal is held
+    to its list.
+    """
+
+    if operation in principal.operations:
+        return True
+    return (principal.principal_id == "core" and principal.is_unrestricted
+            and operation in CORE_OPERATIONS)
+
+
 install_lane_operations()
 
 
@@ -2940,7 +2963,7 @@ class WriterServer:
             principal = self._principal(request.auth_token)
         except PermissionError:
             return None
-        if operation not in principal.operations:
+        if not principal_may_call(principal, operation):
             return None
         if set(request.params) - OPERATION_FIELDS.get(operation, frozenset()):
             return None
@@ -3087,7 +3110,7 @@ class WriterServer:
         operation = request.operation
         if operation not in OPERATION_FIELDS:
             raise PermissionError("unknown operation")
-        if operation not in principal.operations:
+        if not principal_may_call(principal, operation):
             raise PermissionError("operation is not permitted")
         unknown = set(request.params) - OPERATION_FIELDS[operation]
         if unknown:
