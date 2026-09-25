@@ -105,6 +105,9 @@ HELD_LANE_STATUSES = frozenset({"recovery_required", "not_permitted", "ungranted
 CONTRACT_RETRIED_REASON = "contract_failed_after_automatic_retry"
 UNPROVED_SEND_RETRIED_REASON = "unproved_send_failed_after_automatic_retry"
 REENTRY_REBOUND_REASON = "reentry_failed_after_automatic_rebind"
+# Not retried at all: a proved paid call whose provider usage broke the
+# WorkOrder budget would break it again on the same route.
+PROVIDER_BUDGET_REFUSED_REASON = "provider_budget_exceeded_not_retried"
 ESCALATED_HOLD_REASONS: tuple[str, ...] = (
     CONTRACT_RETRIED_REASON, UNPROVED_SEND_RETRIED_REASON, REENTRY_REBOUND_REASON,
 )
@@ -583,6 +586,14 @@ def _retry_words(
             "最坏情况是先前那次其实已经计费，也就是这个阶段最多已经花了两次调用，"
             "所以系统不再自动买第三次。",
             "先看模型或线路为什么连续两次都拿不回可用结果；确认值得再买一次，就执行："
+            + _line("authorize-unproved", cap="<上限美元>")
+            + "（先不加 --apply 是只读预览；--max-cost-usd 是你愿意花的上限。）",
+        )
+    if PROVIDER_BUDGET_REFUSED_REASON in reason:
+        return (
+            "这次调用已经送达并计费，但供应商回报的 token 用量超过了 WorkOrder 的预算，"
+            "结果被拒；同一路由再试只会同样超出、再付一次，所以系统没有自动重试。",
+            "先确认部署的版本已经把 CLI 网关的固定开销算进预算；确认值得再买一次，就执行："
             + _line("authorize-unproved", cap="<上限美元>")
             + "（先不加 --apply 是只读预览；--max-cost-usd 是你愿意花的上限。）",
         )
@@ -1106,6 +1117,7 @@ __all__ = [
     "LANE_HOLD_LEDGERS",
     "REENTRY_REBOUND_REASON",
     "UNPROVED_SEND_RETRIED_REASON",
+    "PROVIDER_BUDGET_REFUSED_REASON",
     "lane_hold_ledgers",
     "recovery_command",
     "GOVERNANCE_DIR_NAME",

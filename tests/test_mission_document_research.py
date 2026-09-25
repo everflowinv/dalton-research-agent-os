@@ -157,6 +157,27 @@ class AlwaysUnprovedSendAdapter(CountingFakeAdapter):
         raise BrokerConnectionError("socket failed after an unknown boundary")
 
 
+class ProviderBudgetExceededAdapter(CountingFakeAdapter):
+    """Every call is sent, charged, and then refused on its token telemetry.
+
+    Live, 2026-09-25: a claude-cli-gateway draft reported 65,831 cache-write +
+    2,991 cache-read + 2 input + 803 output tokens against a 68,096-token
+    WorkOrder total, and the adapter refused the paid result with
+    ``PROVIDER_BUDGET_EXCEEDED``.
+    """
+
+    def execute(self, work, route, selected):
+        from dataclasses import replace
+        from tests.test_transcript_polish_model_worker import FakeAdapter
+        self.calls += 1
+        invocation, result = FakeAdapter.execute(self, work, route, selected)
+        return invocation, replace(
+            result, status="failed", outputs={},
+            error={"code": "PROVIDER_BUDGET_EXCEEDED",
+                   "message": "provider max_total_tokens telemetry exceeds WorkOrder budget",
+                   "source": "openclaw-model-adapter"})
+
+
 class RouteBoundCountingFakeAdapter(CountingFakeAdapter):
     """Keep the shared fixture adapter's invocation faithful to the selected route."""
 
@@ -2334,6 +2355,49 @@ class MissionDocumentResearchTests(unittest.TestCase):
             == "unproved_send_failed_after_automatic_retry")
         self.assertIn("already issued", escalation["meaning"])
         self.assertIn("only an owner authorization", escalation["meaning"])
+
+    def test_provider_budget_refusal_is_held_not_retried_on_the_same_route(self):
+        """Live: paid 0.54 USD, refused, retried automatically, paid again."""
+
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        self._enable_recovery(fixture, maximum=2)
+        admission = authority.admit_from_plan(**args)
+        adapter = ProviderBudgetExceededAdapter({"unused": True})
+        executor, _draft, _verifier = self._executor(
+            fixture, authority, draft_adapter=adapter)
+        stopped = self._run_until(
+            executor, admission,
+            lambda item: item.get("status") == "stopped")
+        self.assertEqual(stopped["reason"],
+                         executor_module.PROVIDER_BUDGET_EXCEEDED_NOT_RETRIED)
+        calls = adapter.calls
+        for _ in range(3):
+            self.assertEqual(executor.run_once(admission["id"])["reason"],
+                             executor_module.PROVIDER_BUDGET_EXCEEDED_NOT_RETRIED)
+        self.assertEqual(adapter.calls, calls)
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM mission_document_research_recovery_links"
+        ).fetchone()[0], 0)
+        self.assertEqual(fixture.store.connection.execute(
+            "SELECT count(*) FROM "
+            "mission_document_research_controlled_recovery_authorizations"
+        ).fetchone()[0], 0)
+        lane = MissionDocumentResearchCoordinator(
+            store=fixture.store, launcher=None, clock=fixture.harness.clock)
+        work_ref = next(
+            item["work_order_ref"] for item in read_mission_document_research_observations(
+                fixture.store.connection)
+            if item["recovery"] and item["recovery"]["reason"]
+            == executor_module.PROVIDER_BUDGET_EXCEEDED_NOT_RETRIED)
+        self.assertEqual(lane._typed_recovery_state(admission, work_ref)["action"],
+                         "recovery_required")
+        # The owner's one-call door is the unproved-send door.
+        from dalton_core.mission_document_research_lane import (
+            _escalated_stage_ordinal, _recovery_doors,
+        )
+        self.assertEqual(_escalated_stage_ordinal(
+            fixture.store.connection, admission,
+            _recovery_doors()["unproved"]["reasons"]), 2)
 
     def test_unproved_send_retry_stops_at_its_own_daily_cap_and_waits(self):
         """The cap is a spending bound, so its answer is tomorrow, not a person."""

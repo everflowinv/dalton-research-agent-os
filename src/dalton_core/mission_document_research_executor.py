@@ -170,6 +170,17 @@ DEFAULT_MAX_AUTOMATIC_UNPROVED_SEND_RETRIES_PER_DAY = 5
 AUTOMATIC_UNPROVED_SEND_RETRY_REASON = "automatic_bounded_unproved_send_retry"
 UNPROVED_SEND_RETRY_DAY_CAP_REASON = "automatic_unproved_send_retry_day_cap_reached"
 UNPROVED_SEND_FAILED_AFTER_AUTOMATIC_RETRY = "unproved_send_failed_after_automatic_retry"
+# 2026-09-25: a send the adapter refused *after* the provider answered, because
+# the provider's own token telemetry exceeded the frozen WorkOrder budget.  It
+# is not unproved at all -- it was sent, it was charged, and the usage that
+# broke the budget is on record -- and the same route would break it the same
+# way: the automatic retry re-routes the identical WorkOrder to the same first
+# model.  Live, every qualitative draft on claude-opus-5 paid 0.54 USD, was
+# refused, then paid again on the automatic retry (about 4 USD an hour across
+# both environments).  So it is never retried automatically; it waits for the
+# owner, whose unproved-send door buys at most one more call.
+PROVIDER_BUDGET_EXCEEDED_CODE = "PROVIDER_BUDGET_EXCEEDED"
+PROVIDER_BUDGET_EXCEEDED_NOT_RETRIED = "provider_budget_exceeded_not_retried"
 # Written by every release before this one for exactly this state.  Such a hold
 # has not spent its automatic retry either, so the lane re-enters it once.
 LEGACY_UNPROVED_SEND_REASON = "send_state_unproved"
@@ -3899,6 +3910,9 @@ class MissionDocumentResearchExecutor:
             # One Work carries one authorization; automation never adds a
             # second and never overwrites a person's.
             spent = UNPROVED_SEND_FAILED_AFTER_AUTOMATIC_RETRY
+        if (spent is None and authorization is None and isinstance(record, Mapping)
+                and record.get("error_code") == PROVIDER_BUDGET_EXCEEDED_CODE):
+            spent = PROVIDER_BUDGET_EXCEEDED_NOT_RETRIED
         if spent is not None:
             recovery = {
                 "status": "stopped", "reason": spent, "eligible": False,
@@ -4558,6 +4572,7 @@ __all__ = ["AUTHORITY_KIND",
            "LEGACY_UNPROVED_SEND_REASON",
            "OWNER_UNPROVED_SEND_RETRY_CLASSIFICATION",
            "UNPROVED_SEND_FAILED_AFTER_AUTOMATIC_RETRY",
+           "PROVIDER_BUDGET_EXCEEDED_NOT_RETRIED",
            "UNPROVED_SEND_RETRY_DAY_CAP_REASON",
            "MissionDocumentResearchExecutor",
            "MissionDocumentResearchExecutorError",
