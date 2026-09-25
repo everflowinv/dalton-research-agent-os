@@ -2110,8 +2110,12 @@ class MissionSourceDiscoveryCoordinator:
     def _cadence_block(self, mission_version_ref: str, company_ref: str,
                        spec: Mapping[str, Any], *,
                        use_retry_interval: bool = False) -> str | None:
+        # 2026-09-25b: every version of the mission.  P1/P2 publish a new
+        # version over the one that searched last night, and asked of the new
+        # version alone every (company, spec) read as never searched.
         latest = self.missions.discovery_dispatches(
-            mission_version_ref, company_ref=company_ref, spec_ref=spec["spec_ref"], limit=1
+            mission_version_ref, company_ref=company_ref, spec_ref=spec["spec_ref"], limit=1,
+            across_versions=True,
         )
         if not latest:
             return None

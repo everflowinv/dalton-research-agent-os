@@ -1823,13 +1823,33 @@ class CoverageMissionAuthority:
         rows = self.connection.execute(query, params).fetchall()
         return [self._dispatch_row(row) for row in rows]
 
+    def _version_scope(self, column: str, mission_version_ref: str, across_versions: bool) -> str:
+        """``column`` bound to one version, or to every version of its mission."""
+
+        _text(mission_version_ref, "mission_version_ref")
+        if not across_versions:
+            return f"{column}=?"
+        return (f"{column} IN (SELECT v.mission_version_id FROM coverage_mission_versions v "
+                "JOIN coverage_mission_versions o ON o.mission_ref=v.mission_ref "
+                "WHERE o.mission_version_id=?)")
+
     def discovery_dispatches(
         self, mission_version_ref: str, *, company_ref: str | None = None,
-        spec_ref: str | None = None, limit: int = 100,
+        spec_ref: str | None = None, limit: int = 100, across_versions: bool = False,
     ) -> list[dict[str, Any]]:
+        """Discovery dispatches, newest first.
+
+        ``across_versions`` (2026-09-25b): every version of the mission the
+        given version belongs to.  The cadence asks when a (company, spec) was
+        last searched; P1/P2 publishing a new version does not make last
+        night's search older, and asked of the new version alone it read
+        "never" and searched everything again.
+        """
+
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
             raise CoverageMissionValidationError("discovery dispatch limit must be 1..1000")
-        query = "SELECT * FROM coverage_mission_discovery_dispatches WHERE mission_version_ref=?"
+        query = "SELECT * FROM coverage_mission_discovery_dispatches WHERE " + self._version_scope(
+            "mission_version_ref", mission_version_ref, across_versions)
         params: list[Any] = [_text(mission_version_ref, "mission_version_ref")]
         if company_ref is not None:
             query += " AND company_ref=?"
@@ -2173,11 +2193,15 @@ class CoverageMissionAuthority:
 
     def source_discoveries(
         self, mission_version_ref: str, *, company_ref: str | None = None,
-        spec_ref: str | None = None, limit: int = 100,
+        spec_ref: str | None = None, limit: int = 100, across_versions: bool = False,
     ) -> list[dict[str, Any]]:
+        """Source discoveries, newest first; ``across_versions`` as for
+        :meth:`discovery_dispatches`."""
+
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
             raise CoverageMissionValidationError("discovery limit must be 1..1000")
-        query = "SELECT * FROM coverage_mission_source_discoveries WHERE mission_version_ref=?"
+        query = "SELECT * FROM coverage_mission_source_discoveries WHERE " + self._version_scope(
+            "mission_version_ref", mission_version_ref, across_versions)
         params: list[Any] = [_text(mission_version_ref, "mission_version_ref")]
         if company_ref is not None:
             query += " AND company_ref=?"

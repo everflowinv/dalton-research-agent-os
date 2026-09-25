@@ -429,6 +429,68 @@ class HeldAcrossVersionsTests(_VersionHarness):
 
 
 @_own_tests_only
+class SearchCadenceTests(_VersionHarness):
+    """Found in the sweep: the search cadence asked the new version alone and
+    read every (company, spec) as never searched -- live, all nine Guidepoint
+    queries ran again within the hour of P1 publishing ws-7d's v4."""
+
+    def _dispatch(self, version: dict, status: str, created_at: str) -> None:
+        with self.m._transaction() as cur:
+            cur.execute(
+                "INSERT INTO coverage_mission_discovery_dispatches VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                ("discovery-dispatch:fixture:" + status, version["id"], version["content_hash"], ACN,
+                 "source:alphaengine", "discovery-plan:fixture", "0" * 64, SPEC, "1" * 64,
+                 self.actor, self.actor, "{}", status, "ticket:fixture", None, created_at, created_at))
+
+    def test_the_last_search_is_the_last_search_whatever_the_version(self) -> None:
+        from datetime import datetime, timedelta, timezone
+        from types import SimpleNamespace
+
+        from dalton_core.mission_source_discovery import MissionSourceDiscoveryCoordinator
+
+        now = datetime(2026, 9, 25, 12, tzinfo=timezone.utc)
+        self._dispatch(self.v2, "succeeded", (now - timedelta(days=1)).isoformat())
+        spec = {"spec_ref": SPEC, "rediscovery_interval_days": 7, "retry_interval_days": 1}
+        lane = SimpleNamespace(missions=self.m, clock=lambda: now, source_ref="source:alphaengine",
+                               search_launcher=None, store=self.h.h.core)
+
+        def block():
+            current = self.m.active_mission(REF)["id"]
+            return MissionSourceDiscoveryCoordinator._cadence_block(lane, current, ACN, spec)
+
+        before = block()
+        self.assertEqual(before, "rediscovered 1d ago; interval 7d")
+        v3 = self._publish(3)
+        self.assertEqual(block(), before)
+        # The per-version reader still answers for its own version only.
+        self.assertEqual(self.m.discovery_dispatches(v3["id"]), [])
+        self.assertEqual(len(self.m.discovery_dispatches(v3["id"], across_versions=True)), 1)
+        # And a discovery recorded under v1 is still the mission's history.
+        self.assertEqual(self.m.source_discoveries(v3["id"]), [])
+        self.assertEqual([d["mission_version_ref"] for d in
+                          self.m.source_discoveries(v3["id"], across_versions=True)],
+                         [self.h.mission["id"]])
+
+    def test_guidepoint_asks_every_version_for_the_last_run(self) -> None:
+        from dalton_core.mission_guidepoint_lane import GuidepointLaneCoordinator
+
+        asked = []
+
+        class Missions:
+            def source_discoveries(_self, *args, **kwargs):
+                asked.append(kwargs.get("across_versions"))
+                return []
+
+        lane = GuidepointLaneCoordinator.__new__(GuidepointLaneCoordinator)
+        lane.missions = Missions()
+        lane._mission_version_ref = "coverage-mission-version:fixture:4"
+        lane._mission_version_hash = "0" * 64
+        lane._requested_by = self.actor
+        self.assertIsNone(lane._last_discovery(ACN, SPEC))
+        self.assertEqual(asked, [True])
+
+
+@_own_tests_only
 class ConsensusReaderTests(_VersionHarness):
     """Found in the sweep: consensus extraction was offered broker notes from
     the version in force only."""

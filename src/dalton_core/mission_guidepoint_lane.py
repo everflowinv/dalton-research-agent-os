@@ -500,8 +500,12 @@ class GuidepointLaneCoordinator:
 
     # -- cadence -----------------------------------------------------------
     def _last_discovery(self, company_ref: str, spec_ref: str) -> dict[str, Any] | None:
+        # 2026-09-25b: every version of the mission.  P1 published ws-7d's v4
+        # and within the hour all nine Guidepoint queries ran again, each of
+        # them searched under v3 in the week before, as "never_run".
         records = self.missions.source_discoveries(
-            self.mission_version_ref, company_ref=company_ref, spec_ref=spec_ref, limit=1
+            self.mission_version_ref, company_ref=company_ref, spec_ref=spec_ref, limit=1,
+            across_versions=True,
         )
         for record in records:
             if record["source_ref"] == GUIDEPOINT_SOURCE_REF:
