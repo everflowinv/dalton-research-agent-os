@@ -3012,6 +3012,131 @@ class MissionDocumentResearchTests(unittest.TestCase):
                     prior_ticket_ref=prior_ref, authorization=authorization)
         self.assertEqual(len(spawned), 1)
 
+    def test_owner_grant_spent_on_a_systemic_death_is_honoured_once_more(self):
+        """Live 2026-09-25: five owner grants bought only ``binding drifted``.
+
+        The grant is spent when the child starts, before the child can know
+        whether the admission is executable.  A child that then dies
+        re-verifying authority -- before any send -- bought nothing, so the
+        same grant re-enters once more without asking the owner again.  Once:
+        a second systemic death is a fault that goes back to a person.  A child
+        that failed on its own research work spends the grant for good.
+        """
+
+        from dalton_core.lane_child_launcher import LaneChildRejected, write_owner_only
+        from dalton_core.lane_reentry_claim import claim_path, systemic_path
+        from dalton_core.mission_document_research_launcher import (
+            MissionDocumentResearchLauncher,
+        )
+
+        for final_error, refunded in (
+            ("MissionDocumentResearchExecutorError: model budget binding drifted", True),
+            ("MissionDocumentResearchExecutorError: historical recovery link "
+             "authority drifted", True),
+            ("ResearchAutoCommitRejected: document qualitative rule admits no "
+             "numeric statement", False),
+        ):
+            with self.subTest(final_error=final_error):
+                fixture, authority, args, _registration, _launcher = self._fixture()
+                admission = authority.admit_from_plan(**args)
+                for name, body in (("grant-staging.sqlite", b"staging"),
+                                   ("grant-core.sqlite", b"core")):
+                    (fixture.state / name).write_bytes(body)
+                for name in ("grant-planner.json", "grant-document.json",
+                             "grant-draft.json", "grant-verifier.json"):
+                    (fixture.state / name).write_text("{}\n", encoding="utf-8")
+                launcher = MissionDocumentResearchLauncher(
+                    state_dir=fixture.state,
+                    staging_path=fixture.state / "grant-staging.sqlite",
+                    planner_scheduler_db=fixture.state / "grant-core.sqlite",
+                    planner_model_config_path=fixture.state / "grant-planner.json",
+                    draft_model_config_path=fixture.state / "grant-draft.json",
+                    verifier_model_config_path=fixture.state / "grant-verifier.json",
+                    document_config_path=fixture.state / "grant-document.json",
+                )
+                self.addCleanup(launcher.close)
+                configuration = launcher.configuration()
+                signature = {"admission_ref": admission["id"],
+                             "admission_hash": admission["content_hash"],
+                             "configuration": configuration}
+                prior_ref = "mission-document-research:" + content_hash(signature)[:24]
+                ticket_path = launcher._ticket_path(prior_ref)
+                ticket_path.parent.mkdir(parents=True, exist_ok=True)
+
+                def finished_run(error):
+                    moment = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+                    write_owner_only(ticket_path, {
+                        "schema_version": "0.1", "id": prior_ref, **signature,
+                        "configuration_hash": content_hash(configuration),
+                        "started_at": moment, "pid": 1, "command": ["true"],
+                        "status": "failed", "exit_code": 1, "completed_at": moment,
+                    })
+                    summary = {
+                        "schema_version": "0.1", "created_at": moment,
+                        "admission_ref": admission["id"],
+                        "admission_hash": admission["content_hash"],
+                        "status": "failed", "outcomes": [], "error": error,
+                    }
+                    write_owner_only(ticket_path.with_name("summary.json"),
+                                     {**summary, "content_hash": content_hash(summary)})
+
+                authorization = "test:exact-scheduler-replay"
+                # The lane's own automatic attempt: claimed, ran, and died on
+                # its own work -- so it is spent and the owner was asked.
+                write_owner_only(claim_path(launcher, prior_ref, authorization), {
+                    "schema_version": "0.3", "ticket_ref": prior_ref,
+                    "authorization": authorization,
+                    "claimed_at": "2026-09-24T08:00:00+00:00",
+                    "lane_input": None, "prior_log_base64": "",
+                    "prior_log_sha256": "0" * 64,
+                    "prior_summary_base64": "", "prior_summary_sha256": "0" * 64,
+                })
+                # ... and its one systemic completion was spent long ago too.
+                write_owner_only(systemic_path(launcher, prior_ref, authorization), {
+                    "schema_version": "0.1", "kind": "systemic_failure_completion",
+                    "prior_ticket_ref": prior_ref, "marker": "x",
+                    "reason": "requires the active mission",
+                    "completed_at": "2026-09-24T08:00:01+00:00",
+                })
+                finished_run("MissionDocumentModelAuthorityError: installed mission "
+                             "document verifier cannot remain independent")
+                spawned = []
+
+                def fake_spawn(*, digest, record, _controlled_reentry=None, **kwargs):
+                    spawned.append(digest)
+                    return {"id": f"mission-document-research:{digest}",
+                            "status": "running", **dict(record)}
+
+                def resume():
+                    with patch.object(launcher, "spawn", side_effect=fake_spawn):
+                        return launcher.resume(
+                            admission_ref=admission["id"],
+                            admission_hash=admission["content_hash"],
+                            prior_ticket_ref=prior_ref, authorization=authorization)
+
+                with self.assertRaisesRegex(LaneChildRejected, "already attempted"):
+                    resume()
+                launcher.authorize_controlled_reentry(
+                    admission["id"], actor_ref="human:owner",
+                    granted_at=datetime.now(timezone.utc).isoformat())
+                resume()
+                self.assertEqual(len(spawned), 1)
+                finished_run(final_error)
+                if not refunded:
+                    with self.assertRaisesRegex(LaneChildRejected, "already attempted"):
+                        resume()
+                    self.assertEqual(len(spawned), 1)
+                    continue
+                # No new grant: the spent one is honoured once more.
+                resume()
+                self.assertEqual(len(spawned), 2)
+                self.assertEqual(len(list(launcher.tickets_dir.glob(
+                    "controlled-reentry-grant-*-refund-*.json"))), 1)
+                finished_run(final_error)
+                with self.assertRaisesRegex(LaneChildRejected, "already attempted"):
+                    resume()
+                self.assertEqual(len(spawned), 2)
+
     def test_a_child_that_failed_on_its_own_work_is_not_completed_again(self):
         """Only a systemic condition buys the extra completion."""
 
