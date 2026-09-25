@@ -397,3 +397,43 @@ class MultiSubjectAdmissionTests(unittest.TestCase):
         self.assertEqual(widened["admitted"][1]["status"], "admitted")
         after = self.h.counts()
         self.assertEqual(after["claim_versions"] - settled["claim_versions"], 1)
+
+
+class AdmissionQualityWiringTests(MultiSubjectAdmissionTests):
+    """2026-09-25b: the quality holds and the anchored rewrite, in the real loop."""
+
+    # The inherited identity tests run in their own class; only these here.
+    test_two_subjects_mint_two_candidates_with_distinct_keys = None
+    test_replaying_the_same_two_subject_window_writes_nothing_new = None
+    test_a_second_subject_the_span_never_names_is_held_not_minted = None
+    test_the_single_subject_key_is_the_one_it_has_always_been = None
+
+    def _quality(self, checker):
+        return patch.object(type(self.h.service), "admission_quality_check",
+                            return_value=checker)
+
+    def test_a_quality_hold_stages_for_a_person_and_mints_nothing(self):
+        primary = self.review["company_ref"]
+        before = self.h.counts()
+        with self._plan([primary]), self._quality(
+                lambda suggestion: (suggestion, "held for human review: statistics compilation")):
+            result = self.admit()
+        self.assertEqual(result["status"], "held")
+        self.assertEqual([entry["status"] for entry in result["admitted"]], ["held"])
+        self.assertIn("statistics compilation", result["admitted"][0]["reason"])
+        self.assertEqual(self.h.counts()["claim_versions"], before["claim_versions"])
+
+    def test_an_anchored_relative_year_is_what_enters_the_ledger(self):
+        primary = self.review["company_ref"]
+
+        def anchored(suggestion):
+            return ({**suggestion, "period": "2027",
+                     "normalized_statement": suggestion["normalized_statement"] + " (2027)"},
+                    None)
+
+        with self._plan([primary]), self._quality(anchored):
+            result = self.admit()
+        self.assertEqual(result["admitted"][0]["status"], "admitted", result)
+        claim = self.h.h.core.get_claim(result["admitted"][0]["claim_version_ref"])["claim"]
+        self.assertEqual(claim["period"], "2027")
+        self.assertTrue(claim["normalized_statement"].endswith(" (2027)"))

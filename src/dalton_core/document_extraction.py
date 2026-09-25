@@ -2553,12 +2553,19 @@ class DocumentExtractionService:
         # byte-identical for it and a replay is still a duplicate.
         resolve_subjects = self.statement_subjects(context, spec_ref)
         span_names = self.admission_subject_check(context, spec_ref)
+        # 2026-09-25b: what the statement's own words cannot show -- a page
+        # that is an SEO statistics compilation, a statement impossible at the
+        # document's date, a relative year -- is asked here, before the
+        # support check spends anything, and answered with a hold.
+        quality = self.admission_quality_check(context)
         pairs = []
         for suggestion in drafted["suggestions"]:
+            suggestion, quality_hold = quality(suggestion)
             plan = resolve_subjects(suggestion["normalized_statement"])
             for subject_ref in plan["subjects"]:
                 pairs.append((suggestion, subject_ref, plan["basis"],
-                              span_names(subject_ref, suggestion["citation"].get("raw_text"))))
+                              span_names(subject_ref, suggestion["citation"].get("raw_text"))
+                              or quality_hold))
         # 2026-09-24: the independent support check, one call for the window.
         # Asked only about what would otherwise be committed, and before any
         # write: a window that cannot be checked now is not admitted now.
@@ -2712,6 +2719,57 @@ class DocumentExtractionService:
                 result["holds"][index] = reason
         result.update({"status": "verified", "cost_micros": outcome.get("cost_micros", 0)})
         return result
+
+    def admission_quality_check(self, context):
+        """A checker: ``suggestion -> (suggestion, hold reason or None)``.
+
+        2026-09-25b post-deploy sample (``claim_admission_quality``):
+
+        * a fetched public-web page that is a statistics compilation (title
+          and one figure per paragraph) holds every statement drafted from it;
+        * a statement that cites a report for a period not over at the
+          document's date, or states as fact how an unfinished (or future)
+          period turned out, is held; a forecast stated as one is admitted;
+        * a relative year ("the following year") is written as the year it
+          means against the document's published date -- statement and
+          period both -- and held when it cannot be anchored.
+
+        The returned suggestion is the one to stage: the same dict unless a
+        relative year was anchored.
+        """
+
+        from .claim_admission_quality import (
+            anchor_relative_years, statistics_compilation_evidence,
+            statistics_compilation_hold, temporal_impossibility,
+        )
+
+        page_hold = None
+        if context.get("source_ref") == PUBLIC_WEB_SOURCE_REF:
+            try:
+                text = self._document_text(context)
+            except Exception:  # noqa: BLE001 - unreadable page: the other checks still run
+                text = None
+            evidence = statistics_compilation_evidence(text)
+            if evidence is not None:
+                page_hold = statistics_compilation_hold(evidence)
+        document_date = context.get("document_date")
+        date_basis = context.get("document_date_basis")
+
+        def check(suggestion):
+            anchored = anchor_relative_years(
+                statement=suggestion["normalized_statement"], period=suggestion["period"],
+                document_date=document_date, date_basis=date_basis)
+            if anchored["anchored"] is not None:
+                suggestion = {**suggestion, "normalized_statement": anchored["statement"],
+                              "period": anchored["period"]}
+            hold = page_hold or temporal_impossibility(
+                statement=suggestion["normalized_statement"], period=suggestion["period"],
+                document_date=document_date,
+                cited_span=(suggestion.get("citation") or {}).get("raw_text"),
+            ) or anchored["hold"]
+            return suggestion, hold
+
+        return check
 
     def admission_subject_check(self, context, spec_ref):
         """A checker: why a span may not be admitted for a subject, or None.
