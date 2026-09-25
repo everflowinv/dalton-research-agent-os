@@ -3711,6 +3711,158 @@ class MissionDocumentResearchTests(unittest.TestCase):
                 self.assertEqual(stage["status"], "blocked")
                 self.assertEqual(stage["reason"], "recovery refusal proof drifted")
 
+    def _completed_draft_then_roll(self):
+        """A draft paid under mission v1, then a signing rolls the envelope."""
+
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        admission = authority.admit_from_plan(**args)
+        executor, draft, verifier = self._executor(fixture, authority)
+        draft_done = self._run_until(
+            executor, admission,
+            lambda item: item.get("status") == "succeeded"
+            and item.get("stage") == "qualitative_model_draft")
+        self.assertEqual((draft.calls, verifier.calls), (1, 0))
+        rolled = self._roll_mission(fixture, budget={
+            **fixture.mission["budget"], "max_daily_cost_usd": 9.0,
+            "max_daily_paid_calls": 7})
+        self.assertNotEqual(rolled["id"], fixture.mission["id"])
+        return fixture, authority, admission, executor, draft, verifier, draft_done
+
+    def _draft_budget_binding(self, fixture, work_ref):
+        return fixture.budget.connection.execute(
+            "SELECT b.admission_id,b.record_json FROM model_mission_budget_bindings b "
+            "JOIN thesis_impact_day_admissions a ON a.admission_id=b.admission_id "
+            "WHERE a.work_order_ref=?", (work_ref,),
+        ).fetchone()
+
+    def test_completed_stage_bound_under_old_mission_version_reenters_after_roll(self):
+        """Live 2026-09-25: every owner re-entry died on ``binding drifted``.
+
+        6a2bcd's draft was paid under mission v14 / policy-17; the current
+        envelope is policy-18 / governing mission v26.  The completed stage
+        keeps the envelope it ran under, and the admission finishes without
+        buying the draft again.
+        """
+
+        (fixture, authority, admission, executor, draft, verifier,
+         draft_done) = self._completed_draft_then_roll()
+        row = self._draft_budget_binding(fixture, draft_done["work_order_ref"])
+        recorded = json.loads(row["record_json"])
+        current = executor_module._expected_budget_binding(authority, admission, 1)
+        # The envelope really did roll under the completed stage ...
+        self.assertNotEqual(canonical_json(recorded), canonical_json(current))
+        self.assertEqual(recorded["mission_version_ref"], current["mission_version_ref"])
+        # ... and the completed stage is still exact authority.
+        work = fixture.harness.scheduler().work_order_authority(
+            draft_done["work_order_ref"])["work_order"]
+        formal = fixture.harness.scheduler().formal_result(work["id"])
+        proof = exact_mission_document_model_execution_authority(
+            work, formal, executor.draft_worker)
+        self.assertEqual(proof["execution_proof"]["budget_mission_binding_hash"],
+                         content_hash(recorded))
+        finished = self._run_until(
+            executor, admission, lambda item: item.get("status") == "complete")
+        self.assertEqual(finished["research_status"], "candidate_staged")
+        self.assertEqual((draft.calls, verifier.calls), (1, 1))
+
+    def test_binding_written_before_pool_enforcement_existed_is_still_exact(self):
+        """Live 3953fd12 / 49d92fa7: drafts paid on 2026-09-11 carry no
+        ``pool_enforcement``; the envelope gained that field afterwards."""
+
+        (fixture, authority, admission, executor, _draft, _verifier,
+         draft_done) = self._completed_draft_then_roll()
+        older = json.loads(self._draft_budget_binding(
+            fixture, draft_done["work_order_ref"])["record_json"])
+        current = executor_module._expected_budget_binding(authority, admission, 1)
+        self.assertNotIn("pool_enforcement", older)
+        later = {**current, "pool_enforcement": "off"}
+        authentic = executor_module._historical_budget_binding_authentic
+        self.assertTrue(authentic(authority, later, older))
+        # A field the envelope never had is not an older shape; it is refused.
+        self.assertFalse(authentic(authority, later, {**older, "extra": 1}))
+        self.assertFalse(authentic(authority, current, {**older, "pool_enforcement": "on"}))
+
+    def test_rolled_binding_tampering_is_still_refused(self):
+        tampers = {
+            "mission_version_hash": lambda b: {**b, "mission_version_hash": "0" * 64},
+            "other_mission": lambda b: {
+                **b, "mission_ref": "coverage-mission:someone-else",
+                "mission_version_ref": "coverage-mission-version:someone-else:1"},
+            "policy_hash": lambda b: {**b, "outer_budget": {
+                **b["outer_budget"], "governance_policy_version_hash": "1" * 64}},
+            "mandate_version": lambda b: {**b, "outer_budget": {
+                **b["outer_budget"], "mandate_version_ref": "mandate-version:forged:9"}},
+            "caps_above_outer": lambda b: {
+                **b, "max_daily_cost_micros": b["outer_budget"]["max_daily_cost_micros"] + 1},
+            "pool": lambda b: {**b, "pool": "coverage"},
+        }
+        for name, tamper in tampers.items():
+            with self.subTest(tamper=name):
+                (fixture, authority, admission, executor, draft, verifier,
+                 draft_done) = self._completed_draft_then_roll()
+                row = self._draft_budget_binding(fixture, draft_done["work_order_ref"])
+                forged = tamper(json.loads(row["record_json"]))
+                connection = fixture.budget.connection
+                connection.execute("DROP TRIGGER model_mission_budget_no_update")
+                connection.execute(
+                    "UPDATE model_mission_budget_bindings SET mission_ref=?,record_json=? "
+                    "WHERE admission_id=?",
+                    (forged["mission_ref"], canonical_json(forged), row["admission_id"]))
+                connection.commit()
+                work = fixture.harness.scheduler().work_order_authority(
+                    draft_done["work_order_ref"])["work_order"]
+                formal = fixture.harness.scheduler().formal_result(work["id"])
+                with self.assertRaisesRegex(MissionDocumentResearchExecutorError,
+                                            "model budget binding drifted"):
+                    exact_mission_document_model_execution_authority(
+                        work, formal, executor.draft_worker)
+                with self.assertRaisesRegex(MissionDocumentResearchExecutorError,
+                                            "model budget binding drifted"):
+                    self._run_until(executor, admission,
+                                    lambda item: item.get("status") == "complete")
+                self.assertEqual((draft.calls, verifier.calls), (1, 0))
+
+    def test_contract_retry_recovery_work_survives_an_envelope_roll(self):
+        """Live ws-7d ...e5967f6d: ``historical recovery link authority drifted``.
+
+        A RecoveryWork bought by the automatic contract retry succeeded under
+        the old envelope.  Its link is intact; it is simply not an atomic
+        day-budget recovery, which is no reason to refuse it.
+        """
+
+        fixture, authority, args, _registration, _launcher = self._fixture()
+        self._enable_recovery(fixture, maximum=2)
+        admission = authority.admit_from_plan(**args)
+        executor, draft, verifier = self._executor(
+            fixture, authority, draft_adapter=ContractRejectOnceAdapter({
+                "schema_version": "0.1", "status": "answered",
+                "answer": "Managed services revenue is recognized over time.",
+                "candidate": {
+                    "normalized_statement":
+                        "Managed services revenue is recognized over time.",
+                    "metric_or_aspect": "managed services revenue recognition",
+                    "period": "current policy", "basis": "reported",
+                    "cited_match_indexes": [0]}, "missing": []},
+                {"schema_version": "0.1", "status": "answered"}))
+        recovered = self._run_until(
+            executor, admission,
+            lambda item: item.get("status") == "succeeded"
+            and item.get("stage") == "qualitative_model_draft")
+        self.assertTrue(recovered["work_order_ref"].startswith(
+            "work:mission-document-recovery-"))
+        link = json.loads(fixture.store.connection.execute(
+            "SELECT record_json FROM mission_document_research_recovery_links"
+        ).fetchone()[0])
+        self.assertEqual(link["failure_proof"]["classification"],
+                         "automation_bounded_contract_retry")
+        calls = draft.calls
+        self._roll_mission(fixture, budget={
+            **fixture.mission["budget"], "max_daily_cost_usd": 9.0})
+        finished = self._run_until(
+            executor, admission, lambda item: item.get("status") == "complete")
+        self.assertEqual(finished["research_status"], "candidate_staged")
+        self.assertEqual(draft.calls, calls)
+
     def test_pre_change_contract_hold_is_picked_up_by_the_automatic_retry(self):
         """The nineteen live holds: recorded before the retry existed, not spent."""
 

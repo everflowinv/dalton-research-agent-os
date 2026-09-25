@@ -996,7 +996,9 @@ def _exact_model_execution(work: Mapping[str, Any], formal: Mapping[str, Any], w
     expected_binding = _expected_budget_binding(authority, admission, index)
     actual_binding = (None if exact_budget is None else exact_budget["mission_binding"])
     if (actual_binding is not None
-            and canonical_json(actual_binding) != canonical_json(expected_binding)):
+            and canonical_json(actual_binding) != canonical_json(expected_binding)
+            and not _historical_budget_binding_authentic(
+                authority, expected_binding, actual_binding)):
         historical_binding = _historical_atomic_day_recovery_binding(
             authority, budget_store, admission, index, work, worker,
         )
@@ -1148,6 +1150,163 @@ def _same_stable_budget_scope(historical: Mapping[str, Any],
     ))
 
 
+_OUTER_BUDGET_FIELDS = frozenset({
+    "mandate_ref", "mandate_version_ref", "mandate_version_hash",
+    "governance_policy_ref", "governance_policy_version_ref",
+    "governance_policy_version_hash", "max_daily_paid_calls", "max_daily_cost_micros",
+})
+
+
+_LATER_BINDING_FIELDS = frozenset({"pool_enforcement"})
+
+
+def _positive_micros(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _historical_budget_binding_authentic(
+    authority: Any, current: Mapping[str, Any], binding: Any,
+) -> bool:
+    """Is ``binding`` a governance envelope this admission really ran under?
+
+    2026-09-25: every budget revision and every policy signing rolls the
+    governing mission and the governance policy, and with them the envelope
+    ``_expected_budget_binding`` derives *now* (live: mission v14 admitted,
+    stages paid under policy-17, current policy-18 / governing mission v26).
+    A stage that already ran was bound, and paid, under the envelope current
+    at that time, so comparing it with today's envelope failed every owner
+    re-entry of an admission older than the last signing.
+
+    The work identity must not move: the mission lineage, the exact admitted
+    mission version and its hash, and the budget pool and lane are compared
+    with the current binding exactly.  Only the rolled governance envelope
+    may differ, and then only to a real historical one: the mandate and
+    governance policy versions it names must exist, under the same mandate
+    and policy lineage, with exactly the hashes it asserts, and its caps must
+    sit inside its own outer budget.  A tampered hash, another mission, or an
+    envelope no ledger ever held is still refused.
+    """
+
+    if not isinstance(binding, Mapping) or not isinstance(current, Mapping):
+        return False
+    if canonical_json(binding) == canonical_json(current):
+        return True
+    if not _same_stable_budget_scope(binding, current):
+        return False
+    outer = binding.get("outer_budget")
+    current_outer = current.get("outer_budget")
+    if (not isinstance(outer, Mapping) or set(outer) != _OUTER_BUDGET_FIELDS
+            or not isinstance(current_outer, Mapping)
+            or outer.get("mandate_ref") != current_outer.get("mandate_ref")
+            or outer.get("governance_policy_ref")
+            != current_outer.get("governance_policy_ref")):
+        return False
+    # Same closed shape as today's envelope, except for fields added to the
+    # envelope after the stage ran (``pool_enforcement``, 2026-09-2x): a
+    # binding written before them simply does not carry them.
+    if (not set(binding) <= set(current)
+            or not set(current) - set(binding) <= _LATER_BINDING_FIELDS):
+        return False
+    for key in ("max_daily_paid_calls", "max_daily_cost_micros"):
+        if (not _positive_micros(binding.get(key)) or not _positive_micros(outer.get(key))
+                or binding[key] > outer[key]):
+            return False
+    caps = binding.get("pool_caps_micros")
+    if caps is not None:
+        if (not isinstance(caps, Mapping) or set(caps) != set(
+                current.get("pool_caps_micros") or {})
+                or not all(isinstance(value, int) and not isinstance(value, bool)
+                           and value >= 0 for value in caps.values())
+                or sum(caps.values()) > binding["max_daily_cost_micros"]):
+            return False
+    try:
+        mission = authority._missions.mission(binding["mission_version_ref"])
+        connection = authority.store.connection
+        policy = connection.execute(
+            "SELECT content_hash FROM governance_policy_versions "
+            "WHERE policy_version_id=? AND policy_ref=?",
+            (outer["governance_policy_version_ref"], outer["governance_policy_ref"]),
+        ).fetchone()
+        mandate = connection.execute(
+            "SELECT content_hash FROM mandate_versions "
+            "WHERE version_id=? AND mandate_ref=?",
+            (outer["mandate_version_ref"], outer["mandate_ref"]),
+        ).fetchone()
+    except Exception:  # noqa: BLE001 - unreadable authority is not authentic
+        return False
+    return (
+        mission.get("id") == binding["mission_version_ref"]
+        and mission.get("mission_ref") == binding["mission_ref"]
+        and mission.get("content_hash") == binding["mission_version_hash"]
+        and policy is not None
+        and policy[0] == outer["governance_policy_version_hash"]
+        and mandate is not None
+        and mandate[0] == outer["mandate_version_hash"]
+    )
+
+
+def _authentic_binding_hashes(
+    authority: Any, budget_store: Any, current: Mapping[str, Any],
+) -> set[str]:
+    """Hashes of every authentic envelope the budget ledger bound for this scope.
+
+    A recovery proof written before a governance roll stores only the hash of
+    the envelope current at that time.  The ledger itself kept every envelope
+    it admitted a paid attempt under, so a stored hash is accepted when it
+    names one of those -- re-verified here, not trusted -- or today's.
+    """
+
+    accepted = {content_hash(current)}
+    connection = getattr(budget_store, "connection", None)
+    if connection is None:
+        return accepted
+    try:
+        rows = connection.execute(
+            "SELECT record_json FROM model_mission_budget_bindings WHERE mission_ref=?",
+            (current["mission_ref"],),
+        ).fetchall()
+    except Exception:  # noqa: BLE001 - no ledger, only today's envelope
+        return accepted
+    seen: set[str] = set()
+    for row in rows:
+        raw = row[0]
+        if raw in seen:
+            continue
+        seen.add(raw)
+        try:
+            binding = json.loads(raw)
+        except (TypeError, ValueError, RecursionError):
+            continue
+        if (isinstance(binding, Mapping)
+                and canonical_json(binding) == raw
+                and _historical_budget_binding_authentic(authority, current, binding)):
+            accepted.add(content_hash(binding))
+    return accepted
+
+
+def _with_recorded_binding_hash(
+    rederived: Mapping[str, Any] | None, recorded: Any,
+    accepted: Callable[[], set[str]],
+) -> Mapping[str, Any] | None:
+    """Re-derived proof, carrying the envelope hash it was written with.
+
+    Proofs and records re-derive ``mission_binding_hash`` from the envelope
+    current *now*.  When that is the only difference and the recorded hash
+    names an authentic historical envelope, the recorded proof is the exact
+    one; anything else still differs and is still refused by the caller.
+    """
+
+    if (not isinstance(rederived, Mapping) or not isinstance(recorded, Mapping)
+            or rederived.get("mission_binding_hash")
+            == recorded.get("mission_binding_hash")):
+        return rederived
+    rebased = {**rederived, "mission_binding_hash": recorded.get("mission_binding_hash")}
+    if (canonical_json(rebased) != canonical_json(recorded)
+            or recorded.get("mission_binding_hash") not in accepted()):
+        return rederived
+    return rebased
+
+
 def _no_send_receipt(envelope: Mapping[str, Any], work: Mapping[str, Any],
                      route_ref: str) -> str | None:
     receipt = envelope.get("metadata", {}).get("mission_document_no_send")
@@ -1265,8 +1424,14 @@ def _verify_recovery_failure_proof(authority: Any, scheduler: Scheduler,
                 "unproved send retry authorization is invalid") from exc
         body = dict(authorization)
         asserted = body.pop("content_hash", None)
-        actual = _unproved_send_state_record(
-            authority, admission, failed, formal, index, worker)
+        actual = _with_recorded_binding_hash(
+            _unproved_send_state_record(
+                authority, admission, failed, formal, index, worker),
+            proof.get("unproved_send_record"),
+            lambda: _authentic_binding_hashes(
+                authority, getattr(worker, "budget_store", None),
+                _expected_budget_binding(authority, admission, index)),
+        )
         if classification == AUTOMATIC_UNPROVED_SEND_RETRY_CLASSIFICATION:
             if (set(authorization) != AUTOMATIC_UNPROVED_SEND_RETRY_FIELDS
                     or authorization.get("kind") != classification
@@ -1369,8 +1534,14 @@ def _verify_recovery_failure_proof(authority: Any, scheduler: Scheduler,
         proxy = object.__new__(MissionDocumentResearchExecutor)
         proxy.authority = authority
         proxy.verifier_worker = worker
-        actual = proxy._historical_no_send_authority(
-            admission, failed, formal, authorization)
+        actual = _with_recorded_binding_hash(
+            proxy._historical_no_send_authority(
+                admission, failed, formal, authorization),
+            proof,
+            lambda: _authentic_binding_hashes(
+                authority, getattr(worker, "budget_store", None),
+                _expected_budget_binding(authority, admission, 2)),
+        )
         if (actual is None or actual != proof
                 or authorization.get("content_hash") != row["content_hash"]
                 or canonical_json(authorization) != row["record_json"]):
@@ -1388,7 +1559,9 @@ def _verify_recovery_failure_proof(authority: Any, scheduler: Scheduler,
     binding = _expected_budget_binding(authority, admission, index)
     classification = proof.get("classification")
     if (classification != "atomic_day_budget_refusal"
-            and proof.get("mission_binding_hash") != content_hash(binding)):
+            and proof.get("mission_binding_hash") != content_hash(binding)
+            and proof.get("mission_binding_hash") not in _authentic_binding_hashes(
+                authority, budget_store, binding)):
         raise MissionDocumentResearchExecutorError("recovery mission binding drifted")
     if classification == "adapter_proved_definitely_not_sent":
         if (_no_send_receipt(envelope, failed, common["route_decision_ref"])
@@ -1416,7 +1589,9 @@ def _verify_recovery_failure_proof(authority: Any, scheduler: Scheduler,
                 != proof.get("budget_settlement_hash")
                 or exact["settlement"].get("actual_micros") != 0
                 or exact["settlement"].get("usage_entry_ref") is not None
-                or canonical_json(exact["mission_binding"]) != canonical_json(binding)):
+                or proof.get("mission_binding_hash") != content_hash(exact["mission_binding"])
+                or not _historical_budget_binding_authentic(
+                    authority, binding, exact["mission_binding"])):
             raise MissionDocumentResearchExecutorError("zero-cost recovery proof drifted")
         return
     table = ("thesis_impact_day_rejections" if classification == "atomic_day_budget_refusal"
@@ -1452,8 +1627,10 @@ def _verify_recovery_failure_proof(authority: Any, scheduler: Scheduler,
         historical_wire = (None if not isinstance(historical_binding, Mapping)
                            else canonical_json(historical_binding))
         if (not isinstance(historical_binding, Mapping)
-                or historical_wire not in {
+                or (historical_wire not in {
                     canonical_json(admitted_binding), canonical_json(binding)}
+                    and not _historical_budget_binding_authentic(
+                        authority, binding, historical_binding))
                 or proof.get("mission_binding_hash") != content_hash(historical_binding)
                 or not _same_stable_budget_scope(historical_binding, binding)
                 or refusal.get("policy_version_id") != failed["metadata"]["budget_policy_ref"]):
@@ -1514,11 +1691,17 @@ def _historical_atomic_day_recovery_binding(
             or link.get("admission_hash") != admission["content_hash"]
             or link.get("stage_ordinal") != index + 1
             or link.get("recovery_work_order_ref") != work["id"]
-            or canonical_json(receipt) != canonical_json(expected_receipt)
-            or link.get("failure_proof", {}).get("classification")
-            != "atomic_day_budget_refusal"):
+            or canonical_json(receipt) != canonical_json(expected_receipt)):
         raise MissionDocumentResearchExecutorError(
             "historical recovery link authority drifted")
+    # An intact link of any other class is simply not this compatibility
+    # path.  Until 2026-09-25 it was refused as "authority drifted" -- live,
+    # a contract-retry RecoveryWork (ws-7d, ...e5967f6d) whose envelope had
+    # rolled failed every re-entry on a link nothing was wrong with.
+    failure_proof = link.get("failure_proof")
+    if (not isinstance(failure_proof, Mapping)
+            or failure_proof.get("classification") != "atomic_day_budget_refusal"):
+        return None
     failed_authority = authority.store.connection.execute(
         "SELECT work_order_json,work_order_hash FROM scheduler_work_orders "
         "WHERE work_order_id=?", (link["failed_work_order_ref"],),
@@ -2918,7 +3101,8 @@ class MissionDocumentResearchExecutor:
                     or receipt_kind not in {"adapter_result", "typed_transport_exception"}
                     or settlement.get("actual_micros") != 0
                     or settlement.get("usage_entry_ref") is not None
-                    or canonical_json(binding) != canonical_json(expected_binding)):
+                    or not _historical_budget_binding_authentic(
+                        self.authority, expected_binding, binding)):
                 return None
             return {
                 "classification": "proved_zero_cost_no_send",
@@ -3805,7 +3989,58 @@ class MissionDocumentResearchExecutor:
             "suggested_actions": [],
             "created_at": formal["created_at"],
         }
+        recorded = self._recorded_observation_under_rolled_envelope(
+            admission, index, body)
+        if recorded is not None:
+            return recorded
         return self._write_observation(body)
+
+    def _recorded_observation_under_rolled_envelope(self, admission, index, body):
+        """The stored observation of this same fact, written before a roll.
+
+        A recovery observation's identity is (admission, Work, reason,
+        status); its proof carries ``mission_binding_hash``, re-derived from
+        the envelope current *now*.  After a governance roll the same stopped
+        fact re-derives with a new hash and used to refuse as ``stored
+        observation drifted`` (live 6a2bcd).  When that hash is the only
+        difference and the stored one names an authentic historical envelope,
+        the stored row is this observation.
+        """
+
+        row = self.connection.execute(
+            "SELECT record_json FROM mission_document_research_observations "
+            "WHERE observation_id=?", (body["id"],)).fetchone()
+        if row is None:
+            return None
+        try:
+            stored = json.loads(row["record_json"])
+        except (TypeError, ValueError, RecursionError):
+            return None
+        stored_proof = ((stored.get("recovery") or {}).get("proof")
+                        if isinstance(stored, Mapping) else None)
+        proof = (body.get("recovery") or {}).get("proof")
+        if (not isinstance(stored_proof, Mapping) or not isinstance(proof, Mapping)
+                or stored_proof.get("mission_binding_hash")
+                == proof.get("mission_binding_hash")):
+            return None
+        worker = self.draft_worker if index == 1 else self.verifier_worker
+        rebased = _with_recorded_binding_hash(
+            proof, stored_proof,
+            lambda: _authentic_binding_hashes(
+                self.authority, getattr(worker, "budget_store", None),
+                _expected_budget_binding(self.authority, admission, index)),
+        )
+        if rebased is proof:
+            return None
+        candidate = {**body, "recovery": {**body["recovery"], "proof": dict(rebased)}}
+        candidate.pop("content_hash", None)
+        candidate["content_hash"] = content_hash(candidate)
+        if canonical_json(candidate) != row["record_json"]:
+            return None
+        exact = [item for item in read_mission_document_research_observations(
+            self.connection, mission_version_ref=body["mission_version_ref"]
+        ) if item["id"] == body["id"]]
+        return exact[0] if len(exact) == 1 else None
 
     def _recover_paid_contract_failure(self, admission, work, formal, index, links,
                                        paid, *, now, deadline):
