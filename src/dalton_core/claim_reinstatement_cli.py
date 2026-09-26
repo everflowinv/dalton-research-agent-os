@@ -11,6 +11,11 @@
     # would withdraw, so their retirement stands again
     .venv/bin/python -m dalton_core.claim_reinstatement_cli recheck --state-dir "..."
 
+    # read-only: the support retirements (citation_support_rejected) the
+    # backfill will ask again under the current support contract, and which
+    # of them a current-contract verdict already upholds
+    .venv/bin/python -m dalton_core.claim_reinstatement_cli support-rereview --state-dir "..."
+
     # one reinstatement withdrawn by a person: dry run, then --apply
     .venv/bin/python -m dalton_core.claim_reinstatement_cli withdraw --state-dir "..." \\
         --claim-version-ref claim-version:… --reason "说的是 META，不是 GOOGL" \\
@@ -205,6 +210,39 @@ def rereview(state: Path, *, max_documents: int, extra_aliases: Iterable[str] = 
     return summary
 
 
+def support_rereview(state: Path, *, show: int = 100) -> dict[str, Any]:
+    """What the backfill's re-review of support retirements has left to do (read-only)."""
+
+    from types import SimpleNamespace
+
+    from .claim_support_backfill import REREVIEW_PASS_REF, ClaimSupportBackfill
+    from .claim_support_verification import CONTRACT_REF
+
+    connection = _connect(state)
+    try:
+        backfill = ClaimSupportBackfill(
+            store=SimpleNamespace(connection=connection), missions=_MissionReader(connection),
+            verifier=SimpleNamespace(records=None), reader=None, challenges=None,
+            claim_sources=())
+        candidates = backfill.rereview_candidates()
+        summary: dict[str, Any] = {"contract_ref": CONTRACT_REF, "pass_ref": REREVIEW_PASS_REF,
+                                   "would_reinstate": [], "skipped": []}
+        backfill._reinstate_upheld(None, summary, dry_run=True)
+    finally:
+        connection.close()
+    return {
+        **summary,
+        "to_ask": len(candidates),
+        "to_ask_retired": sum(1 for row in candidates if row["kind"] == "retired"),
+        "to_ask_rejected_not_retired": sum(1 for row in candidates if row["kind"] == "rejected"),
+        "to_ask_first": [
+            {"claim_version_ref": row["ref"], "kind": row["kind"],
+             "statement": str(json.loads(row["claim_json"]).get("normalized_statement"))[:160]}
+            for row in candidates[:show]],
+        "would_reinstate_count": len(summary["would_reinstate"]),
+    }
+
+
 def status(state: Path) -> dict[str, Any]:
     from .claim_retirement import (
         reinstated_claim_version_refs,
@@ -277,9 +315,11 @@ def reinstate(state: Path, *, claim_version_ref: str, reason: str,
 def main(argv: Iterable[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("status", "rereview", "reinstate", "recheck", "withdraw"):
+    for name in ("status", "rereview", "reinstate", "recheck", "withdraw", "support-rereview"):
         command = sub.add_parser(name)
         command.add_argument("--state-dir", type=Path, required=True)
+        if name == "support-rereview":
+            command.add_argument("--show", type=int, default=100)
         if name == "recheck":
             command.add_argument("--max-documents", type=int, default=10 ** 6)
         if name == "withdraw":
@@ -302,6 +342,8 @@ def main(argv: Iterable[str] | None = None) -> int:
     state = args.state_dir.expanduser().resolve()
     if args.command == "status":
         _print(status(state))
+    elif args.command == "support-rereview":
+        _print(support_rereview(state, show=args.show))
     elif args.command == "recheck":
         _print(recheck(state, max_documents=args.max_documents))
     elif args.command == "withdraw":

@@ -77,7 +77,9 @@ DETERMINISTIC_REASONS = frozenset({"subject_absent_from_source", "boilerplate_di
 # does not re-run anything; it re-reads the append-only verdict row bound to
 # the exact claim version, statement and subject, and refuses without one.
 RECORDED_VERDICT_REASONS = frozenset({"citation_support_rejected"})
-SUPPORT_VERIFIER_REF = "claim-verifier:citation-support:v1"
+# v2 (2026-09-26b): the verdicts are asked under claim-support-verification:v2
+# (document facts and whole sentences; ``claim_support_context``).
+SUPPORT_VERIFIER_REF = "claim-verifier:citation-support:v2"
 # v2: span level as well as document level (claim_subject.subject_absent_from_citation).
 # v3 (2026-09-24 audit): the span rule also keeps a Claim whose statement leans
 # on an antecedent just before the span, or names an executive, and a document
@@ -93,7 +95,13 @@ SPAN_RATIONALE_PREFIX = "这条结论所引的原文片段"
 REINSTATEMENT_REASONS: tuple[str, ...] = (
     "human_judgment",
     "subject_named_under_current_rule",
+    "citation_support_upheld_under_current_rule",
 )
+#: 2026-09-26b: a ``citation_support_rejected`` retirement withdrawn because
+#: the support check, asked again under its current contract (the document's
+#: date, period and speaker, the whole cited sentences), upholds the Claim.
+#: The authority re-reads that verdict (``recorded_support``) before writing.
+SUPPORT_REREVIEW_RULE_REF = "claim-rereview:citation-support:v2"
 #: The rule an automatic reinstatement re-runs.  v3: the current span
 #: detector no longer fires.  v4 (2026-09-25 audit): and the subject is
 #: positively named -- by the statement, its executive, the antecedent it
@@ -372,6 +380,7 @@ class ClaimRetirementAuthority:
             self.connection, "dalton_claim_retirement_authorized")
         self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
         self._admit_new_reason_codes()
+        self._admit_new_reinstatement_reasons()
 
     def _admit_new_reason_codes(self) -> None:
         """Widen an existing challenges table's reason CHECK, keeping every stored byte.
@@ -428,6 +437,57 @@ class ClaimRetirementAuthority:
         self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
         if self.connection.execute("PRAGMA foreign_key_check").fetchall():
             raise ClaimRetirementConflict("the claim challenge reason migration broke foreign keys")
+
+    def _admit_new_reinstatement_reasons(self) -> None:
+        """Widen an existing reinstatements table's reason CHECK, keeping every stored byte.
+
+        2026-09-26b: ``citation_support_upheld_under_current_rule``.  The same
+        rebuild as ``_admit_new_reason_codes``: same columns, same rows, the
+        schema file's indexes and triggers re-applied, foreign keys checked
+        afterwards (the withdrawals table references this one by name).
+        """
+
+        row = self.connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='claim_retirement_reinstatements'"
+        ).fetchone()
+        if row is None or all(code in (row[0] or "") for code in REINSTATEMENT_REASONS):
+            return
+        if self.connection.in_transaction:
+            raise ClaimRetirementConflict(
+                "the claim reinstatement reason migration requires no open transaction")
+        reasons = ",\n        ".join(f"'{code}'" for code in REINSTATEMENT_REASONS)
+        self.connection.execute("PRAGMA foreign_keys = OFF")
+        try:
+            self.connection.executescript(f"""
+                BEGIN IMMEDIATE;
+                DROP TRIGGER IF EXISTS claim_retirement_reinstatements_authorized_insert;
+                DROP TRIGGER IF EXISTS claim_retirement_reinstatements_no_update;
+                DROP TRIGGER IF EXISTS claim_retirement_reinstatements_no_delete;
+                CREATE TABLE claim_retirement_reinstatements_v2 (
+                    reinstatement_id TEXT PRIMARY KEY,
+                    claim_version_ref TEXT NOT NULL REFERENCES claim_versions(claim_version_id),
+                    decision_ref TEXT NOT NULL UNIQUE REFERENCES claim_retirement_decisions(decision_id),
+                    decision_hash TEXT NOT NULL,
+                    reason_code TEXT NOT NULL CHECK(reason_code IN (
+                        {reasons}
+                    )),
+                    rule_ref TEXT,
+                    actor_ref TEXT NOT NULL,
+                    rationale TEXT NOT NULL,
+                    record_json TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                INSERT INTO claim_retirement_reinstatements_v2 SELECT * FROM claim_retirement_reinstatements;
+                DROP TABLE claim_retirement_reinstatements;
+                ALTER TABLE claim_retirement_reinstatements_v2 RENAME TO claim_retirement_reinstatements;
+                COMMIT;
+            """)
+        finally:
+            self.connection.execute("PRAGMA foreign_keys = ON")
+        self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
+        if self.connection.execute("PRAGMA foreign_key_check").fetchall():
+            raise ClaimRetirementConflict("the claim reinstatement reason migration broke foreign keys")
 
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Cursor]:
@@ -783,10 +843,24 @@ class ClaimRetirementAuthority:
         challenge = self.challenge_record(decision["challenge_ref"])
         claim = self._claim(claim_version_ref)
         rule_ref = None
-        if _AUTOMATION_RE.fullmatch(actor):
+        named_by = None
+        if _AUTOMATION_RE.fullmatch(actor) and challenge["reason_code"] in RECORDED_VERDICT_REASONS:
+            # 2026-09-26b: a support retirement is withdrawn by automation
+            # only on a verdict under the current contract, bound to this
+            # exact Claim version, that upholds it -- re-read here.
+            from .claim_support_verification import recorded_support
+
+            if recorded_support(self.connection, claim_version_ref=claim_version_ref,
+                                claim=claim) is None:
+                raise ClaimRetirementConflict(
+                    "no recorded support verdict under the current contract upholds this "
+                    "exact Claim version")
+            reason_code, rule_ref = ("citation_support_upheld_under_current_rule",
+                                     SUPPORT_REREVIEW_RULE_REF)
+        elif _AUTOMATION_RE.fullmatch(actor):
             if challenge["reason_code"] != "subject_absent_from_source":
                 raise ClaimRetirementConflict(
-                    "automation may only reinstate a subject-absent retirement")
+                    "automation may only reinstate a subject-absent or support retirement")
             if source_text is None and self.source_text_resolver is not None:
                 source_text = self.source_text_resolver(claim_version_ref)
             if source_text is None or cited_span is None:
@@ -966,6 +1040,7 @@ __all__ = [
     "BOILERPLATE_DETECTOR_REF",
     "PRIOR_REREVIEW_RULE_REFS",
     "REINSTATEMENT_REASONS",
+    "SUPPORT_REREVIEW_RULE_REF",
     "REREVIEW_RULE_REF",
     "WITHDRAWAL_REASONS",
     "withdrawn_reinstatement_claim_version_refs",

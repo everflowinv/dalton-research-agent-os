@@ -83,7 +83,8 @@ CREATE TABLE IF NOT EXISTS claim_retirement_reinstatements (
     decision_hash TEXT NOT NULL,
     reason_code TEXT NOT NULL CHECK(reason_code IN (
         'human_judgment',
-        'subject_named_under_current_rule'
+        'subject_named_under_current_rule',
+        'citation_support_upheld_under_current_rule'
     )),
     rule_ref TEXT,
     actor_ref TEXT NOT NULL,
