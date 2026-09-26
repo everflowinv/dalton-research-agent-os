@@ -1483,6 +1483,17 @@ class DebateMapAuthority:
         return validate_version(wire)
 
 
+#: 2026-09-26: which version of ``novelty`` below decides "duplicate".  A
+#: duplicate is recorded as a terminal verdict under a key that names this
+#: version (``mission_debate_map_lane._business_key``), so a changed rule asks
+#: every held subject once more -- and only once.  Before this, duplicates
+#: recorded under the rule that did not yet count a withdrawn retired Claim
+#: (c8d61613) held ws-7d MSFT, legacy DXC, ACN and the industry map for good.
+#: Bump it whenever ``novelty`` changes what it calls new; a test pins the
+#: function's source to this value so a change cannot slip past unbumped.
+NOVELTY_RULE_VERSION = "2026-09-25.retired-withdrawn"
+
+
 def novelty(
     prior: Mapping[str, Any] | None, candidate: Mapping[str, Any],
     *, retired: Collection[str] = (),
@@ -1557,6 +1568,7 @@ __all__ = [
     "GATE_REASONS",
     "LIVE_STATUSES",
     "MARKET_LEANS",
+    "NOVELTY_RULE_VERSION",
     "OUR_SIDES",
     "POLICY_HASH",
     "POLICY_REF",

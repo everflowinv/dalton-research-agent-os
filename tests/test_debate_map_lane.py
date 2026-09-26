@@ -72,6 +72,59 @@ class ContractRecoveryIdentityTests(unittest.TestCase):
         self.assertEqual(current.split("|contract:")[0], repaired.split("|contract:")[0])
 
 
+class NoveltyRuleIdentityTests(unittest.TestCase):
+    """2026-09-26: a duplicate reached under an old novelty rule is not final."""
+
+    MISSION = {"id": "mission:v1", "content_hash": "a" * 64}
+
+    def test_the_novelty_rule_is_part_of_the_business_key(self):
+        current = _business_key("company:msft", "b" * 64, self.MISSION)
+        self.assertIn("|novelty:", current)
+        with patch("dalton_core.debate_map.NOVELTY_RULE_VERSION", "next-rule"):
+            changed = _business_key("company:msft", "b" * 64, self.MISSION)
+        self.assertNotEqual(current, changed)
+        self.assertEqual(current.split("|novelty:")[0], changed.split("|novelty:")[0])
+
+    def test_a_pre_rule_duplicate_does_not_hold_the_subject_under_the_new_rule(self):
+        from dalton_core.lane_failure_ledger import lane_budget
+        from dalton_core.lane_permission_control import record_controlled_failure
+
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("dalton_core.debate_map.NOVELTY_RULE_VERSION", "before"):
+                old_key = _business_key("company:msft", "b" * 64, self.MISSION)
+            budget = lane_budget("mission_debate_map", state_dir=directory)
+            record_controlled_failure(
+                budget, old_key, self.MISSION, None,
+                reason="last run: duplicate", status="duplicate")
+            self.assertEqual(budget.blocked(old_key).action, "terminal")
+            # Replayed after a restart as well: the ledger is durable.
+            replayed = lane_budget("mission_debate_map", state_dir=directory)
+            self.assertEqual(replayed.blocked(old_key).action, "terminal")
+            new_key = _business_key("company:msft", "b" * 64, self.MISSION)
+            self.assertIsNone(replayed.blocked(new_key))
+            # And under an unchanged rule the duplicate still holds: no clock
+            # re-asks a question whose answer cannot have changed.
+            record_controlled_failure(
+                replayed, new_key, self.MISSION, None,
+                reason="last run: duplicate", status="duplicate")
+            self.assertEqual(replayed.blocked(new_key).action, "terminal")
+
+    def test_changing_novelty_means_bumping_its_version(self):
+        import hashlib
+        import inspect
+
+        from dalton_core.debate_map import NOVELTY_RULE_VERSION, novelty
+
+        digest = hashlib.sha256(inspect.getsource(novelty).encode()).hexdigest()
+        # If this fails you changed ``debate_map.novelty``.  Bump
+        # NOVELTY_RULE_VERSION (so every duplicate held under the old rule is
+        # asked once more) and then re-pin both values here.
+        self.assertEqual(
+            (NOVELTY_RULE_VERSION, digest),
+            ("2026-09-25.retired-withdrawn",
+             "1d0b29e2dd8044b03bbe44de6c0430b3b38b8e216fae6c35e0afc9828b9173c0"))
+
+
 class FakeModel:
     """Two canned replies, and a record of what was asked."""
 

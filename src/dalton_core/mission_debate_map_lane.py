@@ -77,16 +77,26 @@ DEBATE_MAP_MODEL_CONFIG = "initial-screen-model-config.json"
 
 def _business_key(subject_ref: str, fingerprint: str,
                   mission: dict[str, Any], launcher: Any = None) -> str:
+    from .debate_map import NOVELTY_RULE_VERSION
     from .debate_map_draft import DRAFT_CONTRACT_HASH
     from .cockpit_model import verifier_provider_contract_fingerprint
 
     verifier_contract = verifier_provider_contract_fingerprint(
         "debate_map_verifier")
     from .model_route_recovery import configured_business_key
+    # 2026-09-26: the novelty rule is part of the question.  A ``duplicate``
+    # is a terminal verdict that never expires, and it is a verdict about
+    # (this evidence, under this rule): keyed without the rule, one reached
+    # before a rule change held the subject for good (ws-7d MSFT stayed on v1
+    # still citing eight retired Claims).  Keyed with it, a new rule asks each
+    # held subject exactly once, and an unchanged rule never re-asks -- which
+    # a time-based expiry could not promise: it would pay a redraw per subject
+    # per day to hear "duplicate" again.
     return configured_business_key(
         f"{subject_ref}|{fingerprint}|{mission['id']}|"
         f"{mission['content_hash']}|contract:{DRAFT_CONTRACT_HASH}|"
-        f"verifier_contract:{verifier_contract}", launcher
+        f"verifier_contract:{verifier_contract}|"
+        f"novelty:{NOVELTY_RULE_VERSION}", launcher
     )
 
 
