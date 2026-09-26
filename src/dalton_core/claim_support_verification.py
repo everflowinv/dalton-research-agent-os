@@ -24,11 +24,13 @@ thrown away.
 
 **Routing, money, independence.**  The call goes through ``CockpitModel`` on
 the extraction lane's own model configuration: its pinned routing policy, its
-credential slots, its day ledger.  The purpose is registered to the ``cheap``
-tier, so the chain the owner set on the model page decides which flash model
-answers, and the extraction draft's own route decision is passed as the
-producer, so the chain skips the drafter's family (``model_router``'s
-independence filter; unknown lineage is never independent).  The spend is
+credential slots, its day ledger.  The purpose is registered to the
+``verifier`` tier (2026-09-26; it was ``cheap``, whose links cannot serve a
+WorkOrder with a provider output contract), so the chain the owner set on the
+model page decides which model answers, and the extraction draft's own route
+decision is passed as the producer, so the chain skips the drafter's family
+(``model_router``'s independence filter; unknown lineage is never
+independent).  The spend is
 admitted to the ``coverage`` pool, the one extraction spends from, and each
 purpose also has a daily ceiling of its own here, read from the day ledger
 (``claim-support-verification.json`` beside the state; defaults below).
@@ -61,7 +63,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from .model_fallback_chain import TIER_CHEAP, register_purpose_tier
+from .model_fallback_chain import TIER_VERIFIER, register_purpose_tier
 from .store import authorization_flag, canonical_json, content_hash
 
 SCHEMA_VERSION = "0.1"
@@ -77,7 +79,7 @@ BACKFILL_PURPOSE = "claim_support_backfill"
 for _purpose in (PURPOSE, BACKFILL_PURPOSE):
     # ``register_purpose_tier`` returns the tier; it registers the purpose
     # with the cockpit model registry as well.
-    register_purpose_tier(_purpose, TIER_CHEAP)
+    register_purpose_tier(_purpose, TIER_VERIFIER)
 
 # Which sources' statements are checked: the morning sales notes and
 # AlphaEngine's broker documents -- the two whose prose is dense with other
@@ -122,11 +124,42 @@ _CONTRACT_WIRING_PHRASES = ("output schema", "provider contract", "provider sche
 _WIRING_KEY_SUFFIX = ":contract-wiring"
 
 
+# 2026-09-26: the other failure that says nothing about the statements.  From
+# 00:00 UTC every call of both purposes was refused by the router before any
+# model saw it ("CockpitModelRouteUnavailable: no model route is available
+# right now": the cheap chain had no link declaring provider-controlled-verify)
+# and after three of those, 105 legacy and 94 ws-7d statements were held for a
+# person as "could not be run".  An empty route set -- cooldowns, a catalog
+# change, a chain with no capable link, a gateway the catalog took out -- is
+# the system's state, and it changes without the statements changing.  It
+# defers hourly like the wiring refusal, and a batch it exhausted is asked
+# again.  (A drafter no chain link is independent of is not this: it is
+# refused before the call, in ``_independence``, and held.)
+_ROUTE_UNAVAILABLE_PHRASES = ("CockpitModelRouteUnavailable", "no model route is available")
+_ROUTE_KEY_SUFFIX = ":route-unavailable"
+# Where a batch exhausted by a systemic failure (either kind) counts its
+# attempts after it is asked again, so the three it gets are three real ones.
+_RECOUNT_KEY_SUFFIX = ":recount"
+_SIDE_KEY_SUFFIXES = (_WIRING_KEY_SUFFIX, _ROUTE_KEY_SUFFIX)
+
+
 def contract_wiring_failure(text: Any) -> bool:
     """Whether a failure is the verifier's own output-contract wiring, not the items."""
 
     return (isinstance(text, str) and "independent verifier" in text
             and any(phrase in text for phrase in _CONTRACT_WIRING_PHRASES))
+
+
+def route_unavailable_failure(text: Any) -> bool:
+    """Whether a failure is the router having no route at all, not the items."""
+
+    return isinstance(text, str) and any(phrase in text for phrase in _ROUTE_UNAVAILABLE_PHRASES)
+
+
+def systemic_failure(text: Any) -> bool:
+    """A failure that is never counted towards holding statements for a person."""
+
+    return contract_wiring_failure(text) or route_unavailable_failure(text)
 MAX_CITED_CHARS = 2400
 MAX_STATEMENT_CHARS = 2000
 SUPPORT_VALUES = ("supported", "not_supported")
@@ -569,6 +602,7 @@ class ClaimSupportVerifier:
         daily_cap_micros: int,
         spend_today: Callable[[str, str], int] | None = None,
         producer_family: Callable[[str], str] | None = None,
+        independent_route: Callable[[str], str | None] | None = None,
         clock: Callable[[], datetime] | None = None,
         max_attempts: int = MAX_ATTEMPTS,
         max_prompt_bytes: int = 48000,
@@ -581,6 +615,9 @@ class ClaimSupportVerifier:
         self.daily_cap_micros = int(daily_cap_micros)
         self.spend_today = spend_today or (lambda _purpose, _day: 0)
         self.producer_family = producer_family
+        # family -> None when the purpose's chain has a link that can serve a
+        # verifier WorkOrder and is independent of it, else why not.
+        self.independent_route = independent_route
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.max_attempts = int(max_attempts)
         self.max_prompt_bytes = int(max_prompt_bytes)
@@ -604,12 +641,8 @@ class ClaimSupportVerifier:
         self.records.write(sql, params)
 
     def _record_attempt(self, request_key: str, bucket: str, reason: str) -> int:
-        if contract_wiring_failure(reason) and not request_key.endswith(_WIRING_KEY_SUFFIX):
-            # Kept, for the hourly deferral and for anyone reading why, but
-            # under a key the exhaustion check never reads.
-            self._record_attempt(request_key + _WIRING_KEY_SUFFIX, bucket, reason)
-            prior = self._attempts(request_key)
-            return 0 if prior is None else int(prior["attempts"])
+        """Count one failure under exactly this key; the caller picks the key."""
+
         self._write(
             "INSERT INTO claim_support_attempts(request_key,purpose,attempts,last_bucket,last_reason,updated_at) "
             "VALUES(?,?,1,?,?,?) ON CONFLICT(request_key) DO UPDATE SET "
@@ -618,6 +651,27 @@ class ClaimSupportVerifier:
             (request_key, self.purpose, bucket, reason[:500], _now()),
         )
         return int(self._attempts(request_key)["attempts"])
+
+    def _counting_key(self, request_key: str) -> str:
+        """Where this batch's counted failures go.
+
+        A batch a deploy before 2026-09-26 exhausted with a systemic failure
+        (its last reason) was exhausted by the system, not by its statements:
+        it is asked again, and what fails from then on is counted afresh under
+        a key of its own, so it gets the three real attempts it never had.
+        """
+
+        prior = self._attempts(request_key)
+        if (prior is not None and prior["attempts"] >= self.max_attempts
+                and systemic_failure(prior["last_reason"])):
+            return request_key + _RECOUNT_KEY_SUFFIX
+        return request_key
+
+    def _record_systemic(self, request_key: str, bucket: str, reason: str) -> None:
+        """Keep a systemic failure for the hourly deferral, never for exhaustion."""
+
+        suffix = _WIRING_KEY_SUFFIX if contract_wiring_failure(reason) else _ROUTE_KEY_SUFFIX
+        self._record_attempt(request_key + suffix, bucket, reason)
 
     def _record_verdict(self, item: Mapping[str, Any], verdict: Mapping[str, Any],
                         call: Mapping[str, Any], producer_refs: Sequence[str]) -> dict[str, Any]:
@@ -669,6 +723,19 @@ class ClaimSupportVerifier:
                 refused[item["item_key"]] = (
                     f"the drafting model family {family!r} is unclassified, so no verifier "
                     "can be shown independent of it")
+                continue
+            if self.independent_route is None:
+                continue
+            # 2026-09-26: the router answers "no route" alike for a chain
+            # nobody can serve right now and for a drafter every link shares
+            # a family with.  The first is deferred; the second never changes
+            # by waiting, so it is told apart here, before the call, and held.
+            try:
+                why = self.independent_route(family)
+            except Exception:  # noqa: BLE001 - an unreadable chain is the router's to refuse
+                why = None
+            if why:
+                refused[item["item_key"]] = why
         return refused
 
     def verify(self, *, mission: Mapping[str, Any], items: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -725,23 +792,25 @@ class ClaimSupportVerifier:
 
     def _ask(self, mission: Mapping[str, Any], chunk: Sequence[Mapping[str, Any]],
              now: datetime, outcome: dict[str, Any]) -> str:
-        from .cockpit_model import CockpitModelPoolExhausted
+        from .cockpit_model import CockpitModelPoolExhausted, CockpitModelRouteUnavailable
 
         keys = sorted(item["item_key"] for item in chunk)
         request_key = content_hash({"purpose": self.purpose, "items": keys})[:32]
         bucket = now.strftime("%Y-%m-%dT%H")
-        prior = self._attempts(request_key)
-        wiring = self._attempts(request_key + _WIRING_KEY_SUFFIX)
-        # A batch whose last counted failure was contract wiring was exhausted
-        # by a bug, not by its statements: it is asked again.
+        counting_key = self._counting_key(request_key)
+        prior = self._attempts(counting_key)
+        side = [self._attempts(request_key + suffix) for suffix in _SIDE_KEY_SUFFIXES]
+        # A batch whose last counted failure was systemic (contract wiring, no
+        # route) was exhausted by the system, not by its statements: it is
+        # asked again (``_counting_key``).
         if (prior is not None and prior["attempts"] >= self.max_attempts
-                and not contract_wiring_failure(prior["last_reason"])):
+                and not systemic_failure(prior["last_reason"])):
             for item in chunk:
                 outcome["unverifiable"][item["item_key"]] = (
                     f"the support check failed {prior['attempts']} times "
                     f"(last: {prior['last_reason']})")
             return "exhausted"
-        if any(row is not None and row["last_bucket"] == bucket for row in (prior, wiring)):
+        if any(row is not None and row["last_bucket"] == bucket for row in (prior, *side)):
             outcome["reason"] = "the support check already failed this hour; retried next hour"
             return "deferred"
         try:
@@ -764,11 +833,15 @@ class ClaimSupportVerifier:
         except CockpitModelPoolExhausted as exc:
             outcome["reason"] = f"{type(exc).__name__}: {exc}"
             return "deferred"
-        except Exception as exc:  # noqa: BLE001 - any failure is a failed attempt
-            attempts = self._record_attempt(request_key, bucket, f"{type(exc).__name__}: {exc}")
+        except Exception as exc:  # noqa: BLE001 - any other failure is a failed attempt
             outcome["reason"] = f"{type(exc).__name__}: {exc}"
-            if contract_wiring_failure(outcome["reason"]):
+            if isinstance(exc, CockpitModelRouteUnavailable) or systemic_failure(outcome["reason"]):
+                # Not the statements' failure: the review stays open and the
+                # batch is asked again next hour, however long it lasts.
+                self._record_systemic(request_key, bucket, outcome["reason"])
+                outcome["systemic"] = True
                 return "deferred"
+            attempts = self._record_attempt(counting_key, bucket, outcome["reason"])
             if attempts >= self.max_attempts:
                 for item in chunk:
                     outcome["unverifiable"][item["item_key"]] = (
@@ -785,7 +858,7 @@ class ClaimSupportVerifier:
                 item, verdict, call, producer_refs)
         if len(answers) < len(chunk):
             reason = "; ".join(problems[:3]) or "the reply left statements unanswered"
-            attempts = self._record_attempt(request_key, bucket, reason)
+            attempts = self._record_attempt(counting_key, bucket, reason)
             outcome["reason"] = reason
             if attempts >= self.max_attempts:
                 for index, item in enumerate(chunk):
@@ -820,6 +893,16 @@ def build_verifier(*, store: Any, model_config: Mapping[str, Any], scheduler_db:
         with ModelRouter(model_config["model_router_db"], read_only=True) as router:
             return served_family(router, route_ref)
 
+    chain_links: list[tuple[str, str]] | None = None
+
+    def independent_route(producer: str) -> str | None:
+        nonlocal chain_links
+        if chain_links is None:
+            with ModelRouter(model_config["model_router_db"], read_only=True) as router:
+                chain_links = verifier_chain_links(
+                    router, model_config["routing_policy_ref"], purpose)
+        return no_independent_link(chain_links, producer, purpose=purpose)
+
     return ClaimSupportVerifier(
         store=store, model_call=model.call, purpose=purpose,
         max_prompt_bytes=int(model.budget_for(purpose)["max_input_tokens"]),
@@ -828,7 +911,48 @@ def build_verifier(*, store: Any, model_config: Mapping[str, Any], scheduler_db:
         spend_today=lambda name, day: purpose_spend_micros(
             model_config["budget_db"], name, day, scheduler_db=scheduler_db),
         producer_family=family,
+        independent_route=independent_route,
     )
+
+
+def verifier_chain_links(router: Any, policy_version_ref: str, purpose: str) -> list[tuple[str, str]]:
+    """``(profile_id, family)`` of every link this purpose's chain can serve a verifier with.
+
+    "Can serve" is the capability a WorkOrder with a provider output contract
+    asks for (``provider-controlled-verify``); a link without it is rejected
+    by the router whatever the drafter was.
+    """
+
+    from .model_fallback_chain import effective_chain, profile_families
+
+    profiles = profile_families(router)
+    chain = effective_chain(router.get_policy(policy_version_ref), purpose, profiles=profiles)
+    return [
+        (profile_id, str(profiles[profile_id].get("family") or ""))
+        for profile_id in chain["chain"]
+        if profile_id in profiles
+        and "provider-controlled-verify" in (profiles[profile_id].get("capabilities") or ())
+    ]
+
+
+def no_independent_link(links: Sequence[tuple[str, str]], producer: str, *,
+                        purpose: str) -> str | None:
+    """Why no link of ``links`` can check ``producer``'s work, or None when one can.
+
+    A chain with no capable link at all is not an answer about the drafter --
+    it is the configuration the 2026-09-26 outage was, and it is deferred like
+    any other missing route rather than held.
+    """
+
+    from .model_router import independent_families
+
+    if not links:
+        return None
+    if any(independent_families(family, producer) for _profile_id, family in links):
+        return None
+    return (f"no model of the {purpose} chain that can verify "
+            f"({', '.join(profile_id for profile_id, _family in links)}) is independent "
+            f"of the drafting family {producer!r}")
 
 
 __all__ = [
@@ -846,12 +970,16 @@ __all__ = [
     "build_prompt",
     "build_verifier",
     "contract_wiring_failure",
+    "route_unavailable_failure",
+    "systemic_failure",
     "hold_reason",
     "item_key",
     "load_settings",
+    "no_independent_link",
     "parse_verdicts",
     "never_sent_admissions",
     "purpose_spend_micros",
     "recorded_rejection",
     "support_item",
+    "verifier_chain_links",
 ]

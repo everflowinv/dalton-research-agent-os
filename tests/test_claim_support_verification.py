@@ -34,7 +34,11 @@ from dalton_core.claim_support_verification import (
     purpose_spend_micros,
     support_item,
 )
-from dalton_core.cockpit_model import CockpitModelError, CockpitModelPoolExhausted
+from dalton_core.cockpit_model import (
+    CockpitModelError,
+    CockpitModelPoolExhausted,
+    CockpitModelRouteUnavailable,
+)
 from dalton_core.document_extraction import DocumentExtractionService
 from dalton_core.document_extraction_cli import run_extraction
 from dalton_core.research_review import HumanReviewAuthority
@@ -129,14 +133,16 @@ class ContractTests(unittest.TestCase):
         self.assertNotEqual(item_key(**base), item_key(**{**base, "cited_text": "c2"}))
         self.assertNotEqual(item_key(**base), item_key(**{**base, "subject_ref": "company:ticker:msft"}))
 
-    def test_both_purposes_are_cheap_tier_coverage_pool_and_labelled(self) -> None:
+    def test_both_purposes_are_verifier_tier_coverage_pool_and_labelled(self) -> None:
         from dalton_core.budget_pools import pool_for_purpose
         from dalton_core.call_budget import default_call_budget
         from dalton_core.model_fallback_chain import tier_for
         from dalton_core.model_selection import PURPOSE_LABELS
 
         for purpose in (PURPOSE, BACKFILL_PURPOSE):
-            self.assertEqual(tier_for(purpose), "cheap")
+            # 2026-09-26: verifier, not cheap -- their WorkOrders carry a
+            # provider contract, which no cheap link could serve.
+            self.assertEqual(tier_for(purpose), "verifier")
             self.assertEqual(pool_for_purpose(purpose), "coverage")
             self.assertIn(purpose, PURPOSE_LABELS)
             # The owner's rule: every packaged single-call ceiling is a dollar;
@@ -385,6 +391,85 @@ class VerifierTests(unittest.TestCase):
              "2026-09-24T07:00:00+00:00"))
         self.assertEqual(verifier.verify(mission=MISSION, items=other)["status"], "exhausted")
 
+    ROUTE = "CockpitModelRouteUnavailable: no model route is available right now"
+
+    def test_no_route_defers_hourly_and_never_holds(self) -> None:
+        # 2026-09-26: the router refused every call from 00:00 UTC (the cheap
+        # chain had no link that could serve a verifier WorkOrder).  Counted,
+        # three of those held a day's statements for a person.
+        route = CockpitModelRouteUnavailable("no model route is available right now")
+        model = FakeModel(*[route] * (MAX_ATTEMPTS + 2),
+                          _reply(("supported", "about_subject", None)))
+        verifier = self.verifier(model)
+        items = [_item(1)]
+        for _ in range(MAX_ATTEMPTS + 2):
+            outcome = verifier.verify(mission=MISSION, items=items)
+            self.assertEqual(outcome["status"], "deferred", outcome)
+            self.assertEqual(outcome["unverifiable"], {})
+            # Once an hour, not every tick.
+            self.assertEqual(verifier.verify(mission=MISSION, items=items)["status"], "deferred")
+            self.clock.now += timedelta(hours=1)
+        self.assertEqual(len(model.calls), MAX_ATTEMPTS + 2)
+        self.assertEqual(verifier.verify(mission=MISSION, items=items)["status"], "verified")
+        rows = dict(self.store.connection.execute(
+            "SELECT request_key, attempts FROM claim_support_attempts").fetchall())
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(next(iter(rows)).endswith(":route-unavailable"))
+
+    def test_the_route_refusal_is_recognised_by_its_text_as_well(self) -> None:
+        # ``_answer`` spells the same refusal differently; either is systemic.
+        model = FakeModel(*[CockpitModelError(
+            "no model route is available right now")] * (MAX_ATTEMPTS + 1))
+        verifier = self.verifier(model)
+        for _ in range(MAX_ATTEMPTS + 1):
+            self.assertEqual(verifier.verify(mission=MISSION, items=[_item(1)])["status"],
+                             "deferred")
+            self.clock.now += timedelta(hours=1)
+
+    def test_a_batch_exhausted_by_no_route_is_asked_again_and_recounted(self) -> None:
+        # What the 2026-09-26 outage left behind: three (or four) counted
+        # failures, all "no model route".  The batch is asked again, and a
+        # real failure after that is the first of three, not the fourth.
+        model = FakeModel(*[CockpitModelError("provider down")] * MAX_ATTEMPTS)
+        verifier = self.verifier(model)
+        items = [_item(1)]
+        request_key = content_hash(
+            {"purpose": PURPOSE, "items": [items[0]["item_key"]]})[:32]
+        verifier.records.write(
+            "INSERT INTO claim_support_attempts(request_key,purpose,attempts,last_bucket,last_reason,updated_at) "
+            "VALUES(?,?,?,?,?,?)",
+            (request_key, PURPOSE, MAX_ATTEMPTS + 1, "2026-09-24T04", self.ROUTE,
+             "2026-09-24T04:02:41+00:00"))
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            outcome = verifier.verify(mission=MISSION, items=items)
+            self.assertEqual(len(model.calls), attempt)
+            expected = "exhausted" if attempt == MAX_ATTEMPTS else "deferred"
+            self.assertEqual(outcome["status"], expected, outcome)
+            self.clock.now += timedelta(hours=1)
+        self.assertIn("provider down", outcome["unverifiable"][items[0]["item_key"]])
+
+    def test_a_drafter_no_capable_link_is_independent_of_is_held_without_a_call(self) -> None:
+        from dalton_core.claim_support_verification import no_independent_link
+
+        links = [("profile:gemini-3-8-flash", "google-gemini-3"),
+                 ("profile:gemini-3-1-pro-preview", "google-gemini-3")]
+        model = FakeModel(_reply(("supported", "about_subject", None)))
+        verifier = self.verifier(
+            model, producer_family=lambda ref: ("google-gemini-3" if ref.endswith("gemini")
+                                                else "deepseek-v4"),
+            independent_route=lambda family: no_independent_link(
+                links, family, purpose=PURPOSE))
+        gemini, deepseek = _item(1, route="route-decision:gemini"), _item(2)
+        outcome = verifier.verify(mission=MISSION, items=[gemini, deepseek])
+        self.assertEqual(outcome["status"], "exhausted")
+        self.assertIn("independent of the drafting family 'google-gemini-3'",
+                      outcome["unverifiable"][gemini["item_key"]])
+        self.assertIn(deepseek["item_key"], outcome["verdicts"])
+        self.assertEqual(len(model.calls), 1)
+        # A chain with no capable link at all says nothing about the drafter:
+        # it is the router's to refuse, and that refusal defers.
+        self.assertIsNone(no_independent_link([], "deepseek-v4", purpose=PURPOSE))
+
     def test_a_partial_answer_keeps_what_was_answered_and_defers_the_rest(self) -> None:
         model = FakeModel(_reply(("supported", "about_subject", None)),
                           _reply(("supported", "about_subject", None)))
@@ -456,13 +541,14 @@ class AdmissionTests(AutomationDraftingTests):
         "basis": "fixture management commentary",
         "excerpt": "Accenture management says client decisions remain cautious"}
 
-    def _run(self, model):
-        self._grant_automation()
-        self._policy_with_document_rule()
-        context = self._active_context()
+    def _run(self, model, *, max_attempts=MAX_ATTEMPTS, first=True):
         fixture = self.root / "support-fixture.json"
-        fixture.write_text(json.dumps({"schema_version": "0.1", "suggestions": [
-            {**self.STATEMENT, "quote_id": context["quotes"][0]["quote_id"]}]}), encoding="utf-8")
+        if first:
+            self._grant_automation()
+            self._policy_with_document_rule()
+            context = self._active_context()
+            fixture.write_text(json.dumps({"schema_version": "0.1", "suggestions": [
+                {**self.STATEMENT, "quote_id": context["quotes"][0]["quote_id"]}]}), encoding="utf-8")
         base = document_extraction_cli.ExtractionHost
 
         class Host(base):
@@ -470,7 +556,7 @@ class AdmissionTests(AutomationDraftingTests):
                 super().__init__(**kwargs)
                 inner._claim_support_verifier = ClaimSupportVerifier(
                     store=inner.store, model_call=model, daily_cap_micros=100_000,
-                    producer_family=lambda ref: "deepseek-v4")
+                    producer_family=lambda ref: "deepseek-v4", max_attempts=max_attempts)
 
         before = self.h.counts()
         with patch.object(document_extraction_cli, "ExtractionHost", Host):
@@ -521,6 +607,86 @@ class AdmissionTests(AutomationDraftingTests):
         states = {r["state"] for r in self.h.missions.document_reviews(active["id"])}
         self.assertIn("awaiting_human_extraction", states)
 
+
+    def test_a_route_outage_keeps_the_review_open_and_holds_nothing(self) -> None:
+        model = FakeModel(CockpitModelRouteUnavailable("no model route is available right now"))
+        summary, before = self._run(model, max_attempts=1)
+        self.assertEqual(summary["admitted"], [])
+        [resolved] = summary["resolved_reviews"]
+        self.assertEqual(resolved["status"], "held")
+        self.assertIn("claim_support_verification_deferred", resolved["reason"])
+        self.assertEqual(self.h.counts(), before)
+
+    def _outage_leftovers(self):
+        """What 2026-09-26 left behind, reproduced with the code as it was.
+
+        "No model route" counted towards the attempts (the old code saw it as
+        an ordinary CockpitModelError), the batch exhausted, the statement was
+        staged as held and the review closed.  The Scheduler kept the prompt
+        the batch was asked with.
+        """
+
+        from dalton_core import claim_support_verification as csv
+        from dalton_core.claim_support_verification import ClaimSupportVerdictStore
+        from dalton_core.cockpit_model import build_work
+        from dalton_core.scheduler import Scheduler
+
+        outage = FakeModel(CockpitModelError("no model route is available right now"))
+        with patch.object(csv, "systemic_failure", csv.contract_wiring_failure):
+            summary, before = self._run(outage, max_attempts=1)
+        [held] = summary["admitted"]
+        self.assertEqual(held["status"], "held", held)
+        self.assertIn("could not be run", held["reason"])
+        [resolved] = summary["resolved_reviews"]
+        self.assertEqual(resolved["status"], "extraction_staged")
+        ClaimSupportVerdictStore(self.h.h.core).write(
+            "UPDATE claim_support_attempts SET attempts=?", (MAX_ATTEMPTS,))
+        [asked] = outage.calls
+        with Scheduler(self.root / "scheduler.sqlite") as scheduler:
+            scheduler.enqueue(build_work(
+                purpose=PURPOSE, request_id=asked["request_id"], prompt=asked["prompt"],
+                mission_version_ref=asked["mission"]["id"], max_input_tokens=120_000,
+                max_output_tokens=1_600, max_cost_usd=1.0, max_seconds=120))
+        return held, before
+
+    def test_candidates_the_outage_held_are_asked_again_and_committed(self) -> None:
+        held, before = self._outage_leftovers()
+        recovered = FakeModel(_reply(("supported", "about_subject", None)))
+        summary, _ = self._run(recovered, first=False)
+        recheck = summary["support_recheck"]
+        self.assertEqual(recheck["remaining_before"], 1, recheck)
+        [admitted] = recheck["admitted"]
+        # The very candidate that was staged, not a second copy of it.
+        self.assertEqual(admitted["candidate_claim_ref"], held["candidate_claim_ref"])
+        self.assertEqual(len(recovered.calls), 1)
+        self.assertIn("Accenture", recovered.calls[0]["prompt"])
+        self.assertEqual(self.h.counts()["claim_versions"], before["claim_versions"] + 1)
+        # Settled: nothing left to ask, nothing paid again.
+        again = FakeModel()
+        summary, _ = self._run(again, first=False)
+        self.assertEqual(summary["support_recheck"]["remaining_before"], 0)
+        self.assertEqual(again.calls, [])
+
+    def test_a_recheck_that_finds_the_statement_unsupported_leaves_it_held(self) -> None:
+        held, before = self._outage_leftovers()
+        recovered = FakeModel(_reply(("not_supported", "about_subject", None)))
+        summary, _ = self._run(recovered, first=False)
+        recheck = summary["support_recheck"]
+        self.assertEqual((recheck["admitted"], recheck["still_held"]), ([], 1), recheck)
+        self.assertEqual(self.h.counts()["claim_versions"], before["claim_versions"])
+        review = HumanReviewAuthority(self.root / "staging.sqlite")
+        self.addCleanup(review.close)
+        self.assertEqual(review.candidate_status(held["candidate_claim_ref"])["review_state"],
+                         "staged")
+
+    def test_a_recheck_during_the_outage_defers_and_holds_nothing_more(self) -> None:
+        held, before = self._outage_leftovers()
+        still = FakeModel(CockpitModelRouteUnavailable("no model route is available right now"))
+        summary, _ = self._run(still, first=False)
+        recheck = summary["support_recheck"]
+        self.assertEqual(recheck["admitted"], [])
+        self.assertIsNotNone(recheck["deferred"])
+        self.assertEqual(self.h.counts()["claim_versions"], before["claim_versions"])
 
 if __name__ == "__main__":
     unittest.main()

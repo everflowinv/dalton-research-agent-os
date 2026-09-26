@@ -168,9 +168,20 @@ _PURPOSE_TIERS: dict[str, str] = {
     # 2026-09-24: the support check on a drafted statement, before admission
     # and as a backfill after.  Two closed answers per statement -- a flash
     # model's job -- and independent of the drafter because the drafter's
-    # route is passed as the producer, not because the tier is different.
-    "claim_support_verifier": TIER_CHEAP,
-    "claim_support_backfill": TIER_CHEAP,
+    # route is passed as the producer.
+    #
+    # 2026-09-26: the verifier tier, not the cheap one.  4fa1e3c4 gave both
+    # purposes a provider output contract, which makes their WorkOrders ask for
+    # ``provider-controlled-verify``; no link of the cheap chain declares it
+    # (deepseek-v4-flash, gemini-3-8-flash-antigravity, zai-glm-5-3-flash), so
+    # from the first call after that deploy every route was rejected
+    # (capability_not_supported on every link) and "no model route is
+    # available right now" held a day's statements for a person.  The verifier
+    # chain is the one the model page refuses to save without such a link, and
+    # its first link is a flash model.  Every purpose with a provider contract
+    # belongs here (test_cockpit_model_fallback pins that).
+    "claim_support_verifier": TIER_VERIFIER,
+    "claim_support_backfill": TIER_VERIFIER,
     "discovery_selection": TIER_CHEAP,
     "registered_annual_report_draft": TIER_BRAIN,
     "registered_annual_report_verifier": TIER_VERIFIER,

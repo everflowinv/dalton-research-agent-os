@@ -185,6 +185,57 @@ class BackfillTests(BackfillHarness):
         self.assertEqual((again["calls"], again["retired"]), (0, [good["ref"]]))
 
 
+    def test_claims_marked_unverifiable_for_want_of_a_route_are_asked_again(self) -> None:
+        # 2026-09-26: every call was refused with "no model route" from 00:00
+        # UTC, and after three refusals a batch's Claims were marked
+        # unverifiable -- under the first pass for some, and under the
+        # after-contract-wiring pass for Claims that pass had just re-opened.
+        from dalton_core.claim_support_backfill import RETRY_PASS_REF, ROUTE_RETRY_PASS_REF
+
+        good, bad, _lost, _numeric, _contested = self.claims()
+        route = ("the support check failed 3 times (last: CockpitModelRouteUnavailable: "
+                 "no model route is available right now)")
+        wiring = ("the support check failed 3 times (last: CockpitModelError: ... independent "
+                  "verifier WorkOrder lacks the required output schema version)")
+        self.verifier.records.mark(claim_version_ref=good["ref"], claim_version_hash=good["hash"],
+                                   pass_ref=PASS_REF, outcome="unverifiable", detail=route)
+        self.verifier.records.mark(claim_version_ref=bad["ref"], claim_version_hash=bad["hash"],
+                                   pass_ref=PASS_REF, outcome="unverifiable", detail=wiring)
+        self.verifier.records.mark(claim_version_ref=bad["ref"], claim_version_hash=bad["hash"],
+                                   pass_ref=RETRY_PASS_REF, outcome="unverifiable", detail=route)
+        self.model.replies.append(_reply(("supported", "about_subject", None),
+                                         ("not_supported", "about_subject", None)))
+        result = self.backfill().run_once(max_items=10)
+        self.assertEqual(len(self.model.calls), 1)
+        self.assertEqual(result["examined"], 2, result)
+        marks = {(row[0], row[1]): row[2] for row in self.store.connection.execute(
+            "SELECT claim_version_ref, pass_ref, outcome FROM claim_support_backfill_marks")}
+        # Each gets its next free pass ref, and the verdict settles it.
+        self.assertEqual(marks[(good["ref"], RETRY_PASS_REF)], "verdict")
+        self.assertEqual(marks[(bad["ref"], ROUTE_RETRY_PASS_REF)], "verdict")
+        self.assertEqual(result["remaining_after"], 0)
+
+    def test_a_route_outage_now_defers_the_backfill_instead_of_marking(self) -> None:
+        from dalton_core.cockpit_model import CockpitModelRouteUnavailable
+
+        from datetime import datetime, timedelta, timezone
+
+        moment = [datetime(2026, 9, 26, 0, 20, tzinfo=timezone.utc)]
+        self.verifier.clock = lambda: moment[0]
+        self.claims()
+        self.model.replies.extend(
+            [CockpitModelRouteUnavailable("no model route is available right now")] * 4)
+        for _ in range(4):
+            result = self.backfill().run_once(max_items=10)
+            self.assertEqual(result["unverifiable"], 0, result)
+            self.assertIsNotNone(result["deferred"])
+            moment[0] += timedelta(hours=1)
+        self.assertEqual(len(self.model.calls), 4)
+        self.assertEqual(self.store.connection.execute(
+            "SELECT COUNT(*) FROM claim_support_backfill_marks WHERE outcome='unverifiable'"
+        ).fetchone()[0], 0)
+
+
 class AuthorityTests(BackfillHarness):
     def test_automation_cannot_retire_on_the_reason_without_a_recorded_rejection(self) -> None:
         claim = self.claim(statement="EPAM said engineering demand improved.", source=SOURCE)

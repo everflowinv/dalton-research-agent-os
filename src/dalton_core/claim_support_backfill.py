@@ -37,8 +37,8 @@ from typing import Any
 from .claim_support_verification import (
     ClaimSupportVerifier,
     admissible,
-    contract_wiring_failure,
     support_item,
+    systemic_failure,
 )
 
 PASS_REF = "claim-support-backfill:v1"
@@ -49,6 +49,15 @@ PASS_REF = "claim-support-backfill:v1"
 # "a new pass ref re-opens every Claim that is not settled by a verdict" --
 # and its next mark is written there.
 RETRY_PASS_REF = "claim-support-backfill:v1:after-contract-wiring"
+# 2026-09-26: the same for "no model route" (the support purposes sat on a
+# chain that could not serve them): 60 first-pass and 20 after-contract-wiring
+# marks in each workspace say ``unverifiable`` for that alone.  Such a mark
+# settles nothing either; the Claim's next mark is written under the first of
+# these pass refs it has none under, so a Claim marked by both outages still
+# gets one real look.  The last one settles whatever it says -- and a systemic
+# failure no longer ends in an ``unverifiable`` mark at all, it defers.
+ROUTE_RETRY_PASS_REF = "claim-support-backfill:v1:after-route-unavailable"
+PASS_REFS = (PASS_REF, RETRY_PASS_REF, ROUTE_RETRY_PASS_REF)
 SUPPORT_REASON = "citation_support_rejected"
 WRITE_SCOPE = "claim_challenge"
 DEFAULT_MAX_DOCUMENTS = 60
@@ -109,29 +118,31 @@ class ClaimSupportBackfill:
             return []
         prefixes = " OR ".join("json_extract(c.claim_json,'$.claim_ref') LIKE ?"
                                for _ in self.claim_sources)
-        # A first-pass mark settles a Claim unless it is an ``unverifiable``
-        # the verifier's contract wiring caused; that Claim is re-opened once,
-        # under RETRY_PASS_REF, and whatever it is marked there settles it.
+        # A mark settles a Claim unless it is an ``unverifiable`` a systemic
+        # failure caused (the verifier's contract wiring, no model route);
+        # such a Claim is re-opened under the next pass ref it has no mark
+        # under (``PASS_REFS``), and a mark under the last one settles it.
         self.connection.create_function(
-            "dalton_contract_wiring_failure", 1,
-            lambda text: 1 if contract_wiring_failure(text) else 0, deterministic=True)
+            "dalton_systemic_support_failure", 1,
+            lambda text: 1 if systemic_failure(text) else 0, deterministic=True)
+        passes = ",".join("?" for _ in PASS_REFS)
         return self.connection.execute(
             "SELECT c.claim_version_id AS ref, c.claim_json AS claim_json, c.content_hash AS hash, "
-            "EXISTS (SELECT 1 FROM claim_support_backfill_marks f "
-            "  WHERE f.claim_version_ref=c.claim_version_id AND f.pass_ref=?) AS reopened "
+            "(SELECT json_group_array(f.pass_ref) FROM claim_support_backfill_marks f "
+            "  WHERE f.claim_version_ref=c.claim_version_id) AS marked_passes "
             "FROM claim_versions c "
             "WHERE json_extract(c.claim_json,'$.claim_kind')='qualitative' "
             f"AND ({prefixes}) "
             "AND NOT EXISTS (SELECT 1 FROM claim_retirement_challenges h "
             "  WHERE h.claim_version_ref=c.claim_version_id) "
             "AND NOT EXISTS (SELECT 1 FROM claim_support_backfill_marks m "
-            "  WHERE m.claim_version_ref=c.claim_version_id AND m.pass_ref=? "
-            "  AND NOT (m.outcome='unverifiable' AND dalton_contract_wiring_failure(m.detail))) "
+            f"  WHERE m.claim_version_ref=c.claim_version_id AND m.pass_ref IN ({passes}) "
+            "  AND NOT (m.outcome='unverifiable' AND dalton_systemic_support_failure(m.detail))) "
             "AND NOT EXISTS (SELECT 1 FROM claim_support_backfill_marks r "
             "  WHERE r.claim_version_ref=c.claim_version_id AND r.pass_ref=?) "
             "ORDER BY c.created_at DESC, c.claim_version_id",
-            (PASS_REF, *(f"claim:{source}:%" for source in self.claim_sources), PASS_REF,
-             RETRY_PASS_REF),
+            (*(f"claim:{source}:%" for source in self.claim_sources), *PASS_REFS,
+             PASS_REFS[-1]),
         ).fetchall()
 
     @staticmethod
@@ -153,9 +164,10 @@ class ClaimSupportBackfill:
 
     def _mark(self, row: Mapping[str, Any], outcome: str, *, item_key: str | None = None,
               detail: str | None = None) -> None:
+        marked = set(json.loads(row["marked_passes"] or "[]"))
         self.verifier.records.mark(
             claim_version_ref=row["ref"], claim_version_hash=row["hash"],
-            pass_ref=RETRY_PASS_REF if row["reopened"] else PASS_REF,
+            pass_ref=next(ref for ref in PASS_REFS if ref not in marked),
             outcome=outcome, item_key=item_key, detail=detail)
 
     # -- the pass -------------------------------------------------------------
@@ -306,6 +318,9 @@ __all__ = [
     "ClaimSupportBackfill",
     "DEFAULT_MAX_DOCUMENTS",
     "PASS_REF",
+    "PASS_REFS",
+    "RETRY_PASS_REF",
+    "ROUTE_RETRY_PASS_REF",
     "SUPPORT_REASON",
     "run_backfill",
 ]
