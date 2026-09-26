@@ -139,7 +139,7 @@ _BARE_MONTH_DAY_RE = re.compile(
     _MONTH_DAY_RE.pattern + r"(?!\s*,?\s*(?:19|20)\d{2})",
     re.IGNORECASE,
 )
-NUMBER_SOURCE_CONTRACT_VERSION = "number-source-contract:0.4"
+NUMBER_SOURCE_CONTRACT_VERSION = "number-source-contract:0.5"
 
 
 def number_source_contract_fingerprint() -> str:
@@ -153,7 +153,7 @@ def number_source_contract_fingerprint() -> str:
         "bound_period_equivalence": (
             "iso-date-to-english-month-date-or-exact-cited-month-day"
             "+cjk-and-slash-month-day"),
-        "print_equivalence": "percent-word",
+        "print_equivalence": "percent-word+english-number-words-exact",
     })
 
 
@@ -344,6 +344,107 @@ def _remove_bound_numeric_month_days(
     return body
 
 
+# 2026-09-26: a cited row that spells its figure in English words -- "five
+# thousand employees" -- carries that figure as surely as one printing 5000,
+# and CTSH's dossier was refused round after round ($0.88 each) for writing it
+# in digits.  The words are read as exactly one integer and only that integer:
+# no rounding, no "about", no digits-with-scale ("5 thousand"), and only the
+# plain spelling (see ``_english_words``), so "twenty five hundred" or "five
+# five" stay unread rather than being guessed at.
+_UNITS_WORDS = (
+    "zero", "one", "two", "three", "four", "five", "six", "seven", "eight",
+    "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen",
+    "sixteen", "seventeen", "eighteen", "nineteen",
+)
+_TENS_WORDS = ("", "", "twenty", "thirty", "forty", "fifty", "sixty",
+               "seventy", "eighty", "ninety")
+_SCALE_WORDS = (("trillion", 10 ** 12), ("billion", 10 ** 9),
+                ("million", 10 ** 6), ("thousand", 10 ** 3))
+_NUMBER_WORD = (
+    "(?:" + "|".join(sorted(
+        [*_UNITS_WORDS, *filter(None, _TENS_WORDS), "hundred",
+         *(name for name, _ in _SCALE_WORDS)], key=len, reverse=True)) + ")")
+_ENGLISH_NUMBER_RE = re.compile(
+    rf"(?<![A-Za-z-]){_NUMBER_WORD}(?:(?:\s+and\s+|\s+|-){_NUMBER_WORD})*"
+    r"(?![A-Za-z-])(\s*\(?\s*(?:percent|per\s?cent|pct)\b\)?)?",
+    re.IGNORECASE)
+
+
+def _english_below_thousand(value: int) -> list[str]:
+    words: list[str] = []
+    hundreds, rest = divmod(value, 100)
+    if hundreds:
+        words += [_UNITS_WORDS[hundreds], "hundred"]
+    if rest >= 20:
+        tens, units = divmod(rest, 10)
+        words.append(_TENS_WORDS[tens] + ("-" + _UNITS_WORDS[units] if units else ""))
+    elif rest or not words:
+        words.append(_UNITS_WORDS[rest])
+    return words
+
+
+def _english_words(value: int) -> str:
+    """The one plain spelling of ``value``, e.g. ``five thousand two hundred``."""
+
+    if value == 0:
+        return "zero"
+    words: list[str] = []
+    for name, scale in _SCALE_WORDS:
+        count, value = divmod(value, scale)
+        if count:
+            words += [*_english_below_thousand(count), name]
+    if value:
+        words += _english_below_thousand(value)
+    return " ".join(words)
+
+
+def _english_number(phrase: str) -> int | None:
+    """The integer an English number phrase names exactly, or ``None``.
+
+    Parsed leniently, then accepted only if the value spells back to the same
+    words (``and`` and hyphens aside): a phrase that is not the plain spelling
+    of one number is not a number this check will vouch for.
+    """
+
+    words = [word for word in re.split(r"[\s-]+", phrase.lower())
+             if word and word != "and"]
+    units = {word: index for index, word in enumerate(_UNITS_WORDS)}
+    tens = {word: index * 10 for index, word in enumerate(_TENS_WORDS) if word}
+    scales = dict(_SCALE_WORDS)
+    total = current = 0
+    for word in words:
+        if word in units:
+            current += units[word]
+        elif word in tens:
+            current += tens[word]
+        elif word == "hundred":
+            current *= 100
+        elif word in scales:
+            total += current * scales[word]
+            current = 0
+        else:
+            return None
+    value = total + current
+    spelled = re.split(r"[\s-]+", _english_words(value))
+    return value if spelled == words else None
+
+
+def english_number_tokens(text: str) -> set[str]:
+    """Normalised figures that English number words in ``text`` state exactly."""
+
+    found: set[str] = set()
+    for match in _ENGLISH_NUMBER_RE.finditer(text or ""):
+        phrase = match.group(0)[: len(match.group(0)) - len(match.group(1) or "")]
+        value = _english_number(phrase)
+        if value is None:
+            continue
+        # As with digits: "25 percent" in a row sources both 25 and 25%.
+        found.add(str(value))
+        if match.group(1):
+            found.add(f"{value}%")
+    return found
+
+
 def unsourced_numbers(body: str, numbers: Sequence[Mapping[str, Any]]) -> list[str]:
     """Figures in the body that no supplied, Claim-bound number accounts for."""
 
@@ -354,6 +455,7 @@ def unsourced_numbers(body: str, numbers: Sequence[Mapping[str, Any]]) -> list[s
             sourced.add(_normalise_number(token))
         for match in _PERCENT_WORD_RE.finditer(text):
             sourced.add(_normalise_number(match.group(1)) + "%")
+        sourced |= english_number_tokens(text)
     checked_body = _remove_bound_numeric_month_days(
         _remove_bound_month_dates(body, numbers), numbers)
     return [
@@ -1216,6 +1318,7 @@ __all__ = [
     "MissionDeliverableError",
     "MissionDeliverableNotFound",
     "MissionDeliverableValidationError",
+    "english_number_tokens",
     "number_source_contract_fingerprint",
     "REVISION_FIELDS",
     "WRITE_SCOPE",
