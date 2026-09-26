@@ -318,6 +318,54 @@ class AttemptVoidTests(unittest.TestCase):
         self.assertEqual(
             MissionSecQuartersCoordinator._dispatch_windows_used(stub)[accession], 2)
 
+    def test_governance_and_source_lag_failures_are_not_counted_on_a_real_core(self):
+        """2026-09-26: the ledger query, against the real schema."""
+
+        from dalton_core.mission_sec_quarters import attempt_ledger
+
+        accession = "0001467373-25-000217"
+        state = Path(self._dir.name)
+        run_dir = state / "sec-lane-runs" / "gov"
+        run_dir.mkdir(parents=True)
+        (run_dir / "run.log").write_text(
+            "lane precondition failed: active Core governance policy 'policy-4' does not "
+            "authorize the SEC company-facts lane; ...\n", encoding="utf-8")
+        governance = self.dispatch("g", ticket_ref="sec-lane-run:gov")
+        lag = self.dispatch("l", ticket_ref="sec-lane-run:lag")
+        real = self.dispatch("r", ticket_ref="sec-lane-run:real")
+        self.authority.settle_sec_dispatch(governance, outcome="finished", detail="failed")
+        self.authority.settle_sec_dispatch(
+            lag, outcome="finished", detail="failed",
+            failure_reason="SEC company facts has no 10-Q accession in the filing window")
+        self.authority.settle_sec_dispatch(
+            real, outcome="finished", detail="failed",
+            failure_reason="AuthorityResolutionConflict: does not match schema type")
+        with self.authority._transaction() as cur:
+            cur.execute(
+                "INSERT INTO coverage_mission_sec_dispatches("
+                "dispatch_id,mission_version_ref,mission_version_hash,company_ref,ticker,"
+                "actor_ref,form,filed_from,filed_to,expected_accession,observation_ref,"
+                "authorization_json,request_hash,status,ticket_ref,failure_reason,"
+                "created_at,updated_at) "
+                "VALUES('mission-sec-dispatch:rej',?,?,?,'ACN',?,'10-Q','2025-07-01',"
+                "'2025-07-05',?,'obs','{}','h','rejected',NULL,"
+                "'CoverageMissionConflict: SEC automation must bind the active mission version',"
+                "'2026-09-07T18:00:00+00:00','2026-09-07T18:00:00+00:00')",
+                (self.mission["id"], self.mission["content_hash"], ACN,
+                 "automation:coverage-mission", accession),
+            )
+        ledger = attempt_ledger(self.store.connection, state)
+        # Four dispatches; only the real failure counts.
+        self.assertEqual(ledger["counted"][accession], 1)
+        self.assertEqual(ledger["excused"][accession], {"governance": 2, "source_lag": 1})
+        self.assertEqual(len(ledger["source_lag"][accession]), 1)
+        # A voided one is not excused twice.
+        self.authority.void_sec_dispatch_attempt(
+            lag, reason="lag", voided_by="agent:dalton-core")
+        ledger = attempt_ledger(self.store.connection, state)
+        self.assertEqual(ledger["counted"][accession], 1)
+        self.assertNotIn("source_lag", ledger["excused"][accession])
+
     def test_the_dispatch_itself_is_not_deleted(self):
         dispatch_id = self.dispatch("a")
         self.authority.void_sec_dispatch_attempt(

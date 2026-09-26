@@ -6055,6 +6055,15 @@ class WriterServer:
         if not pending:
             return {"status": "idle", "settled": len(settled)}
         dispatch = pending[0]
+        hold = self._sec_lane_governance_hold()
+        if hold is not None:
+            # 2026-09-26: the lane would refuse this run at its governance
+            # precondition, and so every other one.  Launching it anyway spent
+            # an attempt per filing per tick on ws-7d.  The dispatch stays
+            # pending -- untouched, not rejected -- and launches on the first
+            # tick after the policy authorizes the lane.
+            return {"status": "held", "dispatch_ref": dispatch["dispatch_id"],
+                    "reason": hold, "settled": len(settled)}
         authorization = dispatch["authorization"]
         try:
             exact = self.coverage_mission.authorize_sec_lane(
@@ -6102,6 +6111,17 @@ class WriterServer:
             "status": "launched", "dispatch_ref": dispatch["dispatch_id"],
             "ticket_ref": ticket["id"],
         }
+
+    def _sec_lane_governance_hold(self) -> str | None:
+        """Why the SEC company-facts lane would refuse any run now, or None."""
+
+        from .sec_company_facts_lane import LanePreconditionError, check_core_governance_rules
+
+        try:
+            check_core_governance_rules(self.store)
+        except LanePreconditionError as exc:
+            return f"lane precondition: {exc}"
+        return None
 
     def _op_dispatch_coverage_mission_sec_lane(self, p: Mapping[str, Any]) -> Any:
         return self._dispatch_one_coverage_mission_sec_lane()
