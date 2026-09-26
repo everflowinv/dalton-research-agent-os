@@ -9,7 +9,47 @@
 
 ---
 
-（当前没有待部署批次。）
+## 批次 2026-09-26e（main `8eca60eb` 及之后）
+
+### 这批解决什么（批次 d 部署后验证中发现）
+
+| 主题 | 效果 |
+|---|---|
+| **核验误判带日期、发言人的陈述**（`44ab2f3b` `2ae6f513` `f6fcb060` `437c380f`） | 核验 v2：引文扩到完整句子（原来是从 1200 字切片半句处截断），同时传入文档日期、发言人、发布方。按日期锚定的时间、元数据能证明的发言人、同义改写都不再算新增事实。今天 93 条 not_supported 人工核对后，明确误判 29 条，v2 下都会改判。部署后，被撤回的 claim 按 v2 自动复核，判为支持的自动恢复。重核队列不再卡在同样的 24 条上，同一段文字只提交一个 claim。 |
+| **SEC 治理前置条件烧掉重试次数**（`6abb0f79`） | 排队前先检查治理前置条件，不满足就 hold；治理失败、mission 升版导致的拒绝、companyfacts 尚未收录都不再计入重试次数，其中数据源滞后改为退避重试（1 天起，最长 7 天）。 |
+| **writer 处理 owner 请求超时**（`55595420`） | owner 请求排到排队中的自动化任务前面；超时从 10 秒改为 120 秒；超时后先确认请求是否已完成，再决定是否重试。 |
+| **debate map、dossier 数字、IBM model_spec、行业图**（`b95b59c8` `d5bfb6ef` `3c91a672` `267028c5`） | duplicate 终态绑定 novelty 规则版本，MSFT 等会各重问一次；支持英文数字单词（five thousand ↔ 5000）；因已取消的拒绝规则而进入终态的，给一次恢复机会；行业图不再把仍有效的行业改挂当成已退役。 |
+
+测试记录见文末。
+
+### 部署命令
+
+```zsh
+zsh ~/Projects/dalton-research-agent-os/docs/ops/deploy.sh
+```
+
+（见下文 E0：部署命令已写成脚本，不必再手动粘贴长行。）
+
+### 部署后执行
+
+1. **E1 恢复晨报核验回补**（部署后立刻执行；回补会先按 v2 规则复核被撤回的 claim，判为支持的自动恢复）：
+   `zsh ~/Projects/dalton-research-agent-os/docs/ops/pause-support-backfill.sh resume`
+2. **E2（可选）立即人工恢复 4 条已确认误撤回的 claim**，不想等自动复核时用：
+   `zsh ~/Projects/dalton-research-agent-os/docs/ops/run-2026-09-26-support-verifier-owner-steps.sh reinstate`（dry-run），确认后在命令末尾加 `apply`。
+
+### 与本批无关、现在就可以做
+
+- ws-7d SEC 治理策略：`zsh ~/Projects/dalton-research-agent-os/docs/ops/run-2026-09-26-sec-governance-owner-steps.sh`（签入 policy-5 并归还被烧掉的次数）。
+
+### 已知未修
+
+- CTSH 2026Q2：SEC companyfacts 已有两个月没收录这份 10-Q。部署后改为退避重试，不再计入次数；如果一直不收录，需要改为直接读 filing 自身的 XBRL。
+- 新建 workspace 的首份策略只签入了 auto-commit，没有签 research_plan_auto_start，以后新建的 workspace 会遇到和 ws-7d 同样的问题。
+- 纯超时导致的 cockpit 终态不会开恢复 epoch（有意采取的保守做法）。
+
+### 测试记录
+
+在 main `8eca60eb` 上跑全量测试：10510 个，全部通过（skipped 4）。
 
 ---
 
