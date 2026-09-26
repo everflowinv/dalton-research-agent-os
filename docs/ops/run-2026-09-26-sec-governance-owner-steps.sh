@@ -1,6 +1,6 @@
 #!/bin/zsh
 # ws-7d SEC company-facts 车道：签入 research_plan_auto_start，并归还被治理前置条件烧掉的次数（2026-09-26）。
-# 用法：zsh ~/Projects/dalton-wt-secgov/docs/ops/run-2026-09-26-sec-governance-owner-steps.sh
+# 用法：zsh ~/Projects/dalton-research-agent-os/docs/ops/run-2026-09-26-sec-governance-owner-steps.sh
 # 合并进 main 之后改用：zsh ~/Projects/dalton-research-agent-os/docs/ops/run-2026-09-26-sec-governance-owner-steps.sh
 #
 # 1) 先 dry-run，确认结果是 would-publish policy-5，再以 human:owner 身份通过 ws-7d 的 writer 发布
