@@ -328,6 +328,33 @@ class MissionDebateMapLaneCoordinator:
         stale = sorted(cited_refs(current) & retired)
         return None if not stale else "retired:" + ",".join(stale)
 
+    def _retired_for(self, subject_ref: Any, mission: Any,
+                     retired: set[str]) -> set[str]:
+        """The retired Claims that are gone *for this subject*.
+
+        2026-09-26.  ``retired_claim_version_refs`` is the company-level
+        answer: a Claim reattributed to the industry is still retired there.
+        For the industry map it is live evidence -- the industry reads it
+        through its reattribution -- so counting it as retired made every
+        still-valid reattribution look like a withdrawn citation and redrew
+        the industry map at once, past the six-hour minimum.  The industry
+        subject therefore subtracts its own live reattributions; a company
+        subject keeps the company-level set unchanged.
+        """
+
+        if not retired or subject_ref != (mission or {}).get("industry_ref"):
+            return retired
+        try:
+            from .claim_industry_reattribution import reattributed_claim_version_refs
+
+            live = reattributed_claim_version_refs(
+                self.store.connection, str(subject_ref))
+        except Exception:  # noqa: BLE001 - unreadable: the conservative answer
+            # Not knowing which retirements the industry reattributed must
+            # not bypass the minimum interval; no urgency is the safe side.
+            return set()
+        return retired - live
+
     def _paced(self, subject_ref: str, urgent_key: str | None) -> str | None:
         """Why this subject may not be drafted yet, or None.
 
@@ -458,7 +485,8 @@ class MissionDebateMapLaneCoordinator:
                     retired = retired_claim_version_refs(self.store.connection)
                 except Exception:  # noqa: BLE001 - no retirement read: no urgency
                     retired = set()
-            urgent_key = self._retired_cited(current, retired)
+            urgent_key = self._retired_cited(
+                current, self._retired_for(subject_ref, mission, retired))
             # A mission roll is a distinct authorized input even when its
             # claim set is byte-identical.  Keeping it in the persistent
             # signature also prevents an old terminal/permission outcome from

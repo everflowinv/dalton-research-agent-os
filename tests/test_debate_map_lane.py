@@ -125,6 +125,75 @@ class NoveltyRuleIdentityTests(unittest.TestCase):
              "1d0b29e2dd8044b03bbe44de6c0430b3b38b8e216fae6c35e0afc9828b9173c0"))
 
 
+class IndustryReattributionUrgencyTests(unittest.TestCase):
+    """2026-09-26: a live industry reattribution is not a retirement for the industry map."""
+
+    INDUSTRY = "industry:it-services"
+    MISSION = {"id": "mission:v1", "content_hash": "a" * 64,
+               "industry_ref": "industry:it-services"}
+
+    def _coordinator(self, pacing_dir):
+        from types import SimpleNamespace
+
+        coordinator = object.__new__(MissionDebateMapLaneCoordinator)
+        coordinator.store = SimpleNamespace(connection=object())
+        from dalton_core.mission_debate_map_lane import RedrawPacing
+
+        coordinator.pacing = RedrawPacing(Path(pacing_dir) / "pacing.json")
+        coordinator.clock = lambda: datetime(2026, 9, 26, 12, 0, tzinfo=timezone.utc)
+        return coordinator
+
+    def test_the_industry_subject_does_not_count_its_own_reattributions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            coordinator = self._coordinator(directory)
+            retired = {"claim:acn:1", "claim:acn:2"}
+            with patch("dalton_core.claim_industry_reattribution."
+                       "reattributed_claim_version_refs",
+                       return_value={"claim:acn:1"}) as live:
+                self.assertEqual(
+                    coordinator._retired_for(self.INDUSTRY, self.MISSION, retired),
+                    {"claim:acn:2"})
+                live.assert_called_once_with(coordinator.store.connection, self.INDUSTRY)
+                # A company keeps the company-level answer.
+                self.assertEqual(
+                    coordinator._retired_for("company:acn", self.MISSION, retired),
+                    retired)
+
+    def test_an_unreadable_reattribution_table_is_no_urgency(self):
+        with tempfile.TemporaryDirectory() as directory:
+            coordinator = self._coordinator(directory)
+            with patch("dalton_core.claim_industry_reattribution."
+                       "reattributed_claim_version_refs",
+                       side_effect=sqlite3.OperationalError("locked")):
+                self.assertEqual(coordinator._retired_for(
+                    self.INDUSTRY, self.MISSION, {"claim:acn:1"}), set())
+
+    def test_a_still_valid_reattribution_keeps_the_six_hour_minimum(self):
+        # The industry map cites claim:acn:1, retired for ACN but reattributed
+        # to the industry.  Drawn two hours ago: no urgency, so it waits.
+        current = {"debates": [{"bull": {"claim_refs": ["claim:acn:1"]},
+                                "bear": {"claim_refs": []}}]}
+        with tempfile.TemporaryDirectory() as directory:
+            coordinator = self._coordinator(directory)
+            coordinator.pacing.put(self.INDUSTRY, {
+                "last_draft_at": "2026-09-26T10:00:00+00:00", "failures": 0})
+            with patch("dalton_core.claim_industry_reattribution."
+                       "reattributed_claim_version_refs",
+                       return_value={"claim:acn:1"}), \
+                    patch("dalton_core.debate_map.cited_refs",
+                          return_value={"claim:acn:1"}):
+                retired = coordinator._retired_for(
+                    self.INDUSTRY, self.MISSION, {"claim:acn:1"})
+                urgent = coordinator._retired_cited(current, retired)
+                self.assertIsNone(urgent)
+                self.assertIn("next redraw is due",
+                              coordinator._paced(self.INDUSTRY, urgent))
+                # Withdraw the reattribution and the same citation is urgent.
+                urgent = coordinator._retired_cited(current, {"claim:acn:1"})
+                self.assertEqual(urgent, "retired:claim:acn:1")
+                self.assertIsNone(coordinator._paced(self.INDUSTRY, urgent))
+
+
 class FakeModel:
     """Two canned replies, and a record of what was asked."""
 
