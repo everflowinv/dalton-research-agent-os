@@ -1378,6 +1378,7 @@ def _run_claim_support_backfill(host: ExtractionHost, config: Mapping[str, Any],
 def _run_claim_support_recheck(host: ExtractionHost, scheduler_db: Path) -> dict[str, Any]:
     """One bounded recheck of outage-held candidates; never a reason for the run to fail."""
 
+    from .claim_review import review_spool
     from .claim_support_recheck import ClaimSupportRecheck
 
     try:
@@ -1389,6 +1390,9 @@ def _run_claim_support_recheck(host: ExtractionHost, scheduler_db: Path) -> dict
         return ClaimSupportRecheck(
             store=host.store, reviewer=host.candidate_review,
             verifier=host._claim_support_verifier, scheduler_db=scheduler_db,
+            # The originals and the sales-note headers, for whole sentences
+            # and document facts (contract v2).
+            spool=review_spool(host.state_dir, primary=host._transcript_spool),
         ).run_once(mission=host.coverage_mission.mission(pointer["mission_version_id"]))
     except Exception as exc:  # noqa: BLE001 - reported, retried next run
         return {"status": "unavailable", "reason": f"{type(exc).__name__}: {exc}"}

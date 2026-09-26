@@ -2686,6 +2686,7 @@ class DocumentExtractionService:
             return result
         names = {}
         items = {}
+        passage = self._support_passage(context)
         for index in candidates:
             suggestion, subject_ref, _basis, _held = pairs[index]
             if subject_ref not in names:
@@ -2693,10 +2694,11 @@ class DocumentExtractionService:
                                if m.get("company_ref") == subject_ref), None)
                 names[subject_ref] = (self._company_label(mission, member)
                                       if member and member.get("ticker") else subject_ref)
+            cited, facts = passage(suggestion)
             items[index] = support_item(
                 subject_ref=subject_ref, subject_name=names[subject_ref],
                 statement=suggestion["normalized_statement"],
-                cited_text=suggestion["citation"]["raw_text"],
+                cited_text=cited, document=facts,
                 producer_route_ref=suggestion.get("route_ref"))
         outcome = verifier.verify(mission=mission, items=list(items.values()))
         if outcome["status"] == "deferred":
@@ -2719,6 +2721,51 @@ class DocumentExtractionService:
                 result["holds"][index] = reason
         result.update({"status": "verified", "cost_micros": outcome.get("cost_micros", 0)})
         return result
+
+    def _support_passage(self, context):
+        """``suggestion -> (cited text, document facts)`` for the support check.
+
+        2026-09-26b (contract v2): the whole sentences around the citation,
+        read from the window the quotes tile gap-free, and what the Core knows
+        about the document -- the context's own date, the provenance row's
+        title and house, the statement's period, the transcript speaker at the
+        span.  Nothing here enters the context or its hash: a window's key and
+        its paid draft do not move.
+        """
+
+        from .claim_support_context import cited_passage, document_facts
+        from .claim_support_verification import MAX_CITED_CHARS
+
+        quotes = context.get("quotes") or ()
+        window = "".join(str(q.get("raw_text") or "") for q in quotes)
+        offset = int(context.get("offset") or 0)
+        try:
+            base = document_facts(self.writer.store.connection,
+                                  document_ref=context.get("document_ref"),
+                                  document_date=context.get("document_date"))
+        except Exception:  # noqa: BLE001 - facts are context, never a gate
+            base = {}
+
+        def passage(suggestion):
+            citation = suggestion.get("citation") or {}
+            cited = citation.get("raw_text") or ""
+            speaker = None
+            start, end = citation.get("source_start"), citation.get("source_end")
+            if (isinstance(start, int) and isinstance(end, int)
+                    and 0 <= start - offset < end - offset <= len(window)
+                    and window[start - offset:end - offset] == cited):
+                found = cited_passage(window, start - offset, end - offset,
+                                      max_chars=MAX_CITED_CHARS)
+                cited, speaker = found["cited_text"], found["speaker"]
+            facts = dict(base)
+            if suggestion.get("period"):
+                facts["period"] = str(suggestion["period"])[:200]
+            if speaker:
+                facts["speaker"] = speaker
+            return cited, {key: facts[key] for key in ("title", "date", "house", "period", "speaker")
+                           if key in facts}
+
+        return passage
 
     def admission_quality_check(self, context):
         """A checker: ``suggestion -> (suggestion, hold reason or None)``.

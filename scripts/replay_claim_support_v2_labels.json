@@ -1,0 +1,932 @@
+{
+ "legacy:61dca3e6f365": {
+  "index": 0,
+  "category": "TP",
+  "v2": "not_supported",
+  "subject": "about_subject",
+  "reason": "语句加了“larger pipeline opportunities to close in the second half”，所引原文没有",
+  "purpose": "claim_support_verifier",
+  "statement": "EPAM said it expected higher energy prices and global economic uncertainty to affect its revenue growth rate for 2026 and therefore lowered its full-year revenue growth outlook, while continuing to ex",
+  "claim_version_ref": null
+ },
+ "legacy:f0c708e9f7a5": {
+  "index": 1,
+  "category": "FP",
+  "v2": "supported",
+  "subject": "about_subject",
+  "reason": "几乎逐字（some further worsening / clients delaying spending decisions / incremental uncertainty and delays）；EPAM 自家电话会，发言人 Jason Peterson",
+  "purpose": "claim_support_verifier",
+  "statement": "EPAM described the downside of its guidance range as possibly further worsening in the economic environment, with some clients delaying spending decisions leading to incremental uncertainty and increm",
+  "claim_version_ref": null
+ },
+ "legacy:df4c10edf876": {
+  "index": 2,
+  "category": "BORDERLINE",
+  "v2": "supported",
+  "subject": "about_subject",
+  "reason": "除“large multiyear”外逐字；该修饰来自提问中的先行词，引文未显示",
+  "purpose": "claim_support_verifier",
+  "statement": "EPAM said it is risk-adjusting its pipeline of large multiyear deals and not fully including them the same way as other deals because it is unsure how fast they will convert and ramp.",
+  "claim_version_ref": null
+ },
+ "legacy:97d041ae37f2": {
+  "index": 3,
+  "category": "FP",
+  "v2": "supported",
+  "subject": "about_subject",
+  "reason": "逐字（particularly seeing underperformance in North America…lower visibility in the second half）；“2026”由文档日期 2026-05-07 锚定",
+  "purpose": "claim_support_verifier",
+  "statement": "EPAM said it was particularly seeing underperformance in North America, contributing to lower visibility in the second half of 2026.",
+  "claim_version_ref": null
+ },
+ "legacy:4a781e4787e5": {
+  "index": 4,
+  "category": "BORDERLINE",
+  "v2": "supported",
+  "subject": "about_subject",
+  "reason": "“handful of customers…somewhat delayed…April and May”逐字；“revision to its 2026 organic growth guide”是问答语境，引文未明说",
+  "purpose": "claim_support_verifier",
+  "statement": "As of the 2026 guidance discussion, EPAM characterized the revision to its 2026 organic growth guide as more a matter of a handful of customers whose decision-making appeared somewhat delayed, a patte",
+  "claim_version_ref": null
+ },
+ "legacy:f72073a54b6b": {
+  "index": 5,
+  "category": "TP",
+  "v2": "not_supported",
+  "subject": "about_subject",
+  "reason": "后半句（as an aggregate / never won as one opportunity）不在所引句子",
+  "purpose": "claim_support_verifier",
+  "statement": "EPAM stated that its AI-native business portfolio is run at higher profitability than the EPAM average, and that EPAM has run large programs as an aggregate before but never won them as one opportunit",
+  "claim_version_ref": null
+ },
+ "legacy:e5e6f629138c": {
+  "index": 6,
+  "category": "TP",
+  "v2": "not_supported",
+  "subject": "about_subject",
+  "reason": "写成“2025 guidance”，但文档是 2026-05-07 的 Q1 2026 电话会，midrange 指当年指引，年份错",
+  "purpose": "claim_support_verifier",
+  "statement": "EPAM stated that for the midpoint of its 2025 guidance it does not need to win many of the large deals and is not counting heavily on them, but that a worsening environment would make the midpoint cha",
+  "claim_version_ref": null
+ },
+ "legacy:4fbb927842b5": {
+  "index": 7,
+  "category": "BORDERLINE",
+  "v2": "supported",
+  "subject": "about_subject",
+  "reason": "其余逐字；“largely idiosyncratic”原文说的是北美增速，语句把它挪到了整体下半年放缓上",
+  "purpose": "claim_support_verifier",
+  "statement": "EPAM said it expected a slowdown in revenue growth in the second half of 2026, largely idiosyncratic to EPAM, and that none of its larger emerging-pipeline opportunities had closed, so meaningful reve",
+  "claim_version_ref": null
+ },
+ "legacy:1a49f1339dad": {
+  "index": 8,
+  "category": "FP",
+  "v2": "supported",
+  "subject": "about_subject",
+  "reason": "发言人 Balazs Fejes；taking longer than we anticipated / big deals progressing / not in guidance / significant revenue in 2027 逐字",
+  "purpose": "claim_support_verifier",
+  "statement": "EPAM's Balazs Fejes said the go-to-market transformation is taking longer than EPAM anticipated, and that EPAM expects significant revenue contribution from its big deals in 2027, with big deals progr",
+  "claim_version_ref": null
+ },
+ "legacy:1f98850abbcb": {
+  "index": 9,
+  "category": "FP",
+  "v2": "supported",
+  "subject": "about_subject",
+  "reason": "逐字，发言人 Balazs Fejes",
+  "purpose": "claim_support_verifier",
+  "statement": "EPAM's Balazs Fejes said clients are planning ramp-ups of AI-native services mainly from savings delivered by AI while also funding tokens, hardware and infrastructure, and that savings are appearing ",
+  "claim_version_ref": null
+ },
+ "legacy:9f8a3b12cd88": {
+  "index": 10,
+  "category": "BORDERLINE",
+  "v2": "not_supported",
+  "subject": "about_subject",
+  "reason": "“full stack agentic engineers”“AI partners and hyperscalers”不在引文（it 的先行词在提问里）",
+  "purpose": "claim_support_verifier",
+  "statement": "EPAM said it is building full stack agentic engineers internally rather than only hiring externally, that they are part of its sales motion and go-to-market with AI partners and hyperscalers, and that",
+  "claim_version_ref": null
+ },
+ "legacy:584d4f993813": {
+  "index": 11,
+  "category": "FP",
+  "v2": "supported",
+  "subject": "about_subject",
+  "reason": "逐字（project ramp downs…outweighed the growth in AI, cloud, cybersecurity）；Q2 2026 由文档锚定",
+  "purpose": "claim_support_verifier",
+  "statement": "EPAM said its software and high tech vertical decline in Q2 2026 was due to project ramp downs concentrated in non-AI services, which outweighed growth in AI, cloud and cybersecurity work within the s",
+  "claim_version_ref": null
+ },
+ "legacy:86e41d378bb0": {
+  "index": 12,
+  "category": "FP",
+  "v2": "supported",
+  "subject": "about_subject",
+  "reason": "逐字；full-year 2026 由文档日期锚定",
+  "purpose": "claim_support_verifier",
+  "statement": "EPAM's full-year 2026 guidance midpoint requires EPAM to remain roughly flat with growth continuing in Europe, particularly financial services and life sciences, while EPAM expects ongoing underperfor",
+  "claim_version_ref": null
+ },
+ "legacy:aab56c4b43db": {
+  "index": 13,
+  "category": "FP",
+  "v2": "supported",
+  "subject": "about_subject",
+  "reason": "v1 引文在“for all our”处被截断；整句后可见“source and the solution for all our partners…FDE”",
+  "purpose": "claim_support_verifier",
+  "statement": "EPAM said it aims to have the largest concentration of certified engineering and software engineering professionals in its industry and to be the source and supplier for partners seeking forward-deplo",
+  "claim_version_ref": null
+ },
+ "legacy:76825a88d93c": {
+  "index": 14,
+  "category": "TP",
+  "v2": "not_supported",
+  "subject": "about_subject",
+  "reason": "“Raised POs”是上调目标价（price objective），不是采购订单",
+  "purpose": "claim_support_backfill",
+  "statement": "IBM is cited among hardware names (with NTAP, STX, WDC) where raised purchase orders were noted, indicating improving demand signals for IBM in AI infrastructure hardware.",
+  "claim_version_ref": "claim-version:c4595d8a035ed6df66f965d175d1f86ee7262fb781a3757e8b53daa3969eeffc"
+ },
+ "legacy:7fc8cf42a0e9": {
+  "index": 15,
+  "category": "FP",
+  "v2": "supported",
+  "subject": "about_subject",
+  "reason": "逐字，发言人 Balazs Fejes；“2026 earnings call”由标题/日期锚定",
+  "purpose": "claim_support_verifier",
+  "statement": "As of the 2026 earnings call, EPAM's Balazs Fejes said the overall demand environment had not really changed and that the company remained in the same macro space, while adding that around July client",
+  "claim_version_ref": null
+ },
+ "legacy:bf28cd394eca": {
+  "index": 16,
+  "category": "FP",
+  "v2": "supported",
+  "subject": "about_subject",
+  "reason": "分析师提问逐字，语句也正确归于分析师",
+  "purpose": "claim_support_verifier",
+  "statement": "An analyst noted that EPAM's demand shift happened in July after EPAM set its Q2 2026 framework in early May, raising questions about EPAM's forward visibility; most of EPAM's business is T&M rather t",
+  "claim_version_ref": null
+ },
+ "legacy:9d55e6b63b03": {
+  "index": 17,
+  "category": "TP",
+  "v2": "not_supported",
+  "subject": "about_subject",
+  "reason": "“margin profile on large deals trended better…”在所引段落之后的句子，引用未覆盖",
+  "purpose": "claim_support_verifier",
+  "statement": "Cognizant said its margin profile on large deals has trended better than originally signed contracts, that it can pass productivity gains to clients while staying margin accretive for itself as long a",
+  "claim_version_ref": null
+ },
+ "legacy:1d9a6b0ddc54": {
+  "index": 18,
+  "category": "FP",
+  "v2": "supported",
+  "subject": "about_subject",
+  "reason": "逐字；Q2 FY2026 由文档锚定",
+  "purpose": "claim_support_verifier",
+  "statement": "As of Q2 FY2026, Cognizant said health sciences demand was stable but cautious and cost-driven, with clients prioritizing vendor consolidation, legacy modernization and compliance while discretionary ",
+  "claim_version_ref": null
+ },
+ "legacy:af7a612dca53": {
+  "index": 19,
+  "category": "FP",
+  "v2": "supported",
+  "subject": "about_subject",
+  "reason": "逐字（new and expansion bookings / ramp-up to billable volumes / lower furloughs in Q4）",
+  "purpose": "claim_support_verifier",
+  "statement": "Cognizant said it modeled the remainder of the year with a larger share of new and expansion bookings than earlier in the year, ramp-up of deals in transition moving to billable volumes in the third a",
+  "claim_version_ref": null
+ },
+ "legacy:773174b47e6a": {
+  "index": 20,
+  "category": "FP",
+  "v2": "supported",
+  "subject": "about_subject",
+  "reason": "逐字，发言人 Jatin Dalal",
+  "purpose": "claim_support_verifier",
+  "statement": "As of the Q2 FY2026 call, Cognizant's Jatin Dalal said the company began actively embedding AI into its solutions from the beginning of 2025 and is roughly halfway through that journey, with about ano",
+  "claim_version_ref": null
+ },
+ "legacy:914b667daa1a": {
+  "index": 21,
+  "category": "FP",
+  "v2": "supported",
+  "subject": "about_subject",
+  "reason": "逐字（organic revenue growth at the high end of our expectations…）；Q2 2026 由文档锚定",
+  "purpose": "claim_support_verifier",
+  "statement": "In Q2 2026, Cognizant reported organic revenue growth at the high end of its expectations and year-over-year adjusted operating margin expansion; nearly all healthy sequential growth came from its org",
+  "claim_version_ref": null
+ },
+ "legacy:f992f8be02b5": {
+  "index": 22,
+  "category": "TP",
+  "v2": "not_supported",
+  "subject": "about_subject",
+  "reason": "“optimizing token usage”“software engineering more mature than business operations”不在引文（This 的先行词在前文）",
+  "purpose": "claim_support_verifier",
+  "statement": "As of the Q2 FY2026 earnings call, Cognizant's Ravi Kumar said optimizing token usage was a hot topic, that software engineering is more mature in this respect than business operations, and that this ",
+  "claim_version_ref": null
+ },
+ "legacy:f35bcd3e99d9": {
+  "index": 23,
+  "category": "TP",
+  "v2": "not_supported",
+  "subject": "about_subject",
+  "reason": "整句后仍无“rather than an inflection in SaaS/Apps fundamentals”",
+  "purpose": "claim_support_backfill",
+  "statement": "The desk notes CTSH was among IT and software-related names that rose sharply over the prior month, framed as part of a short-momentum thematic move rather than an inflection in SaaS/Apps fundamentals",
+  "claim_version_ref": "claim-version:66245bc38feb972b0f897f0333c1745c7ca47ec55036636ed259e95a630362b6"
+ },
+ "legacy:4eecfb317475": {
+  "index": 24,
+  "category": "TP",
+  "v2": "not_supported",
+  "subject": "about_other",
+  "reason": "about_other：说的是软件板块指数",
+  "purpose": "claim_support_backfill",
+  "statement": "The desk attributes the broader software index move to earnings-driven gains in PLTR and MSFT, two of the largest software companies, rather than to a broad fundamental inflection.",
+  "claim_version_ref": "claim-version:c1f292223803edb6ff0327100a7fc79dda8b1bdf422c925aeb2c10f7ee80ebfc"
+ },
+ "legacy:e95b9aae902f": {
+  "index": 25,
+  "category": "TP",
+  "v2": "not_supported",
+  "subject": "about_subject",
+  "reason": "IBM 同时在 HARDWARE/HDDs 名单里，“rather than pure hardware names”与原文矛盾",
+  "purpose": "claim_support_backfill",
+  "statement": "IBM is categorized by BofA under IT Services, Fintech & Payments for its Global Technology Conference, placing it alongside payments and fintech peers rather than pure hardware names.",
+  "claim_version_ref": "claim-version:15b8001754d274e918936193df47870c4f096ce306554455900c3efcda54a7b0"
+ },
+ "legacy:af27fc7c3bb3": {
+  "index": 26,
+  "category": "TP",
+  "v2": "not_supported",
+  "subject": "about_other",
+  "reason": "about_other：印度 IT 服务同业",
+  "purpose": "claim_support_backfill",
+  "statement": "Indian IT services companies other than TCS reported sequential revenue deceleration or decline in the quarter, and all peers except TechM missed analyst estimates.",
+  "claim_version_ref": "claim-version:245e4e2d820e33acef352f96cb0167f124bb241bfe72a484e5ef60b817ef26a3"
+ },
+ "legacy:8932bfeb8f83": {
+  "index": 27,
+  "category": "TP",
+  "v2": "not_supported",
+  "subject": "about_subject",
+  "reason": "整句后引文中仍没有 CTSH",
+  "purpose": "claim_support_backfill",
+  "statement": "CTSH was listed among the most out of favor names in the desk's sentiment check heading into the TMT earnings week.",
+  "claim_version_ref": "claim-version:55fccfbb7c06420d68548746c66a11cd9f927b191092d6092655a64b4de6c8a2"
+ },
+ "legacy:c90f0851ab47": {
+  "index": 28,
+  "category": "TP",
+  "v2": "not_supported",
+  "subject": "about_subject",
+  "reason": "leader/laggard 表里没有 IBM；原文说的是 IBM 软件业务减速",
+  "purpose": "claim_support_backfill",
+  "statement": "IBM was among the weakest performers on the single-stock leader/laggard table for the week, in the Software subsector.",
+  "claim_version_ref": "claim-version:22d076a2a661e6c31580c0508299e3e78ae70d7aeb35f014a13c6a8d928f570d"
+ },
+ "legacy:1b4d86514167": {
+  "index": 29,
+  "category": "FP",
+  "v2": "supported",
+  "subject": "about_subject",
+  "reason": "逐字，引文自带“发言人Ravi Kumar：”",
+  "purpose": "claim_support_verifier",
+  "statement": "As of the Q2 FY2026 call, Cognizant's Ravi Kumar said the company continues to be in the winner's circle, is confident of staying there for the rest of the year and creating tail velocity for the next",
+  "claim_version_ref": null
+ },
+ "legacy:ae7a1d3c7440": {
+  "index": 30,
+  "category": "FP",
+  "v2": "supported",
+  "subject": "about_subject",
+  "reason": "逐字概括（seven deals >$100M TCV、TTM bookings +5%、book-to-bill 1.3、ACV modestly down）",
+  "purpose": "claim_support_verifier",
+  "statement": "For Q2 FY2026 Cognizant reported another quarter of strong large-deal bookings, including multiple deals each above a hundred-million-dollar TCV, with trailing-twelve-month bookings growing and a book",
+  "claim_version_ref": null
+ },
+ "legacy:ef589d284473": {
+  "index": 31,
+  "category": "TP",
+  "v2": "not_supported",
+  "subject": "about_other",
+  "reason": "about_other：是邮件元信息，不是研究结论",
+  "purpose": "claim_support_backfill",
+  "statement": "The note is labeled Sales Commentary Only, Not Research, indicating the CTSH-related content is marketing commentary rather than formal research coverage.",
+  "claim_version_ref": "claim-version:5673cde3f8a7946accfb66b615545d8023e60b9b5d0c4634bc56f31c551e2912"
+ },
+ "legacy:f87fead952ed": {
+  "index": 32,
+  "category": "TP",
+  "v2": "not_supported",
+  "subject": "about_other",
+  "reason": "about_other：BofA 研究员名单",
+  "purpose": "claim_support_backfill",
+  "statement": "BofA's IT Services research coverage (Matt O'Neill, Mihir Bhatia, Caroline Latta) sits in the Payments, Processors & IT Services group, framing CTSH within the IT services competitor set tracked by th",
+  "claim_version_ref": "claim-version:ff655405701e4ae469ec2b5db1eccf9180de349fa864381edf789a55cb6f9886"
+ },
+ "legacy:f628d930308b": {
+  "index": 33,
+  "category": "TP",
+  "v2": "not_supported",
+  "subject": "about_subject",
+  "reason": "CTSH 在参会名单属实，但“Cognex-style vendor presence”是编造的结论",
+  "purpose": "claim_support_backfill",
+  "statement": "CTSH is listed among the C-Suite companies participating in Jefferies' Nasdaq conference held in London, indicating Cognex-style vendor presence at a sell-side tech investor event.",
+  "claim_version_ref": "claim-version:6b17d684bcc4f9f56d379370584e309bb3145c65cb41e14b6e4130d4b12852f9"
+ },
+ "legacy:ee66f93ee5dc": {
+  "index": 34,
+  "category": "TP",
+  "v2": "not_supported",
+  "subject": "about_subject",
+  "reason": "引文里没有 Genpact",
+  "purpose": "claim_support_backfill",
+  "statement": "Cognizant was grouped alongside Genpact under the same Jefferies analyst, indicating peer coverage of US IT services names on this desk.",
+  "claim_version_ref": "claim-version:1504297fad06f41b8851c8a5dd099e75e4bcdfa49f63f7ed7b6fe6d953f109f9"
+ },
+ "legacy:56d07732ca46": {
+  "index": 35,
+  "category": "BORDERLINE",
+  "v2": "supported",
+  "subject": "about_subject",
+  "reason": "整句后可见“India IT Services: ACN read-through: Uptick in M&A allocation and demand comments to weigh”；支持成立，但这是 ACN 对印度 IT 的传导，主体归属需人判断",
+  "purpose": "claim_support_backfill",
+  "statement": "BofA flagged ACN (Accenture) read-through from India IT Services, noting an uptick in M&A allocation and demand comments as items expected to weigh on the group.",
+  "claim_version_ref": "claim-version:09d5ff0339017cfdcd56dbde38605068b6b9a4a3e2ef36e2a45440022f216707"
+ },
+ "legacy:01b7aa752483": {
+  "index": 36,
+  "category": "TP",
+  "v2": "not_supported",
+  "subject": "about_other",
+  "reason": "about_other：这段是 CAP（Capgemini）Q2 preview，不是 ACN",
+  "purpose": "claim_support_backfill",
+  "statement": "After ACN results, Fred views the negative market reaction tied to Middle East concerns as overdone, citing low exposure; guidance already embeds macro prudence and the low end of FY guidance could be",
+  "claim_version_ref": "claim-version:a0e7bd378f30abde28e05707f62131a7ef6efa4ec44e5f40ccb438402d888c98"
+ },
+ "legacy:e83f10b800ac": {
+  "index": 37,
+  "category": "TP",
+  "v2": "not_supported",
+  "subject": "about_subject",
+  "reason": "原文“low DD move”=低双位数，语句写成低个位数",
+  "purpose": "claim_support_backfill",
+  "statement": "Despite only a low single-digit move in ACN over the prior ten days, the desk was surprised the stock was not up more given other charts, shorted positioning and a very low beta factor.",
+  "claim_version_ref": "claim-version:d99b2b0939b6ae1adbd9efea24dcca47db7a4d795eb3724ef7e99a7a21e6d156"
+ },
+ "legacy:4f63cf500725": {
+  "index": 38,
+  "category": "TP",
+  "v2": "not_supported",
+  "subject": "about_subject",
+  "reason": "“frames ACN's demand narrative as the counterparty to AI capex”是推论，原文未提 ACN",
+  "purpose": "claim_support_backfill",
+  "statement": "The author states that if/when the momentum trade reverses, the thematic trade remains buying AI winners (semicaps, memory, networking, compute) and selling application Software and IT Services, which",
+  "claim_version_ref": "claim-version:bfe821a6c4a915550f991abf073dee9d1484602565d3d8d65a818335f4ed86a2"
+ },
+ "legacy:8b553bdbd257": {
+  "index": 39,
+  "category": "TP",
+  "v2": "not_supported",
+  "subject": "about_subject",
+  "reason": "表中 ACN 两日 +10%，语句说 fell sharply，方向相反",
+  "purpose": "claim_support_backfill",
+  "statement": "ACN's shares fell sharply over the two-day window after the calendar flipped to the second half, one of several large-cap tech names to decline in that period.",
+  "claim_version_ref": "claim-version:e472258673bae4a6c2be00a08ebc826f8d14724bdb40a0e9d3767cb8f8a9b805"
+ },
+ "legacy:dd4e924aed5c": {
+  "index": 40,
+  "category": "TP",
+  "v2": "not_supported",
+  "subject": "about_subject",
+  "reason": "“IBM's relative resilience was not a broad de-risking signal”是推论",
+  "purpose": "claim_support_backfill",
+  "statement": "Long-only investors were described as not wholesale abandoning the AI trade over the coming months, yet the desk sensed only a tiny bit of lightening up in memory and semicap flows, suggesting IBM's r",
+  "claim_version_ref": "claim-version:73d5ee0dfa0003ff864b35801ce75e2607d877473358439782f279fb1a49aff5"
+ },
+ "ws7d:d14e3587a3fe": {
+  "index": 41,
+  "category": "TP",
+  "v2": "supported",
+  "subject": "about_other",
+  "reason": "支持部分其实成立（As of March 2026 为日期锚定），但 about_other（Marvell）判断正确，结果不变",
+  "purpose": "claim_support_verifier",
+  "statement": "As of March 2026, BofA noted Marvell has custom ASIC programs with Microsoft and Amazon, and that visibility into those programs could improve as Marvell can offer full-stack rack-scale AI compute wit",
+  "claim_version_ref": null
+ },
+ "ws7d:94d68427917a": {
+  "index": 42,
+  "category": "TP",
+  "v2": "not_supported",
+  "subject": "about_other",
+  "reason": "把 they can offer 误读成微软和亚马逊；about_other 正确",
+  "purpose": "claim_support_verifier",
+  "statement": "Marvell的定制ASIC项目与微软和亚马逊相关，且该文本称这些项目可见度有改善的潜力，尤其因为微软和亚马逊能够以相关连接能力提供全栈式机架级AI算力。",
+  "claim_version_ref": null
+ },
+ "ws7d:718c9ce2b2c7": {
+  "index": 43,
+  "category": "BORDERLINE",
+  "v2": "supported",
+  "subject": "about_subject",
+  "reason": "引文“股价盘后的下跌”没点名；标题“高盛Touchpoint: 谷歌业绩”显示是 Alphabet",
+  "purpose": "claim_support_verifier",
+  "statement": "市场对 CSP 增加 capex 的反应体现在 Alphabet 股价盘后下跌。",
+  "claim_version_ref": null
+ },
+ "ws7d:488e8bf2e358": {
+  "index": 44,
+  "category": "TP",
+  "v2": "not_supported",
+  "subject": "about_subject",
+  "reason": "把 Prime Day 销售归到 AWS",
+  "purpose": "claim_support_verifier",
+  "statement": "Amazon Web Services Prime Day sales rose year over year, with possible mix shift toward essentials and grocery spend, and BofA analyst Justin Post flags risk to Q3 guidance from Prime Day shifting fro",
+  "claim_version_ref": null
+ },
+ "ws7d:00d6ad359926": {
+  "index": 45,
+  "category": "TP",
+  "v2": "not_supported",
+  "subject": "about_other",
+  "reason": "about_other：Chewy",
+  "purpose": "claim_support_verifier",
+  "statement": "Investor focus for a Chewy fireside chat includes competitive positioning versus Amazon, alongside macro pet trends, vet care opportunity and EBITDA margin expansion cadence.",
+  "claim_version_ref": null
+ },
+ "ws7d:325db7fe265d": {
+  "index": 46,
+  "category": "FP",
+  "v2": "supported",
+  "subject": "about_subject",
+  "reason": "逐字；BofA 为文档发布方",
+  "purpose": "claim_support_verifier",
+  "statement": "BofA flagged risk to Q3 guidance on Prime Day timing shifting forward, potentially shifting a sales amount from Q3 to Q2.",
+  "claim_version_ref": null
+ },
+ "ws7d:ca8d5e9d30b3": {
+  "index": 47,
+  "category": "FP",
+  "v2": "supported",
+  "subject": "about_subject",
+  "reason": "逐字；BofA 为文档发布方（信息量低，但被支持）",
+  "purpose": "claim_support_verifier",
+  "statement": "Amazon Prime Day was listed among the stocks and items to watch in the week of the BofA sales commentary.",
+  "claim_version_ref": null
+ },
+ "ws7d:80d5ee4f2b2c": {
+  "index": 48,
+  "category": "BORDERLINE",
+  "v2": "not_supported",
+  "subject": "about_subject",
+  "reason": "内容逐字，但“An expert call summary”的出处在引文外",
+  "purpose": "claim_support_verifier",
+  "statement": "An expert call summary stated that in the AI race GOOG continues to benefit from vertical tech integration, a massive customer dataset and ad monetization, and that it is too early to count META out a",
+  "claim_version_ref": null
+ },
+ "ws7d:db819babee7c": {
+  "index": 49,
+  "category": "FP",
+  "v2": "supported",
+  "subject": "about_subject",
+  "reason": "逐字；Sep'26 解析为 September 2026",
+  "purpose": "claim_support_verifier",
+  "statement": "BofA listed Meta's next catalysts as launch of consumer agentic products, more advanced LLMs, the Connect conference in September 2026, and more details on the enterprise AI opportunity.",
+  "claim_version_ref": null
+ },
+ "ws7d:73d13d4e7567": {
+  "index": 50,
+  "category": "TP",
+  "v2": "not_supported",
+  "subject": "about_subject",
+  "reason": "末句“monetization could represent a sizable incremental revenue opportunity”原文无",
+  "purpose": "claim_support_verifier",
+  "statement": "BofA's Justin Post stated that Meta's new AI-powered search could drive traction for services and experiences queries, with Meta's social graph adding richer context across Groups, Reels and messaging",
+  "claim_version_ref": null
+ },
+ "ws7d:9717fe04baad": {
+  "index": 51,
+  "category": "FP",
+  "v2": "supported",
+  "subject": "about_subject",
+  "reason": "逐字＋日期锚定（信息量低）",
+  "purpose": "claim_support_verifier",
+  "statement": "A BofA Global Internet event listed for 2026 concerns Amazon Logistics, a call with MWPVL covering updates on Supply Chain Services.",
+  "claim_version_ref": null
+ },
+ "ws7d:dbe265f08885": {
+  "index": 52,
+  "category": "BORDERLINE",
+  "v2": "not_supported",
+  "subject": "about_subject",
+  "reason": "“vulnerable”是对“agentic traffic concerns”的加重表述",
+  "purpose": "claim_support_verifier",
+  "statement": "Amazon was described as vulnerable to shopping-agent traffic from Google and OpenAI, with Alexa for Shopping framed as key to addressing those agentic traffic concerns while lifting shopping conversio",
+  "claim_version_ref": null
+ },
+ "ws7d:262fdc399682": {
+  "index": 53,
+  "category": "TP",
+  "v2": "not_supported",
+  "subject": "about_other",
+  "reason": "about_other：Nvidia 的辩论点",
+  "purpose": "claim_support_verifier",
+  "statement": "Among the debate points BofA flagged ahead of Nvidia's print, one was competition with custom semis such as the Google TPU, naming Alphabet's TPU as a competitive factor for Nvidia.",
+  "claim_version_ref": null
+ },
+ "ws7d:2d36dd68293d": {
+  "index": 54,
+  "category": "TP",
+  "v2": "not_supported",
+  "subject": "about_other",
+  "reason": "about_other：OpenAI",
+  "purpose": "claim_support_backfill",
+  "statement": "OpenAI was flagged as having missed revenue and weekly-active-user targets, raising worries about its ability to meet AI capex commitments, though OpenAI pushed back saying its business was firing on ",
+  "claim_version_ref": "claim-version:abe9393dc64ca7518c1aab9e06c8eb59a0485d44ccd87a3c3155ce314fe9120f"
+ },
+ "ws7d:87a5e7466e84": {
+  "index": 55,
+  "category": "TP",
+  "v2": "not_supported",
+  "subject": "about_other",
+  "reason": "about_other：Amazon 股东信",
+  "purpose": "claim_support_backfill",
+  "statement": "Amazon's shareholder letter signals willingness to accept short-term free cash flow headwinds from large capex in exchange for a substantial medium- to long-term free cash flow surplus, a framing rele",
+  "claim_version_ref": "claim-version:533676d503ad8f67917807142dfb635c05c2db9b144d772d1e1075dbbab7d2f9"
+ },
+ "ws7d:68f1dba82943": {
+  "index": 56,
+  "category": "TP",
+  "v2": "not_supported",
+  "subject": "about_subject",
+  "reason": "加了“as well as a builder of its own AI infrastructure”",
+  "purpose": "claim_support_backfill",
+  "statement": "Meta has signed an agreement to deploy AWS Graviton processors at scale, indicating Meta is a customer of a named cloud competitor's custom silicon as well as a builder of its own AI infrastructure.",
+  "claim_version_ref": "claim-version:6fd2ff1cd8a21246e81ca4464e2644a4014ccd6da6c4fb691c2076c8616172d6"
+ },
+ "ws7d:4706937104ff": {
+  "index": 57,
+  "category": "FP",
+  "v2": "supported",
+  "subject": "about_subject",
+  "reason": "逐字；Google I/O 2026 由文档日期锚定",
+  "purpose": "claim_support_verifier",
+  "statement": "BofA's internet read-throughs from Google I/O 2026 say Alphabet may have an early deployment advantage enabling ecosystem lock-in ahead of Meta and other AI competitors, that eCommerce competition int",
+  "claim_version_ref": null
+ },
+ "ws7d:6076887f2377": {
+  "index": 58,
+  "category": "FP",
+  "v2": "supported",
+  "subject": "about_subject",
+  "reason": "逐字；“reported in May 2026”即文档日期，UDN 报道",
+  "purpose": "claim_support_verifier",
+  "statement": "As reported in May 2026 citing unnamed supply chain sources, NVIDIA Vera Rubin-based servers were to begin shipping in July to big cloud firms including Amazon (AMZN), Google and Microsoft.",
+  "claim_version_ref": null
+ },
+ "ws7d:f45e375a7610": {
+  "index": 59,
+  "category": "TP",
+  "v2": "not_supported",
+  "subject": "about_subject",
+  "reason": "方向反了：剔除一次性收益 +18% 低于报告口径 +26%",
+  "purpose": "claim_support_verifier",
+  "statement": "BofA reported that Q1 earnings growth was higher on an ex-one-time-gains basis excluding Amazon than on a reported basis including one-time gains at Amazon and peers.",
+  "claim_version_ref": null
+ },
+ "ws7d:f6586230de05": {
+  "index": 60,
+  "category": "FP",
+  "v2": "supported",
+  "subject": "about_subject",
+  "reason": "逐字；链接文字“(Amazon)”标明主体",
+  "purpose": "claim_support_verifier",
+  "statement": "BofA analyst Ken Hoexter sees Amazon's full throttle logistics move likely causing an overhang on asset-based service providers as well as asset-light brokers and forwarders.",
+  "claim_version_ref": null
+ },
+ "ws7d:01b01209b6ff": {
+  "index": 61,
+  "category": "FP",
+  "v2": "supported",
+  "subject": "about_subject",
+  "reason": "逐字；引文带“(Amazon)”",
+  "purpose": "claim_support_verifier",
+  "statement": "Analyst Ken Hoexter sees Amazon's full-throttle ASCS move likely causing an overhang on asset-based service providers as well as asset-light brokers and forwarders.",
+  "claim_version_ref": null
+ },
+ "ws7d:280401a32f65": {
+  "index": 62,
+  "category": "BORDERLINE",
+  "v2": "supported",
+  "subject": "about_subject",
+  "reason": "引文无 Amazon 字样，主体来自标题“AMZN ASCS Views”",
+  "purpose": "claim_support_verifier",
+  "statement": "Ken Hoexter sees Amazon's full-throttle ASCS move likely causing an overhang on asset-based service providers and asset-light brokers and forwarders.",
+  "claim_version_ref": null
+ },
+ "ws7d:a40dd963b1bb": {
+  "index": 63,
+  "category": "TP",
+  "v2": "not_supported",
+  "subject": "about_other",
+  "reason": "about_other",
+  "purpose": "claim_support_backfill",
+  "statement": "Bears warn that expect more data-center construction moratoriums to pop up, a capacity/power-constraint narrative that bears on the pace of AI data-center expansion across hyperscalers including Meta.",
+  "claim_version_ref": "claim-version:1e978b56e43642c35be4f62340dc0dc92c686dd7dd4e5f8e2e9668e56945020a"
+ },
+ "ws7d:1c7b24296af0": {
+  "index": 64,
+  "category": "TP",
+  "v2": "not_supported",
+  "subject": "about_other",
+  "reason": "about_other：Big Tech 整体",
+  "purpose": "claim_support_backfill",
+  "statement": "The bull case holds that Big Tech is free-cash-flow rich and proving AI ROI while growing top-line at high-teens or low-twenties, which bears directly on whether Meta's AI capex can be funded from int",
+  "claim_version_ref": "claim-version:f4d8ad5468dce12bc06b69b1a3d3c3d0b6602af33884a52e85d6c95a6564cdc4"
+ },
+ "ws7d:3d4f4b834773": {
+  "index": 65,
+  "category": "TP",
+  "v2": "not_supported",
+  "subject": "about_subject",
+  "reason": "引文是 Pershing/Ackman 13F 信（our Amazon investment），不是 Jefferies 的观点，归属错",
+  "purpose": "claim_support_backfill",
+  "statement": "Jefferies characterizes AWS as a direct beneficiary of the multi-decade migration of enterprise IT workloads to the cloud, which it says is now further accelerated by surging demand for AI inference w",
+  "claim_version_ref": "claim-version:05f992e0b3de997b4320ca1defd150484ffed2eea625c303e1b6d8114f3a8687"
+ },
+ "ws7d:4b6d3713be1d": {
+  "index": 66,
+  "category": "TP",
+  "v2": "not_supported",
+  "subject": "about_other",
+  "reason": "about_other：Microsoft",
+  "purpose": "claim_support_backfill",
+  "statement": "Bill Ackman disclosed a new position in Microsoft, describing it as a company followed for many years now offered at a highly compelling valuation.",
+  "claim_version_ref": "claim-version:47a430d66db381881af3af590006e44a6b17379c30a76735cc20775ea1be847a"
+ },
+ "ws7d:a8026fd88d27": {
+  "index": 67,
+  "category": "TP",
+  "v2": "not_supported",
+  "subject": "about_subject",
+  "reason": "原文列五家（含 Apple），语句写“四家”",
+  "purpose": "claim_support_backfill",
+  "statement": "Meta 在 Q1 录得显著高于同业的营收同比增长，是报告期内四家大盘科技公司中增速最快的一家。",
+  "claim_version_ref": "claim-version:59af902c6019d46bea4ebdacd38e0179eef628adc85130a97137456053414687"
+ },
+ "ws7d:2410bf32fadc": {
+  "index": 68,
+  "category": "BORDERLINE",
+  "v2": "not_supported",
+  "subject": "about_subject",
+  "reason": "整句后可见“how will Meta fund all this…rumored equity raise as an overhang”；“Muse launch prompted”在前一句",
+  "purpose": "claim_support_backfill",
+  "statement": "Meta's Muse AI product launch prompted investor questions about how Meta will fund its AI spending, with a rumored equity raise cited as an overhang on the shares, per the sales note.",
+  "claim_version_ref": "claim-version:8fcb6e600d0dd6a0fb01d139a132e87b930a733ae9bb0263289e9f098a782d4a"
+ },
+ "ws7d:b7ec50267dee": {
+  "index": 69,
+  "category": "BORDERLINE",
+  "v2": "not_supported",
+  "subject": "about_subject",
+  "reason": "同上；“alongside the strong AI product momentum”在前一句",
+  "purpose": "claim_support_backfill",
+  "statement": "Meta's heavy AI investment is framed by the note as raising open questions among investors about funding sources, an overhang alongside the strong AI product momentum.",
+  "claim_version_ref": "claim-version:ad41d5e456fbe9a02ff983dc136cee626c039c37c84a1bd876d8f379efe85a79"
+ },
+ "ws7d:10821beec12a": {
+  "index": 70,
+  "category": "TP",
+  "v2": "not_supported",
+  "subject": "about_subject",
+  "reason": "全平台 2.5mm 少于 ChatGPT 3.6mm，只有 iOS 领先；语句去掉了 iOS 限定",
+  "purpose": "claim_support_backfill",
+  "statement": "Meta's Muse AI app drew strong early engagement metrics, ranking first in the US iOS Productivity category and exceeding downloads of Instagram and ChatGPT over the same period, according to Sensor To",
+  "claim_version_ref": "claim-version:f9ea1502c517bff4439840143534c8aa10489ffed55e53709a89f6be6ee3f04a"
+ },
+ "ws7d:b8c2bd790866": {
+  "index": 71,
+  "category": "BORDERLINE",
+  "v2": "supported",
+  "subject": "about_subject",
+  "reason": "“goes to $248B”（高于买方 $234B），“raised”是合理解读但原文没给旧值",
+  "purpose": "claim_support_verifier",
+  "statement": "For 2027, BofA's Justin Post raised his Amazon capex estimate above the buyside figure heard heading into the print.",
+  "claim_version_ref": null
+ },
+ "ws7d:a075fbd6576b": {
+  "index": 72,
+  "category": "TP",
+  "v2": "not_supported",
+  "subject": "about_other",
+  "reason": "about_other：UCTT",
+  "purpose": "claim_support_backfill",
+  "statement": "A semicap supplier said its customers' accelerated technology roadmaps gave it confidence it was in the early stages of a multi-year, AI-driven expansion, supporting a multi-year capacity buildout con",
+  "claim_version_ref": "claim-version:c649763c7ed26c3a2cb8c19e30578035b1ce1ff862b7d4f3b3eac51c3d4a81fe"
+ },
+ "ws7d:cf1991cf803e": {
+  "index": 73,
+  "category": "TP",
+  "v2": "not_supported",
+  "subject": "about_other",
+  "reason": "about_other：TER",
+  "purpose": "claim_support_backfill",
+  "statement": "A supplier with the majority of revenue tied to AI-related demand attributed its results to the strength of its wafer-to-AI-data-center strategy and expected AI-driven momentum to continue, indicating",
+  "claim_version_ref": "claim-version:cf447411ba0cc13af877d80f196773f96ea1324e15131b6a188682963321eddc"
+ },
+ "ws7d:aa79fa8f9aee": {
+  "index": 74,
+  "category": "TP",
+  "v2": "not_supported",
+  "subject": "about_other",
+  "reason": "about_other：动量因子",
+  "purpose": "claim_support_backfill",
+  "statement": "The note characterizes the day's momentum unwind as driven by the long leg heavily exposed to AI-related names, implying meaningful overlap between momentum positioning and the AMZN/GOOGL/META/MSFT AI",
+  "claim_version_ref": "claim-version:7dcef4eee7a22b90e6a436619392d469c4dff72f7c20c430e4b23bc3820d9e31"
+ },
+ "ws7d:2b4dc5f34608": {
+  "index": 75,
+  "category": "FP",
+  "v2": "supported",
+  "subject": "about_subject",
+  "reason": "逐字（Q1 preview、AWS +28%、Anthropic、Q1 revenue/EBIT、Retail、January layoffs）",
+  "purpose": "claim_support_verifier",
+  "statement": "As of its 2026 Amazon Q1 preview, BofA raised its AWS growth expectation, attributing the increase to Anthropic-related demand, and also raised its overall Q1 revenue and EBIT expectations, citing str",
+  "claim_version_ref": null
+ },
+ "ws7d:f5762ffb2999": {
+  "index": 76,
+  "category": "FP",
+  "v2": "supported",
+  "subject": "about_subject",
+  "reason": "逐字；analyst 为 BofA 的 Justin Post",
+  "purpose": "claim_support_verifier",
+  "statement": "As of the 2026 Q1 preview, BofA's analyst raised AWS growth expectations, attributing the increase to Anthropic-related demand and noting buy-side bars may be higher still.",
+  "claim_version_ref": null
+ },
+ "ws7d:4808e2e9142e": {
+  "index": 77,
+  "category": "TP",
+  "v2": "not_supported",
+  "subject": "about_subject",
+  "reason": "“sets a high bar”原文无",
+  "purpose": "claim_support_backfill",
+  "statement": "Semiconductor strength into the print, with SOX on a long win streak, is flagged as a backdrop that sets a high bar for AI-related megacap results including AMZN and its peers.",
+  "claim_version_ref": "claim-version:cbde03d09462cd43462e2fe8638e732392504df9a39e31cd029c317edaee526c"
+ },
+ "ws7d:091a6573e809": {
+  "index": 78,
+  "category": "TP",
+  "v2": "not_supported",
+  "subject": "about_other",
+  "reason": "about_other：Microsoft",
+  "purpose": "claim_support_backfill",
+  "statement": "The author says he interpreted Satya's podcast remarks about the puts and takes of owning versus leasing data center capacity to mean he was waffling on capex, which the author asserts was not the cas",
+  "claim_version_ref": "claim-version:d159c1b659e56591751ff7b1f5e87eb64fbc6f985a751b31f4d48f35fbee6f5e"
+ },
+ "ws7d:5940a6f2d7b4": {
+  "index": 79,
+  "category": "FP",
+  "v2": "supported",
+  "subject": "about_subject",
+  "reason": "逐字（Big Tech best-in-class revenue growth…could give cover for more capex into 2027）",
+  "purpose": "claim_support_backfill",
+  "statement": "BofA previewed earnings from Meta, Microsoft, Amazon, Google and Apple in the same week, framing Big Tech as continuing to post best-in-class revenue growth with standout profitability, which the note",
+  "claim_version_ref": "claim-version:c4653527923f44181831480d05eeefc569b53733c63b5a1f52c2130f83ef5c5c"
+ },
+ "ws7d:2e432f2794cd": {
+  "index": 80,
+  "category": "TP",
+  "v2": "not_supported",
+  "subject": "about_subject",
+  "reason": "“debate among clients over capex upside and semis-boom discomfort”原文无",
+  "purpose": "claim_support_backfill",
+  "statement": "BofA describes a debate among clients over capex upside and semis-boom discomfort across Big Tech reporting that week, which is the market narrative framing around Meta's and peers' capex trajectory.",
+  "claim_version_ref": "claim-version:eaaf648714c2a5d1733624275610d216f812a0d0554afcc0d229e08e7d3de836"
+ },
+ "ws7d:d6f521b45f40": {
+  "index": 81,
+  "category": "FP",
+  "v2": "supported",
+  "subject": "about_subject",
+  "reason": "v1 引文在句中截断；整句后“Despite ongoing consumer sentiment angst…sentiment on AMZN continues to warm up amidst emerging cloud (AWS) + chip (Trainium) optimism”",
+  "purpose": "claim_support_backfill",
+  "statement": "The desk reports sentiment on Amazon warming amid emerging optimism on both cloud (AWS) and its in-house Trainium chip, contrasting with lingering consumer sentiment angst.",
+  "claim_version_ref": "claim-version:50647925cae223d104fac0e3d2bee20a7b5cd531482119b8fa1f17110ed929bd"
+ },
+ "ws7d:deddf9a45cb6": {
+  "index": 82,
+  "category": "TP",
+  "v2": "not_supported",
+  "subject": "about_other",
+  "reason": "about_other：Anthropic",
+  "purpose": "claim_support_backfill",
+  "statement": "Anthropic's CFO said Anthropic procures compute from three chip platforms—Amazon Trainium, Google TPUs, and Nvidia GPUs—and uses them fungibly, flexibility that took long to build.",
+  "claim_version_ref": "claim-version:beb7a332bac2e8a5301a6fa888528cadb4cb4e0a479344600367e8db4b2d270b"
+ },
+ "ws7d:5fed3c77fb89": {
+  "index": 83,
+  "category": "TP",
+  "v2": "not_supported",
+  "subject": "about_other",
+  "reason": "about_other：Anthropic",
+  "purpose": "claim_support_backfill",
+  "statement": "Anthropic's CFO said compute procurement is the lifeblood of its business and occupies a large share of his time.",
+  "claim_version_ref": "claim-version:dfe8d3dd55024cf60572c53126d770a164d6a78fa44961d7764c26c4426d859d"
+ },
+ "ws7d:190cdcadf0d8": {
+  "index": 84,
+  "category": "FP",
+  "v2": "supported",
+  "subject": "about_subject",
+  "reason": "v1 引文截断；整句后“AI is clearly enhancing content recommendation and ad targeting with Muse Spark…”（Meta: AI Era Transition 段）",
+  "purpose": "claim_support_backfill",
+  "statement": "AI is described as enhancing Meta's content recommendation and ad targeting, with the Muse Spark reasoning model seen as likely driving further improvements.",
+  "claim_version_ref": "claim-version:32c2febfe7ce04f8ca2edb2d9689a67b3e398edf5df3874bf736514f624f3002"
+ },
+ "ws7d:dd1304ee1b44": {
+  "index": 85,
+  "category": "TP",
+  "v2": "not_supported",
+  "subject": "about_subject",
+  "reason": "“viewed as primarily strategic”原文无",
+  "purpose": "claim_support_verifier",
+  "statement": "Amazon announced it will acquire Globalstar, adding direct-to-device capabilities into its growing Leo network, and the acquisition is viewed as primarily strategic.",
+  "claim_version_ref": null
+ },
+ "ws7d:3e22248e54ed": {
+  "index": 86,
+  "category": "TP",
+  "v2": "not_supported",
+  "subject": "about_other",
+  "reason": "about_other：宏观/NDX",
+  "purpose": "claim_support_backfill",
+  "statement": "Desk reports the NDX multiple contracting toward near multi-year lows amid re-emerging AI debates, a macro backdrop with the long end of the curve at decades highs — the narrative context in which Met",
+  "claim_version_ref": "claim-version:553bf717fcdf281820449f410f7a228ddd826105b8fae94164f01189264f6501"
+ },
+ "ws7d:19f93aa98429": {
+  "index": 87,
+  "category": "TP",
+  "v2": "not_supported",
+  "subject": "about_other",
+  "reason": "about_other：TMT 板块",
+  "purpose": "claim_support_backfill",
+  "statement": "Desk describes investors debating whether the market is signaling a regime shift away from the capex trade, with risk appetite muted and a 'holding pattern' while macro is complicated — the key multi-",
+  "claim_version_ref": "claim-version:7b36d4c69449d27ce8a3c2a5f07f604bd30254561d4c5b1bcd39e9044cb4bfd2"
+ },
+ "ws7d:8fc176be0a34": {
+  "index": 88,
+  "category": "TP",
+  "v2": "not_supported",
+  "subject": "about_other",
+  "reason": "about_other；引文也不含该内容",
+  "purpose": "claim_support_backfill",
+  "statement": "Aggregate results from MSFT, GOOGL, AMZN and others are said to provide industry-wide evidence of ROI on data center capex, though the debate remains open long-term.",
+  "claim_version_ref": "claim-version:98f5bb62f67259b7ddd43dc2719aae96bce5b79bffa878a61081bd54285c340e"
+ },
+ "ws7d:94f92313b85b": {
+  "index": 89,
+  "category": "TP",
+  "v2": "not_supported",
+  "subject": "about_subject",
+  "reason": "“treats cloud capex ROI as evidence rather than settled fact”是推论",
+  "purpose": "claim_support_backfill",
+  "statement": "Citing third-party raises to Cloud Capex and demonstrable ROI on Capex from MSFT, AMZN and others, the note treats cloud capex ROI as evidence rather than settled fact.",
+  "claim_version_ref": "claim-version:eb6ff29bd6508d28f2e4b27a6ddabec1bf73bd206fd262f3a036146b406f1692"
+ },
+ "ws7d:253428dda7a4": {
+  "index": 90,
+  "category": "TP",
+  "v2": "not_supported",
+  "subject": "about_other",
+  "reason": "about_other：hyperscaler 整体",
+  "purpose": "claim_support_backfill",
+  "statement": "Details on AI demand, customer commitments and ASIC chip usage from potential OpenAI and Anthropic offerings could point to more durable demand for hyperscaler capacity.",
+  "claim_version_ref": "claim-version:fda691ebf63fff7993693f152c5f08de4f111a8a4f94003ee87451a17ff318c3"
+ },
+ "ws7d:f92350c7d351": {
+  "index": 91,
+  "category": "FP",
+  "v2": "supported",
+  "subject": "about_subject",
+  "reason": "逐字：25% raises to Cloud Capex、NVDA/AVGO AI guide、demonstrable ROI on Capex from MSFT, AMZN",
+  "purpose": "claim_support_backfill",
+  "statement": "The note attributes part of the improved WFE outlook to large raises in cloud capex, and lists demonstrable ROI on capex from MSFT and AMZN among supporting data points, alongside NVDA and AVGO AI gui",
+  "claim_version_ref": "claim-version:385cdbb7e940ff0e4b1b72f43a2b22b77b511fa57246ed2108c2d7ef7989b3f5"
+ },
+ "ws7d:050c39282a95": {
+  "index": 92,
+  "category": "TP",
+  "v2": "not_supported",
+  "subject": "about_other",
+  "reason": "about_other：板块资金流",
+  "purpose": "claim_support_backfill",
+  "statement": "Info Tech and Communication Services were the most net-bought sectors for a third straight week, driven by long buys, indicating persistent positioning demand in META's sector.",
+  "claim_version_ref": "claim-version:71aeeaaae203f795f8ef21b94ad7cf237e546b87f11680c6e3174b2cbf29c0b0"
+ }
+}

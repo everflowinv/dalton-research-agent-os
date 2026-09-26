@@ -84,3 +84,28 @@ BEFORE UPDATE ON claim_support_backfill_marks BEGIN
 CREATE TRIGGER IF NOT EXISTS claim_support_backfill_marks_no_delete
 BEFORE DELETE ON claim_support_backfill_marks BEGIN
     SELECT RAISE(ABORT, 'claim support backfill marks are append-only'); END;
+
+-- 2026-09-26b: the recheck's marker, per held candidate and question version
+-- (the verifier's contract ref).  A candidate the recheck has asked -- or found
+-- to duplicate a Claim already in the Ledger, or another held candidate with
+-- the same statement, subject and cited source -- is marked and never asked
+-- again under the same contract, so the queue's head moves on instead of
+-- re-reading the same cached verdicts every run.  Append-only.
+CREATE TABLE IF NOT EXISTS claim_support_recheck_marks (
+    candidate_claim_ref TEXT NOT NULL,
+    rule_ref TEXT NOT NULL,
+    item_key TEXT,
+    outcome TEXT NOT NULL CHECK(outcome IN ('verdict', 'unverifiable', 'duplicate', 'unreadable')),
+    detail TEXT,
+    marked_at TEXT NOT NULL,
+    PRIMARY KEY (candidate_claim_ref, rule_ref)
+);
+CREATE TRIGGER IF NOT EXISTS claim_support_recheck_marks_authorized_insert
+BEFORE INSERT ON claim_support_recheck_marks WHEN dalton_claim_support_authorized() = 0 BEGIN
+    SELECT RAISE(ABORT, 'claim support recheck mark insert requires ClaimSupportVerdictStore'); END;
+CREATE TRIGGER IF NOT EXISTS claim_support_recheck_marks_no_update
+BEFORE UPDATE ON claim_support_recheck_marks BEGIN
+    SELECT RAISE(ABORT, 'claim support recheck marks are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS claim_support_recheck_marks_no_delete
+BEFORE DELETE ON claim_support_recheck_marks BEGIN
+    SELECT RAISE(ABORT, 'claim support recheck marks are append-only'); END;

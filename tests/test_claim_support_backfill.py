@@ -112,9 +112,12 @@ class BackfillTests(BackfillHarness):
     def test_a_statement_judged_at_admission_is_read_not_asked(self) -> None:
         good = self.claim(statement="EPAM said engineering demand improved.", source=SOURCE, span=(0, 62))
         from dalton_core.claim_support_verification import support_item
+        # The same question the backfill asks: the whole sentence the span
+        # sits in, and the Claim's period as a document fact (contract v2).
         item = support_item(subject_ref=EPAM, subject_name="EPAM",
                             statement="EPAM said engineering demand improved.",
-                            cited_text=SOURCE[0:62], producer_route_ref="route-decision:drafter")
+                            cited_text=SOURCE[0:62], document={"period": "2026Q2"},
+                            producer_route_ref="route-decision:drafter")
         self.model.replies.append(_reply(("supported", "about_subject", None)))
         self.verifier.verify(mission={"id": "m"}, items=[item])
         self.assertEqual(len(self.model.calls), 1)
@@ -243,7 +246,7 @@ class AuthorityTests(BackfillHarness):
         challenge = self.authority.challenge(
             claim_version_ref=claim["ref"], claim_version_hash=claim["hash"],
             reason_code=SUPPORT_REASON, rationale="said so", actor_ref=AUTOMATION)
-        self.assertEqual(challenge["detector_ref"], "claim-verifier:citation-support:v1")
+        self.assertEqual(challenge["detector_ref"], "claim-verifier:citation-support:v2")
         with self.assertRaises(ClaimRetirementConflict):
             self.authority.decide(challenge_ref=challenge["id"], challenge_hash=challenge["content_hash"],
                                   decision="retired", actor_ref=AUTOMATION, rationale="said so")
@@ -307,6 +310,193 @@ class MigrationTests(unittest.TestCase):
         with self.assertRaises(sqlite3.DatabaseError):
             store.connection.execute("UPDATE claim_retirement_challenges SET rationale='y'")
         # And a second construction is a no-op.
+        ClaimRetirementAuthority(store)
+
+
+V1 = "claim-support-verification:v1"
+
+
+class StatementModel:
+    """A verifier that answers by statement, whatever order the prompt lists them in."""
+
+    def __init__(self, answers):
+        self.answers = dict(answers)
+        self.calls: list[dict] = []
+
+    def __call__(self, **kwargs):
+        self.calls.append(kwargs)
+        prompt = kwargs["prompt"]
+        items = json.loads(prompt[prompt.rindex("UNTRUSTED_ITEMS=") + len("UNTRUSTED_ITEMS="):])
+        return {"text": _reply(*(self.answers[item["statement"]] for item in items)),
+                "cost_micros": 700, "work_order_ref": f"work:cockpit-{kwargs['purpose']}-x",
+                "route_decision_ref": "route-decision:verifier", "invocation_ref": "invocation:v"}
+
+
+class SupportRereviewTests(BackfillHarness):
+    """2026-09-26b: retirements a v1 verdict made are asked once under v2 and put back when upheld."""
+
+    GOOD = "In Q2 2026, EPAM said engineering demand improved in the quarter."
+    BAD = "EPAM expects margins to expand sharply."
+    # A 1,200-character-style slice that cuts the sentence the statement rests on.
+    TEXT = ("Operator remarks came first. 发言人Balazs Fejes： Engineering demand improved in "
+            "the quarter, and we expect that to continue. Margins were flat.")
+
+    def retire_under_v1(self):
+        import dalton_core.claim_support_backfill as backfill_module
+        import dalton_core.claim_support_verification as verification_module
+        from unittest.mock import patch
+
+        cut = self.TEXT.index("improved")
+        good = self.claim(statement=self.GOOD, source=self.TEXT, span=(cut, cut + 40))
+        bad = self.claim(statement=self.BAD, source=self.TEXT, span=(cut, cut + 40))
+        self.grant_claim_challenge()
+        self.verifier.model_call = StatementModel({
+            self.GOOD: ("not_supported", "about_subject", None),
+            self.BAD: ("not_supported", "about_subject", None)})
+        with patch.object(verification_module, "CONTRACT_REF", V1), \
+                patch.object(backfill_module, "CONTRACT_REF", V1):
+            first = self.backfill().run_once(max_items=10)
+        self.assertEqual(sorted(first["retired"]), sorted([good["ref"], bad["ref"]]), first)
+        return good, bad
+
+    def test_a_retirement_the_current_contract_upholds_is_reinstated_once(self) -> None:
+        good, bad = self.retire_under_v1()
+        model = StatementModel({self.GOOD: ("supported", "about_subject", None),
+                                self.BAD: ("not_supported", "about_subject", None)})
+        self.verifier.model_call = model
+        result = self.backfill().run_once(max_items=10)
+        rereview = result["rereview"]
+        self.assertEqual((rereview["candidates"], rereview["asked"], rereview["upheld"],
+                          rereview["still_rejected"]), (2, 2, 1, 1), rereview)
+        self.assertEqual([item["claim_version_ref"] for item in rereview["reinstated"]], [good["ref"]])
+        self.assertEqual(self.authority.retired_claim_version_refs(), {bad["ref"]})
+        # The question carried the whole sentence and the document facts.
+        prompt = model.calls[0]["prompt"]
+        items = json.loads(prompt[prompt.rindex("UNTRUSTED_ITEMS=") + len("UNTRUSTED_ITEMS="):])
+        self.assertIn("Engineering demand improved in the quarter, and we expect that to continue.",
+                      items[0]["cited_text"])
+        self.assertEqual(items[0]["document"], {"period": "2026Q2", "speaker": "Balazs Fejes"})
+        self.assertIn("never added facts", prompt)
+        record = self.authority.reinstatements()[0]
+        self.assertEqual((record["reason_code"], record["rule_ref"], record["actor_ref"]),
+                         ("citation_support_upheld_under_current_rule",
+                          "claim-rereview:citation-support:v2", AUTOMATION))
+        # Once per contract: nothing is asked or written again.
+        again = self.backfill().run_once(max_items=10)
+        self.assertEqual((again["rereview"]["candidates"], again["rereview"]["asked"],
+                          again["rereview"]["reinstated"], again["calls"]), (0, 0, [], 0))
+        self.assertEqual(len(model.calls), 1)
+        self.assertEqual(len(self.authority.reinstatements()), 1)
+
+    def test_without_the_grant_it_asks_and_reports_then_reinstates_without_asking_again(self) -> None:
+        good, _bad = self.retire_under_v1()
+        # The grant is withdrawn: a newer mission version without claim_challenge.
+        params = dict(self.params)
+        params.update({"version_id": "coverage-mission-version:us-it-services:3",
+                       "prior_version_ref": "coverage-mission-version:us-it-services:2",
+                       "idempotency_key": "coverage-mission:us-it-services:3"})
+        self.missions.create_mission(self.mission_ref, **params)
+        model = StatementModel({self.GOOD: ("supported", "about_subject", None),
+                                self.BAD: ("not_supported", "about_subject", None)})
+        self.verifier.model_call = model
+        held = self.backfill().run_once(max_items=10)["rereview"]
+        self.assertEqual(([i["claim_version_ref"] for i in held["would_reinstate"]], held["reinstated"]),
+                         ([good["ref"]], []))
+        params = dict(self.params)
+        params["autonomy"] = {**params["autonomy"],
+                              "may_write": list(params["autonomy"]["may_write"]) + ["claim_challenge"]}
+        params.update({"version_id": "coverage-mission-version:us-it-services:4",
+                       "prior_version_ref": "coverage-mission-version:us-it-services:3",
+                       "idempotency_key": "coverage-mission:us-it-services:4"})
+        self.missions.create_mission(self.mission_ref, **params)
+        acted = self.backfill().run_once(max_items=10)["rereview"]
+        self.assertEqual([i["claim_version_ref"] for i in acted["reinstated"]], [good["ref"]])
+        self.assertEqual(len(model.calls), 1)
+
+    def test_automation_cannot_reinstate_a_support_retirement_on_an_old_verdict(self) -> None:
+        good, _bad = self.retire_under_v1()
+        with self.assertRaises(ClaimRetirementConflict):
+            self.authority.reinstate(claim_version_ref=good["ref"], actor_ref=AUTOMATION,
+                                     rationale="the old verdict was wrong")
+        # A person can.
+        record = self.authority.reinstate(claim_version_ref=good["ref"], actor_ref=OWNER,
+                                          rationale="原文说的就是这件事")
+        self.assertEqual(record["reason_code"], "human_judgment")
+
+    def test_an_old_contract_rejection_is_not_acted_on_until_asked_again(self) -> None:
+        import dalton_core.claim_support_backfill as backfill_module
+        import dalton_core.claim_support_verification as verification_module
+        from unittest.mock import patch
+
+        cut = self.TEXT.index("improved")
+        good = self.claim(statement=self.GOOD, source=self.TEXT, span=(cut, cut + 40))
+        self.verifier.model_call = StatementModel({self.GOOD: ("not_supported", "about_subject", None)})
+        with patch.object(verification_module, "CONTRACT_REF", V1), \
+                patch.object(backfill_module, "CONTRACT_REF", V1):
+            first = self.backfill().run_once(max_items=10)  # no grant: detected, not retired
+        self.assertEqual(first["detected"], 1)
+        self.grant_claim_challenge()
+        # The ceiling stops the re-review from asking; the v1 rejection alone
+        # retires nothing.
+        self.spent = 500_000
+        held = self.backfill().run_once(max_items=10)
+        self.assertEqual((held["detected"], held["retired"]), (0, []), held)
+        self.assertIsNotNone(held["rereview"]["deferred"])
+        self.spent = 0
+        self.verifier.model_call = StatementModel({self.GOOD: ("supported", "about_subject", None)})
+        asked = self.backfill().run_once(max_items=10)
+        self.assertEqual((asked["rereview"]["asked"], asked["rereview"]["upheld"], asked["retired"]),
+                         (1, 1, []))
+        self.assertEqual(self.authority.retired_claim_version_refs(), set())
+        self.assertIsNotNone(good)
+
+
+class ReinstatementMigrationTests(unittest.TestCase):
+    def test_an_existing_reinstatements_table_is_widened_without_losing_a_row(self) -> None:
+        import dalton_core
+
+        store = DaltonStore(":memory:")
+        self.addCleanup(store.close)
+        schema = (Path(dalton_core.__file__).parent / "claim_retirement_schema.sql").read_text(encoding="utf-8")
+        old = schema.replace(",\n        'citation_support_upheld_under_current_rule'\n    ", "\n    ")
+        self.assertNotIn("citation_support_upheld_under_current_rule", old)
+        claim = {"id": "claim-version:" + "1" * 64, "claim_ref": "claim:test:1",
+                 "subject_ref": EPAM, "normalized_statement": "x"}
+        claim["content_hash"] = content_hash({k: v for k, v in claim.items() if k != "content_hash"})
+        with store._transaction() as cur:
+            cur.execute("INSERT INTO claim_versions(claim_version_id,claim_ref,version_number,claim_json,"
+                        "content_hash,created_at) VALUES(?,?,?,?,?,?)",
+                        (claim["id"], claim["claim_ref"], 1, json.dumps(claim), claim["content_hash"],
+                         "2026-09-01T00:00:00+00:00"))
+        store.connection.create_function("dalton_claim_retirement_authorized", 0, lambda: 1)
+        store.connection.executescript(old)
+        store.connection.execute(
+            "INSERT INTO claim_retirement_challenges VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("challenge:1", claim["id"], claim["content_hash"], claim["claim_ref"], EPAM,
+             SUPPORT_REASON, None, None, "r", AUTOMATION, "{}", "0" * 64, "2026-09-01"))
+        store.connection.execute(
+            "INSERT INTO claim_retirement_decisions VALUES(?,?,?,?,?,?,?,?,?,?)",
+            ("decision:1", claim["id"], "challenge:1", "0" * 64, "retired", AUTOMATION, "r", "{}",
+             "0" * 64, "2026-09-01"))
+        store.connection.execute(
+            "INSERT INTO claim_retirement_reinstatements VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            ("reinstatement:1", claim["id"], "decision:1", "0" * 64, "human_judgment", None,
+             OWNER, "r", "{}", "0" * 64, "2026-09-02"))
+        store.connection.execute(
+            "INSERT INTO claim_retirement_reinstatement_withdrawals VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            ("withdrawal:1", claim["id"], "reinstatement:1", "0" * 64, "human_judgment", None,
+             OWNER, "r", "{}", "0" * 64, "2026-09-03"))
+
+        ClaimRetirementAuthority(store)
+        sql = store.connection.execute(
+            "SELECT sql FROM sqlite_master WHERE name='claim_retirement_reinstatements'").fetchone()[0]
+        self.assertIn("citation_support_upheld_under_current_rule", sql)
+        self.assertEqual(store.connection.execute(
+            "SELECT reinstatement_id FROM claim_retirement_reinstatements").fetchall()[0][0],
+            "reinstatement:1")
+        self.assertEqual(store.connection.execute("PRAGMA foreign_key_check").fetchall(), [])
+        with self.assertRaises(sqlite3.DatabaseError):
+            store.connection.execute("DELETE FROM claim_retirement_reinstatements")
         ClaimRetirementAuthority(store)
 
 
