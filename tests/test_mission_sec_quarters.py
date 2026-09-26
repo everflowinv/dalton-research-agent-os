@@ -6,11 +6,14 @@ import hashlib
 import json
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from dalton_core.mission_sec_quarters import (
+    MAX_ATTEMPTS_PER_FILING,
     MissionSecQuartersCoordinator,
+    classify_failure,
+    source_lag_retry_at,
     quarterly_filings,
     read_artifact,
     submissions_filings,
@@ -55,15 +58,36 @@ class _Missions:
         return {"status": "fresh", "dispatch_id": f"d{len(self.queued)}"}
 
 
+AUTHORIZED_POLICY = {
+    "research_plan_auto_start": {
+        "enabled": True,
+        "rules": ["research-plan-auto-start:sec-public-company-facts:v1"]},
+    "research_candidate_auto_commit": {
+        "enabled": True, "max_records": 20,
+        "rules": ["research-auto-commit:sec-public-company-facts-growth:v1"]},
+}
+
+
 class _Store:
     """The reads the coordinator makes, without a Core."""
+
+    policy: dict = AUTHORIZED_POLICY
+
+    def active_policy(self):
+        return {"policy_version_id": "policy-4", "policy": self.policy}
 
     def __init__(self, *, artifact_hash: str | None = None, periods: tuple[str, ...] = (),
                  attempts: dict[str, int] | None = None, open_dispatches: int = 0,
                  artifacts: tuple[str, ...] | None = None,
                  other_metric_periods: tuple[str, ...] = (),
-                 statement_filings: tuple[dict, ...] = ()) -> None:
+                 statement_filings: tuple[dict, ...] = (),
+                 failed_runs: tuple[dict, ...] = (),
+                 envelopes: dict | None = None, policy: dict | None = None) -> None:
+        self.envelopes = envelopes or {}
+        if policy is not None:
+            self.policy = policy
         self.open_dispatches = open_dispatches
+        self.failed_runs = failed_runs
         # Newest first, as the evidence query orders them.
         self.artifacts = artifacts if artifacts is not None else (
             (artifact_hash,) if artifact_hash is not None else ())
@@ -87,6 +111,11 @@ class _Store:
             rows = []
         elif "coverage_mission_statement_filings" in sql:
             rows = [dict(item) for item in self.statement_filings]
+        elif "scheduler_result_envelopes" in sql:
+            envelope = self.envelopes.get(params[0])
+            rows = [] if envelope is None else [{"result_envelope_json": json.dumps(envelope)}]
+        elif "dispatch_reason" in sql:
+            rows = [dict(item) for item in self.failed_runs]
         elif "coverage_mission_sec_dispatches" in sql:
             rows = ([{"n": self.open_dispatches}] if "status IN" in sql
                     else [{"expected_accession": a, "n": n} for a, n in self.attempts.items()])
@@ -384,6 +413,164 @@ class NewestQuarterTests(unittest.TestCase):
         # "f"*64 is not in the spool: had it been opened the reason would say so.
         self.assertEqual(result["status"], "idle")
         self.assertIn("都已入账", json.dumps(result["skipped"], ensure_ascii=False))
+
+
+CTSH_Q2 = "0001058290-26-000031"
+GOVERNANCE_LINE = (
+    "lane precondition failed: active Core governance policy 'policy-4' does not "
+    "authorize the SEC company-facts lane; the lane never installs governance policy "
+    "itself. Install a new policy version through the governance CLI with: "
+    "research_plan_auto_start must be {enabled: true, rules: "
+    "['research-plan-auto-start:sec-public-company-facts:v1', ...known rules]}")
+LAG_MESSAGE = "SEC company facts has no 10-Q accession in the filing window"
+
+
+class FailuresThatAreNotTheFilingsTests(unittest.TestCase):
+    """2026-09-26: governance and source lag stopped spending a filing's budget.
+
+    ws-7d's policy lacked ``research_plan_auto_start``; every run refused at the
+    lane precondition and the coordinator queued on regardless, burning the 47
+    attempts that had just been given back.  Legacy CTSH's 10-Q was listed by
+    EDGAR but not yet in company facts, and two of its three attempts went on
+    "no 10-Q accession in the filing window".
+    """
+
+    setUp = NewestQuarterTests.setUp
+    spool = NewestQuarterTests.spool
+    run_once = NewestQuarterTests.run_once
+
+    def run_at(self, store, entry, when, missions=None):
+        missions = missions or _Missions()
+        result = MissionSecQuartersCoordinator(
+            store=store, missions=missions, state_dir=self.root,
+            checklist=lambda: [entry], clock=lambda: when,
+        ).dispatch_once()
+        return result, missions
+
+    def ticket(self, name, *, log=None, summary=None) -> str:
+        directory = self.root / "sec-lane-runs" / name
+        directory.mkdir(parents=True)
+        if log is not None:
+            (directory / "run.log").write_text(log, encoding="utf-8")
+        if summary is not None:
+            (directory / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+        return f"sec-lane-run:{name}"
+
+    @staticmethod
+    def settled(accession, ticket_ref, *, at="2026-09-23T12:00:00+00:00", reason=None):
+        return {"dispatch_id": f"mission-sec-dispatch:{ticket_ref[-6:]}",
+                "expected_accession": accession, "status": "launched",
+                "ticket_ref": ticket_ref, "dispatch_reason": None,
+                "updated_at": at, "settled_reason": reason, "settled_at": at}
+
+    def lag_summary(self, envelope_ref):
+        return {"ok": False, "issuers": [{"status": "blocked", "failure": {
+            "status": "failed", "result_envelope_ref": envelope_ref}}]}
+
+    def test_an_unauthorized_lane_is_held_before_anything_is_queued(self) -> None:
+        digest = self.spool(SUBMISSIONS)
+        store = _Store(artifacts=(digest,), periods=CTSH_HELD, policy={
+            "research_candidate_auto_commit": AUTHORIZED_POLICY["research_candidate_auto_commit"]})
+        result, missions = self.run_once(store, _ctsh_entry())
+        self.assertEqual(result["status"], "held")
+        self.assertIn("research_plan_auto_start", result["reason"])
+        self.assertEqual(missions.queued, [])
+
+    def test_an_unreadable_policy_holds_too(self) -> None:
+        class Broken(_Store):
+            def active_policy(self):
+                raise LookupError("no pointer")
+
+        digest = self.spool(SUBMISSIONS)
+        result, missions = self.run_once(Broken(artifacts=(digest,), periods=CTSH_HELD),
+                                         _ctsh_entry())
+        self.assertEqual((result["status"], missions.queued), ("held", []))
+
+    def test_runs_refused_by_governance_are_not_attempts(self) -> None:
+        digest = self.spool(SUBMISSIONS)
+        # Three runs, all dead at the lane precondition, which left only a log.
+        runs = tuple(self.settled(CTSH_Q2, self.ticket(f"gov{i}", log=GOVERNANCE_LINE + "\n"))
+                     for i in range(3))
+        store = _Store(artifacts=(digest,), periods=CTSH_HELD,
+                       attempts={CTSH_Q2: 3}, failed_runs=runs)
+        result, missions = self.run_once(store, _ctsh_entry())
+        self.assertEqual(result["status"], "queued")
+        self.assertEqual([q["attempt"] for q in result["queued"]], [1])
+        # The window still widens past the three already used.
+        self.assertEqual(len(missions.queued), 1)
+
+    def test_a_rejection_because_the_mission_moved_is_not_an_attempt(self) -> None:
+        digest = self.spool(SUBMISSIONS)
+        rejected = {"dispatch_id": "mission-sec-dispatch:r", "expected_accession": CTSH_Q2,
+                    "status": "rejected", "ticket_ref": None,
+                    "dispatch_reason": "CoverageMissionConflict: SEC automation must bind "
+                                       "the active mission version",
+                    "updated_at": "2026-09-25T06:18:38+00:00",
+                    "settled_reason": None, "settled_at": None}
+        other = dict(rejected, dispatch_id="mission-sec-dispatch:o",
+                     dispatch_reason="CoverageMissionConflict: SEC automation company/ticker "
+                                     "is outside the mission universe")
+        store = _Store(artifacts=(digest,), periods=CTSH_HELD, attempts={CTSH_Q2: 3},
+                       failed_runs=(rejected, other))
+        result, _ = self.run_once(store, _ctsh_entry())
+        # One excused, one still counting: 2 of 3 used.
+        self.assertEqual([q["attempt"] for q in result["queued"]], [3])
+
+    def test_a_real_failure_still_counts(self) -> None:
+        digest = self.spool(SUBMISSIONS)
+        runs = tuple(self.settled(CTSH_Q2, self.ticket(f"bad{i}"), reason=(
+            "AuthorityResolutionConflict: adapter structured output does not match"))
+            for i in range(3))
+        store = _Store(artifacts=(digest,), periods=CTSH_HELD, attempts={CTSH_Q2: 3},
+                       failed_runs=runs)
+        result, missions = self.run_once(store, _ctsh_entry())
+        self.assertEqual((result["status"], missions.queued), ("idle", []))
+        self.assertIn(f"已经试过 {MAX_ATTEMPTS_PER_FILING} 次",
+                      json.dumps(result["skipped"], ensure_ascii=False))
+
+    def test_source_lag_is_not_an_attempt_and_is_retried_later(self) -> None:
+        digest = self.spool(SUBMISSIONS)
+        envelopes = {f"result-envelope:{i}": {"status": "failed", "error": {
+            "code": "normalization_error", "message": LAG_MESSAGE, "retryable": False}}
+            for i in range(2)}
+        runs = (
+            self.settled(CTSH_Q2, self.ticket("lag0", summary=self.lag_summary("result-envelope:0")),
+                         at="2026-09-26T12:31:04+00:00"),
+            self.settled(CTSH_Q2, self.ticket("lag1", summary=self.lag_summary("result-envelope:1")),
+                         at="2026-09-26T12:41:06+00:00"),
+        )
+        # Legacy CTSH: one mission-drift rejection plus the two lag failures.
+        store = _Store(artifacts=(digest,), periods=CTSH_HELD, attempts={CTSH_Q2: 3},
+                       failed_runs=runs, envelopes=envelopes)
+        # Ten minutes later: not yet -- two lag failures back off two days.
+        soon = datetime(2026, 9, 26, 12, 51, tzinfo=timezone.utc)
+        result, missions = self.run_at(store, _ctsh_entry(), soon)
+        self.assertEqual((result["status"], missions.queued), ("idle", []))
+        text = json.dumps(result["skipped"], ensure_ascii=False)
+        self.assertIn("还没收录", text)
+        self.assertIn("2026-09-28T12:41", text)
+        # After the backoff it is tried again, and the budget shows the lag
+        # failures were not spent: of three dispatches only one still counts.
+        later = datetime(2026, 9, 28, 12, 42, tzinfo=timezone.utc)
+        result, missions = self.run_at(store, _ctsh_entry(), later)
+        self.assertEqual(result["status"], "queued")
+        self.assertEqual([q["attempt"] for q in result["queued"]], [2])
+
+    def test_the_settled_reason_is_used_before_the_disk(self) -> None:
+        self.assertEqual(classify_failure(LAG_MESSAGE), "source_lag")
+        self.assertEqual(classify_failure(GOVERNANCE_LINE), "governance")
+        self.assertEqual(classify_failure(
+            "SEC company facts has no 10-K accession in the filing window"), "source_lag")
+        self.assertIsNone(classify_failure("SEC company facts latest 10-Q accession is ambiguous"))
+        self.assertIsNone(classify_failure(None))
+
+    def test_the_lag_backoff_doubles_and_is_capped_at_a_week(self) -> None:
+        first = datetime(2026, 9, 1, tzinfo=timezone.utc)
+        self.assertIsNone(source_lag_retry_at([]))
+        self.assertEqual(source_lag_retry_at([first]), first + timedelta(days=1))
+        self.assertEqual(source_lag_retry_at([first] * 2), first + timedelta(days=2))
+        self.assertEqual(source_lag_retry_at([first] * 3), first + timedelta(days=4))
+        self.assertEqual(source_lag_retry_at([first] * 9), first + timedelta(days=7))
 
 
 if __name__ == "__main__":

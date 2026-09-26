@@ -196,7 +196,7 @@ class BoundedProbeExecutorTests(unittest.TestCase):
 
 
 class MissionObservationDispatchTests(unittest.TestCase):
-    def _server(self, launcher):
+    def _server(self, launcher, governance_hold=None):
         server = WriterServer.__new__(WriterServer)
         server._bounded_control = type("Control", (), {
             "record_observation_followup": lambda _self, _round, **_kw: {
@@ -253,6 +253,7 @@ class MissionObservationDispatchTests(unittest.TestCase):
 
         server._coverage_mission = Mission()
         server._sec_lane_launcher = launcher
+        server._sec_lane_governance_hold = governance_hold or (lambda: None)
         return server
 
     def test_writer_dispatches_exact_observation_under_mission_grant(self) -> None:
@@ -274,6 +275,43 @@ class MissionObservationDispatchTests(unittest.TestCase):
         self.assertEqual(launcher.request["actor_ref"], "automation:coverage-mission")
         self.assertEqual(launcher.request["form"], "10-Q")
         self.assertEqual(launcher.request["mission_context"]["paid_calls_reserved"], 0)
+
+    def test_a_lane_the_policy_does_not_authorize_is_held_not_launched(self) -> None:
+        """2026-09-26: ws-7d launched runs its policy refused, one attempt each."""
+
+        class Launcher:
+            started = 0
+
+            def start(self, **_request):
+                Launcher.started += 1
+                return {"id": "sec-lane-run:" + "1" * 24}
+
+        server = self._server(Launcher(), governance_hold=lambda: (
+            "lane precondition: active Core governance policy 'policy-4' does not "
+            "authorize the SEC company-facts lane"))
+        result = server._op_bounded_planner_record_observation({
+            "round_ref": "round:1", "mandate_version_ref": "mandate:1",
+        })
+        self.assertEqual(result["lane_status"], "held")
+        self.assertEqual(Launcher.started, 0)
+        # Still pending: it launches once the policy authorizes the lane,
+        # rather than being rejected (and counted) now.
+        self.assertEqual(len(server._coverage_mission.pending), 1)
+
+    def test_the_drain_asks_the_real_governance_precondition(self) -> None:
+        from dalton_core.sec_company_facts_lane import LanePreconditionError
+
+        server = WriterServer.__new__(WriterServer)
+        server._store = type("Store", (), {"active_policy": lambda _self: {
+            "policy_version_id": "policy-4",
+            "policy": {"research_candidate_auto_commit": {
+                "enabled": True, "max_records": 20,
+                "rules": ["research-auto-commit:sec-public-company-facts-growth:v1"]}},
+        }})()
+        hold = server._sec_lane_governance_hold()
+        self.assertIn("research_plan_auto_start", hold)
+        self.assertIn("policy-4", hold)
+        self.assertTrue(issubclass(LanePreconditionError, Exception))
 
     def test_busy_lane_is_reported_as_deferred_not_as_launched(self) -> None:
         class BusyLauncher:

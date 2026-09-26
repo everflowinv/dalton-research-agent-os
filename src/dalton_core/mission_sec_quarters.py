@@ -33,12 +33,25 @@ does each of the newest four 10-Q quarters carry this lane's own
 from every observation authority already holds: company facts, submissions,
 and the statement lane's ingested filings.  The statement lane is the one that
 goes looking for new filings, so a new 10-Q it ingests is queued here next.
+
+2026-09-26: two failures that say nothing about the filing stopped spending
+its budget.  ws-7d's active policy lacked ``research_plan_auto_start``, so
+every run refused at the lane's governance precondition -- and the coordinator
+kept queuing, five minutes apart, until the 47 attempts just given back were
+gone again.  The coordinator now asks that precondition itself and holds
+before queuing anything, and a run that died on it (or was rejected because
+the mission moved under a queued dispatch) is not an attempt.  Separately,
+SEC company facts lags the filing index: CTSH's 10-Q was listed and not yet
+in company facts, so each run answered "no 10-Q accession in the filing
+window".  That is the source being late, not the filing being bad: it is not
+counted either, and the filing is retried on a backoff instead of at once.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -67,6 +80,29 @@ YOY_METRIC = "quarterly_revenue_yoy_growth"
 # company-facts and a submissions payload.  They are megabytes each.
 MAX_ARTIFACTS_READ = 6
 SPOOL_ROOTS = ("transcript-spool", "connector-spool", "raw-spool")
+# 2026-09-26: failures that prove nothing about the filing they were spent on.
+# Governance: the lane refused before it opened anything, and would refuse any
+# filing equally until a policy is installed.
+GOVERNANCE_FAILURE_MARKERS = (
+    "does not authorize the SEC company-facts lane",
+    "Core has no active governance policy",
+)
+# The mission moved while a dispatch sat in the queue; the drain rejects it
+# for binding the old version.  A mission publish is an owner act (a policy
+# cascade), not a verdict on the filing.
+MISSION_DRIFT_MARKERS = (
+    "SEC automation must bind the active mission version",
+    "SEC automation mission hash binding failed",
+    "queued SEC authorization drifted",
+)
+# Company facts has not caught up with the filing index yet
+# (``sec_public_adapter.latest_accession``).  Retried, later, on a backoff.
+SOURCE_LAG_PATTERN = re.compile(
+    r"SEC company facts has no 10-[QK] accession in the filing window")
+SOURCE_LAG_RETRY_BASE = timedelta(days=1)
+SOURCE_LAG_RETRY_MAX = timedelta(days=7)
+EXCUSED_GOVERNANCE = "governance"
+EXCUSED_SOURCE_LAG = "source_lag"
 
 
 def _parse_date(value: Any) -> date | None:
@@ -149,6 +185,163 @@ def submissions_filings(
     return ordered[: max(1, int(limit))]
 
 
+def classify_failure(reason: Any) -> str | None:
+    """``governance`` / ``source_lag`` for a failure that is not the filing's."""
+
+    if not isinstance(reason, str) or not reason:
+        return None
+    if any(marker in reason for marker in GOVERNANCE_FAILURE_MARKERS + MISSION_DRIFT_MARKERS):
+        return EXCUSED_GOVERNANCE
+    if SOURCE_LAG_PATTERN.search(reason):
+        return EXCUSED_SOURCE_LAG
+    return None
+
+
+def run_failure_text(connection: Any, state_dir: Path | None, ticket_ref: Any) -> str | None:
+    """What a settled run said went wrong, read from what it left behind.
+
+    The settlement's ``failure_reason`` comes from the run summary's issuer
+    ``error``; two failures never reach it.  A governance precondition refuses
+    before any summary is written, so its only trace is ``run.log``.  A plan
+    that ran and failed at the connector leaves a summary whose issuer carries
+    a ``failure`` naming the result envelope, and the reason is in that
+    envelope in the Core.  Both are read here rather than guessed.
+    """
+
+    if state_dir is None or not isinstance(ticket_ref, str) or ":" not in ticket_ref:
+        return None
+    directory = Path(state_dir) / "sec-lane-runs" / ticket_ref.split(":", 1)[1]
+    try:
+        summary = json.loads((directory / "summary.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        summary = None
+    if isinstance(summary, Mapping):
+        envelopes: list[str] = []
+        for issuer in summary.get("issuers") or ():
+            if not isinstance(issuer, Mapping):
+                continue
+            if isinstance(issuer.get("error"), str) and issuer["error"].strip():
+                return issuer["error"].strip()
+            failure = issuer.get("failure")
+            if isinstance(failure, Mapping) and isinstance(failure.get("result_envelope_ref"), str):
+                envelopes.append(failure["result_envelope_ref"])
+        for ref in envelopes:
+            try:
+                row = connection.execute(
+                    "SELECT result_envelope_json FROM scheduler_result_envelopes "
+                    "WHERE result_envelope_id=? LIMIT 1", (ref,),
+                ).fetchone()
+                error = (json.loads(row["result_envelope_json"]).get("error") or {}) if row else {}
+            except Exception:  # noqa: BLE001 - an unreadable envelope names nothing
+                continue
+            if isinstance(error, Mapping) and isinstance(error.get("message"), str):
+                return error["message"]
+        if isinstance(summary.get("error"), str):
+            return summary["error"]
+        return None
+    try:
+        log = (directory / "run.log").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    for line in log.splitlines():
+        if line.strip().startswith("lane precondition failed:"):
+            return line.strip()
+    return None
+
+
+def _instant(value: Any) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def source_lag_retry_at(failed_at: Sequence[datetime]) -> datetime | None:
+    """When a filing company facts has not caught up with may be tried again.
+
+    A day after the first such failure, doubling to at most a week: company
+    facts usually catches up within days, and one public read a week for a
+    filing it never picks up costs nothing worth stopping for.
+    """
+
+    if not failed_at:
+        return None
+    delay = min(SOURCE_LAG_RETRY_BASE * (2 ** (len(failed_at) - 1)), SOURCE_LAG_RETRY_MAX)
+    return max(failed_at) + delay
+
+
+def attempt_ledger(connection: Any, state_dir: Path | None = None) -> dict[str, Any]:
+    """The retry budget per accession, and the failures it does not count.
+
+    ``counted``: dispatches that still count against ``MAX_ATTEMPTS_PER_FILING``
+    -- every dispatch, less the voided ones and the ones whose failure was
+    governance or source lag.  ``source_lag``: when each accession's lag
+    failures happened, for the backoff.  ``excused``: how many were forgiven,
+    by kind, so the report can say so.
+    """
+
+    from .coverage_mission import SEC_RUN_SUCCEEDED
+
+    try:
+        rows = connection.execute(
+            "SELECT d.expected_accession AS expected_accession, COUNT(*) AS n "
+            "FROM coverage_mission_sec_dispatches d "
+            "LEFT JOIN coverage_mission_sec_dispatch_attempt_voids v "
+            "ON v.dispatch_id=d.dispatch_id "
+            "WHERE v.dispatch_id IS NULL GROUP BY d.expected_accession"
+        ).fetchall()
+    except Exception:  # noqa: BLE001
+        return {"counted": {}, "source_lag": {}, "excused": {}}
+    counted = {row["expected_accession"]: int(row["n"])
+               for row in rows if row["expected_accession"]}
+    try:
+        failed = connection.execute(
+            "SELECT d.dispatch_id AS dispatch_id, d.expected_accession AS expected_accession, "
+            "d.status AS status, d.ticket_ref AS ticket_ref, "
+            "d.failure_reason AS dispatch_reason, d.updated_at AS updated_at, "
+            "s.failure_reason AS settled_reason, s.settled_at AS settled_at "
+            "FROM coverage_mission_sec_dispatches d "
+            "LEFT JOIN coverage_mission_sec_dispatch_settlements s "
+            "ON s.dispatch_id=d.dispatch_id "
+            "LEFT JOIN coverage_mission_sec_dispatch_attempt_voids v "
+            "ON v.dispatch_id=d.dispatch_id "
+            "WHERE v.dispatch_id IS NULL AND (d.status='rejected' "
+            "OR (s.dispatch_id IS NOT NULL AND s.detail IS NOT ?))",
+            (SEC_RUN_SUCCEEDED,),
+        ).fetchall()
+    except Exception:  # noqa: BLE001 - an older Core has no settlement journal
+        failed = []
+    lag: dict[str, list[datetime]] = {}
+    excused: dict[str, dict[str, int]] = {}
+    for row in failed:
+        accession = row["expected_accession"]
+        if not accession:
+            continue
+        if row["status"] == "rejected":
+            # Only a rejection for the mission moving is excused; any other
+            # refusal is left counting, as before.
+            kind = classify_failure(row["dispatch_reason"])
+            if kind != EXCUSED_GOVERNANCE:
+                continue
+        else:
+            reason = row["settled_reason"] or run_failure_text(
+                connection, state_dir, row["ticket_ref"])
+            kind = classify_failure(reason)
+        if kind is None:
+            continue
+        counted[accession] = max(0, counted.get(accession, 0) - 1)
+        bucket = excused.setdefault(accession, {})
+        bucket[kind] = bucket.get(kind, 0) + 1
+        if kind == EXCUSED_SOURCE_LAG:
+            when = _instant(row["settled_at"]) or _instant(row["updated_at"])
+            if when is not None:
+                lag.setdefault(accession, []).append(when)
+    return {"counted": counted, "source_lag": lag, "excused": excused}
+
+
 def read_artifact(state_dir: Path, content_sha256: str) -> Mapping[str, Any] | None:
     """The exact artifact bytes, verified against the hash authority recorded."""
 
@@ -184,6 +377,7 @@ class MissionSecQuartersCoordinator:
         state_dir: str | Path,
         checklist: Callable[[], Sequence[Mapping[str, Any]]],
         clock: Callable[[], datetime] | None = None,
+        governance_check: Callable[[], Any] | None = None,
     ) -> None:
         self.store = store
         self.connection = store.connection
@@ -191,6 +385,30 @@ class MissionSecQuartersCoordinator:
         self.state_dir = Path(state_dir).expanduser().resolve()
         self.checklist = checklist
         self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.governance_check = governance_check or self._core_governance
+
+    def _core_governance(self) -> Any:
+        from .sec_company_facts_lane import check_core_governance_rules
+
+        return check_core_governance_rules(self.store)
+
+    def _governance_hold(self) -> str | None:
+        """Why the lane would refuse any run right now, or None.
+
+        2026-09-26: the lane checks the active policy for its two rules before
+        it does anything, and refuses every run while they are missing.  The
+        coordinator used to queue anyway, and each refused run was an attempt;
+        on ws-7d that spent the retry budget of every filing every company
+        needed, five minutes at a time.  Asking first costs one policy read.
+        Anything the check cannot answer holds too: queueing on a guess is
+        how the budget went.
+        """
+
+        try:
+            self.governance_check()
+        except Exception as exc:  # noqa: BLE001 - LanePreconditionError or unreadable
+            return f"{type(exc).__name__}: {exc}"
+        return None
 
     # -- authority reads -----------------------------------------------------
 
@@ -352,19 +570,17 @@ class MissionSecQuartersCoordinator:
         on every filing five companies still needed and told nobody anything
         about those filings.  A voided attempt is one somebody has recorded as
         proving nothing, and it does not count against the budget.
+
+        2026-09-26: nor do the two failures that are never the filing's -- a
+        governance precondition (or a mission publish) refusing the run, and
+        company facts not having caught up with the filing yet.  Those are
+        recognised from what the run left behind, see ``attempt_ledger``.
         """
 
-        try:
-            rows = self.connection.execute(
-                "SELECT d.expected_accession AS expected_accession, COUNT(*) AS n "
-                "FROM coverage_mission_sec_dispatches d "
-                "LEFT JOIN coverage_mission_sec_dispatch_attempt_voids v "
-                "ON v.dispatch_id=d.dispatch_id "
-                "WHERE v.dispatch_id IS NULL GROUP BY d.expected_accession"
-            ).fetchall()
-        except Exception:  # noqa: BLE001
-            return {}
-        return {row["expected_accession"]: int(row["n"]) for row in rows if row["expected_accession"]}
+        return attempt_ledger(self.connection, getattr(self, "state_dir", None))["counted"]
+
+    def _attempt_ledger(self) -> dict[str, Any]:
+        return attempt_ledger(self.connection, getattr(self, "state_dir", None))
 
     def _dispatch_windows_used(self) -> dict[str, int]:
         """How many windows each accession has already been queued under.
@@ -397,7 +613,16 @@ class MissionSecQuartersCoordinator:
             companies = list(self.checklist())
         except Exception as exc:  # noqa: BLE001 - report, never crash the tick
             return {"status": "unavailable", "reason": f"{type(exc).__name__}: {exc}"}
-        attempts = self._dispatch_attempts()
+        hold = self._governance_hold()
+        if hold is not None:
+            # Nothing is queued, so nothing is spent: the next tick asks again
+            # and queues as soon as the policy authorizes the lane.
+            return {"status": "held", "reason": "lane precondition: " + hold,
+                    "queued": [], "skipped": []}
+        ledger = self._attempt_ledger()
+        attempts = ledger["counted"]
+        lagging = ledger["source_lag"]
+        now = self.clock()
         windows_used = self._dispatch_windows_used()
         skipped: list[dict[str, Any]] = []
         for entry in companies:
@@ -442,6 +667,7 @@ class MissionSecQuartersCoordinator:
             # quarter, so the same accession can answer two periods and running
             # it twice would spend the lane on a filing already fetched.
             wanted: list[dict[str, Any]] = []
+            deferred = 0
             seen_accessions: set[str] = set()
             # Only the newest four: a quarter older than those does not make the
             # weekly report current, and walking further back is how the lane
@@ -454,6 +680,14 @@ class MissionSecQuartersCoordinator:
                     skipped.append({"ticker": entry.get("ticker"), "accession": filing["accession"],
                                     "reason": f"这份 filing 已经试过 {tried} 次"})
                     continue
+                retry_at = source_lag_retry_at(lagging.get(filing["accession"], ()))
+                if retry_at is not None and now < retry_at:
+                    deferred += 1
+                    skipped.append({"ticker": entry.get("ticker"), "accession": filing["accession"],
+                                    "reason": "SEC company facts 还没收录这份 filing，"
+                                              f"{retry_at.isoformat(timespec='minutes')} 后再试",
+                                    "retry_at": retry_at.isoformat()})
+                    continue
                 seen_accessions.add(filing["accession"])
                 # The budget is what forgiveness restores; the window salt is
                 # what keeps each queued dispatch a new row.
@@ -463,7 +697,8 @@ class MissionSecQuartersCoordinator:
                     break
             if not wanted:
                 skipped.append({"ticker": entry.get("ticker"),
-                                "reason": "最近四个季度里缺的那几份都已试满次数"})
+                                "reason": ("最近四个季度里缺的那几份在等 SEC company facts 收录或已试满次数"
+                                           if deferred else "最近四个季度里缺的那几份都已试满次数")})
                 continue
             try:
                 authorization = self.missions.authorize_sec_lane(
@@ -542,6 +777,10 @@ LANE = register_lane(LaneSpec(
 
 __all__ = [
     "LANE",
+    "attempt_ledger",
+    "classify_failure",
+    "run_failure_text",
+    "source_lag_retry_at",
     "MAX_ATTEMPTS_PER_FILING",
     "MAX_QUEUED_PER_RUN",
     "RECENT_FILINGS",
