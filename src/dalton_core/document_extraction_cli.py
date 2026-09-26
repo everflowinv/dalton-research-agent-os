@@ -910,6 +910,14 @@ def run_extraction(
         # duplicates and writes nothing new.
         if candidate_staging is not None:
             _admit_complete_reviews(host, service, complete_reviews, summary)
+        # 2026-09-26: the statements a systemic support-check failure held
+        # for a person (no model route from 00:00 UTC), asked again and, when
+        # supported, committed -- the same candidate, the same policy door.
+        # After admission, so a still-open review re-admits its own first.
+        if (candidate_staging is not None and stop_reason != "systemic_model_failure"
+                and getattr(host, "_claim_support_verifier", None) is not None):
+            summary["support_recheck"] = _run_claim_support_recheck(
+                host, scheduler_db if scheduler_db is not None else state / "scheduler.sqlite")
         # 2026-09-24: the one-time support check of Claims admitted before the
         # admission-time check existed, a bounded slice per run under its own
         # daily ceiling.  Not after a systemic model failure: the provider that
@@ -1363,6 +1371,25 @@ def _run_claim_support_backfill(host: ExtractionHost, config: Mapping[str, Any],
             store=host.store, missions=host.coverage_mission, model_config=config,
             scheduler_db=scheduler_db, state_dir=host.state_dir,
             spool=review_spool(host.state_dir, primary=host._transcript_spool))
+    except Exception as exc:  # noqa: BLE001 - reported, retried next run
+        return {"status": "unavailable", "reason": f"{type(exc).__name__}: {exc}"}
+
+
+def _run_claim_support_recheck(host: ExtractionHost, scheduler_db: Path) -> dict[str, Any]:
+    """One bounded recheck of outage-held candidates; never a reason for the run to fail."""
+
+    from .claim_support_recheck import ClaimSupportRecheck
+
+    try:
+        pointer = host.store.connection.execute(
+            "SELECT mission_version_id FROM coverage_mission_pointer ORDER BY mission_ref LIMIT 1"
+        ).fetchone()
+        if pointer is None:
+            return {"status": "no_mission"}
+        return ClaimSupportRecheck(
+            store=host.store, reviewer=host.candidate_review,
+            verifier=host._claim_support_verifier, scheduler_db=scheduler_db,
+        ).run_once(mission=host.coverage_mission.mission(pointer["mission_version_id"]))
     except Exception as exc:  # noqa: BLE001 - reported, retried next run
         return {"status": "unavailable", "reason": f"{type(exc).__name__}: {exc}"}
 

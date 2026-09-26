@@ -1756,6 +1756,69 @@ class CockpitChainTests(unittest.TestCase):
         )
         self.assertNotEqual(verifier["work_order_ref"], legacy.id)
 
+    def test_every_purpose_with_a_provider_contract_routes_on_the_verifier_tier(self) -> None:
+        # 2026-09-26: a provider output contract makes the WorkOrder ask for
+        # provider-controlled-verify, and only the verifier chain is kept
+        # (by the model page) to hold a link that declares it.  The support
+        # check's two purposes were on the cheap tier, whose live links declare
+        # none, and every call was refused as "no model route".
+        import dalton_core.claim_support_verification  # noqa: F401 - registers its purposes
+        from dalton_core.cockpit_model import _VERIFIER_PROVIDER_CONTRACTS
+        from dalton_core.model_fallback_chain import tier_for
+
+        for purpose in _VERIFIER_PROVIDER_CONTRACTS:
+            with self.subTest(purpose=purpose):
+                self.assertEqual(tier_for(purpose), "verifier")
+
+    def test_the_support_check_routes_when_the_cheap_chain_has_no_controlled_link(self) -> None:
+        # The live shape of 2026-09-26, legacy and ws-7d alike: the extraction
+        # policy declares a cheap chain none of whose links carries broker
+        # verification controls, and a verifier chain whose links do.  The
+        # drafter is deepseek; the support check must reach the verifier chain.
+        import dalton_core.claim_support_verification  # noqa: F401 - registers its purposes
+
+        cheap = ["profile:deepseek-v4-flash", "profile:zai-glm-5-3-flash"]
+        verifier = ["profile:gemini-3-5-flash-lite"]
+        with ModelRouter(self.router_db) as router:
+            base = router.get_policy(self.cheap_policy)
+            wire = {key: copy.deepcopy(base[key]) for key in (
+                "schema_version", "filters", "ordered_preferences")}
+            wire["filters"]["allowed_profile_ids"] = cheap + verifier
+            wire["fallback_chains"] = {"tiers": {
+                **copy.deepcopy(base["fallback_chains"]["tiers"]),
+                "cheap": cheap, "verifier": verifier}}
+            wire.update({
+                "id": "model-routing-policy:support-route-live-shape",
+                "policy_version_ref":
+                    "model-routing-policy-version:support-route-live-shape:1",
+                "version": 1, "prior_version_ref": None,
+                "created_at": NOW.isoformat(timespec="microseconds"),
+            })
+            wire["content_hash"] = content_hash(wire)
+            router.register_policy(wire)
+            capable = {
+                profile["id"]: "provider-controlled-verify" in profile["capabilities"]
+                for profile in router.latest_profiles()}
+            slots = credential_slots_for(router, cheap + verifier)
+        self.assertFalse(any(capable[profile_id] for profile_id in cheap))
+        self.assertTrue(capable[verifier[0]])
+        producer = self._model(
+            ChainAdapter({}), policy_version_ref=self.cheap_policy, slots=self.cheap_slots,
+        ).call(purpose="claim_index", request_id="support-live-shape-producer",
+               prompt="draft", mission=self.mission)
+        for purpose in ("claim_support_verifier", "claim_support_backfill"):
+            with self.subTest(purpose=purpose):
+                adapter = ChainAdapter({})
+                answer = self._model(
+                    adapter, policy_version_ref=wire["policy_version_ref"], slots=slots,
+                ).call(
+                    purpose=purpose, request_id=f"{purpose}-live-shape",
+                    prompt='{"schema_version":"0.1","verdicts":[]}', mission=self.mission,
+                    producer_route_decision_refs=[producer["route_decision_ref"]],
+                )
+                self.assertEqual(adapter.served, verifier)
+                self.assertEqual(answer["text"], f"answered by {verifier[0]}")
+
     def test_debate_and_conviction_work_orders_bind_their_provider_contracts(self) -> None:
         producer = self._model(
             ChainAdapter({}), policy_version_ref=self.chain_policy
