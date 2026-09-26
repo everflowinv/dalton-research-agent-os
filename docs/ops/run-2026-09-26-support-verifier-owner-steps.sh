@@ -2,12 +2,12 @@
 # 支持核验（claim-support）误判修复：owner 需要执行的步骤（2026-09-26，分支 fix/support-verifier-accuracy）。
 #
 # 用法（默认只读，不写任何东西）：
-#   zsh ~/Projects/dalton-wt-verifier/docs/ops/run-2026-09-26-support-verifier-owner-steps.sh
-#   zsh ~/Projects/dalton-wt-verifier/docs/ops/run-2026-09-26-support-verifier-owner-steps.sh status
-#   zsh ~/Projects/dalton-wt-verifier/docs/ops/run-2026-09-26-support-verifier-owner-steps.sh pause-backfill
-#   zsh ~/Projects/dalton-wt-verifier/docs/ops/run-2026-09-26-support-verifier-owner-steps.sh reinstate
-#   zsh ~/Projects/dalton-wt-verifier/docs/ops/run-2026-09-26-support-verifier-owner-steps.sh reinstate apply
-#   zsh ~/Projects/dalton-wt-verifier/docs/ops/run-2026-09-26-support-verifier-owner-steps.sh resume-backfill
+#   zsh ~/Projects/dalton-research-agent-os/docs/ops/run-2026-09-26-support-verifier-owner-steps.sh
+#   zsh ~/Projects/dalton-research-agent-os/docs/ops/run-2026-09-26-support-verifier-owner-steps.sh status
+#   zsh ~/Projects/dalton-research-agent-os/docs/ops/run-2026-09-26-support-verifier-owner-steps.sh pause-backfill
+#   zsh ~/Projects/dalton-research-agent-os/docs/ops/run-2026-09-26-support-verifier-owner-steps.sh reinstate
+#   zsh ~/Projects/dalton-research-agent-os/docs/ops/run-2026-09-26-support-verifier-owner-steps.sh reinstate apply
+#   zsh ~/Projects/dalton-research-agent-os/docs/ops/run-2026-09-26-support-verifier-owner-steps.sh resume-backfill
 #
 #   status           只读：两个环境的退役/恢复计数，以及修复部署后自动复核会重问哪些 claim。
 #   pause-backfill   建议现在就做：线上 backfill 仍按旧规则（v1）每 10 分钟左右撤回一批 claim。
@@ -23,7 +23,7 @@
 # 如果要立刻恢复就执行，否则等部署后自动完成。
 
 PY=~/.dalton/runtime/releases/41fe150af11aeabd7ef467366b5f6388113642761a961621a47bbd0409503bab/venv/bin/python
-WT=~/Projects/dalton-wt-verifier
+WT=~/Projects/dalton-research-agent-os
 L=/Volumes/EveSSD/Dalton/legacy-state/dalton-core
 W=/Volumes/EveSSD/Dalton/workspaces/ws-7d894366d1132e2930475a60/state/dalton-core
 WS_MANIFEST=$HOME/.dalton/workspaces/ws-7d894366d1132e2930475a60/workspace.json
