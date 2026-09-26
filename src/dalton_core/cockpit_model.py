@@ -1309,6 +1309,9 @@ def _validate_model_spec_request_namespace(
         r"(?::operator-recovery:[0-9a-f]{16}"
         r"|:route-admission:[0-9a-f]{64}"
         r"|:capacity-recovery:[0-9]+:[0-9a-f]{16})?"
+        # 2026-09-26: one epoch per retired-refusal rule-set version, which
+        # may precede a later capacity epoch.
+        r"|:retired-rule:[0-9a-f]{16}(?::capacity-recovery:[0-9]+:[0-9a-f]{16})?"
     )
     remainder = request_id.removeprefix(decorated)
     if not request_id.startswith(decorated) or re.fullmatch(recovery, remainder) is None:
@@ -1713,6 +1716,106 @@ def _capacity_busy_terminal(formal: Mapping[str, Any] | None) -> bool:
     )
 
 
+#: 2026-09-26: refusals the adapter used to make and no longer does.  A
+#: terminal failure whose every chain failure is one of these (or a timeout,
+#: which says nothing about the request either way) was a verdict of a rule
+#: that has since been withdrawn, and replaying it for ever is replaying a
+#: decision nobody would make today.  Live: IBM's model_spec WorkOrder
+#: ``work:cockpit-model_spec-65bfb0b8…`` failed at 09-25 08:14 on two gateway
+#: output-overrun refusals and a timeout; abf3999f stopped refusing gateway
+#: overruns that afternoon, and the lane-failure ledger went on replaying
+#: MODEL_CHAIN_EXHAUSTED every 35 minutes because the request id is content
+#: addressed and the capacity epoch is the only one that opens.
+#:
+#: Each entry is a closed description, so the judgement is a pure function of
+#: the stored envelope and the profile catalog.  The table's own hash is the
+#: *rule-set version* written into the recovery request id: one recovery
+#: epoch per version, and a table that later retires another rule opens one
+#: more epoch for exactly the failures that rule explains.
+RETIRED_REFUSAL_RULES: tuple[dict[str, Any], ...] = (
+    {
+        "rule": "cli-gateway-output-overrun-refusal",
+        "retired_by": "abf3999f",
+        "code": "PROVIDER_BUDGET_EXCEEDED",
+        "messages": (
+            "provider max_output_tokens telemetry exceeds WorkOrder budget",
+            "provider max_output_tokens telemetry exceeds profile budget",
+            "provider output usage exceeds requested maxTokens",
+        ),
+        # Only a gateway stopped being refused; a provider that honors
+        # ``maxTokens`` is held to it exactly as before.
+        "provider_suffix": "-cli-gateway",
+    },
+)
+_TIMEOUT_FAILURE_CODES = frozenset({"TIMEOUT", "TIMED_OUT", "DEADLINE_EXCEEDED"})
+
+
+def retired_rules_version() -> str:
+    return content_hash([
+        {**rule, "messages": list(rule["messages"])} for rule in RETIRED_REFUSAL_RULES
+    ])[:16]
+
+
+def _profile_provider_at(router_db: Any, profile_id: str, at: str) -> str | None:
+    """The provider this profile had when the failure was recorded."""
+
+    try:
+        with ModelRouter(router_db, read_only=True) as router:
+            rows = router.connection.execute(
+                "SELECT provider, created_at FROM model_endpoint_profile_versions "
+                "WHERE profile_id=? ORDER BY version", (profile_id,),
+            ).fetchall()
+    except Exception:  # noqa: BLE001 - an unreadable catalog proves nothing
+        return None
+    provider = None
+    for row in rows:
+        created = str(row[1] or "")
+        if not provider or not at or created <= at:
+            provider = str(row[0] or "")
+    return provider
+
+
+def _retired_rule_terminal(
+    formal: Mapping[str, Any] | None, *, router_db: Any,
+) -> bool:
+    """Whether a terminal failure rests only on refusals no longer made.
+
+    Every chain failure must be either a retired refusal -- same code, same
+    message, a profile whose provider the rule names -- or a timeout, and at
+    least one must be a retired refusal: a failure made only of timeouts was
+    never the rule's, and this door is about the rule.
+    """
+
+    if not isinstance(formal, Mapping) or formal.get("terminal_state") != "failed":
+        return False
+    envelope = formal.get("result_envelope") or {}
+    if (envelope.get("error") or {}).get("code") != "MODEL_CHAIN_EXHAUSTED":
+        return False
+    failures = (envelope.get("metadata") or {}).get("chain_failures")
+    if not isinstance(failures, list) or not failures:
+        return False
+    at = str(formal.get("created_at") or "")
+    retired = 0
+    for failure in failures:
+        if not isinstance(failure, Mapping):
+            return False
+        code = failure.get("code")
+        if code in _TIMEOUT_FAILURE_CODES:
+            continue
+        rule = next((
+            rule for rule in RETIRED_REFUSAL_RULES
+            if code == rule["code"] and failure.get("message") in rule["messages"]
+        ), None)
+        if rule is None:
+            return False
+        provider = _profile_provider_at(
+            router_db, str(failure.get("profile_id") or ""), at)
+        if not provider or not provider.endswith(rule["provider_suffix"]):
+            return False
+        retired += 1
+    return retired > 0
+
+
 def _capacity_retry(config: Mapping[str, Any]) -> dict[str, int]:
     return dict(config.get("capacity_retry") or {
         "cooldown_seconds": 1800,
@@ -2096,6 +2199,7 @@ class CockpitModel:
                     re.escape(policy_suffix)
                     + r"(?::route-admission:[0-9a-f]{64})?"
                     + r"(?::operator-recovery:[0-9a-f]{16})?"
+                    + r"(?::retired-rule:[0-9a-f]{16})?"
                     + r"(?::capacity-recovery:\d+:[0-9a-f]{16})?$",
                     base_request_id,
                 )
@@ -2424,6 +2528,32 @@ class CockpitModel:
                         _model_spec_request_identity=_model_spec_request_identity,
                         _structured_output_repair=_structured_output_repair,
                     )
+            retired_marker = ":retired-rule:" + retired_rules_version()
+            if (not dossier_bound
+                    and not _capacity_busy_terminal(capacity_terminal)
+                    and retired_marker not in base_request_id
+                    and _retired_rule_terminal(
+                        capacity_terminal,
+                        router_db=self.config["model_router_db"])):
+                # 2026-09-26: the failure is the verdict of a refusal the
+                # adapter no longer makes.  One more call, under a request id
+                # that names this rule-set version, so it is asked exactly
+                # once per version; its own terminal failure, if any, is
+                # replayed like any other.  Inserted before a trailing
+                # capacity epoch so both counters keep reading their own.
+                capacity_suffix = re.search(
+                    r":capacity-recovery:\d+:[0-9a-f]{16}$", base_request_id)
+                cut = capacity_suffix.start() if capacity_suffix else len(base_request_id)
+                return self.call(
+                    purpose=purpose,
+                    request_id=(base_request_id[:cut] + retired_marker
+                                + base_request_id[cut:]),
+                    prompt=prompt,
+                    mission=mission,
+                    producer_route_decision_refs=producer_refs,
+                    _model_spec_request_identity=_model_spec_request_identity,
+                    _structured_output_repair=_structured_output_repair,
+                )
             if _capacity_busy_terminal(capacity_terminal):
                 if epoch >= capacity_retry["max_recovery_epochs"]:
                     raise CockpitModelError("capacity_recovery_exhausted")

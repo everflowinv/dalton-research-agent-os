@@ -1228,6 +1228,140 @@ class CockpitChainTests(unittest.TestCase):
         self.assertEqual(charges[:3], [0, 0, 0])
         self.assertEqual(charges[3], answer["cost_micros"])
 
+    def _overrun_everywhere(self) -> ChainAdapter:
+        from dalton_core.model_fallback_chain import tier_chain as chain
+
+        return ChainAdapter({
+            profile_id: {
+                "code": "PROVIDER_BUDGET_EXCEEDED",
+                "message": "provider max_output_tokens telemetry exceeds WorkOrder budget",
+            }
+            for profile_id in chain("brain")
+        })
+
+    def test_a_terminal_of_retired_gateway_refusals_gets_one_recovery_epoch(self) -> None:
+        # 2026-09-26, IBM model_spec: failed on gateway output-overrun
+        # refusals that abf3999f withdrew, then replayed for ever.
+        adapter = self._overrun_everywhere()
+        model = self._model(adapter, policy_version_ref=self.chain_policy)
+        kwargs = {"purpose": "plan", "request_id": "retired-rule-recovery",
+                  "prompt": "what next?", "mission": self.mission}
+        with patch("dalton_core.cockpit_model._profile_provider_at",
+                   return_value="claude-cli-gateway"):
+            with self.assertRaises(CockpitModelError):
+                model.call(**kwargs)
+            failed_calls = len(adapter.served)
+            self.assertGreater(failed_calls, 0)
+            adapter.script.clear()
+            answer = model.call(**kwargs)
+            self.assertFalse(answer["replayed"])
+            self.assertEqual(len(adapter.served), failed_calls + 1)
+            # Exactly once: the recovered request id is itself replayed.
+            again = model.call(**kwargs)
+            self.assertTrue(again["replayed"])
+            self.assertEqual(len(adapter.served), failed_calls + 1)
+        with Scheduler(self.root / "scheduler.sqlite") as scheduler:
+            requests = [json.loads(row[0])["metadata"]["request_id"]
+                        for row in scheduler.connection.execute(
+                            "SELECT work_order_json FROM scheduler_work_orders")]
+        from dalton_core.cockpit_model import retired_rules_version
+
+        self.assertEqual(sorted(":retired-rule:" in r for r in requests), [False, True])
+        self.assertTrue(any(r.endswith(":retired-rule:" + retired_rules_version())
+                            for r in requests))
+
+    def test_a_recovered_request_that_fails_again_is_replayed_not_recovered(self) -> None:
+        adapter = self._overrun_everywhere()
+        model = self._model(adapter, policy_version_ref=self.chain_policy)
+        kwargs = {"purpose": "plan", "request_id": "retired-rule-twice",
+                  "prompt": "what next?", "mission": self.mission}
+        with patch("dalton_core.cockpit_model._profile_provider_at",
+                   return_value="claude-cli-gateway"):
+            with self.assertRaises(CockpitModelError):
+                model.call(**kwargs)
+            first = len(adapter.served)
+            with self.assertRaises(CockpitModelError):
+                model.call(**kwargs)   # the one recovery epoch, failing again
+            second = len(adapter.served)
+            self.assertGreater(second, first)
+            with self.assertRaises(CockpitModelError):
+                model.call(**kwargs)   # replayed: nothing new is sent
+            self.assertEqual(len(adapter.served), second)
+
+    def test_the_same_refusal_on_a_provider_that_honors_max_tokens_is_final(self) -> None:
+        adapter = self._overrun_everywhere()
+        model = self._model(adapter, policy_version_ref=self.chain_policy)
+        kwargs = {"purpose": "plan", "request_id": "direct-provider-overrun",
+                  "prompt": "what next?", "mission": self.mission}
+        with patch("dalton_core.cockpit_model._profile_provider_at",
+                   return_value="anthropic"):
+            with self.assertRaises(CockpitModelError):
+                model.call(**kwargs)
+            served = len(adapter.served)
+            adapter.script.clear()
+            with self.assertRaises(CockpitModelError):
+                model.call(**kwargs)
+        self.assertEqual(len(adapter.served), served)
+
+    def test_the_retired_rule_judgement_is_closed(self) -> None:
+        from dalton_core.cockpit_model import _retired_rule_terminal
+
+        overrun = {"code": "PROVIDER_BUDGET_EXCEEDED", "failure_class": "budget_refused",
+                   "message": "provider max_output_tokens telemetry exceeds WorkOrder budget",
+                   "profile_id": "profile:claude-opus-5"}
+        timeout = {"code": "TIMEOUT", "failure_class": "unclassified_failure",
+                   "message": "host completion exceeded request timeout",
+                   "profile_id": "profile:gemini-3-8-flash-antigravity-high"}
+        other = {"code": "CONTENT_REFUSAL", "failure_class": "content_refusal",
+                 "message": "refused", "profile_id": "profile:claude-opus-5"}
+
+        def formal(*failures):
+            return {"terminal_state": "failed", "created_at": NOW.isoformat(),
+                    "result_envelope": {
+                        "error": {"code": "MODEL_CHAIN_EXHAUSTED"},
+                        "metadata": {"chain_failures": list(failures)}}}
+
+        with patch("dalton_core.cockpit_model._profile_provider_at",
+                   return_value="claude-cli-gateway"):
+            judge = lambda f: _retired_rule_terminal(f, router_db="unused")  # noqa: E731
+            # The live IBM shape: two gateway overruns and a timeout.
+            self.assertTrue(judge(formal(overrun, overrun, timeout)))
+            self.assertTrue(judge(formal(overrun)))
+            # Timeouts alone were never the rule's; anything else is final.
+            self.assertFalse(judge(formal(timeout)))
+            self.assertFalse(judge(formal(overrun, other)))
+            self.assertFalse(judge(formal()))
+            self.assertFalse(judge({**formal(overrun), "terminal_state": "succeeded"}))
+
+    def test_a_model_spec_repair_request_accepts_the_retired_rule_epoch(self) -> None:
+        from dalton_core.cockpit_model import (
+            _validate_model_spec_request_namespace, retired_rules_version,
+        )
+
+        # IBM's live request id, plus the one decoration this adds.
+        base = "model-spec-repair:cb127ab4e03303a59ce5fd5a8c06c11a"
+        config = {"transport_retry": {"max_definitely_not_sent_retries": 1}}
+        transport = ":transport-policy:" + content_hash(config["transport_retry"])[:16]
+        marker = ":retired-rule:" + retired_rules_version()
+        _validate_model_spec_request_namespace(base + transport + marker, base, config)
+        _validate_model_spec_request_namespace(
+            base + transport + marker + ":capacity-recovery:1:" + "a" * 16, base, config)
+        with self.assertRaises(CockpitModelError):
+            _validate_model_spec_request_namespace(
+                base + transport + ":retired-rule:nothex", base, config)
+
+    def test_the_provider_is_read_as_it_was_when_the_failure_was_recorded(self) -> None:
+        from dalton_core.cockpit_model import _profile_provider_at
+
+        with ModelRouter(self.router_db, read_only=True) as router:
+            row = router.connection.execute(
+                "SELECT profile_id, provider, created_at FROM "
+                "model_endpoint_profile_versions ORDER BY version LIMIT 1").fetchone()
+        self.assertEqual(
+            _profile_provider_at(str(self.router_db), row[0], "9999-12-31"), row[1])
+        self.assertIsNone(_profile_provider_at(
+            str(self.router_db), "profile:does-not-exist", "9999-12-31"))
+
     def test_configured_capacity_epochs_exhaust_without_new_identities(self) -> None:
         adapter = ChainAdapter({
             "profile:gpt-6-astra": {"code": "BUSY", "message": "still busy"}
