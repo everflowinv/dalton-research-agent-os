@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from dalton_core.governance_cli import ephemeral_call
 from dalton_core.writer_server import (
+    OWNER_CLIENT_TIMEOUT,
     CORE_OPERATIONS, DASHBOARD_CONTROL_OPERATIONS, FEEDBACK_BRIDGE_OPERATIONS,
     Principal, load_principals, write_token_config,
 )
@@ -37,7 +38,7 @@ class GovernanceCliTests(unittest.TestCase):
                 ephemeral_call(
                     tokens, root / "writer.sock", actor_ref="human:owner",
                     operation="publish_first_workspace_mission", params={})
-            self.assertEqual(observed["timeout"], 45)
+            self.assertEqual(observed["timeout"], OWNER_CLIENT_TIMEOUT)
 
     def test_ephemeral_principal_contains_only_selected_operation_and_restores_file(self):
         with tempfile.TemporaryDirectory() as directory:

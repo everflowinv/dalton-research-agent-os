@@ -209,8 +209,8 @@ def write_grant(launcher: Any, admission_ref: str, *, actor_ref: str,
                 granted_at: str) -> dict[str, Any]:
     """Record one owner grant of one further controlled re-entry.
 
-    Idempotent for the same owner and instant, so a retried call does not
-    stack grants; the grant itself is consumed by the next re-entry and then
+    Idempotent for the same owner while the grant is pending, so a retried
+    call does not stack grants; the grant itself is consumed by the next re-entry and then
     survives only as the record of who allowed it.
     """
 
@@ -227,6 +227,16 @@ def write_grant(launcher: Any, admission_ref: str, *, actor_ref: str,
     }
     existing = _record(path)
     if existing is not None and existing != body:
+        # 2026-09-26: the same owner asking again while their grant is still
+        # pending is a retry of a call whose answer never reached them -- the
+        # writer finished it after the client had given up -- not a second
+        # grant.  Replay the pending one; ``granted_at`` differs only because
+        # every call stamps its own instant.
+        comparable = {key: value for key, value in body.items() if key != "granted_at"}
+        if {key: value for key, value in existing.items()
+                if key != "granted_at"} == comparable:
+            return {"status": "granted", "grant_path": str(path),
+                    "replayed": True, **existing}
         raise ValueError("a different controlled re-entry grant is already pending")
     if existing is None:
         write_owner_only(path, body)

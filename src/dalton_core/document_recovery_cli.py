@@ -35,6 +35,8 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -121,14 +123,160 @@ def door_for(reason: str) -> str | None:
     return None
 
 
-def _call(state: Path, *, operation: str, actor: str,
-          params: dict[str, Any]) -> Any:
+def _ephemeral_call(state: Path, *, operation: str, actor: str,
+                    params: dict[str, Any]) -> Any:
     from .governance_cli import ephemeral_call
 
     return ephemeral_call(
         state / "writer-tokens.json", state / "run" / "writer.sock",
         actor_ref=actor, operation=operation, params=params,
     )
+
+
+# 2026-09-26.  A door the client gave up on may still have been opened: the
+# writer finishes a request it has started even after the caller has gone
+# (live: seven BrokenPipeErrors, every one of them a door that *had* been
+# opened).  So a timeout is never answered by blindly calling again.  The
+# ledger is asked first, read-only, whether this call's door is already open;
+# only when it is not is the call repeated -- which is safe as well, because
+# every door replays an authorization it already wrote rather than minting a
+# second one.
+RETRYABLE_CODES = frozenset({"transport_error", "store_timeout", "queued_timeout"})
+CALL_ATTEMPTS = 3
+CONFIRM_WAIT_SECONDS = 30.0
+CONFIRM_POLL_SECONDS = 3.0
+# Recorded instants are the writer's clock and ours is the terminal's: the
+# same machine, but allow a little for the stamp being taken before the call.
+CLOCK_SLACK = timedelta(seconds=5)
+OWNER_AUTHORIZATION_PREFIXES: dict[str, str] = {
+    PAID_OPERATION: "mission-document-paid-recovery-authorization:",
+    UNPROVED_OPERATION: "mission-document-unproved-send-recovery-authorization:",
+}
+
+
+def _instant(value: Any) -> datetime | None:
+    try:
+        moment = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(timezone.utc)
+
+
+def door_opened_since(state: Path, *, operation: str, admission_ref: str,
+                      actor: str, since: datetime) -> dict[str, Any] | None:
+    """Read-only: whether this admission's door was opened at or after ``since``.
+
+    Paid and unproved doors write an owner authorization row in the Core
+    ledger; the re-entry door writes a grant file in the lane's ticket
+    directory, which the next re-entry renames to a ``-used-`` record.  Both
+    are read without a writer and without write access: SQLite is opened
+    ``mode=ro``, and the files are only read.
+    """
+
+    floor = since - CLOCK_SLACK
+    if operation == OPERATION:
+        from types import SimpleNamespace
+
+        from .lane_reentry_claim import grant_path
+        from .mission_document_research_launcher import TICKETS_DIRNAME
+
+        pending = grant_path(SimpleNamespace(
+            tickets_dir=Path(state) / TICKETS_DIRNAME), admission_ref)
+        candidates = [pending, *sorted(pending.parent.glob(
+            pending.name[:-5] + "-used-*.json"))]
+        for path in candidates:
+            try:
+                record = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            moment = _instant(record.get("granted_at")) if isinstance(record, dict) else None
+            if (moment is not None and moment >= floor
+                    and record.get("admission_ref") == admission_ref
+                    and record.get("actor_ref") == actor):
+                return {"status": "granted", "grant_path": str(path),
+                        "granted_at": record.get("granted_at")}
+        return None
+    prefix = OWNER_AUTHORIZATION_PREFIXES.get(operation)
+    database = Path(state) / "core.sqlite"
+    if prefix is None or not database.exists():
+        return None
+    import sqlite3
+
+    try:
+        connection = sqlite3.connect(
+            f"file:{database}?mode=ro", uri=True, timeout=5.0)
+    except sqlite3.Error:
+        return None
+    try:
+        rows = connection.execute(
+            "SELECT authorization_id, stage_ordinal, created_at, record_json "
+            "FROM mission_document_research_controlled_recovery_authorizations "
+            "WHERE admission_ref=? ORDER BY created_at", (admission_ref,),
+        ).fetchall()
+    except sqlite3.Error:
+        return None
+    finally:
+        connection.close()
+    for authorization_id, stage_ordinal, created_at, record_json in rows:
+        try:
+            record = json.loads(record_json)
+        except (TypeError, ValueError):
+            continue
+        moment = _instant(created_at)
+        if (isinstance(record, dict)
+                and str(record.get("id") or authorization_id).startswith(prefix)
+                and moment is not None and moment >= floor):
+            return {"status": "admitted", "admission_ref": admission_ref,
+                    "stage_ordinal": stage_ordinal,
+                    "authorization_ref": record.get("id") or authorization_id,
+                    "authorized_at": created_at,
+                    "max_cost_usd": record.get("max_cost_usd")}
+    return None
+
+
+def _call(state: Path, *, operation: str, actor: str,
+          params: dict[str, Any], sleep: Any = None, clock: Any = None) -> Any:
+    """Call one door; after a timeout, look before calling it again."""
+
+    from .writer_protocol import RemoteError
+
+    sleep = sleep or time.sleep
+    clock = clock or time.monotonic
+    started = datetime.now(timezone.utc)
+    admission_ref = str(params.get("admission_ref") or "")
+    failure: RemoteError | None = None
+    for attempt in range(1, CALL_ATTEMPTS + 1):
+        try:
+            return _ephemeral_call(
+                state, operation=operation, actor=actor, params=params)
+        except RemoteError as exc:
+            if exc.code not in RETRYABLE_CODES:
+                raise
+            failure = exc
+        # ``queued_timeout`` is the writer saying the request never ran, so
+        # there is nothing to wait for; anything else may still be finishing.
+        deadline = clock() + (
+            0.0 if failure.code == "queued_timeout" else CONFIRM_WAIT_SECONDS)
+        while True:
+            opened = door_opened_since(
+                state, operation=operation, admission_ref=admission_ref,
+                actor=actor, since=started)
+            if opened is not None:
+                print(f"writer answered {failure.code}, but the door is open: "
+                      "confirmed from the ledger, not called again",
+                      file=sys.stderr)
+                return {**opened, "confirmed_after": failure.code}
+            if clock() >= deadline:
+                break
+            sleep(CONFIRM_POLL_SECONDS)
+        if attempt < CALL_ATTEMPTS:
+            print(f"writer answered {failure.code} and the door is not open; "
+                  f"calling again ({attempt + 1}/{CALL_ATTEMPTS})",
+                  file=sys.stderr)
+    assert failure is not None
+    raise failure
 
 
 def _print(value: Any) -> None:
@@ -284,8 +432,8 @@ def main(argv: Iterable[str] | None = None) -> int:
 
 __all__ = [
     "DOORS", "OPERATION", "PAID_OPERATION", "UNPROVED_OPERATION",
-    "authorize_all_escalated", "door_for", "escalated_holds",
-    "holds", "main",
+    "authorize_all_escalated", "door_for", "door_opened_since",
+    "escalated_holds", "holds", "main",
 ]
 
 
