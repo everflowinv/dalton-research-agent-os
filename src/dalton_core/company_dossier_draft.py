@@ -308,6 +308,7 @@ def build_unit_prompt(
     _positive_research_purpose: bool = True,
     _quantitative_priority: bool = True,
     _verbatim_figures_in_chinese: bool = True,
+    _figures_as_written: bool = True,
 ) -> str:
     """One unit's prompt: the slots, the rules, the material, the last version.
 
@@ -360,6 +361,11 @@ def build_unit_prompt(
             "  beside the exact figure. A margin, share or growth rate you work out from",
             "  two rows is a new number: write it only if a row carries it, and cite it.",
         ] if _verbatim_figures_in_chinese else [])),
+        *(([
+            "  A figure the tag spells out in words keeps the tag's own wording: a row",
+            "  saying 'five thousand employees' is written five thousand, never turned",
+            "  into digits such as 5000 or 5,000.",
+        ] if _figures_as_written else [])),
         *(([
             "- When a Figures row carries the number a sentence is about, cite that row.",
             "  A statement row saying revenue 'grew strongly' and a figure row carrying the",
@@ -458,7 +464,8 @@ def legacy_unit_prompt_v02(**kwargs: Any) -> str:
                              _analytical_contract=False,
                              _positive_research_purpose=False,
                              _quantitative_priority=False,
-                             _verbatim_figures_in_chinese=False)
+                             _verbatim_figures_in_chinese=False,
+                             _figures_as_written=False)
 
 
 def legacy_unit_prompt_v03(**kwargs: Any) -> str:
@@ -467,7 +474,8 @@ def legacy_unit_prompt_v03(**kwargs: Any) -> str:
     return build_unit_prompt(**kwargs, _analytical_contract=False,
                              _positive_research_purpose=False,
                              _quantitative_priority=False,
-                             _verbatim_figures_in_chinese=False)
+                             _verbatim_figures_in_chinese=False,
+                             _figures_as_written=False)
 
 
 def legacy_unit_prompt_v04(**kwargs: Any) -> str:
@@ -476,7 +484,8 @@ def legacy_unit_prompt_v04(**kwargs: Any) -> str:
     return build_unit_prompt(**kwargs, _final_text_contract=False,
                              _positive_research_purpose=False,
                              _quantitative_priority=False,
-                             _verbatim_figures_in_chinese=False)
+                             _verbatim_figures_in_chinese=False,
+                             _figures_as_written=False)
 
 
 def legacy_unit_prompt_v05(**kwargs: Any) -> str:
@@ -484,7 +493,8 @@ def legacy_unit_prompt_v05(**kwargs: Any) -> str:
 
     return build_unit_prompt(**kwargs, _positive_research_purpose=False,
                              _quantitative_priority=False,
-                             _verbatim_figures_in_chinese=False)
+                             _verbatim_figures_in_chinese=False,
+                             _figures_as_written=False)
 
 
 def legacy_unit_prompt_v06(**kwargs: Any) -> str:
@@ -499,7 +509,8 @@ def legacy_unit_prompt_v06(**kwargs: Any) -> str:
     """
 
     return build_unit_prompt(**kwargs, _quantitative_priority=False,
-                             _verbatim_figures_in_chinese=False)
+                             _verbatim_figures_in_chinese=False,
+                             _figures_as_written=False)
 
 
 def legacy_unit_prompt_v07(**kwargs: Any) -> str:
@@ -512,7 +523,20 @@ def legacy_unit_prompt_v07(**kwargs: Any) -> str:
     which ``numbers_without_refs`` refused as a number no cited row carries.
     """
 
-    return build_unit_prompt(**kwargs, _verbatim_figures_in_chinese=False)
+    return build_unit_prompt(**kwargs, _verbatim_figures_in_chinese=False,
+                             _figures_as_written=False)
+
+
+def legacy_unit_prompt_v08(**kwargs: Any) -> str:
+    """Rebuild the prompt before it said to keep a figure spelled in words.
+
+    2026-09-26: CTSH's dossier kept being refused -- $0.88 a round -- because
+    a row saying "five thousand" came back as "5000", a figure no cited row
+    carries in digits.  ``unsourced_numbers`` now reads the words as exactly
+    that number; the prompt also asks for the row's own wording.
+    """
+
+    return build_unit_prompt(**kwargs, _figures_as_written=False)
 
 
 # ---------------------------------------------------------------------------
@@ -1115,6 +1139,7 @@ __all__ = [
     "citable_context",
     "legacy_unit_prompt_v06",
     "legacy_unit_prompt_v07",
+    "legacy_unit_prompt_v08",
     "unit_contract",
     "unit_contract_reminder",
     "draft_hash",

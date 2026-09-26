@@ -72,6 +72,128 @@ class ContractRecoveryIdentityTests(unittest.TestCase):
         self.assertEqual(current.split("|contract:")[0], repaired.split("|contract:")[0])
 
 
+class NoveltyRuleIdentityTests(unittest.TestCase):
+    """2026-09-26: a duplicate reached under an old novelty rule is not final."""
+
+    MISSION = {"id": "mission:v1", "content_hash": "a" * 64}
+
+    def test_the_novelty_rule_is_part_of_the_business_key(self):
+        current = _business_key("company:msft", "b" * 64, self.MISSION)
+        self.assertIn("|novelty:", current)
+        with patch("dalton_core.debate_map.NOVELTY_RULE_VERSION", "next-rule"):
+            changed = _business_key("company:msft", "b" * 64, self.MISSION)
+        self.assertNotEqual(current, changed)
+        self.assertEqual(current.split("|novelty:")[0], changed.split("|novelty:")[0])
+
+    def test_a_pre_rule_duplicate_does_not_hold_the_subject_under_the_new_rule(self):
+        from dalton_core.lane_failure_ledger import lane_budget
+        from dalton_core.lane_permission_control import record_controlled_failure
+
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("dalton_core.debate_map.NOVELTY_RULE_VERSION", "before"):
+                old_key = _business_key("company:msft", "b" * 64, self.MISSION)
+            budget = lane_budget("mission_debate_map", state_dir=directory)
+            record_controlled_failure(
+                budget, old_key, self.MISSION, None,
+                reason="last run: duplicate", status="duplicate")
+            self.assertEqual(budget.blocked(old_key).action, "terminal")
+            # Replayed after a restart as well: the ledger is durable.
+            replayed = lane_budget("mission_debate_map", state_dir=directory)
+            self.assertEqual(replayed.blocked(old_key).action, "terminal")
+            new_key = _business_key("company:msft", "b" * 64, self.MISSION)
+            self.assertIsNone(replayed.blocked(new_key))
+            # And under an unchanged rule the duplicate still holds: no clock
+            # re-asks a question whose answer cannot have changed.
+            record_controlled_failure(
+                replayed, new_key, self.MISSION, None,
+                reason="last run: duplicate", status="duplicate")
+            self.assertEqual(replayed.blocked(new_key).action, "terminal")
+
+    def test_changing_novelty_means_bumping_its_version(self):
+        import hashlib
+        import inspect
+
+        from dalton_core.debate_map import NOVELTY_RULE_VERSION, novelty
+
+        digest = hashlib.sha256(inspect.getsource(novelty).encode()).hexdigest()
+        # If this fails you changed ``debate_map.novelty``.  Bump
+        # NOVELTY_RULE_VERSION (so every duplicate held under the old rule is
+        # asked once more) and then re-pin both values here.
+        self.assertEqual(
+            (NOVELTY_RULE_VERSION, digest),
+            ("2026-09-25.retired-withdrawn",
+             "1d0b29e2dd8044b03bbe44de6c0430b3b38b8e216fae6c35e0afc9828b9173c0"))
+
+
+class IndustryReattributionUrgencyTests(unittest.TestCase):
+    """2026-09-26: a live industry reattribution is not a retirement for the industry map."""
+
+    INDUSTRY = "industry:it-services"
+    MISSION = {"id": "mission:v1", "content_hash": "a" * 64,
+               "industry_ref": "industry:it-services"}
+
+    def _coordinator(self, pacing_dir):
+        from types import SimpleNamespace
+
+        coordinator = object.__new__(MissionDebateMapLaneCoordinator)
+        coordinator.store = SimpleNamespace(connection=object())
+        from dalton_core.mission_debate_map_lane import RedrawPacing
+
+        coordinator.pacing = RedrawPacing(Path(pacing_dir) / "pacing.json")
+        coordinator.clock = lambda: datetime(2026, 9, 26, 12, 0, tzinfo=timezone.utc)
+        return coordinator
+
+    def test_the_industry_subject_does_not_count_its_own_reattributions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            coordinator = self._coordinator(directory)
+            retired = {"claim:acn:1", "claim:acn:2"}
+            with patch("dalton_core.claim_industry_reattribution."
+                       "reattributed_claim_version_refs",
+                       return_value={"claim:acn:1"}) as live:
+                self.assertEqual(
+                    coordinator._retired_for(self.INDUSTRY, self.MISSION, retired),
+                    {"claim:acn:2"})
+                live.assert_called_once_with(coordinator.store.connection, self.INDUSTRY)
+                # A company keeps the company-level answer.
+                self.assertEqual(
+                    coordinator._retired_for("company:acn", self.MISSION, retired),
+                    retired)
+
+    def test_an_unreadable_reattribution_table_is_no_urgency(self):
+        with tempfile.TemporaryDirectory() as directory:
+            coordinator = self._coordinator(directory)
+            with patch("dalton_core.claim_industry_reattribution."
+                       "reattributed_claim_version_refs",
+                       side_effect=sqlite3.OperationalError("locked")):
+                self.assertEqual(coordinator._retired_for(
+                    self.INDUSTRY, self.MISSION, {"claim:acn:1"}), set())
+
+    def test_a_still_valid_reattribution_keeps_the_six_hour_minimum(self):
+        # The industry map cites claim:acn:1, retired for ACN but reattributed
+        # to the industry.  Drawn two hours ago: no urgency, so it waits.
+        current = {"debates": [{"bull": {"claim_refs": ["claim:acn:1"]},
+                                "bear": {"claim_refs": []}}]}
+        with tempfile.TemporaryDirectory() as directory:
+            coordinator = self._coordinator(directory)
+            coordinator.pacing.put(self.INDUSTRY, {
+                "last_draft_at": "2026-09-26T10:00:00+00:00", "failures": 0})
+            with patch("dalton_core.claim_industry_reattribution."
+                       "reattributed_claim_version_refs",
+                       return_value={"claim:acn:1"}), \
+                    patch("dalton_core.debate_map.cited_refs",
+                          return_value={"claim:acn:1"}):
+                retired = coordinator._retired_for(
+                    self.INDUSTRY, self.MISSION, {"claim:acn:1"})
+                urgent = coordinator._retired_cited(current, retired)
+                self.assertIsNone(urgent)
+                self.assertIn("next redraw is due",
+                              coordinator._paced(self.INDUSTRY, urgent))
+                # Withdraw the reattribution and the same citation is urgent.
+                urgent = coordinator._retired_cited(current, {"claim:acn:1"})
+                self.assertEqual(urgent, "retired:claim:acn:1")
+                self.assertIsNone(coordinator._paced(self.INDUSTRY, urgent))
+
+
 class FakeModel:
     """Two canned replies, and a record of what was asked."""
 

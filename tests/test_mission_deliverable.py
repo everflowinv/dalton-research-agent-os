@@ -187,6 +187,65 @@ class NumberDisciplineTests(unittest.TestCase):
         self.assertEqual(unsourced_numbers(
             "利润率约15.8%。", [{"text": "revenue was 15.8 usd"}]), ["15.8%"])
 
+    def test_english_number_words_source_exactly_their_number(self) -> None:
+        # 2026-09-26, CTSH: the row says "five thousand", the draft printed
+        # 5000, and the round was refused as an unsourced figure ($0.88 each).
+        source = {"text": "Cognizant added roughly five thousand employees in India"}
+        self.assertEqual(unsourced_numbers("印度新增 5000 名员工。", [source]), [])
+        self.assertEqual(unsourced_numbers("印度新增 5,000 名员工。", [source]), [])
+        # Exact equivalence only: no rounding and no neighbouring figure.
+        self.assertEqual(
+            unsourced_numbers("印度新增 5001 名员工。", [source]), ["5001"])
+        self.assertEqual(
+            unsourced_numbers("印度新增约 5100 名员工。", [source]), ["5100"])
+        self.assertEqual(unsourced_numbers(
+            "增加 2345678。",
+            [{"text": "two million three hundred forty-five thousand six hundred "
+                      "seventy-eight units"}]), [])
+        self.assertEqual(unsourced_numbers(
+            "增加 105 家。", [{"text": "one hundred and five new clients"}]), [])
+        self.assertEqual(unsourced_numbers(
+            "增长 25%。", [{"text": "bookings grew twenty-five percent"}]), [])
+
+    def test_words_that_are_not_one_plain_number_are_not_read(self) -> None:
+        from dalton_core.mission_deliverable import english_number_tokens
+
+        # Not guessed at: a run of words that is not the plain spelling of one
+        # number, a scale with no count, words inside other words.
+        self.assertEqual(english_number_tokens("five five"), set())
+        self.assertEqual(english_number_tokens("twenty five hundred"), set())
+        self.assertEqual(english_number_tokens("a thousand"), set())
+        self.assertEqual(english_number_tokens("someone often weighed in"), set())
+        self.assertEqual(english_number_tokens("Five Thousand"), {"5000"})
+        # A words-sourced figure is never a percentage unless the row says so.
+        self.assertEqual(unsourced_numbers(
+            "增长 25%。", [{"text": "twenty-five new logos"}]), ["25%"])
+
+    def test_the_number_contract_moved_so_held_rounds_are_asked_again(self) -> None:
+        from dalton_core.mission_deliverable import NUMBER_SOURCE_CONTRACT_VERSION
+
+        self.assertEqual(NUMBER_SOURCE_CONTRACT_VERSION, "number-source-contract:0.5")
+
+    def test_the_drafting_prompt_asks_for_the_row_s_own_wording(self) -> None:
+        from dalton_core.company_dossier_draft import (
+            build_unit_prompt, legacy_unit_prompt_v08,
+        )
+
+        args = {"unit": "business_model",
+                "structure": [{"slot_id": "s1", "prompt": "What it sells"}],
+                "material": [], "company": {"ticker": "CTSH",
+                                            "company_ref": "company:ctsh"}}
+        current = build_unit_prompt(**args)
+        self.assertIn("'five thousand employees' is written five thousand", current)
+        previous = legacy_unit_prompt_v08(**args)
+        self.assertNotIn("five thousand", previous)
+        self.assertEqual(
+            current.replace(
+                "  A figure the tag spells out in words keeps the tag's own wording: a row\n"
+                "  saying 'five thousand employees' is written five thousand, never turned\n"
+                "  into digits such as 5000 or 5,000.\n", ""),
+            previous)
+
     def test_a_filed_figure_restated_in_yi_is_still_not_the_filed_figure(self) -> None:
         # IBM business_model (d73d6b47): "18857000000 美元（约 188.6 亿美元）".
         # Right, and not a number in the Ledger (golden ``unit-rewrite``).
@@ -232,10 +291,12 @@ class NumberDisciplineTests(unittest.TestCase):
         self.assertEqual(unsourced_numbers(
             "覆盖14个客户。",
             [{"text": "x", "period": "October 14 Investor Day"}]), ["14"])
-        # And the contract identity moves, so held companies are retried.
+        # And the contract identity moved (0.4 here; 0.5 since English
+        # number words), so held companies are retried.
         from dalton_core.mission_deliverable import NUMBER_SOURCE_CONTRACT_VERSION
 
-        self.assertEqual(NUMBER_SOURCE_CONTRACT_VERSION, "number-source-contract:0.4")
+        self.assertNotIn(NUMBER_SOURCE_CONTRACT_VERSION, (
+            "number-source-contract:0.3",))
 
 
 class AuthorityTests(DeliverableHarness):

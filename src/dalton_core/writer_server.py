@@ -324,6 +324,77 @@ from .writer_protocol import (
 )
 
 
+class PriorityStoreExecutor(concurrent.futures.Executor):
+    """The one store thread, with the owner's requests taken first.
+
+    Still exactly one worker -- one writer, one connection -- so nothing about
+    the store's threading changes.  The only difference from a one-worker
+    ``ThreadPoolExecutor`` is the order in which queued work is taken:
+    ``submit_urgent`` work goes ahead of every ``submit`` that has not started
+    yet, in arrival order among itself.  Running work is never interrupted.
+    """
+
+    _URGENT, _NORMAL = 0, 1
+
+    def __init__(self, thread_name_prefix: str = "dalton-store") -> None:
+        import heapq
+        import itertools
+
+        self._heapq = heapq
+        self._sequence = itertools.count()
+        self._condition = threading.Condition()
+        self._queue: list[tuple[int, int, concurrent.futures.Future, Any, tuple, dict]] = []
+        self._shutdown = False
+        self._thread = threading.Thread(
+            target=self._work, name=f"{thread_name_prefix}_0", daemon=True)
+        self._thread.start()
+
+    def submit(self, fn: Any, /, *args: Any, **kwargs: Any) -> concurrent.futures.Future:
+        return self._submit(self._NORMAL, fn, args, kwargs)
+
+    def submit_urgent(self, fn: Any, /, *args: Any, **kwargs: Any) -> concurrent.futures.Future:
+        return self._submit(self._URGENT, fn, args, kwargs)
+
+    def _submit(self, priority: int, fn: Any, args: tuple, kwargs: dict) -> concurrent.futures.Future:
+        future: concurrent.futures.Future = concurrent.futures.Future()
+        with self._condition:
+            if self._shutdown:
+                raise RuntimeError("cannot schedule new futures after shutdown")
+            self._heapq.heappush(
+                self._queue, (priority, next(self._sequence), future, fn, args, kwargs))
+            self._condition.notify()
+        return future
+
+    def _work(self) -> None:
+        while True:
+            with self._condition:
+                while not self._queue and not self._shutdown:
+                    self._condition.wait()
+                if not self._queue:
+                    return
+                _priority, _order, future, fn, args, kwargs = self._heapq.heappop(self._queue)
+            if not future.set_running_or_notify_cancel():
+                continue
+            try:
+                result = fn(*args, **kwargs)
+            except BaseException as exc:  # noqa: BLE001 - delivered to the waiter
+                future.set_exception(exc)
+            else:
+                future.set_result(result)
+            del future, fn, args, kwargs
+
+    def shutdown(self, wait: bool = True, *, cancel_futures: bool = False) -> None:
+        with self._condition:
+            self._shutdown = True
+            if cancel_futures:
+                for item in self._queue:
+                    item[2].cancel()
+                self._queue.clear()
+            self._condition.notify_all()
+        if wait and threading.current_thread() is not self._thread:
+            self._thread.join()
+
+
 class WriterServerError(RuntimeError):
     pass
 
@@ -385,6 +456,19 @@ STORE_REQUEST_TIMEOUT = 30.0
 # answer always arrives first.  ``writer_client.DEFAULT_TIMEOUT`` asserts the
 # gap; do not narrow one without the other.
 CLIENT_REQUEST_TIMEOUT = 45.0
+
+# 2026-09-26: an owner's request -- a human-governance operation sent by a
+# ``human:`` principal -- is taken off the store queue ahead of every queued
+# automation request (``PriorityStoreExecutor``), but it still cannot preempt
+# the lane tick that is already running.  Live on 2026-09-26 single lane ticks
+# held the store thread for 13-20 s (``over_budget_seconds`` in the tick
+# ledger) and an owner recovery door itself takes several seconds, so the
+# thirty seconds automation gets is too tight for the one caller who is
+# sitting at a terminal and whose request is idempotent.  The writer waits
+# longer for it, and the governance client waits longer still, so the owner
+# receives the writer's structured answer rather than a broken pipe.
+OWNER_REQUEST_TIMEOUT = 90.0
+OWNER_CLIENT_TIMEOUT = 120.0
 
 # B1-2: how long one lane tick may hold the single store thread before it is
 # expected to hand it back.  A lane that needs longer settles on the next
@@ -2131,7 +2215,7 @@ class WriterServer:
         self._stop = threading.Event()
         self._connection_slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
         self._connection_executor: concurrent.futures.ThreadPoolExecutor | None = None
-        self._store_executor: concurrent.futures.ThreadPoolExecutor | None = None
+        self._store_executor: concurrent.futures.Executor | None = None
 
     @property
     def store(self) -> DaltonStore:
@@ -2364,7 +2448,7 @@ class WriterServer:
             if not stat.S_ISSOCK(existing.st_mode):
                 raise WriterServerError("socket path is not a socket")
             socket_path.unlink()
-        self._store_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="dalton-store")
+        self._store_executor = PriorityStoreExecutor(thread_name_prefix="dalton-store")
         self._connection_executor = concurrent.futures.ThreadPoolExecutor(max_workers=MAX_CONNECTIONS, thread_name_prefix="dalton-rpc")
         self._read_executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=READ_EXECUTOR_WORKERS, thread_name_prefix="dalton-read")
@@ -2893,9 +2977,12 @@ class WriterServer:
                     executor, handler = self._executor_for(operation)
                     if executor is None:
                         raise WriterServerError("writer server is stopping")
-                    future = executor.submit(handler, request)
+                    owner = self._owner_request(request)
+                    urgent = getattr(executor, "submit_urgent", None) if owner else None
+                    future = (urgent or executor.submit)(handler, request)
                     try:
-                        result = future.result(timeout=STORE_REQUEST_TIMEOUT)
+                        result = future.result(
+                            timeout=OWNER_REQUEST_TIMEOUT if owner else STORE_REQUEST_TIMEOUT)
                     except concurrent.futures.TimeoutError as exc:
                         # A request that never started must not execute later,
                         # after the caller has received a terminal timeout.
@@ -2941,6 +3028,24 @@ class WriterServer:
             pass
         finally:
             reader.close()
+
+    def _owner_request(self, request: Any) -> bool:
+        """Whether a person sent this request through a governance door.
+
+        Such a request goes ahead of queued automation and is given the
+        longer ``OWNER_REQUEST_TIMEOUT``.  Only the queue position and the
+        deadline change: authorization is still decided by ``_handle``, and an
+        unreadable principal simply takes the ordinary path.
+        """
+
+        operation = getattr(request, "operation", None)
+        if not isinstance(operation, str) or operation not in HUMAN_GOVERNANCE_OPERATIONS:
+            return False
+        try:
+            principal = self._principal(request.auth_token)
+            return principal.resolved_actor_ref.startswith("human:")
+        except Exception:  # noqa: BLE001 - not provably a person: ordinary queue
+            return False
 
     def _short_circuited(self, request: Any) -> dict[str, Any] | None:
         """This lane's remembered refusal, or ``None`` to do the real work.

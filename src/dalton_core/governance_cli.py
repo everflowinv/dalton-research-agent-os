@@ -20,6 +20,7 @@ from typing import Any, Iterable, Mapping
 from .writer_client import WriterClient
 from .writer_server import (
     HUMAN_GOVERNANCE_OPERATIONS,
+    OWNER_CLIENT_TIMEOUT,
     Principal,
     load_principals,
     replace_token_config,
@@ -73,10 +74,15 @@ def ephemeral_call(token_config: str | Path, socket_path: str | Path, *, actor_r
         replace_token_config(config, [*principals.values(), human])
         try:
             # Keep the ephemeral human principal valid through the bounded
-            # broker round-trip. Other governance operations retain their
-            # existing timeout; no retry or second model call is introduced.
-            timeout = (90 if operation == "generate_document_extraction" else
-                       45 if operation == "publish_first_workspace_mission" else 10)
+            # round-trip.  2026-09-26: this used to be ten seconds for most
+            # doors, less than one lane tick holds the store thread, so an
+            # owner door that the writer went on to complete arrived at the
+            # terminal as "writer service is unavailable" (and a BrokenPipe in
+            # the writer's log).  The writer now takes the owner's request
+            # ahead of queued automation and waits OWNER_REQUEST_TIMEOUT for
+            # it; the client waits longer than that, so the answer -- success
+            # or the writer's own structured timeout -- is what arrives.
+            timeout = OWNER_CLIENT_TIMEOUT
             return WriterClient(str(socket), token, timeout=timeout).call(operation, dict(params))
         finally:
             current = load_principals(
