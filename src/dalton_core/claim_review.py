@@ -310,6 +310,9 @@ class ClaimReviewDriver:
                     # automation correction set recorded it: the producer an
                     # independent check must differ from.
                     "route_decision_ref": None if route is None else route.group(1),
+                    # 2026-09-26b: where a sales note's own header (subject,
+                    # send date, house) is read from, for the support check.
+                    "source_envelope_ref": record.get("source_envelope_ref"),
                 }
                 if isinstance(correction.get("document_ref"), str):
                     self._document_refs.setdefault(digest, correction["document_ref"])
