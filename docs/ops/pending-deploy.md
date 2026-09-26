@@ -9,6 +9,16 @@
 
 ---
 
+（当前没有待部署批次。）
+
+---
+
+## 已部署
+
+- 2026-09-26 12:12 UTC：批次 2026-09-25d，release `41fe150a…`（源 `505b1451`）。controller 首次 bootstrap 报 5，release_switch 自动重试后成功。SEC 次数归还：ws-7d 47 次、legacy 2 次。部署后晨报核验恢复，12:37 时 verdict 数为 62/59。
+
+<details><summary>批次 2026-09-25d 说明</summary>
+
 ## 批次 2026-09-25d（main `49b2d5c8` 及之后）
 
 ### 这批解决什么（批次 c 部署后验证中发现）
@@ -89,9 +99,8 @@ cd ~/Projects/dalton-research-agent-os
 
 在 main `49b2d5c8` 上跑全量：10439 个，全部通过（skipped 4）。此前 `03d8f03e` 上跑过 10411 个，1 个失败，是 `test_installer_startup_wait` 的计时断言，因机器负载超时；之前出现过同样情况，单独重跑 3 次都通过，与本批无关。其余全部通过（skipped 4）。
 
----
+</details>
 
-## 已部署
 
 - 2026-09-25 14:36 UTC：批次 2026-09-25c，release `efe93904…`。C1 已完成：用户在 bootout 后立即 bootstrap 报错，由我补做了 bootstrap；三个 control 均为 Standard，cockpit overview 响应 0.02s。C2（authorize-unproved 5 条）待执行。
 
