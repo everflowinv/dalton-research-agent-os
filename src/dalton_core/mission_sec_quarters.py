@@ -101,8 +101,24 @@ SOURCE_LAG_PATTERN = re.compile(
     r"SEC company facts has no 10-[QK] accession in the filing window")
 SOURCE_LAG_RETRY_BASE = timedelta(days=1)
 SOURCE_LAG_RETRY_MAX = timedelta(days=7)
+# 2026-09-27, ws-7d: GOOGL 0001652044-25-000062 failed with "connector
+# transport exceeded the authority deadline" and was counted, two of its three
+# attempts gone on the network rather than the filing.  The connector
+# executor's two deadline messages (``connector_transport_executor``), and its
+# ``deadline_exceeded`` code where a message does not say so itself.
+TRANSPORT_TIMEOUT_PATTERN = re.compile(
+    r"connector transport (?:exceeded|completed after) the authority deadline"
+    r"|\bdeadline_exceeded\b")
+# Half an hour, doubling, at most six: long enough for a congested link or
+# a slow SEC edge to clear (the tick is five minutes, and retrying into the
+# same congestion is how a timeout repeats), short enough that a filing is
+# not a day late for a blip.  A persistent outage then costs at most four
+# public reads a day, none of them counted.
+TRANSPORT_RETRY_BASE = timedelta(minutes=30)
+TRANSPORT_RETRY_MAX = timedelta(hours=6)
 EXCUSED_GOVERNANCE = "governance"
 EXCUSED_SOURCE_LAG = "source_lag"
+EXCUSED_TRANSPORT = "transport_timeout"
 
 
 def _parse_date(value: Any) -> date | None:
@@ -186,7 +202,8 @@ def submissions_filings(
 
 
 def classify_failure(reason: Any) -> str | None:
-    """``governance`` / ``source_lag`` for a failure that is not the filing's."""
+    """``governance`` / ``source_lag`` / ``transport_timeout`` for a failure
+    that is not the filing's."""
 
     if not isinstance(reason, str) or not reason:
         return None
@@ -194,6 +211,8 @@ def classify_failure(reason: Any) -> str | None:
         return EXCUSED_GOVERNANCE
     if SOURCE_LAG_PATTERN.search(reason):
         return EXCUSED_SOURCE_LAG
+    if TRANSPORT_TIMEOUT_PATTERN.search(reason):
+        return EXCUSED_TRANSPORT
     return None
 
 
@@ -235,6 +254,12 @@ def run_failure_text(connection: Any, state_dir: Path | None, ticket_ref: Any) -
             except Exception:  # noqa: BLE001 - an unreadable envelope names nothing
                 continue
             if isinstance(error, Mapping) and isinstance(error.get("message"), str):
+                code = error.get("code")
+                if (isinstance(code, str) and code == "deadline_exceeded"
+                        and code not in error["message"]):
+                    # The code is the classification; not every deadline
+                    # message spells it ("recorded source page timed out").
+                    return f"{error['message']} [{code}]"
                 return error["message"]
         if isinstance(summary.get("error"), str):
             return summary["error"]
@@ -267,9 +292,24 @@ def source_lag_retry_at(failed_at: Sequence[datetime]) -> datetime | None:
     filing it never picks up costs nothing worth stopping for.
     """
 
+    return _backoff(failed_at, SOURCE_LAG_RETRY_BASE, SOURCE_LAG_RETRY_MAX)
+
+
+def transport_retry_at(failed_at: Sequence[datetime]) -> datetime | None:
+    """When a filing whose connector timed out may be tried again.
+
+    Not an attempt (``attempt_ledger``), so without a backoff the next tick
+    would re-queue it into the same congestion; see ``TRANSPORT_RETRY_BASE``.
+    """
+
+    return _backoff(failed_at, TRANSPORT_RETRY_BASE, TRANSPORT_RETRY_MAX)
+
+
+def _backoff(failed_at: Sequence[datetime], base: timedelta,
+             ceiling: timedelta) -> datetime | None:
     if not failed_at:
         return None
-    delay = min(SOURCE_LAG_RETRY_BASE * (2 ** (len(failed_at) - 1)), SOURCE_LAG_RETRY_MAX)
+    delay = min(base * (2 ** min(len(failed_at) - 1, 16)), ceiling)
     return max(failed_at) + delay
 
 
@@ -278,9 +318,10 @@ def attempt_ledger(connection: Any, state_dir: Path | None = None) -> dict[str, 
 
     ``counted``: dispatches that still count against ``MAX_ATTEMPTS_PER_FILING``
     -- every dispatch, less the voided ones and the ones whose failure was
-    governance or source lag.  ``source_lag``: when each accession's lag
-    failures happened, for the backoff.  ``excused``: how many were forgiven,
-    by kind, so the report can say so.
+    governance, source lag or a connector transport timeout.  ``source_lag``
+    and ``transport``: when each accession's failures of that kind happened,
+    for their backoffs.  ``excused``: how many were forgiven, by kind, so the
+    report can say so.
     """
 
     from .coverage_mission import SEC_RUN_SUCCEEDED
@@ -294,7 +335,7 @@ def attempt_ledger(connection: Any, state_dir: Path | None = None) -> dict[str, 
             "WHERE v.dispatch_id IS NULL GROUP BY d.expected_accession"
         ).fetchall()
     except Exception:  # noqa: BLE001
-        return {"counted": {}, "source_lag": {}, "excused": {}}
+        return {"counted": {}, "source_lag": {}, "transport": {}, "excused": {}}
     counted = {row["expected_accession"]: int(row["n"])
                for row in rows if row["expected_accession"]}
     try:
@@ -315,6 +356,7 @@ def attempt_ledger(connection: Any, state_dir: Path | None = None) -> dict[str, 
     except Exception:  # noqa: BLE001 - an older Core has no settlement journal
         failed = []
     lag: dict[str, list[datetime]] = {}
+    transport: dict[str, list[datetime]] = {}
     excused: dict[str, dict[str, int]] = {}
     for row in failed:
         accession = row["expected_accession"]
@@ -335,11 +377,13 @@ def attempt_ledger(connection: Any, state_dir: Path | None = None) -> dict[str, 
         counted[accession] = max(0, counted.get(accession, 0) - 1)
         bucket = excused.setdefault(accession, {})
         bucket[kind] = bucket.get(kind, 0) + 1
-        if kind == EXCUSED_SOURCE_LAG:
+        if kind in (EXCUSED_SOURCE_LAG, EXCUSED_TRANSPORT):
             when = _instant(row["settled_at"]) or _instant(row["updated_at"])
             if when is not None:
-                lag.setdefault(accession, []).append(when)
-    return {"counted": counted, "source_lag": lag, "excused": excused}
+                (lag if kind == EXCUSED_SOURCE_LAG else transport).setdefault(
+                    accession, []).append(when)
+    return {"counted": counted, "source_lag": lag, "transport": transport,
+            "excused": excused}
 
 
 def read_artifact(state_dir: Path, content_sha256: str) -> Mapping[str, Any] | None:
@@ -575,6 +619,8 @@ class MissionSecQuartersCoordinator:
         governance precondition (or a mission publish) refusing the run, and
         company facts not having caught up with the filing yet.  Those are
         recognised from what the run left behind, see ``attempt_ledger``.
+        2026-09-27: nor a connector transport timeout, which is the network's
+        and is retried on its own backoff (``transport_retry_at``).
         """
 
         return attempt_ledger(self.connection, getattr(self, "state_dir", None))["counted"]
@@ -622,6 +668,7 @@ class MissionSecQuartersCoordinator:
         ledger = self._attempt_ledger()
         attempts = ledger["counted"]
         lagging = ledger["source_lag"]
+        timed_out = ledger.get("transport") or {}
         now = self.clock()
         windows_used = self._dispatch_windows_used()
         skipped: list[dict[str, Any]] = []
@@ -688,6 +735,14 @@ class MissionSecQuartersCoordinator:
                                               f"{retry_at.isoformat(timespec='minutes')} 后再试",
                                     "retry_at": retry_at.isoformat()})
                     continue
+                transport_at = transport_retry_at(timed_out.get(filing["accession"], ()))
+                if transport_at is not None and now < transport_at:
+                    deferred += 1
+                    skipped.append({"ticker": entry.get("ticker"), "accession": filing["accession"],
+                                    "reason": "上次连 SEC 超时（不计入次数），"
+                                              f"{transport_at.isoformat(timespec='minutes')} 后再试",
+                                    "retry_at": transport_at.isoformat()})
+                    continue
                 seen_accessions.add(filing["accession"])
                 # The budget is what forgiveness restores; the window salt is
                 # what keeps each queued dispatch a new row.
@@ -697,7 +752,7 @@ class MissionSecQuartersCoordinator:
                     break
             if not wanted:
                 skipped.append({"ticker": entry.get("ticker"),
-                                "reason": ("最近四个季度里缺的那几份在等 SEC company facts 收录或已试满次数"
+                                "reason": ("最近四个季度里缺的那几份在等 SEC company facts 收录、在超时退避中或已试满次数"
                                            if deferred else "最近四个季度里缺的那几份都已试满次数")})
                 continue
             try:
@@ -781,6 +836,7 @@ __all__ = [
     "classify_failure",
     "run_failure_text",
     "source_lag_retry_at",
+    "transport_retry_at",
     "MAX_ATTEMPTS_PER_FILING",
     "MAX_QUEUED_PER_RUN",
     "RECENT_FILINGS",
