@@ -25,7 +25,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from dalton_core.company_model_cli import (
-    DEFAULT_REPAIR_ATTEMPTS,
+    DEFAULT_REPAIR_ATTEMPTS, model_spec_validation_contract_hash,
     _scheduler_failure_codes, _validated_spec_with_repair,
     choose_company, filed_classifications,
     model_spec_request_id, run_model_spec, structured_output_repair_config,
@@ -35,9 +35,6 @@ from dalton_core.company_model_forecast_cli import run_model_forecast
 from dalton_core.company_model_spec import TASK_HASH, spec_from_response
 from dalton_core.company_dossier import CompanyDossierAuthority
 from dalton_core.company_model_state import build_company_model_state
-from dalton_core.model_forecast_driver import (
-    CASH_FLOW_COMPANION_VALIDATION_CONTRACT_HASH,
-)
 from dalton_core.coverage_mission import CoverageMissionAuthority, CoverageMissionConflict
 from dalton_core.store import DaltonStore
 from dalton_core.store import canonical_json, content_hash
@@ -445,7 +442,7 @@ class ChooseCompanyTests(unittest.TestCase):
                 expected_repair_policy_hash=content_hash(
                     {"max_attempts": DEFAULT_REPAIR_ATTEMPTS}),
                 expected_financial_validation_contract_hash=(
-                    CASH_FLOW_COMPANION_VALIDATION_CONTRACT_HASH),
+                    model_spec_validation_contract_hash()),
             )
         self.assertEqual(summary["spec_status"], "fresh")
         self.assertTrue(summary["replayed"])

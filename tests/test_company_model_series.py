@@ -242,9 +242,28 @@ class QuarterlySeriesTests(unittest.TestCase):
         self.assertEqual(series["quarters"][0]["source_accessions"],
                          ["0000000000-26-000002"])
 
-    def test_conflicting_values_in_one_filing_are_ambiguous_not_parse_order(self):
-        series = quarterly_series([
+    def test_consistent_duplicates_resolve_to_the_precise_fact_not_parse_order(self):
+        # 2026-09-27 (series-consistent-duplicate-facts:0.1): IBM's rounded
+        # face-statement count and its exact EPS-note count are one XBRL fact
+        # at two precisions -- 953,263,534 rounds to 953,300,000 -- so the
+        # precise one is the value, whichever row is read first.  Until then
+        # every IBM quarter was ambiguous and no diluted-EPS divide could run.
+        rows = [
             _row("2026-04-01", "2026-06-30", "953300000",
+                 accession="0000051143-26-000078"),
+            _row("2026-04-01", "2026-06-30", "953263534",
+                 accession="0000051143-26-000078"),
+        ]
+        for ordered in (rows, list(reversed(rows))):
+            series = quarterly_series(ordered)
+            self.assertEqual([item["value"] for item in series["quarters"]],
+                             ["953263534"])
+            self.assertEqual(series["ambiguous_periods"], [])
+
+    def test_conflicting_values_in_one_filing_are_ambiguous_not_parse_order(self):
+        # 953,400,000 is not 953,263,534 at any precision it could claim.
+        series = quarterly_series([
+            _row("2026-04-01", "2026-06-30", "953400000",
                  accession="0000051143-26-000078"),
             _row("2026-04-01", "2026-06-30", "953263534",
                  accession="0000051143-26-000078"),
@@ -253,7 +272,7 @@ class QuarterlySeriesTests(unittest.TestCase):
         self.assertEqual(series["durations"], [])
         self.assertEqual(series["ambiguous_periods"][0]["values"], [
             {"value": "953263534", "unit": "usd"},
-            {"value": "953300000", "unit": "usd"},
+            {"value": "953400000", "unit": "usd"},
         ])
 
     def test_legacy_replay_keeps_the_original_shape_and_parse_order_tie(self):

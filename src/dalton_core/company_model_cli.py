@@ -83,10 +83,19 @@ MAX_OUTPUT_TOKENS = int(DEFAULT_MODEL_SPEC_CALL_BUDGET["max_output_tokens"])
 # structure rather than to look frugal.
 MAX_COST_USD = float(DEFAULT_MODEL_SPEC_CALL_BUDGET["max_cost_usd"])
 TIMEOUT_SECONDS = int(DEFAULT_MODEL_SPEC_CALL_BUDGET["timeout_seconds"])
-REPAIR_CONTRACT_REF = "contract:company-model-spec-structured-output-repair:0.4"
+REPAIR_CONTRACT_REF = "contract:company-model-spec-structured-output-repair:0.5"
 # One repair call, which is the number every other lane in this repository
 # uses for the same bargain (``draft_contract_repair.MAX_REPAIR_ATTEMPTS``).
 DEFAULT_REPAIR_ATTEMPTS = 1
+# 2026-09-27: IBM's only structure answer was a repair bought at 09:12Z for
+# $0.48 under the retired-rule recovery epoch -- the one extra call that epoch
+# allows.  Every repair binding is content-addressed on REPAIR_CONTRACT_HASH,
+# so any later change to the rule list would have made that paid answer
+# unreachable and asked the same question again at full price.  Instead the
+# answer is found by what it answers -- disclosure, task, parent text and the
+# exact validation error -- and replayed; only a question nobody has answered
+# is sent, and at most ``max_attempts`` of those per contract version.
+REPAIR_REPLAY_POLICY_REF = "model-spec-repair-replay-by-parent-and-error:0.1"
 REPAIR_CONTRACT = {
     "ref": REPAIR_CONTRACT_REF,
     # ``structure`` joins the two envelope codes in 0.2.  The deterministic
@@ -107,6 +116,12 @@ REPAIR_CONTRACT = {
     "text_length_change": "only_overlong_schema_strings_may_change",
     "structure_change": "only_the_named_rule_may_change",
     "semantic_failure": "whole_refusal",
+    # 0.5: a new contract is a new question only where nobody has answered it.
+    # A repair already made under an earlier contract for this disclosure,
+    # this parent text and this exact validation error is replayed, not bought
+    # again, and does not use this contract's attempts; see
+    # ``_prior_contract_repair``.
+    "prior_contract_repair": REPAIR_REPLAY_POLICY_REF,
 }
 REPAIR_CONTRACT_HASH = content_hash(REPAIR_CONTRACT)
 _REPAIR_AUTHORITY_KEYS = {
@@ -321,7 +336,10 @@ def validate_structured_output_repair_binding(
         or config["max_attempts"] < 0
         or isinstance(number, bool)
         or not isinstance(number, int)
-        or not 1 <= number <= config["max_attempts"]
+        # Depth below the root.  The per-contract bound on attempts is proved
+        # against the Scheduler ancestry by the Cockpit admission check.
+        or number < 1
+        or config["max_attempts"] < 1
         or request_id != "model-spec-repair:" + content_hash(binding)[:32]
     ):
         raise CockpitModelError("structured output repair binding is invalid")
@@ -439,7 +457,14 @@ def _validated_spec_with_repair(
     root_call = dict(original_call)
     current_call = dict(original_call)
     repairs = [] if repair_attempts is None else repair_attempts
-    for repair_number in range(repair_config["max_attempts"] + 1):
+    # Calls asked under *this* contract.  Answers replayed from an earlier
+    # contract are free and do not count, so a rule-list change is exactly one
+    # more chance per disclosure, never an open-ended one: every step either
+    # consumes a distinct held answer or one of ``max_attempts``.
+    contract_calls = 0
+    depth = 0
+    replayed_refs: set[str] = set()
+    while True:
         try:
             spec = spec_from_response(
                 state, current_call["text"], decided_by=decided_by,
@@ -447,10 +472,45 @@ def _validated_spec_with_repair(
             )
             return spec, repairs, current_call
         except CompanyModelSpecError as error:
-            if (
-                error.code not in REPAIR_CONTRACT["eligible_error_codes"]
-                or repair_number >= repair_config["max_attempts"]
-            ):
+            if error.code not in REPAIR_CONTRACT["eligible_error_codes"]:
+                raise
+            prior = _prior_contract_repair(
+                getattr(model, "scheduler_db", None),
+                state_hash=str(state["state_hash"]),
+                parent_text=current_call["text"],
+                validation_error={"code": error.code, "message": str(error)},
+                exclude=replayed_refs,
+            )
+            if prior is not None:
+                replayed_refs.add(prior["work_order_ref"])
+                depth = prior["repair_number"]
+                repairs.append({
+                    "repair_number": depth,
+                    "work_order_ref": prior["work_order_ref"],
+                    "result_envelope_ref": prior["result_envelope_ref"],
+                    "invocation_ref": prior["invocation_ref"],
+                    "route_decision_ref": prior["route_decision_ref"],
+                    "replayed": True,
+                    "cost_micros": 0,
+                    "binding_hash": prior["binding_hash"],
+                    "repair_contract_hash": prior["repair_contract_hash"],
+                })
+                if prior["text"] == current_call["text"]:
+                    # The model already declined this exact question.  A new
+                    # contract does not make it a different one.
+                    raise
+                if error.code == "text_length":
+                    _assert_text_length_only_changed(
+                        parse_response(current_call["text"]),
+                        parse_response(prior["text"]),
+                    )
+                current_call = {
+                    key: value for key, value in prior.items()
+                    if key not in {"binding_hash", "repair_contract_hash",
+                                   "repair_number"}
+                }
+                continue
+            if contract_calls >= repair_config["max_attempts"]:
                 raise
             prompt = _repair_prompt(current_call["text"], error)
             binding = {
@@ -480,7 +540,7 @@ def _validated_spec_with_repair(
                 "repair_contract_hash": REPAIR_CONTRACT_HASH,
                 "repair_prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
                 "repair_config": dict(repair_config),
-                "repair_number": repair_number + 1,
+                "repair_number": depth + 1,
             }
             if any(not isinstance(value, str) or not value
                    for value in binding["root_original"].values()):
@@ -503,7 +563,7 @@ def _validated_spec_with_repair(
             # its content.  A paid response that is later refused for semantic
             # drift or another validation failure still happened.
             repairs.append({
-                "repair_number": repair_number + 1,
+                "repair_number": depth + 1,
                 "work_order_ref": repaired_call.get("work_order_ref"),
                 "result_envelope_ref": repaired_call.get("result_envelope_ref"),
                 "invocation_ref": repaired_call.get("invocation_ref"),
@@ -512,13 +572,138 @@ def _validated_spec_with_repair(
                 "cost_micros": int(repaired_call.get("cost_micros") or 0),
                 "binding_hash": content_hash(binding),
             })
+            contract_calls += 1
+            depth += 1
             if error.code == "text_length":
                 _assert_text_length_only_changed(
                     parse_response(current_call["text"]),
                     parse_response(repaired_call["text"]),
                 )
             current_call = dict(repaired_call)
-    raise AssertionError("bounded model specification repair did not return")
+
+
+def _prior_contract_repair(
+    scheduler_db: Any, *, state_hash: str, parent_text: str,
+    validation_error: Mapping[str, str], exclude: set[str],
+) -> dict[str, Any] | None:
+    """A held repair answer, bought under an earlier contract, to this question.
+
+    Matched on what the answer *answers* -- this disclosure and task, this
+    exact parent text and this exact validation error -- and on the Scheduler
+    authority alone: a succeeded formal result whose envelope and WorkOrder
+    still hash to what was recorded.  Answers under the current contract are
+    not returned here; ``CockpitModel.call`` replays those itself under their
+    own request id.  Read-only; anything unreadable is simply no answer.
+    """
+
+    if scheduler_db is None:
+        return None
+    path = Path(scheduler_db)
+    if not path.is_file():
+        return None
+    from .readonly_sqlite import connect_cold_wal_snapshot, connect_read_only
+
+    query = (
+        "SELECT w.work_order_id, w.work_order_json, w.work_order_hash, "
+        "f.result_envelope_id, f.result_envelope_json, f.result_envelope_hash "
+        "FROM scheduler_work_orders w JOIN scheduler_formal_results f "
+        "ON f.work_order_id = w.work_order_id "
+        "WHERE w.work_order_id >= 'work:cockpit-model_spec-' "
+        "AND w.work_order_id < 'work:cockpit-model_spec.' "
+        "AND f.terminal_state = 'succeeded' "
+        "ORDER BY f.created_at DESC, w.work_order_id DESC"
+    )
+    try:
+        try:
+            connection = connect_read_only(path)
+        except sqlite3.OperationalError:
+            # A checkpointed, closed WAL file has no sidecars to attach to.
+            with connect_cold_wal_snapshot(path) as cold:
+                rows = cold.execute(query).fetchall()
+        else:
+            try:
+                rows = connection.execute(query).fetchall()
+            finally:
+                connection.close()
+    except (OSError, sqlite3.Error, ValueError):
+        return None
+    parent_sha = hashlib.sha256(parent_text.encode("utf-8")).hexdigest()
+    for (work_id, work_json, work_hash, envelope_id, envelope_json,
+         envelope_hash) in rows:
+        if work_id in exclude:
+            continue
+        try:
+            work = json.loads(work_json)
+            envelope = json.loads(envelope_json)
+        except (TypeError, ValueError):
+            continue
+        metadata = work.get("metadata") if isinstance(work, Mapping) else None
+        binding = (metadata or {}).get("structured_output_repair")
+        if (
+            not isinstance(binding, Mapping)
+            or metadata.get("purpose") != "model_spec"
+            or binding.get("state_hash") != state_hash
+            or binding.get("task_hash") != TASK_HASH
+            or binding.get("parent_text_sha256") != parent_sha
+            or binding.get("validation_error") != dict(validation_error)
+            or binding.get("repair_contract_hash") == REPAIR_CONTRACT_HASH
+            or isinstance(binding.get("repair_number"), bool)
+            or not isinstance(binding.get("repair_number"), int)
+            or binding["repair_number"] < 1
+            or content_hash(work) != work_hash
+            or content_hash(envelope) != envelope_hash
+            or envelope.get("status") != "succeeded"
+            or envelope.get("work_order_ref") != work_id
+        ):
+            continue
+        text = (envelope.get("outputs") or {}).get("text")
+        if not isinstance(text, str):
+            continue
+        return {
+            "text": text, "replayed": True, "cost_micros": 0,
+            "cost_status": "replayed", "work_order_ref": work_id,
+            "work_order_hash": work_hash,
+            "result_envelope_ref": envelope_id,
+            "result_envelope_hash": envelope_hash,
+            "invocation_ref": envelope.get("invocation_ref"),
+            "route_decision_ref": (envelope.get("metadata") or {}).get(
+                "route_decision_ref"),
+            "binding_hash": content_hash(dict(binding)),
+            "repair_contract_hash": binding.get("repair_contract_hash"),
+            "repair_number": binding.get("repair_number"),
+        }
+    return None
+
+
+def model_spec_validation_contract() -> dict[str, str]:
+    """Every rule a held model answer is re-validated under, by version.
+
+    Carried as the lane's ``financial_validation_contract_hash``: in the run
+    ticket, in the child's expected hash and in the failure-budget business
+    key.  So a change to any of these -- not only to the repair contract --
+    retires a refusal reached under the old rules on the next tick, and the
+    child re-validates the held answers (free replays) before it may send the
+    one new repair per contract version described above.
+    """
+
+    from .company_financial_statement_structure import STRUCTURE_AUTHORITY_REF
+    from .company_model_series import DUPLICATE_FACT_POLICY_REF
+    from .model_forecast_driver import (
+        CASH_FLOW_COMPANION_VALIDATION_CONTRACT_HASH,
+    )
+
+    return {
+        "contract": "company-model-spec-pre-persistence-validation:0.1",
+        "cash_flow_companion": CASH_FLOW_COMPANION_VALIDATION_CONTRACT_HASH,
+        "financial_statement_structure": STRUCTURE_AUTHORITY_REF,
+        "repairable_structure_rules": REPAIRABLE_STRUCTURE_RULES_REF,
+        "series_duplicate_facts": DUPLICATE_FACT_POLICY_REF,
+        "repair_replay": REPAIR_REPLAY_POLICY_REF,
+    }
+
+
+def model_spec_validation_contract_hash() -> str:
+    return content_hash(model_spec_validation_contract())
 
 
 def _write_owner_only(path: Path, value: Any) -> None:
@@ -763,11 +948,8 @@ def run_model_spec(
         repair_config = structured_output_repair_config(raw_model_config)
         repair_policy_hash = content_hash(repair_config)
         summary["repair_policy_hash"] = repair_policy_hash
-        from .model_forecast_driver import (
-            CASH_FLOW_COMPANION_VALIDATION_CONTRACT_HASH,
-        )
-        summary["financial_validation_contract_hash"] = (
-            CASH_FLOW_COMPANION_VALIDATION_CONTRACT_HASH)
+        validation_contract_hash = model_spec_validation_contract_hash()
+        summary["financial_validation_contract_hash"] = validation_contract_hash
         if ((expected_state_hash is not None
              and expected_state_hash != state["state_hash"])
                 or (expected_task_hash is not None
@@ -776,7 +958,7 @@ def run_model_spec(
                     and expected_repair_policy_hash != repair_policy_hash)
                 or (expected_financial_validation_contract_hash is not None
                     and expected_financial_validation_contract_hash
-                    != CASH_FLOW_COMPANION_VALIDATION_CONTRACT_HASH)):
+                    != validation_contract_hash)):
             summary.update({
                 "status": "succeeded", "spec_status": "stale_input",
                 "failure_reason": (
