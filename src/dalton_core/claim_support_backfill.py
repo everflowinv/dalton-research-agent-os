@@ -281,6 +281,7 @@ class ClaimSupportBackfill:
             outcome = self.verifier.verify(mission=mission, items=[item for _row, item in pending])
             summary["calls"] = outcome.get("calls", 0)
             summary["cost_micros"] = outcome.get("cost_micros", 0)
+            summary["second_opinions"] = outcome.get("second_opinions")
             if outcome["status"] == "deferred":
                 summary["deferred"] = outcome.get("reason")
             for row, item in pending:
@@ -415,6 +416,7 @@ class ClaimSupportBackfill:
             outcome = self.verifier.verify(mission=mission, items=[item for _row, item in pending])
             summary["calls"] = outcome.get("calls", 0)
             summary["cost_micros"] = outcome.get("cost_micros", 0)
+            summary["second_opinions"] = outcome.get("second_opinions")
             if outcome["status"] == "deferred":
                 summary["deferred"] = outcome.get("reason")
             for row, item in pending:
@@ -536,7 +538,8 @@ def run_backfill(*, store: Any, missions: Any, model_config: Mapping[str, Any],
     verifier = build_verifier(
         store=store, model_config=model_config, scheduler_db=scheduler_db,
         purpose=BACKFILL_PURPOSE, daily_cap_usd=settings["backfill_daily_cap_usd"],
-        max_items_per_call=per_batch)
+        max_items_per_call=per_batch,
+        second_opinion=bool(settings.get("second_opinion_on_rejection")))
     reader = ClaimReviewDriver(store=store, missions=missions, challenges=challenges, spool=spool)
     return ClaimSupportBackfill(
         store=store, missions=missions, verifier=verifier, reader=reader,

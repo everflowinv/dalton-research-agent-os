@@ -9,6 +9,12 @@ The coordinator launches one child per tick while any review is awaiting
 extraction, except that a child which found nothing to draft holds the lane
 until the awaiting count changes or an hour passes, so a fully drafted queue
 does not spawn a process every five minutes.
+
+With the queue empty it still launches a support-only child (2026-09-27): the
+support recheck, the support backfill and its re-review have no other entry
+point, and they used to stop whenever the queue did.  Each tick also carries
+into the version in force any open review a superseded mission version left
+behind, so a version bump cannot empty the queue.
 """
 
 from __future__ import annotations
@@ -83,6 +89,34 @@ def _frozen_signature(value: Any) -> Any:
     return value
 
 
+def support_progress(summary: Any) -> bool:
+    """Whether a run's support checks got anything done that a next run may continue.
+
+    2026-09-27.  Read off the two support passes' own summaries: the outage
+    recheck asked or de-duplicated something, or the backfill (with its
+    re-review under the current contract) examined, marked, challenged,
+    retired or reinstated something -- and the pass was not stopped by a
+    deferral (a ceiling, the hourly retry), which only a later hour changes.
+    """
+
+    if not isinstance(summary, dict):
+        return False
+    recheck = summary.get("support_recheck")
+    recheck = recheck if isinstance(recheck, dict) else {}
+    backfill = summary.get("support_backfill")
+    backfill = backfill if isinstance(backfill, dict) else {}
+    rereview = backfill.get("rereview")
+    rereview = rereview if isinstance(rereview, dict) else {}
+    recheck_moved = bool(recheck.get("asked") or recheck.get("duplicates")) \
+        and not recheck.get("deferred")
+    rereview_moved = bool(rereview.get("asked") or rereview.get("unreadable")
+                          or rereview.get("reinstated")) and not rereview.get("deferred")
+    backfill_moved = bool(backfill.get("examined") or backfill.get("unreadable")
+                          or backfill.get("unverifiable") or backfill.get("challenged")
+                          or backfill.get("retired")) and not backfill.get("deferred")
+    return recheck_moved or rereview_moved or backfill_moved
+
+
 def _configuration_fingerprint(path: Path) -> str:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -135,7 +169,7 @@ class DocumentExtractionLauncher:
 
     def _command(self, *, requested_by: str | None, max_windows: int,
                  ticket_dir: Path, max_numeric_windows: int = 0,
-                 max_discovery_windows: int = 0) -> list[str]:
+                 max_discovery_windows: int = 0, support_only: bool = False) -> list[str]:
         command = [
             self.python_executable, "-m", "dalton_core.document_extraction_cli",
             "--state-dir", str(self.state_dir),
@@ -162,13 +196,20 @@ class DocumentExtractionLauncher:
             command += ["--candidate-staging", str(self.candidate_staging)]
         if requested_by is not None:
             command += ["--requested-by", requested_by]
+        if support_only:
+            command += ["--support-only"]
         command += list(self.mode_args)
         return command
 
     def start(self, *, requested_by: str | None = None,
               max_windows: int = DEFAULT_MAX_WINDOWS_PER_TICK,
               max_numeric_windows: int = 0,
-              max_discovery_windows: int = 0) -> dict[str, Any]:
+              max_discovery_windows: int = 0,
+              support_only: bool = False) -> dict[str, Any]:
+        """Start one child.  ``support_only`` (2026-09-27) reads no document
+        window: it runs only the support checks -- the outage recheck and the
+        support backfill with its re-review -- under their own ceilings."""
+
         if requested_by is not None and _HUMAN_RE.fullmatch(requested_by) is None \
                 and _AUTOMATION_RE.fullmatch(requested_by) is None:
             raise ExtractionLaunchRejected("requested_by must be a human: or automation: principal")
@@ -190,13 +231,14 @@ class DocumentExtractionLauncher:
                 "max_numeric_windows": max_numeric_windows,
                 "max_discovery_windows": max_discovery_windows, "started_at": started_at,
                 "model_config": str(self.model_config_path),
+                **({"support_only": True} if support_only else {}),
             }).encode("utf-8")).hexdigest()[:24]
             ticket_id = f"{TICKET_PREFIX}:{digest}"
             ticket_dir = _secure_dir(self.tickets_dir / digest)
             command = self._command(requested_by=requested_by, max_windows=max_windows,
                                     max_numeric_windows=max_numeric_windows,
                                     max_discovery_windows=max_discovery_windows,
-                                    ticket_dir=ticket_dir)
+                                    ticket_dir=ticket_dir, support_only=support_only)
             log_fd = os.open(str(ticket_dir / "run.log"), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             try:
                 process = subprocess.Popen(
@@ -212,6 +254,7 @@ class DocumentExtractionLauncher:
                 "model_config_fingerprint": config_fingerprint,
                 "started_at": started_at, "pid": process.pid,
                 "status": "running", "exit_code": None, "completed_at": None,
+                **({"support_only": True} if support_only else {}),
             }
             _write_owner_only(self._ticket_path(ticket_id), record)
             self._current = (ticket_id, process)
@@ -421,10 +464,81 @@ class DocumentExtractionCoordinator:
         wire = [tuple(row) for row in rows]
         return len(wire), hashlib.sha256(canonical_json(wire).encode("utf-8")).hexdigest()
 
+    def _carry_awaiting(self) -> list[dict[str, Any]]:
+        """Open reviews a superseded mission version left behind, carried into the current one.
+
+        2026-09-27: this lane's queue is the version in force; a version bump
+        must not empty it.  Best effort: the carry never takes the tick down.
+        """
+
+        carry = getattr(self.missions, "carry_forward_awaiting_reviews", None)
+        if carry is None:
+            return []
+        carried: list[dict[str, Any]] = []
+        try:
+            for row in self.missions.connection.execute(
+                "SELECT mission_ref FROM coverage_mission_pointer ORDER BY mission_ref"
+            ).fetchall():
+                carried.extend(carry(row["mission_ref"]))
+        except Exception as exc:  # noqa: BLE001 - maintenance, reported
+            carried.append({"status": "error", "reason": f"{type(exc).__name__}: {exc}"})
+        return carried
+
+    def _has_mission(self) -> bool:
+        try:
+            return self.missions.connection.execute(
+                "SELECT 1 FROM coverage_mission_pointer LIMIT 1").fetchone() is not None
+        except Exception:  # noqa: BLE001 - no mission tables: nothing to check
+            return False
+
+    def _dispatch_support_only(self, result: dict[str, Any], latest: dict[str, Any] | None,
+                               awaiting_fingerprint: str) -> dict[str, Any]:
+        """With nothing to draft, still run the support checks -- on their own pacing.
+
+        2026-09-27.  The support recheck, the support backfill and its
+        re-review ran only inside a drafting child, and no child is started
+        while the queue is empty: ws-7d's queue emptied at 09:00 and all three
+        stopped with it, the backfill an hour after the owner resumed it.  A
+        support-only child reads no window and spends nothing but the support
+        checks' own calls, under their own daily ceilings and the verifier's
+        hourly retry, exactly as inside a drafting run.  Pacing: after a run
+        whose checks got something done, the next one starts a tick later --
+        what a non-empty queue gave them; after one that found nothing (or was
+        deferred), the lane rests an hour, as a drained queue always has.
+        """
+
+        if latest is not None and latest.get("settled"):
+            completed = latest.get("completed_at")
+            hold = BUSY_HOLD if latest.get("support_progress") else IDLE_HOLD
+            if completed and self.clock() - datetime.fromisoformat(completed) < hold:
+                return {**result, "status": "idle", "support": "held",
+                        "hold_seconds": int(hold.total_seconds())}
+        try:
+            ticket = self.launcher.start(max_windows=1, support_only=True)
+        except Exception as exc:
+            name = type(exc).__name__
+            return {**result, "status": "busy" if name.endswith("Conflict") else "rejected",
+                    "reason": f"{name}: {exc}"}
+        _write_owner_only(self._latest_path, {
+            "ticket": ticket["id"],
+            "settled": False,
+            "support_only": True,
+            "awaiting_at_launch": result["awaiting"],
+            "awaiting_fingerprint_at_launch": awaiting_fingerprint,
+            "model_config_fingerprint": ticket["model_config_fingerprint"],
+        })
+        return {**result, "status": "launched", "mode": "support_only", "ticket_ref": ticket["id"]}
+
     def dispatch_once(self) -> dict[str, Any]:
         latest = self._latest()
+        carried = self._carry_awaiting()
         awaiting, awaiting_fingerprint = self._awaiting_state()
         result: dict[str, Any] = {"awaiting": awaiting}
+        if carried:
+            result["carried_awaiting"] = {
+                "carried": sum(1 for row in carried if row.get("status") == "carried"),
+                "skipped": [row for row in carried if row.get("status") != "carried"][:5],
+            }
         permission_changed = False
         blocked = self.failure_budget.blocked(self._permission_item)
         if blocked is not None and blocked.action == "not_permitted":
@@ -437,7 +551,7 @@ class DocumentExtractionCoordinator:
                         "failure_class": blocked.classification.failure_class}
             self.failure_budget.clear(self._permission_item)
             permission_changed = True
-        if result["awaiting"] == 0:
+        if result["awaiting"] == 0 and not self._has_mission():
             return {**result, "status": "idle"}
         try:
             config_fingerprint = _configuration_fingerprint(
@@ -490,12 +604,16 @@ class DocumentExtractionCoordinator:
                 advanced = summary.get("advanced_to")
                 result["last"]["advanced_to"] = (
                     advanced if isinstance(advanced, dict) else {})
+                result["last"]["support_progress"] = support_progress(summary)
                 if latest.get("settled") is not True:
                     latest = {**latest, "settled": True, "status": ticket["status"],
                               "drafted": result["last"]["drafted"], "stop_reason": summary.get("stop_reason"),
                               "secondary_fresh": secondary,
+                              "support_progress": result["last"]["support_progress"],
                               "completed_at": ticket.get("completed_at"), "awaiting_at_launch": latest.get("awaiting_at_launch")}
                     _write_owner_only(self._latest_path, latest)
+        if result["awaiting"] == 0:
+            return self._dispatch_support_only(result, latest, awaiting_fingerprint)
         queue_unchanged = bool(
             latest is not None
             and latest.get("awaiting_at_launch") == result["awaiting"]
@@ -575,4 +693,5 @@ __all__ = [
     "ExtractionLaunchRejected",
     "ExtractionTicketNotFound",
     "TICKET_PREFIX",
+    "support_progress",
 ]

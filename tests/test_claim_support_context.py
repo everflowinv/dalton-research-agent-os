@@ -153,7 +153,7 @@ class PromptTests(unittest.TestCase):
         self.assertNotIn("including its direction, negation, uncertainty and who said it", prompt)
 
     def test_the_question_is_keyed_by_contract_and_facts(self) -> None:
-        self.assertEqual(CONTRACT_REF, "claim-support-verification:v2")
+        self.assertEqual(CONTRACT_REF, "claim-support-verification:v3")
         base = dict(subject_ref="s", statement="a", cited_text="b")
         self.assertNotEqual(item_key(**base), item_key(**base, document={"period": "Q2"}))
         self.assertEqual(item_key(**base, document={}), item_key(**base))
