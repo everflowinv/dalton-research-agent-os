@@ -22,7 +22,7 @@
 # 支持的自动恢复（原因 citation_support_upheld_under_current_rule）。所以下面的人工恢复是可选的：
 # 如果要立刻恢复就执行，否则等部署后自动完成。
 
-PY=~/.dalton/runtime/releases/41fe150af11aeabd7ef467366b5f6388113642761a961621a47bbd0409503bab/venv/bin/python
+PY=~/.dalton/runtime/releases/1b5f6b043a5f683a153cc208439e5fdf3505cf704bde728d07c7e9357c94cd7f/venv/bin/python
 WT=~/Projects/dalton-research-agent-os
 L=/Volumes/EveSSD/Dalton/legacy-state/dalton-core
 W=/Volumes/EveSSD/Dalton/workspaces/ws-7d894366d1132e2930475a60/state/dalton-core
