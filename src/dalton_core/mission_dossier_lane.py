@@ -50,6 +50,8 @@ LAUNCHER_KWARG = "company_dossier_launcher"
 # these, an unchanged signature is a reason to stay quiet.
 QUIET_STATUSES = frozenset({"nothing_new", "no_screened_company", "no_mission",
                             "no_claim_index", "insufficient_evidence"})
+# A run that wrote a new version: what the redraft interval is measured from.
+PUBLISHED_STATUSES = frozenset({"published", "partial_published"})
 CONTENT_TERMINAL_STATUSES = frozenset({
     "verification_failed", "rubric_refused", "constitution_refused",
     "not_independent", "no_new_evidence",
@@ -73,6 +75,21 @@ CONTENT_TERMINAL_STATUSES = frozenset({
 # cadence field in it; when one is added, ``MissionDossierLaneCoordinator``
 # takes the number as a constructor argument and the policy can pass it.
 CONTENT_REFUSAL_COOLDOWN_SECONDS = 6 * 60 * 60
+# Three hours: the shortest interval between two *publications* of one
+# company's file.  2026-09-27, legacy: the claim-support recheck admits a
+# batch of Claims every ten minutes, each batch moved CTSH's change key, and
+# the lane published v7..v10 between 09:17 and 09:32 -- four rewrites, $4.3 of
+# drafting and $7.5 of research_language_revision translating each one, for a
+# file that changed by a handful of citations.  The bursts in the chain
+# (ACN 10:46/10:50, EPAM 12:41/12:43/12:48, CTSH 09:17..09:32) last under an
+# hour and sit hours apart, so any interval past an hour folds a burst into
+# one version.  Three rather than one: it caps a company at eight rewrites a
+# day against the 288 five-minute ticks allow, while staying half the six
+# hours the debate map (which reads this file) waits between redraws, so the
+# map always redraws from a file no more than one interval old.  Evidence
+# that lands inside the interval is not lost: it moves the change key, and
+# the first tick after the interval drafts all of it at once.
+MIN_REDRAFT_SECONDS = 3 * 60 * 60
 
 
 def permission_key(connection: Any, launcher: Any, signature: str) -> str:
@@ -235,12 +252,21 @@ class MissionDossierLaneCoordinator:
                  mission: Callable[[], Mapping[str, Any] | None] | None = None,
                  failure_ledger_dir: Any | None = None,
                  failure_clock: Callable[[], Any] | None = None,
-                 cooldown_seconds: int = CONTENT_REFUSAL_COOLDOWN_SECONDS) -> None:
+                 cooldown_seconds: int = CONTENT_REFUSAL_COOLDOWN_SECONDS,
+                 min_redraft_seconds: int = MIN_REDRAFT_SECONDS) -> None:
         self.connection = connection
         self.launcher = launcher
         self.companies = companies
         self.mission = mission
         self.cooldown_seconds = int(cooldown_seconds)
+        self.min_redraft_seconds = int(min_redraft_seconds)
+        # company_ref -> (head version id, exception keys already spent inside
+        # that head's interval).  See ``redraft_pacing``.
+        self._pacing_exceptions: dict[str, tuple[str, set[str]]] = {}
+        # Companies whose last settled run failed rather than published.
+        self._failed_last: set[str] = set()
+        # company_ref -> when its last retired-citation redraft was launched.
+        self._last_withdrawal: dict[str, Any] = {}
         # company_ref -> (when the cooldown ends, what refused, why).  Keyed on
         # the company because that is the thing that keeps being relaunched,
         # and the signature the failure budget holds is a different string on
@@ -377,6 +403,118 @@ class MissionDossierLaneCoordinator:
             str(status), str(reason)[:MAX_FAILURE_DETAIL_CHARS], control,
         )
 
+    # -- the redraft interval ------------------------------------------------
+
+    def _dossier_head(self, company_ref: str) -> Mapping[str, Any] | None:
+        try:
+            return self.connection.execute(
+                "SELECT version_id, created_at FROM company_dossier_versions "
+                "WHERE company_ref=? ORDER BY version_number DESC LIMIT 1",
+                (company_ref,)).fetchone()
+        except Exception:  # noqa: BLE001 - no dossier table yet: nothing to pace
+            return None
+
+    def _retired_cited_by_head(self, version_id: str) -> list[str]:
+        """Retired Claims the published head still cites, or [] if unreadable."""
+
+        import json
+
+        from .claim_retirement import retired_claim_version_refs
+        from .company_dossier import evidence_scope
+
+        try:
+            retired = retired_claim_version_refs(self.connection)
+            if not retired:
+                return []
+            row = self.connection.execute(
+                "SELECT record_json FROM company_dossier_versions WHERE version_id=?",
+                (version_id,)).fetchone()
+            record = json.loads(row["record_json"]) if row is not None else {}
+            return sorted(set(evidence_scope(record)) & set(retired))
+        except Exception:  # noqa: BLE001 - not knowing is no urgency: the safe side
+            return []
+
+    def redraft_pacing(self, company_ref: Any) -> dict[str, Any] | None:
+        """Why this company's file may not be rewritten yet, or ``None``.
+
+        Measured from the Ledger -- the head version's ``created_at`` -- so it
+        survives a restart and needs no state of its own: at most one
+        publication per company every ``min_redraft_seconds``, and whatever
+        evidence arrives meanwhile waits for the next one.
+
+        Two things may not wait, and each is let through once per head
+        version, so neither can turn into the churn this exists to stop:
+
+        * ``retired_citation``: the head still cites a Claim that has since
+          been retired.  The file asserts something the Ledger disowns, and
+          the child's plan marks those units stale, so the redraft withdraws
+          it.  Once per retired set: if the attempt cannot drop it, the same
+          set waits for the interval like any other evidence.  And under the
+          same interval itself: at most one such redraft per company every
+          ``min_redraft_seconds``, so retirements trickling in one at a time
+          (each a new set) are withdrawn together, not one rewrite apiece.
+        * ``failed_last_run``: the company's last run failed rather than
+          published.  Once per head: a second failure waits.
+
+        Neither bypasses the company cooldown or the failure budget, which are
+        asked first -- a content refusal still holds the company six hours
+        and a transport failure still backs off -- so an exception is a
+        prompt retry, never a free one.
+        """
+
+        if company_ref is None or self.min_redraft_seconds <= 0:
+            return None
+        label = str(company_ref)
+        head = self._dossier_head(label)
+        if head is None:
+            return None
+        try:
+            published = datetime.fromisoformat(str(head["created_at"]))
+        except (TypeError, ValueError):
+            return None
+        if published.tzinfo is None:
+            published = published.replace(tzinfo=timezone.utc)
+        until = published + timedelta(seconds=self.min_redraft_seconds)
+        if self._cooldown_clock() >= until:
+            return None
+        version_id = str(head["version_id"])
+        held_version, spent = self._pacing_exceptions.get(label, ("", set()))
+        if held_version != version_id:
+            spent = set()
+            self._pacing_exceptions[label] = (version_id, spent)
+        now = self._cooldown_clock()
+        retired = self._retired_cited_by_head(version_id)
+        exception = None
+        last_withdrawal = self._last_withdrawal.get(label)
+        if retired and (last_withdrawal is None or now >= last_withdrawal
+                        + timedelta(seconds=self.min_redraft_seconds)):
+            key = "retired:" + ",".join(retired)
+            if key not in spent:
+                exception = ("retired_citation", key)
+        if exception is None and label in self._failed_last:
+            key = "failed"
+            if key not in spent:
+                exception = ("failed_last_run", key)
+        if exception is not None:
+            return {"exception": exception[0], "_key": exception[1]}
+        return {
+            "until": until.isoformat(timespec="seconds"),
+            "seconds": self.min_redraft_seconds,
+            "version_ref": version_id,
+            "reason": (f"published {published.isoformat(timespec='seconds')}; the "
+                       f"next rewrite is due after {until.isoformat(timespec='seconds')} "
+                       "and takes in all evidence that lands before then")[
+                           :MAX_FAILURE_DETAIL_CHARS],
+        }
+
+    def _spend_pacing_exception(self, company_ref: Any, key: str) -> None:
+        label = str(company_ref)
+        version_id, spent = self._pacing_exceptions.get(label, ("", set()))
+        spent.add(key)
+        self._pacing_exceptions[label] = (version_id, spent)
+        if key.startswith("retired:"):
+            self._last_withdrawal[label] = self._cooldown_clock()
+
     def _settle(self, ticket_ref: str) -> dict[str, Any] | None:
         try:
             ticket = self.launcher.status(ticket_ref)
@@ -445,6 +583,14 @@ class MissionDossierLaneCoordinator:
             # tick, a transport failure -- ends it.  A published version is the
             # thing the cooldown was waiting for.
             self._cooldowns.pop(str(company or "-"), None)
+        # What the redraft interval's failure exception reads.  A publication
+        # or a quiet run is not a failure; everything else that settled is.
+        if company is not None and settled.get("status") != "orphaned":
+            if (status in PUBLISHED_STATUSES or status in QUIET_STATUSES
+                    or (not status and settled.get("status") == "succeeded")):
+                self._failed_last.discard(str(company))
+            else:
+                self._failed_last.add(str(company))
         if status == "not_authorized" and signature:
             self.budget.record(str(signature),
                                status="gated:not permitted",
@@ -491,6 +637,7 @@ class MissionDossierLaneCoordinator:
         held_decisions = {}
         quiet_companies = []
         cooling_down: dict[str, Any] = {}
+        pacing: dict[str, Any] = {}
         try:
             active_mission = self.mission() if self.mission is not None else None
         except Exception as exc:  # noqa: BLE001 - one lane's failure is not the tick's
@@ -574,6 +721,20 @@ class MissionDossierLaneCoordinator:
                 # already looks for "why did nothing happen for this company".
                 held_companies[label] = cooldown["reason"]
                 continue
+            # The redraft interval, asked last: it is about *when*, and the
+            # holds above are about *whether*.  A controlled re-entry is a
+            # reviewed human decision and is not made to wait for it.
+            paced = (None if controlled_reentry is not None
+                     else self.redraft_pacing(company_ref))
+            exception = None
+            if paced is not None and "exception" in paced:
+                exception = paced
+                paced = None
+            if paced is not None:
+                label = str(company_ref or "-")
+                pacing[label] = paced
+                held_companies[label] = paced["reason"]
+                continue
             try:
                 ticket = self.launcher.start(
                     signature=signature, company_ref=company_ref,
@@ -585,9 +746,14 @@ class MissionDossierLaneCoordinator:
                 return {"status": "rejected", "settled": settled,
                         "reason": f"{type(exc).__name__}: {exc}"}
             self._open = ticket["id"]
+            if exception is not None:
+                self._spend_pacing_exception(company_ref, exception["_key"])
             return {"status": "launched", "ticket_ref": ticket["id"],
                     "company_ref": company_ref, "signature": signature,
                     "settled": settled, "held": held_companies, **fresh(),
+                    **({} if exception is None else
+                       {"pacing_exception": exception["exception"]}),
+                    **({} if not pacing else {"pacing": pacing}),
                     **({} if not cooling_down else {"cooling_down": cooling_down})}
         if not companies:
             return {"status": "idle", "settled": settled, **fresh(),
@@ -600,6 +766,7 @@ class MissionDossierLaneCoordinator:
                         "held": held_companies, **fresh(),
                         **({} if not cooling_down else
                            {"cooling_down": cooling_down}),
+                        **({} if not pacing else {"pacing": pacing}),
                         "failure_budget": self.budget.summary()}
             return {"status": "held", "settled": settled, "held": held_companies,
                     "reason": "; ".join(
@@ -607,6 +774,7 @@ class MissionDossierLaneCoordinator:
                         for company, reason in held_companies.items()),
                     **fresh(),
                     **({} if not cooling_down else {"cooling_down": cooling_down}),
+                    **({} if not pacing else {"pacing": pacing}),
                     "failure_budget": self.budget.summary()}
         return {"status": "idle", "settled": settled,
                 "companies": quiet_companies, **fresh(),
@@ -749,6 +917,8 @@ __all__ = [
     "LANE",
     "LAUNCHER_KWARG",
     "MAX_FAILURE_DETAIL_CHARS",
+    "MIN_REDRAFT_SECONDS",
+    "PUBLISHED_STATUSES",
     "QUIET_STATUSES",
     "MissionDossierLaneCoordinator",
     "add_arguments",
