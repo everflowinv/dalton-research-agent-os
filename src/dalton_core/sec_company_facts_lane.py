@@ -370,7 +370,11 @@ def _annual_budget_mission(
     caps: list[Mapping[str, Any]] = []
     for name, parent in (("mandate", constraints), ("governance", policy["policy"])):
         cap = parent.get("research_budget")
-        if not isinstance(cap, Mapping) or set(cap) != fields:
+        # The same closed shape document extraction accepts: the three caps
+        # plus the optional fields a cockpit budget edit writes.  Exactly-three
+        # refused every policy an owner had edited (``max_daily_document_reads``).
+        from .coverage_mission import research_budget_shape_valid
+        if not research_budget_shape_valid(cap):
             raise LanePreconditionError(
                 f"{name} lacks explicit closed research budget authority"
             )

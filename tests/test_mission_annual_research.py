@@ -69,7 +69,8 @@ class MissionAnnualFixture:
                  unusable_route: bool = False, auto_commit: bool = False,
                  canonical_writes: bool = True,
                  additional_connected_source: str | None = None,
-                 company_in_mandate: bool = False) -> None:
+                 company_in_mandate: bool = False,
+                 max_daily_document_reads: int | None = None) -> None:
         self.case = case
         self.harness = PlanExecutorHarness(suffix="mission-annual-admission")
         case.addCleanup(self.harness.close)
@@ -82,6 +83,9 @@ class MissionAnnualFixture:
             "max_daily_cost_usd": 20.0,
             "max_alphaengine_calls_24h": 30,
         }
+        if max_daily_document_reads is not None:
+            # What a cockpit budget edit writes beside the three caps.
+            outer["max_daily_document_reads"] = max_daily_document_reads
         active = self.store.active_policy_version()
         policy_body = {**active.policy, "research_budget": outer}
         if auto_commit:
@@ -351,6 +355,16 @@ class MissionAnnualResearchTests(unittest.TestCase):
             actor_ref="automation:test", clock=fixture.harness.clock,
         )
         return executor, draft, verifier
+
+    def test_annual_authority_reads_a_budget_the_cockpit_edited(self):
+        # ws-7d and legacy both carry max_daily_document_reads in the policy
+        # and mandate budgets (a cockpit budget edit writes it).  The annual
+        # read required exactly three fields and refused both environments'
+        # budgets as "not closed", which document extraction accepts.
+        fixture = MissionAnnualFixture(self, max_daily_document_reads=2000)
+        resolved = read_active_annual_budget_mission(
+            fixture.store.connection, MISSION, COMPANY, now=NOW)
+        self.assertEqual(resolved["outer_budget"]["max_daily_paid_calls"], 20)
 
     def test_exact_admission_is_append_only_idempotent_and_resolves_without_dispatch(self):
         fixture = MissionAnnualFixture(self)

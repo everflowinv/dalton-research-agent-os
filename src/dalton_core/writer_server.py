@@ -4040,6 +4040,12 @@ class WriterServer:
             policy_record = current_policy
         else:
             policy_version = int(current_policy["version"]) + 1
+            # ``to_dict`` keeps the independence predicates beside ``policy``,
+            # not in it; a budget edit that published ``policy`` alone
+            # silently dropped the producer/verifier model-family gate (legacy
+            # policy-14, ws-7d policy-2).  A budget edit changes the budget.
+            policy_body = {**policy_body, "independence_predicates": list(
+                current_policy.get("independence_predicates") or [])}
             policy = self.store.create_policy(policy_body, policy_version_id=f"policy-{policy_version}",
                 version_number=policy_version, activate=True, policy_ref=current_policy["policy_ref"],
                 effective_from=now, actor_ref=actor, prior_version_ref=current_policy["id"],
