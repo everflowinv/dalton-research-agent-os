@@ -342,6 +342,7 @@ def run_extraction(
     requested_by: str | None,
     hermetic_fixture: Path | None,
     candidate_staging: Path | None = None,
+    support_only: bool = False,
 ) -> dict[str, Any]:
     state = secure_dir(state_dir)
     out = secure_dir(summary_dir)
@@ -355,6 +356,9 @@ def run_extraction(
         "routing_policy_ref": config["routing_policy_ref"],
         "max_windows": max_windows,
         "requested_by": requested_by,
+        # 2026-09-27: a run started with nothing to draft, for the support
+        # checks alone (the coordinator's support-only launch).
+        "support_only": bool(support_only),
         "reviews_scanned": 0,
         "reviews_complete": 0,
         "drafted": [],
@@ -492,7 +496,9 @@ def run_extraction(
         pointers = host.store.connection.execute(
             "SELECT mission_version_id FROM coverage_mission_pointer ORDER BY mission_ref"
         ).fetchall()
-        for pointer in pointers:
+        # 2026-09-27: a support-only run reads no window, runs no secondary
+        # pass and admits nothing; it goes straight to the support checks.
+        for pointer in () if support_only else pointers:
             if stop_reason is not None:
                 break
             mission = host.coverage_mission.mission(pointer["mission_version_id"])
@@ -879,7 +885,7 @@ def run_extraction(
         # reached a single filing or transcript.  Both passes therefore sweep
         # the reviews they want, before admission closes any of them.
         secondary_failure = None
-        if stop_reason != "systemic_model_failure":
+        if stop_reason != "systemic_model_failure" and not support_only:
             secondary_failure = _secondary_sweep(
                 service, numeric_lanes, summary,
                 limit=max_numeric_windows, entries="numeric",
@@ -893,7 +899,8 @@ def run_extraction(
                 directed_reviews=numeric_directed,
                 ledger=windows, model_config_hash=window_config_hash,
             )
-        if stop_reason != "systemic_model_failure" and secondary_failure is None:
+        if (stop_reason != "systemic_model_failure" and secondary_failure is None
+                and not support_only):
             secondary_failure = _secondary_sweep(
                 service, held_lanes, summary,
                 limit=max_discovery_windows, entries="discovery",
@@ -908,7 +915,7 @@ def run_extraction(
         # ADR-0005 / P9d-17b: every fully drafted review is staged and
         # policy-admitted, then closed.  Idempotent: a re-run reports
         # duplicates and writes nothing new.
-        if candidate_staging is not None:
+        if candidate_staging is not None and not support_only:
             _admit_complete_reviews(host, service, complete_reviews, summary)
         # 2026-09-26: the statements a systemic support-check failure held
         # for a person (no model route from 00:00 UTC), asked again and, when
@@ -975,7 +982,8 @@ def run_extraction(
                 "all attempted document windows are pending or failed; no review was completed")
             summary["status"] = "failed"
             return summary
-        summary["stop_reason"] = stop_reason or ("nothing_to_draft" if drafted == 0 else "drained")
+        summary["stop_reason"] = ("support_only" if support_only else
+                                  stop_reason or ("nothing_to_draft" if drafted == 0 else "drained"))
         summary["status"] = "succeeded"
         return summary
     except Exception as exc:  # unexpected: record for the parent, then surface it
@@ -1847,6 +1855,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--requested-by", help="human: actor; default is each mission's automation principal")
     parser.add_argument("--hermetic-fixture-file", type=Path, help="test-only fixture model output")
     parser.add_argument("--candidate-staging", type=Path, help="shared CandidateStaging database; enables admission")
+    parser.add_argument(
+        "--support-only", action="store_true",
+        help="read no window: run only the support recheck and the support backfill "
+             "(with its re-review), under their own ceilings",
+    )
     parser.add_argument("--quiet", action="store_true")
     return parser
 
@@ -1869,6 +1882,7 @@ def main(argv: list[str] | None = None) -> int:
         max_discovery_windows=args.max_discovery_windows,
         requested_by=args.requested_by,
         hermetic_fixture=args.hermetic_fixture_file, candidate_staging=args.candidate_staging,
+        support_only=args.support_only,
     )
     if not args.quiet:
         print(json.dumps(summary, ensure_ascii=False, sort_keys=True, indent=1))
