@@ -191,30 +191,82 @@ class FirstMissionPolicyTests(unittest.TestCase):
         self.store = DaltonStore(str(Path(self.temp.name) / "core.sqlite"))
         self.addCleanup(self.store.close)
 
-    def test_the_first_mission_policy_names_the_document_rule(self):
+    def test_the_first_mission_policy_carries_the_runtime_baseline(self):
+        from dalton_core.research_plan import (
+            PLAN_COMPANY_FACTS_ANNUAL_AUTO_START_RULE_REF,
+            PLAN_COMPANY_FACTS_AUTO_START_RULE_REF,
+        )
+        from dalton_core.sec_company_facts_lane import check_core_governance_rules
+        from scripts.sign_auto_commit_rules import SIGNABLE_RULE_REFS
+
         before = self.store.active_policy_version().to_dict()
         self.assertIsNone(before["policy"].get("research_candidate_auto_commit"))
-        binding = ensure_first_mission_auto_commit_policy(self.store, actor_ref=OWNER)
+        budget = {"max_daily_paid_calls": 100, "max_daily_cost_usd": 100.0,
+                  "max_alphaengine_calls_24h": 50,
+                  "max_alphaengine_probe_calls_24h": 10}
+        binding = ensure_first_mission_auto_commit_policy(
+            self.store, actor_ref=OWNER, mission_budget=budget)
         active = self.store.active_policy_version().to_dict()
         self.assertEqual(binding, {"ref": active["id"], "hash": active["content_hash"]})
+        # Every signable rule, in legacy policy-18's order -- the script that
+        # signs them one environment at a time has nothing left to add.
         self.assertEqual(active["policy"]["research_candidate_auto_commit"], {
-            "enabled": True, "rules": [DOCUMENT_QUALITATIVE_RULE_REF],
-            "max_records": 20})
-        # The gate the held reviews were stuck behind now opens.
+            "enabled": True, "rules": list(SIGNABLE_RULE_REFS), "max_records": 20})
+        self.assertEqual(active["policy"]["research_plan_auto_start"], {
+            "enabled": True, "rules": [PLAN_COMPANY_FACTS_AUTO_START_RULE_REF,
+                                       PLAN_COMPANY_FACTS_ANNUAL_AUTO_START_RULE_REF]})
+        # The closed budget the verification context requires: the three
+        # caps, not the foundation's probe ceiling.
+        self.assertEqual(active["policy"]["research_budget"], {
+            "max_daily_paid_calls": 100, "max_daily_cost_usd": 100.0,
+            "max_alphaengine_calls_24h": 50})
         self.assertTrue(policy_lists_document_rule(active))
-        # Nothing else in the policy moved.
+        # The SEC lane's own precondition -- ws-7d's policy-4 failed it.
+        check_core_governance_rules(self.store)
+        # Nothing else in the policy moved, the independence gate included.
         self.assertEqual(
             {k: v for k, v in active["policy"].items()
-             if k != "research_candidate_auto_commit"},
+             if k not in {"research_candidate_auto_commit", "research_plan_auto_start",
+                          "research_budget"}},
             dict(before["policy"]))
         self.assertEqual(active["independence_predicates"],
                          before["independence_predicates"])
+        self.assertTrue(active["independence_predicates"])
         self.assertEqual(active["prior_version_ref"], before["id"])
         self.assertEqual(active["actor_ref"], OWNER)
 
+    def test_an_existing_block_is_extended_not_replaced(self):
+        before = self.store.active_policy_version().to_dict()
+        body = {**before["policy"],
+                "independence_predicates": before["independence_predicates"],
+                "research_candidate_auto_commit": {
+                    "enabled": True, "rules": [DOCUMENT_QUALITATIVE_RULE_REF],
+                    "max_records": 7},
+                "research_budget": {"max_daily_paid_calls": 9000,
+                                    "max_daily_cost_usd": 300,
+                                    "max_alphaengine_calls_24h": 130,
+                                    "max_daily_document_reads": 2000}}
+        self.store.create_policy(body, policy_version_id="policy-2", version_number=2,
+                                 activate=True, prior_version_ref=before["id"],
+                                 actor_ref=OWNER)
+        ensure_first_mission_auto_commit_policy(
+            self.store, actor_ref=OWNER,
+            mission_budget={"max_daily_paid_calls": 1, "max_daily_cost_usd": 1,
+                            "max_alphaengine_calls_24h": 1})
+        active = self.store.active_policy_version().to_dict()
+        rule = active["policy"]["research_candidate_auto_commit"]
+        self.assertEqual(rule["rules"][0], DOCUMENT_QUALITATIVE_RULE_REF)
+        self.assertEqual(rule["max_records"], 7)
+        # The owner's raised budget is theirs.
+        self.assertEqual(active["policy"]["research_budget"]["max_daily_paid_calls"], 9000)
+
     def test_it_is_idempotent_and_does_not_fork_the_policy_chain(self):
-        first = ensure_first_mission_auto_commit_policy(self.store, actor_ref=OWNER)
-        second = ensure_first_mission_auto_commit_policy(self.store, actor_ref=OWNER)
+        budget = {"max_daily_paid_calls": 1, "max_daily_cost_usd": 1,
+                  "max_alphaengine_calls_24h": 1}
+        first = ensure_first_mission_auto_commit_policy(
+            self.store, actor_ref=OWNER, mission_budget=budget)
+        second = ensure_first_mission_auto_commit_policy(
+            self.store, actor_ref=OWNER, mission_budget=budget)
         self.assertEqual(first, second)
         rows = self.store.connection.execute(
             "SELECT COUNT(*) FROM governance_policy_versions").fetchone()[0]
