@@ -720,6 +720,12 @@ class MissionAnnualResearchCoordinator:
         than required.
         """
 
+        # The SEC source ref every discovery plan, review and registered
+        # annual-report binding uses.  This query said ``source:sec-filings``
+        # -- a name no row has ever carried -- so every Core, legacy included,
+        # reported "0 ready 10-Ks" however many were acquired and read.
+        from .registered_annual_report import SOURCE_REF as SEC_SOURCE_REF
+
         candidates: list[dict[str, Any]] = []
         try:
             rows = self.store.connection.execute(
@@ -730,9 +736,10 @@ class MissionAnnualResearchCoordinator:
                 "LEFT JOIN coverage_mission_discovered_documents d "
                 "ON d.record_id=r.discovered_document_ref "
                 "LEFT JOIN document_read_completion_proofs p ON p.review_id=r.review_id "
-                "WHERE r.source_ref='source:sec-filings' "
+                "WHERE r.source_ref=? "
                 "AND r.document_ref LIKE 'sec:filing:%' "
-                "ORDER BY r.created_at DESC, r.review_id LIMIT 50"
+                "ORDER BY r.created_at DESC, r.review_id LIMIT 50",
+                (SEC_SOURCE_REF,),
             ).fetchall()
         except sqlite3.OperationalError:
             return {"candidates": [], "reason": "this Core holds no SEC filing reviews"}

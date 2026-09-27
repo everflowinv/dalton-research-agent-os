@@ -44,10 +44,11 @@ from .lane_failure_ledger import lane_budget
 from .lane_registry import LaneSpec, register_lane
 
 WRITE_SCOPE = "observation"
-# How a company's SEC issuer number is recovered. The company ref *is* the
-# mapping -- ``company:sec-cik:0001467373`` -- and there is no second table to
-# keep in step with it. A company whose ref is not of this shape simply gets
-# the vendor half, which is what a company with no SEC filings should get.
+# How a company's SEC issuer number is recovered: a legacy ref *is* the
+# mapping -- ``company:sec-cik:0001467373``; a created workspace's
+# ``company:ticker:`` ref maps through the CIK it resolved at first publish
+# (``mission_company_cik``). A company with neither simply gets the vendor
+# half, which is what a company with no SEC filings should get.
 COMPANY_REF_CIK_PREFIX = "company:sec-cik:"
 MAX_FAILURE_DETAIL_CHARS = 500
 # A company whose runs keep failing stops consuming the single slot. Held in
@@ -62,7 +63,8 @@ DRIVER_KEY = "mission_catalyst_calendar"
 SUMMARY_HORIZON_DAYS = 45
 
 
-def _universe(mission: Mapping[str, Any]) -> list[dict[str, str]]:
+def _universe(mission: Mapping[str, Any], *,
+              state_dir: Any | None = None) -> list[dict[str, str]]:
     """The covered companies, in the order the mission prioritised them.
 
     A company with no ticker is skipped rather than guessed at: the vendor half
@@ -84,22 +86,24 @@ def _universe(mission: Mapping[str, Any]) -> list[dict[str, str]]:
         rows.append({
             "company_ref": company_ref,
             "ticker": ticker.strip().upper(),
-            "issuer": issuer_for(company_ref) or "",
+            "issuer": issuer_for(company_ref, state_dir=state_dir) or "",
             "bootstrap_priority": str(item.get("bootstrap_priority") or "P9"),
         })
     rows.sort(key=lambda row: (row["bootstrap_priority"], row["ticker"]))
     return rows
 
 
-def issuer_for(company_ref: str) -> str | None:
-    """The SEC CIK inside a company ref, or None when there is not one."""
+def issuer_for(company_ref: str, *, state_dir: Any | None = None) -> str | None:
+    """The SEC CIK of a covered company, or None when there is not one.
 
-    if not isinstance(company_ref, str):
-        return None
-    if not company_ref.startswith(COMPANY_REF_CIK_PREFIX):
-        return None
-    cik = company_ref[len(COMPANY_REF_CIK_PREFIX):].strip()
-    return cik if cik.isdigit() else None
+    A ``company:ticker:`` ref (every workspace created through setup) has no
+    CIK in it; the one the workspace resolved at first publish is used, so
+    those companies get the SEC half of the calendar too.
+    """
+
+    from .mission_company_cik import company_cik
+
+    return company_cik(company_ref, state_dir=state_dir)
 
 
 def may_write_calendar(mission: Mapping[str, Any] | None) -> bool:
@@ -348,7 +352,7 @@ class MissionCatalystLaneCoordinator:
             return {"status": "busy", "settled": settled,
                     "reason": "a calendar child is still running"}
         skipped: list[dict[str, Any]] = []
-        for company in _universe(mission):
+        for company in _universe(mission, state_dir=getattr(self.launcher, "state_dir", None)):
             company_ref = company["company_ref"]
             self._retire_legacy_permission(company_ref)
             permission_key = self._permission_key(company_ref)

@@ -793,6 +793,9 @@ def buyback_documents(
     not attribute is worse than a line in a tick summary.
     """
 
+    from .mission_company_cik import index_company_refs
+
+    refs = index_company_refs(connection, company_ref)
     try:
         rows = connection.execute(
             "SELECT d.artifact_version_ref AS artifact_version_ref, d.title AS title, "
@@ -801,9 +804,10 @@ def buyback_documents(
             "d.extracted_text AS extracted_text, "
             "d.artifact_content_hash AS artifact_content_hash "
             "FROM document_index_documents d "
-            "JOIN document_index_companies c ON c.document_rowid = d.rowid "
-            "WHERE c.company_ref = ? ORDER BY d.document_date DESC LIMIT ?",
-            (company_ref, int(limit)),
+            "WHERE d.rowid IN (SELECT c.document_rowid FROM document_index_companies c "
+            f"WHERE c.company_ref IN ({','.join('?' * len(refs))})) "
+            "ORDER BY d.document_date DESC LIMIT ?",
+            (*refs, int(limit)),
         ).fetchall()
     except sqlite3.OperationalError as exc:
         if "no such table" not in str(exc):
