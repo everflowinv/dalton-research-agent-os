@@ -9,6 +9,16 @@
 
 ---
 
+（当前没有待部署批次。）
+
+---
+
+## 已部署
+
+- 2026-09-27 09:08 UTC：批次 2026-09-26e，release `1b5f6b04…`（源 `3acdb54f`）。部署前 ws-7d 签入 policy-5，归还 SEC 次数 47 次；部署后恢复回补。controller 首次 bootstrap 返回 5，重试后成功。
+
+<details><summary>批次 2026-09-26e 说明</summary>
+
 ## 批次 2026-09-26e（main `8eca60eb` 及之后）
 
 ### 这批解决什么（批次 d 部署后验证中发现）
@@ -51,9 +61,8 @@ zsh ~/Projects/dalton-research-agent-os/docs/ops/deploy.sh
 
 在 main `8eca60eb` 上跑全量测试：10510 个，全部通过（skipped 4）。
 
----
+</details>
 
-## 已部署
 
 - 2026-09-26 12:12 UTC：批次 2026-09-25d，release `41fe150a…`（源 `505b1451`）。controller 首次 bootstrap 报 5，release_switch 自动重试后成功。SEC 次数归还：ws-7d 47 次、legacy 2 次。部署后晨报核验恢复，12:37 时 verdict 数为 62/59。
 
