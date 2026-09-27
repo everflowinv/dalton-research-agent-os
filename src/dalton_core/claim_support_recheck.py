@@ -38,9 +38,12 @@ path they should have taken, without anybody clearing them one by one:
 
 from __future__ import annotations
 
+import difflib
 import hashlib
 import json
+import re
 import sqlite3
+import unicodedata
 from collections.abc import Mapping
 from contextlib import closing
 from pathlib import Path
@@ -65,6 +68,16 @@ _ITEMS_MARKER = "UNTRUSTED_ITEMS="
 # Statements asked per run: two forward calls' worth.  The backlog is a few
 # hundred at most and the purpose's own daily ceiling still applies.
 MAX_ITEMS_PER_RUN = 24
+# 2026-09-27: two statements about one subject, citing overlapping spans of
+# one document, are the same Claim when their normalised texts agree this
+# closely (difflib ratio, 0..1) and carry the same numbers and negations.
+# Measured on legacy's 79 recheck commits of 2026-09-27: the restatements of a
+# live Claim of the same span scored 0.86-0.92; the closest pair that says
+# something different scored 0.77 (DXC's Q4 revenue decline vs. what it
+# attributed the miss to).  0.85 sits in that gap.
+NEAR_DUPLICATE_RATIO = 0.85
+_NEGATIONS = frozenset({"not", "no", "never", "none", "nor", "neither", "without", "cannot"})
+_NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)*")
 
 
 def _sha256(text: str) -> str:
@@ -129,6 +142,14 @@ class ClaimSupportRecheck:
     a Claim already in the Ledger, or another held candidate (the September
     re-drafts staged the same text twice), is marked ``duplicate`` and never
     committed.
+
+    2026-09-27: "the same text" was too narrow.  Of the 63 legacy committed in
+    its first hour after the deploy, several restated a live Claim of the same
+    document in other words -- IBM's "RBC names key competitors ..." was
+    committed a fifth time beside four live versions of one span.  A held
+    candidate is now also a duplicate when a live Claim (or an earlier
+    candidate of the run) has its subject, cites the same document with an
+    overlapping span, and says the same thing: :func:`near_duplicate`.
     """
 
     def __init__(self, *, store: Any, reviewer: Any, verifier: ClaimSupportVerifier,
@@ -271,6 +292,8 @@ class ClaimSupportRecheck:
                 continue
             identity = _identity(claim["subject_ref"], statement, binding)
             entry = {"candidate_ref": candidate_ref, "identity": identity,
+                     "subject_ref": claim["subject_ref"], "statement": statement,
+                     "binding": binding,
                      "item": self._item(claim, evidence, binding, item)}
             duplicate_of = ledger.get(identity) or seen.get(identity)
             if duplicate_of is not None:
@@ -278,7 +301,43 @@ class ClaimSupportRecheck:
             else:
                 seen[identity] = candidate_ref
             found.append(entry)
+        self._mark_near_duplicates(found)
         return found, len(found)
+
+    def _mark_near_duplicates(self, found: list[dict[str, Any]]) -> None:
+        """A restatement of a live Claim, or of an earlier entry, of the same span is a duplicate.
+
+        In order, oldest first: an entry is checked against the live Claims
+        citing its document and against every earlier entry that is not
+        itself a duplicate, and only where the subject is the same and the
+        cited spans overlap (:func:`spans_overlap`, :func:`near_duplicate`).
+        """
+
+        open_entries = [entry for entry in found if "duplicate_of" not in entry]
+        if not open_entries:
+            return
+        ledger = live_claims_citing(self.connection, {
+            str(entry["binding"].get("document_sha256")) for entry in open_entries
+            if entry["binding"].get("document_sha256")})
+        kept: list[dict[str, Any]] = []
+        for entry in found:
+            if "duplicate_of" in entry:
+                continue
+            document = entry["binding"].get("document_sha256")
+            others = [(row["ref"], row) for row in ledger.get(document, ())] + \
+                [(other["candidate_ref"], other) for other in kept]
+            match = None
+            for ref, other in others:
+                if other["subject_ref"] != entry["subject_ref"] \
+                        or not spans_overlap(entry["binding"], other["binding"]):
+                    continue
+                ratio = near_duplicate(entry["statement"], other["statement"])
+                if ratio is not None and (match is None or ratio > match[1]):
+                    match = (ref, ratio)
+            if match is None:
+                kept.append(entry)
+                continue
+            entry["duplicate_of"], entry["similarity"] = match
 
     def _item(self, claim: Mapping[str, Any], evidence: Mapping[str, Any],
               binding: Mapping[str, Any], asked: Mapping[str, Any]) -> dict[str, Any]:
@@ -320,10 +379,16 @@ class ClaimSupportRecheck:
         entries, summary["remaining_before"] = self.pending()
         for entry in entries:
             if "duplicate_of" in entry:
-                self._mark(entry["candidate_ref"], "duplicate",
-                           detail=f"same statement, subject and cited source as {entry['duplicate_of']}")
+                if "similarity" in entry:
+                    detail = (f"restates {entry['duplicate_of']} (similarity {entry['similarity']}): "
+                              "same subject, same document, overlapping cited span")
+                else:
+                    detail = f"same statement, subject and cited source as {entry['duplicate_of']}"
+                self._mark(entry["candidate_ref"], "duplicate", detail=detail)
                 summary["duplicates"].append({"candidate_claim_ref": entry["candidate_ref"],
-                                              "duplicate_of": entry["duplicate_of"]})
+                                              "duplicate_of": entry["duplicate_of"],
+                                              **({"similarity": entry["similarity"]}
+                                                 if "similarity" in entry else {})})
         pending = [entry for entry in entries if "duplicate_of" not in entry][:self.max_items]
         summary["remaining_after_marks"] = max(
             0, summary["remaining_before"] - len(summary["duplicates"]) - len(pending))
@@ -379,6 +444,95 @@ class ClaimSupportRecheck:
         return summary
 
 
+def _normalized(statement: str) -> str:
+    text = unicodedata.normalize("NFKC", statement).casefold()
+    text = re.sub("n['\u2019]t\\b", " not", text)
+    return " ".join(re.sub(r"[^\w\s]", " ", text).split())
+
+
+def _numbers(statement: str) -> list[str]:
+    text = unicodedata.normalize("NFKC", statement)
+    return sorted(value.replace(",", "") for value in _NUMBER_RE.findall(text))
+
+
+def near_duplicate(first: str, second: str) -> float | None:
+    """The similarity of two statements when they say the same thing, else None.
+
+    Deterministic and deliberately narrow: the normalised texts (NFKC,
+    case-folded, punctuation dropped, "n't" read as "not") must match at
+    ``NEAR_DUPLICATE_RATIO`` or better, *and* carry exactly the same numbers
+    and the same number of negations -- so "grew 5%" never folds into "grew
+    7%", nor "expects" into "does not expect", however alike they read.
+    Whether the two cite the same span is the caller's question.
+    """
+
+    if _numbers(first) != _numbers(second):
+        return None
+    a, b = _normalized(first), _normalized(second)
+    if sum(word in _NEGATIONS for word in a.split()) != sum(word in _NEGATIONS for word in b.split()):
+        return None
+    ratio = difflib.SequenceMatcher(None, a, b, autojunk=False).ratio()
+    return round(ratio, 3) if ratio >= NEAR_DUPLICATE_RATIO else None
+
+
+def spans_overlap(first: Mapping[str, Any], second: Mapping[str, Any]) -> bool:
+    """Both bindings cite the same document and their spans share a character."""
+
+    if not first.get("document_sha256") or first.get("document_sha256") != second.get("document_sha256"):
+        return False
+    try:
+        return int(first["start"]) < int(second["end"]) and int(second["start"]) < int(first["end"])
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def live_claims_citing(connection: sqlite3.Connection,
+                       document_hashes: set[str]) -> dict[str, list[dict[str, Any]]]:
+    """document sha256 -> every live (not retired) Claim citing it: ref, subject, statement, span.
+
+    Read through the citation bindings the Claims' supporting evidence names,
+    which is the chain the recheck itself reads a candidate's binding from.
+    """
+
+    from .claim_retirement import retired_claim_version_refs
+
+    if not document_hashes:
+        return {}
+    bindings: dict[str, tuple[str, int, int]] = {}
+    hashes = sorted(document_hashes)
+    for start in range(0, len(hashes), 400):
+        part = hashes[start:start + 400]
+        for row in connection.execute(
+            "SELECT binding_id, source_content_hash, source_start, source_end "
+            "FROM transcript_claim_citation_bindings WHERE source_content_hash IN "
+            f"({','.join('?' for _ in part)})", part).fetchall():
+            bindings[row[0]] = (row[1], row[2], row[3])
+    if not bindings:
+        return {}
+    retired = retired_claim_version_refs(connection)
+    found: dict[str, list[dict[str, Any]]] = {}
+    for ref, evidence, claim in connection.execute(
+        "SELECT r.claim_version_id, e.evidence_json, c.claim_json FROM evidence_relations r "
+        "JOIN evidence_versions e ON e.evidence_version_id=r.evidence_version_id "
+        "JOIN claim_versions c ON c.claim_version_id=r.claim_version_id "
+        "WHERE r.relation='supports' AND instr(e.evidence_json, ?)>0", (BINDING_PREFIX,),
+    ).fetchall():
+        if ref in retired:
+            continue
+        record = json.loads(evidence)
+        binding_ref = next((item.get("ref") for item in record.get("artifact_refs") or ()
+                            if isinstance(item, Mapping) and item.get("ref") in bindings), None)
+        if binding_ref is None:
+            continue
+        document, start, end = bindings[binding_ref]
+        body = json.loads(claim)
+        found.setdefault(document, []).append({
+            "ref": ref, "subject_ref": body.get("subject_ref"),
+            "statement": str(body.get("normalized_statement") or ""),
+            "binding": {"document_sha256": document, "start": start, "end": end}})
+    return found
+
+
 def _identity(subject_ref: Any, statement: str, binding: Mapping[str, Any]) -> tuple[Any, ...]:
     """One Claim per statement, subject and cited source: the document and the span in it."""
 
@@ -386,4 +540,5 @@ def _identity(subject_ref: Any, statement: str, binding: Mapping[str, Any]) -> t
             binding.get("start"), binding.get("end"))
 
 
-__all__ = ["ClaimSupportRecheck", "MAX_ITEMS_PER_RUN", "PASS_REF", "outage_items"]
+__all__ = ["ClaimSupportRecheck", "MAX_ITEMS_PER_RUN", "NEAR_DUPLICATE_RATIO", "PASS_REF",
+           "live_claims_citing", "near_duplicate", "outage_items", "spans_overlap"]

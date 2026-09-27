@@ -245,5 +245,112 @@ class QueueTests(RecheckHarness):
                                                                        "end": 6}))
 
 
+class NearDuplicateTests(RecheckHarness):
+    """2026-09-27: a restatement of a live Claim of the same span is not committed again."""
+
+    YES = ("supported", "about_subject", None)
+    LIVE = "Cognizant signed seven large deals in the quarter, a strong bookings quarter."
+    SAME = "Cognizant signed seven large deals during the quarter, a strong bookings quarter."
+
+    def _document(self) -> tuple[str, tuple[int, int]]:
+        text = self.TEXT.format(n="Earlier note.")
+        return text, (text.index("We delivered"), text.index(" Annual"))
+
+    def test_a_restatement_of_a_live_claim_of_the_same_span_is_a_duplicate(self) -> None:
+        text, span = self._document()
+        ledger = self.claim(subject=EPAM, statement=self.LIVE, source=text, span=span)
+        # Overlapping, not identical: the candidate cites a sentence inside the Claim's span.
+        held = self.held(self.SAME, text=text, span=(span[0], span[1] - 5))
+        self.outage()
+        recheck, model = self.recheck({self.SAME: self.YES})
+        summary = recheck.run_once(mission=MISSION)
+        [duplicate] = summary["duplicates"]
+        self.assertEqual((duplicate["candidate_claim_ref"], duplicate["duplicate_of"]),
+                         (held, ledger["ref"]))
+        self.assertGreaterEqual(duplicate["similarity"], recheck_module.NEAR_DUPLICATE_RATIO)
+        self.assertEqual((summary["asked"], model.calls, self.recheck_store.commits), (0, [], []))
+        [(outcome, detail)] = self.store.connection.execute(
+            "SELECT outcome, detail FROM claim_support_recheck_marks").fetchall()
+        self.assertEqual(outcome, "duplicate")
+        self.assertIn("same document, overlapping cited span", detail)
+
+    def test_a_retired_claim_does_not_stand_in_for_the_candidate(self) -> None:
+        text, span = self._document()
+        ledger = self.claim(subject=EPAM, statement=self.LIVE, source=text, span=span)
+        held = self.held(self.SAME, text=text, span=span)
+        self.outage()
+        with patch("dalton_core.claim_retirement.retired_claim_version_refs",
+                   return_value={ledger["ref"]}):
+            recheck, _model = self.recheck({self.SAME: self.YES})
+            summary = recheck.run_once(mission=MISSION)
+        self.assertEqual((summary["duplicates"], self.recheck_store.commits), ([], [held]))
+
+    def test_a_different_span_different_numbers_or_a_negation_is_a_different_claim(self) -> None:
+        text, span = self._document()
+        self.claim(subject=EPAM, statement=self.LIVE, source=text,
+                   span=(text.index("Annual contract"), len(text) - 1))
+        other_span = self.held(self.SAME, text=text, span=span)
+        text2, span2 = self._document()
+        text2 = text2.replace("Earlier note.", "Second note.")
+        self.claim(subject=EPAM, statement="Cognizant signed 7 large deals in the quarter.",
+                   source=text2, span=span2)
+        numbers = self.held("Cognizant signed 8 large deals in the quarter.", text=text2, span=span2)
+        negated = self.held("Cognizant did not sign seven large deals in the quarter, a strong bookings quarter.",
+                            text=text, span=span)
+        self.outage()
+        recheck, _model = self.recheck({s: self.YES for s in (
+            self.SAME, "Cognizant signed 8 large deals in the quarter.",
+            "Cognizant did not sign seven large deals in the quarter, a strong bookings quarter.")})
+        summary = recheck.run_once(mission=MISSION)
+        self.assertEqual(summary["duplicates"], [])
+        self.assertEqual(sorted(self.recheck_store.commits), sorted([other_span, numbers, negated]))
+
+    def test_two_held_restatements_of_one_span_commit_once(self) -> None:
+        text, span = self._document()
+        first = self.held(self.LIVE, text=text, span=span, created_at="2026-09-03T00:00:00+00:00")
+        second = self.held(self.SAME, text=text, span=span, created_at="2026-09-25T00:00:00+00:00")
+        self.outage()
+        recheck, model = self.recheck({self.LIVE: self.YES, self.SAME: self.YES})
+        summary = recheck.run_once(mission=MISSION)
+        self.assertEqual(self.recheck_store.commits, [first])
+        self.assertEqual([(d["candidate_claim_ref"], d["duplicate_of"]) for d in summary["duplicates"]],
+                         [(second, first)])
+        self.assertEqual(_asked(model), [self.LIVE])
+
+
+class NearDuplicateRuleTests(unittest.TestCase):
+    """The rule on the pairs it was measured on (legacy, 2026-09-27)."""
+
+    def test_the_restatements_legacy_committed_are_caught(self) -> None:
+        pairs = [
+            ("RBC names IBM's key competitors as traditional hyperscalers Google, Microsoft and Amazon, "
+             "along with consulting firms Deloitte and Accenture.",
+             "IBM's key competitors are named as hyperscalers Google, Microsoft and Amazon, along with "
+             "consulting firms Deloitte and Accenture."),
+            ("RBC names IBM's key competitors as traditional hyperscalers Google, Microsoft and Amazon, "
+             "along with consulting firms Deloitte and Accenture.",
+             "IBM's key competitors include hyperscalers Google, Microsoft and Amazon, along with "
+             "consulting firms Deloitte and Accenture."),
+        ]
+        for first, second in pairs:
+            with self.subTest(first=first[:30]):
+                self.assertIsNotNone(recheck_module.near_duplicate(first, second))
+
+    def test_close_but_different_statements_are_not(self) -> None:
+        near = recheck_module.near_duplicate
+        self.assertIsNone(near(
+            "DXC reported Q4 FY2026 total revenue declined year-to-year, below its guidance range.",
+            "DXC attributed its Q4 revenue miss to weakening discretionary spending on short-term services."))
+        self.assertIsNone(near("EPAM grew revenue 5% in Q2 2026.", "EPAM grew revenue 7% in Q2 2026."))
+        self.assertIsNone(near("EPAM expects demand to improve in 2H.",
+                               "EPAM doesn't expect demand to improve in 2H."))
+        self.assertTrue(recheck_module.spans_overlap(
+            {"document_sha256": "d", "start": 0, "end": 10}, {"document_sha256": "d", "start": 9, "end": 20}))
+        self.assertFalse(recheck_module.spans_overlap(
+            {"document_sha256": "d", "start": 0, "end": 10}, {"document_sha256": "d", "start": 10, "end": 20}))
+        self.assertFalse(recheck_module.spans_overlap(
+            {"document_sha256": "d", "start": 0, "end": 10}, {"document_sha256": "e", "start": 0, "end": 10}))
+
+
 if __name__ == "__main__":
     unittest.main()
