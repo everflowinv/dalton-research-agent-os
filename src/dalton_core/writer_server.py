@@ -5654,33 +5654,7 @@ class WriterServer:
                 "status": "unconfigured",
                 "reason": "no approved document extraction model configuration on this writer",
             }
-        carried = self._carry_open_reviews_forward()
-        result = self._document_extraction_coordinator.dispatch_once()
-        if carried and isinstance(result, dict):
-            result = {**result, "carried_open_reviews": carried}
-        return result
-
-    def _carry_open_reviews_forward(self) -> dict[str, int]:
-        """Bring reviews a mission upgrade left behind into the version in force.
-
-        Extraction only counts reviews under the pointed version; see
-        ``CoverageMissionAuthority.carry_open_reviews_forward`` for why a
-        policy cascade used to stall it.  Bounded, local, and never fatal to
-        the tick: a failure here must not stop extraction of what is open.
-        """
-
-        counts: dict[str, int] = {}
-        try:
-            pointers = [row[0] for row in self.store.connection.execute(
-                "SELECT mission_ref FROM coverage_mission_pointer ORDER BY mission_ref")]
-            for mission_ref in pointers:
-                for item in self.coverage_mission.carry_open_reviews_forward(
-                        mission_ref, limit=100):
-                    counts[item["status"]] = counts.get(item["status"], 0) + 1
-        except Exception as exc:  # noqa: BLE001 - reported in the tick, never fatal
-            counts["error"] = 1
-            counts[f"error:{type(exc).__name__}"] = 1
-        return counts
+        return self._document_extraction_coordinator.dispatch_once()
 
     def _op_run_mission_source_discovery(self, p: Mapping[str, Any]) -> Any:
         # Human-requested discovery: the mission grant is resolved here with the
