@@ -1359,7 +1359,8 @@ def _install_claim_support_verifier(host: ExtractionHost, config: Mapping[str, A
         settings = load_settings(host.state_dir)
         host._claim_support_verifier = build_verifier(
             store=host.store, model_config=config, scheduler_db=scheduler_db,
-            purpose=PURPOSE, daily_cap_usd=settings["daily_cap_usd"])
+            purpose=PURPOSE, daily_cap_usd=settings["daily_cap_usd"],
+            second_opinion=bool(settings.get("second_opinion_on_rejection")))
     except Exception as exc:  # noqa: BLE001 - reported; admissions defer
         host._claim_support_verifier = None
         return {"status": "unavailable", "reason": f"{type(exc).__name__}: {exc}"}

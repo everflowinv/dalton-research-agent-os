@@ -109,3 +109,33 @@ BEFORE UPDATE ON claim_support_recheck_marks BEGIN
 CREATE TRIGGER IF NOT EXISTS claim_support_recheck_marks_no_delete
 BEFORE DELETE ON claim_support_recheck_marks BEGIN
     SELECT RAISE(ABORT, 'claim support recheck marks are append-only'); END;
+
+-- 2026-09-27 (contract v3): a rejection is decided by two independent model
+-- families.  The first family's answer that did not admit a statement is kept
+-- here, by the same item key, until a model of another family has answered
+-- too -- so a second opinion that has to wait (a ceiling, the hourly retry)
+-- never pays for the first again.  The verdict itself, in
+-- claim_support_verdicts, is only written once both have spoken (or the
+-- second cannot be had) and carries both answers.  Append-only.
+CREATE TABLE IF NOT EXISTS claim_support_first_opinions (
+    item_key TEXT PRIMARY KEY,
+    contract_ref TEXT NOT NULL,
+    purpose TEXT NOT NULL,
+    support TEXT NOT NULL CHECK(support IN ('supported', 'not_supported')),
+    subject_relation TEXT NOT NULL CHECK(subject_relation IN ('about_subject', 'about_other')),
+    other_subject TEXT,
+    work_order_ref TEXT NOT NULL,
+    route_decision_ref TEXT,
+    record_json TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS claim_support_first_opinions_authorized_insert
+BEFORE INSERT ON claim_support_first_opinions WHEN dalton_claim_support_authorized() = 0 BEGIN
+    SELECT RAISE(ABORT, 'claim support first opinion insert requires ClaimSupportVerifier'); END;
+CREATE TRIGGER IF NOT EXISTS claim_support_first_opinions_no_update
+BEFORE UPDATE ON claim_support_first_opinions BEGIN
+    SELECT RAISE(ABORT, 'claim support first opinions are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS claim_support_first_opinions_no_delete
+BEFORE DELETE ON claim_support_first_opinions BEGIN
+    SELECT RAISE(ABORT, 'claim support first opinions are append-only'); END;

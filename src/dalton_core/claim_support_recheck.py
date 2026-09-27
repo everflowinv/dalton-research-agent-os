@@ -400,6 +400,7 @@ class ClaimSupportRecheck:
         outcome = self.verifier.verify(mission=mission, items=[entry["item"] for entry in pending])
         summary["calls"] = outcome.get("calls", 0)
         summary["cost_micros"] = outcome.get("cost_micros", 0)
+        summary["second_opinions"] = outcome.get("second_opinions")
         if outcome["status"] == "deferred":
             summary["deferred"] = outcome.get("reason")
         committed: set[tuple[Any, ...]] = set()

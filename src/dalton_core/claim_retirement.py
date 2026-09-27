@@ -79,7 +79,9 @@ DETERMINISTIC_REASONS = frozenset({"subject_absent_from_source", "boilerplate_di
 RECORDED_VERDICT_REASONS = frozenset({"citation_support_rejected"})
 # v2 (2026-09-26b): the verdicts are asked under claim-support-verification:v2
 # (document facts and whole sentences; ``claim_support_context``).
-SUPPORT_VERIFIER_REF = "claim-verifier:citation-support:v2"
+# v3 (2026-09-27): claim-support-verification:v3 -- a conclusion one passage
+# directly gives is supported, and a rejection needs a second family's answer.
+SUPPORT_VERIFIER_REF = "claim-verifier:citation-support:v3"
 # v2: span level as well as document level (claim_subject.subject_absent_from_citation).
 # v3 (2026-09-24 audit): the span rule also keeps a Claim whose statement leans
 # on an antecedent just before the span, or names an executive, and a document
@@ -101,7 +103,7 @@ REINSTATEMENT_REASONS: tuple[str, ...] = (
 #: the support check, asked again under its current contract (the document's
 #: date, period and speaker, the whole cited sentences), upholds the Claim.
 #: The authority re-reads that verdict (``recorded_support``) before writing.
-SUPPORT_REREVIEW_RULE_REF = "claim-rereview:citation-support:v2"
+SUPPORT_REREVIEW_RULE_REF = "claim-rereview:citation-support:v3"
 #: The rule an automatic reinstatement re-runs.  v3: the current span
 #: detector no longer fires.  v4 (2026-09-25 audit): and the subject is
 #: positively named -- by the statement, its executive, the antecedent it
