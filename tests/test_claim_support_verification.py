@@ -494,10 +494,10 @@ class VerifierTests(unittest.TestCase):
     def test_a_large_window_is_split_inside_the_input_bound(self) -> None:
         items = [_item(n, statement="Amazon " + "x" * 900 + f" {n}") for n in range(6)]
         model = FakeModel(*[_reply(*[("supported", "about_subject", None)] * 6)] * 6)
-        verifier = self.verifier(model, max_prompt_bytes=4000)
+        verifier = self.verifier(model, max_prompt_bytes=5000)
         outcome = verifier.verify(mission=MISSION, items=items)
         self.assertGreater(len(model.calls), 1)
-        self.assertTrue(all(len(call["prompt"].encode()) <= 4000 for call in model.calls))
+        self.assertTrue(all(len(call["prompt"].encode()) <= 5000 for call in model.calls))
         self.assertEqual(len(outcome["verdicts"]), 6)
 
 

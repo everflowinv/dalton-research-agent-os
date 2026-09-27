@@ -14,6 +14,7 @@ from dalton_core.mission_sec_quarters import (
     MissionSecQuartersCoordinator,
     classify_failure,
     source_lag_retry_at,
+    transport_retry_at,
     quarterly_filings,
     read_artifact,
     submissions_filings,
@@ -571,6 +572,74 @@ class FailuresThatAreNotTheFilingsTests(unittest.TestCase):
         self.assertEqual(source_lag_retry_at([first] * 2), first + timedelta(days=2))
         self.assertEqual(source_lag_retry_at([first] * 3), first + timedelta(days=4))
         self.assertEqual(source_lag_retry_at([first] * 9), first + timedelta(days=7))
+
+
+    # 2026-09-27, ws-7d: GOOGL 0001652044-25-000062 failed on "connector
+    # transport exceeded the authority deadline" (envelope code
+    # deadline_exceeded, sec-lane-run a1ba4288) and that counted, 2 of 3.
+
+    def deadline_envelopes(self, count, *, message=(
+            "connector transport exceeded the authority deadline")):
+        return {f"result-envelope:t{i}": {"status": "retryable", "error": {
+            "code": "deadline_exceeded", "message": message, "retryable": True}}
+            for i in range(count)}
+
+    def test_a_transport_timeout_is_not_an_attempt_and_backs_off(self) -> None:
+        digest = self.spool(SUBMISSIONS)
+        runs = (
+            self.settled(CTSH_Q2, self.ticket("t0", summary=self.lag_summary("result-envelope:t0")),
+                         at="2026-09-27T09:00:00+00:00"),
+            self.settled(CTSH_Q2, self.ticket("t1", summary=self.lag_summary("result-envelope:t1")),
+                         at="2026-09-27T09:54:02+00:00"),
+        )
+        store = _Store(artifacts=(digest,), periods=CTSH_HELD, attempts={CTSH_Q2: 3},
+                       failed_runs=runs, envelopes=self.deadline_envelopes(2))
+        # Two timeouts: the second waits an hour (30 min doubled), not a tick.
+        soon = datetime(2026, 9, 27, 10, 30, tzinfo=timezone.utc)
+        result, missions = self.run_at(store, _ctsh_entry(), soon)
+        self.assertEqual((result["status"], missions.queued), ("idle", []))
+        text = json.dumps(result["skipped"], ensure_ascii=False)
+        self.assertIn("超时", text)
+        self.assertIn("2026-09-27T10:54", text)
+        # After it, retried -- and of three dispatches only one still counts.
+        later = datetime(2026, 9, 27, 10, 55, tzinfo=timezone.utc)
+        result, missions = self.run_at(store, _ctsh_entry(), later)
+        self.assertEqual(result["status"], "queued")
+        self.assertEqual([q["attempt"] for q in result["queued"]], [2])
+
+    def test_a_deadline_is_recognised_by_its_code_or_either_message(self) -> None:
+        self.assertEqual(classify_failure(
+            "connector transport exceeded the authority deadline"), "transport_timeout")
+        self.assertEqual(classify_failure(
+            "connector transport completed after the authority deadline"),
+            "transport_timeout")
+        self.assertEqual(classify_failure(
+            "recorded source page timed out [deadline_exceeded]"), "transport_timeout")
+        # A filing that is genuinely bad is still the filing's.
+        self.assertIsNone(classify_failure(
+            "AuthorityResolutionConflict: adapter structured output does not match"))
+        self.assertIsNone(classify_failure("the plan deadline passed"))
+        # The envelope's code reaches the classifier even when the message
+        # does not spell it.
+        digest = self.spool(SUBMISSIONS)
+        runs = tuple(
+            self.settled(CTSH_Q2, self.ticket(f"c{i}", summary=self.lag_summary(
+                f"result-envelope:t{i}")), at="2026-09-20T00:00:00+00:00")
+            for i in range(3))
+        store = _Store(artifacts=(digest,), periods=CTSH_HELD, attempts={CTSH_Q2: 3},
+                       failed_runs=runs, envelopes=self.deadline_envelopes(
+                           3, message="recorded source page timed out"))
+        result, _ = self.run_at(store, _ctsh_entry(),
+                                datetime(2026, 9, 27, tzinfo=timezone.utc))
+        self.assertEqual([q["attempt"] for q in result["queued"]], [1])
+
+    def test_the_transport_backoff_doubles_and_is_capped_at_six_hours(self) -> None:
+        first = datetime(2026, 9, 1, tzinfo=timezone.utc)
+        self.assertIsNone(transport_retry_at([]))
+        self.assertEqual(transport_retry_at([first]), first + timedelta(minutes=30))
+        self.assertEqual(transport_retry_at([first] * 2), first + timedelta(hours=1))
+        self.assertEqual(transport_retry_at([first] * 5), first + timedelta(hours=6))
+        self.assertEqual(transport_retry_at([first] * 400), first + timedelta(hours=6))
 
 
 if __name__ == "__main__":

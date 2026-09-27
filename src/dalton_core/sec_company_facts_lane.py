@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -223,8 +224,91 @@ def _agenda_policy(company_refs: Sequence[str]) -> dict[str, Any]:
     }
 
 
+# 2026-09-27: the lane ran ``PRAGMA integrity_check`` on the 3 GB Core at the
+# end of every run.  It outlived the 60 s stack-dump interval (run.log of ws-7d
+# sec-lane-run a1ba4288, stuck at this line), held a read transaction on the
+# Core -- which is what stops the WAL from checkpointing -- for all of it, and
+# decided nothing: the summary reports it and no runtime reader gates on it.
+#
+# So every database is checked with ``quick_check``, and the Core's result is
+# cached for a day.  What that gives up:
+#
+# * ``quick_check`` walks every b-tree page, the freelist, record formats, and
+#   NOT NULL / CHECK constraints, but does not verify that each index's
+#   entries match its table's rows or that UNIQUE indexes are unique.  A
+#   stale or duplicate index entry is the corruption it cannot see.
+# * The cached Core answer is up to a day old.  Corruption arising inside that
+#   day is not reported by the lane until the next check.
+#
+# Both are acceptable because the lane is not where integrity is guarded:
+# the daily backup (``backup._integrity``) runs a full ``integrity_check`` on
+# each snapshot of the Core, and nothing here ever acted on the answer.  Only
+# an ``ok`` is cached: anything else is re-checked on every run.
+CORE_INTEGRITY_CACHE_FILE = "sec-lane-integrity-cache.json"
+CORE_INTEGRITY_MAX_AGE = timedelta(days=1)
+
+
 def _integrity(connection: sqlite3.Connection) -> str:
-    return str(connection.execute("PRAGMA integrity_check").fetchone()[0])
+    return str(connection.execute("PRAGMA quick_check").fetchone()[0])
+
+
+def _database_identity(connection: sqlite3.Connection) -> str | None:
+    """The main database file, by path and inode: a restored file is a new one."""
+
+    try:
+        row = connection.execute("PRAGMA database_list").fetchone()
+        path = Path(str(row[2])) if row is not None and row[2] else None
+        if path is None:
+            return None
+        info = path.stat()
+    except (sqlite3.Error, OSError):
+        return None
+    return f"{path.resolve()}|{info.st_dev}|{info.st_ino}"
+
+
+def cached_integrity(
+    connection: sqlite3.Connection, cache_path: Path, *,
+    now: datetime | None = None, max_age: timedelta = CORE_INTEGRITY_MAX_AGE,
+) -> dict[str, Any]:
+    """``quick_check`` at most once per ``max_age`` for this database file.
+
+    Returns ``{"result", "checked_at", "cached"}``.  A cache that cannot be
+    read or written is only a slower lane: the check then runs every time.
+    """
+
+    now = now or datetime.now(timezone.utc)
+    identity = _database_identity(connection)
+    entries: dict[str, Any] = {}
+    try:
+        raw = json.loads(cache_path.read_text(encoding="utf-8"))
+        entries = raw if isinstance(raw, dict) else {}
+    except (OSError, ValueError):
+        entries = {}
+    held = entries.get(identity) if identity is not None else None
+    if isinstance(held, Mapping) and held.get("result") == "ok":
+        try:
+            checked_at = datetime.fromisoformat(str(held.get("checked_at")))
+        except ValueError:
+            checked_at = None
+        if checked_at is not None and checked_at.tzinfo is not None \
+                and timedelta(0) <= now - checked_at < max_age:
+            return {"result": "ok", "checked_at": checked_at.isoformat(), "cached": True}
+    result = _integrity(connection)
+    checked = now.astimezone(timezone.utc).isoformat()
+    if identity is not None:
+        if result == "ok":
+            entries[identity] = {"result": result, "checked_at": checked}
+        else:
+            entries.pop(identity, None)
+        try:
+            temporary = cache_path.with_name(cache_path.name + ".tmp")
+            fd = os.open(str(temporary), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(entries, stream, sort_keys=True)
+            os.replace(temporary, cache_path)
+        except OSError:
+            pass
+    return {"result": result, "checked_at": checked, "cached": False}
 
 
 def _count(connection: sqlite3.Connection, table: str) -> int:
@@ -1358,10 +1442,16 @@ class SecCompanyFactsLane:
             table: _count(core, table)
             for table in ("evidence_versions", "claim_versions", "thesis_versions")
         }
+        core_check = cached_integrity(core, self.state_dir / CORE_INTEGRITY_CACHE_FILE)
         summary["integrity"] = {
-            "core": _integrity(core),
+            "core": core_check["result"],
             "staging": _integrity(self.review.connection),
             "coordinator": _integrity(self.connector_records.connection),
+        }
+        summary["integrity_check"] = {
+            "mode": "quick_check",
+            "core_checked_at": core_check["checked_at"],
+            "core_cached": core_check["cached"],
         }
         return summary
 

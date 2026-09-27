@@ -38,7 +38,8 @@ from dalton_core.company_dossier_launcher import CompanyDossierLauncher, run_dig
 from dalton_core.coverage_mission import CoverageMissionAuthority
 from dalton_core.lane_registry import lane_for_operation, registered_lanes
 from dalton_core.mission_dossier_lane import (
-    LANE, LAUNCHER_KWARG, MissionDossierLaneCoordinator, build_launcher,
+    LANE, LAUNCHER_KWARG, MIN_REDRAFT_SECONDS, MissionDossierLaneCoordinator,
+    build_launcher,
     company_ledger_signature, dispatch, ledger_signature,
 )
 from dalton_core.store import content_hash
@@ -1507,6 +1508,142 @@ class CoordinatorTests(unittest.TestCase):
         self.assertEqual(coordinator.dispatch_once()["status"], "parked")
         now[0] += timedelta(seconds=1)
         self.assertEqual(coordinator.dispatch_once()["status"], "launched")
+
+    # -- the redraft interval (2026-09-27: CTSH v7..v10 in 15 minutes) -----
+
+    def _published_head(self):
+        summary = self.harness.run()
+        self.assertIn(summary["dossier_status"], ("published", "partial_published"))
+        row = self.connection.execute(
+            "SELECT version_id, created_at, record_json FROM company_dossier_versions "
+            "WHERE company_ref=? ORDER BY version_number DESC LIMIT 1", (ACN,)).fetchone()
+        return row, datetime.fromisoformat(row["created_at"])
+
+    def _retire_one_cited(self, row):
+        from dalton_core.claim_retirement import ClaimRetirementAuthority
+        from dalton_core.company_dossier import evidence_scope
+
+        known = {item["claim_version_id"] for item in self.connection.execute(
+            "SELECT claim_version_id FROM claim_versions")}
+        ref = next(ref for ref in evidence_scope(json.loads(row["record_json"]))
+                   if ref in known)
+        claim_hash = self.connection.execute(
+            "SELECT content_hash FROM claim_versions WHERE claim_version_id=?",
+            (ref,)).fetchone()["content_hash"]
+        retirement = ClaimRetirementAuthority(self.harness.store)
+        challenge = retirement.challenge(
+            claim_version_ref=ref, claim_version_hash=claim_hash,
+            reason_code="human_judgment", rationale="fixture",
+            actor_ref="human:coverage-owner")
+        retirement.decide(
+            challenge_ref=challenge["id"], challenge_hash=challenge["content_hash"],
+            decision="retired", actor_ref="human:coverage-owner", rationale="fixture")
+        return ref
+
+    def test_evidence_inside_the_redraft_interval_waits_and_is_drafted_together(self):
+        _row, published = self._published_head()
+        now = [published + timedelta(minutes=10)]
+        launcher = self.Launcher(summary={"dossier_status": "published"})
+        coordinator = MissionDossierLaneCoordinator(
+            connection=self.connection, launcher=launcher, companies=lambda: [ACN],
+            failure_clock=lambda: now[0])
+        # The recheck admits a batch every ten minutes; each one moves the
+        # change key, and none of them may start a rewrite inside the interval.
+        for index in range(4):
+            self.harness.tag(f"late-{index}", "demand_drivers",
+                             statement=f"第 {index} 批复核放行的材料。")
+            tick = coordinator.dispatch_once()
+            self.assertEqual(tick["status"], "held", tick)
+            self.assertIn(ACN, tick["pacing"])
+            self.assertIn("next rewrite is due after", tick["held"][ACN])
+            now[0] += timedelta(minutes=10)
+        self.assertEqual(launcher.started, [])
+        # One tick past the interval: one launch, carrying all four batches.
+        now[0] = published + timedelta(seconds=MIN_REDRAFT_SECONDS)
+        self.assertEqual(coordinator.dispatch_once()["status"], "launched")
+        self.assertEqual(launcher.started_companies, [ACN])
+        self.assertEqual(MIN_REDRAFT_SECONDS, 3 * 60 * 60)
+
+    def test_a_retired_citation_is_withdrawn_at_once_but_once_per_retired_set(self):
+        row, published = self._published_head()
+        now = [published + timedelta(minutes=5)]
+        launcher = self.Launcher(summary={"dossier_status": "published"})
+        coordinator = MissionDossierLaneCoordinator(
+            connection=self.connection, launcher=launcher, companies=lambda: [ACN],
+            failure_clock=lambda: now[0])
+        self._retire_one_cited(row)
+        first = coordinator.dispatch_once()
+        self.assertEqual(first["status"], "launched")
+        self.assertEqual(first["pacing_exception"], "retired_citation")
+        # The (fake) run did not move the head, so the head still cites the
+        # same retired set: it is not a second emergency, it waits.
+        self.harness.tag("late-r", "demand_drivers", statement="又一批材料。")
+        second = coordinator.dispatch_once()
+        self.assertEqual(second["status"], "held", second)
+        self.assertIn(ACN, second["pacing"])
+        # A second retirement is a new set, but withdrawals are paced too:
+        # one per interval, so a trickle of retirements is one rewrite.
+        withdrawn_at = now[0]
+        head = {"version_id": "v-next", "created_at": now[0].isoformat()}
+        coordinator._dossier_head = lambda _company: head
+        coordinator._retired_cited_by_head = lambda _version: ["claim-version:another"]
+        now[0] += timedelta(minutes=10)
+        self.assertIn(ACN, coordinator.dispatch_once()["pacing"])
+        self.assertEqual(len(launcher.started), 1)
+        # An interval after the last withdrawal, a young head's new retired
+        # set is withdrawn at once again.
+        now[0] = withdrawn_at + timedelta(seconds=MIN_REDRAFT_SECONDS)
+        head["created_at"] = (now[0] - timedelta(minutes=1)).isoformat()
+        again = coordinator.dispatch_once()
+        self.assertEqual(again.get("pacing_exception"), "retired_citation", again)
+
+    def test_a_failed_run_is_retried_promptly_once_then_waits(self):
+        row, published = self._published_head()
+        now = [published + timedelta(minutes=5)]
+        launcher = self.Launcher(ticket_status="failed",
+                                 summary={"failure_reason": "TransportError: reset"})
+        coordinator = MissionDossierLaneCoordinator(
+            connection=self.connection, launcher=launcher, companies=lambda: [ACN],
+            failure_clock=lambda: now[0])
+        self._retire_one_cited(row)
+        self.assertEqual(coordinator.dispatch_once()["pacing_exception"],
+                         "retired_citation")
+        retried = coordinator.dispatch_once()
+        self.assertEqual(retried["status"], "launched", retried)
+        self.assertEqual(retried["pacing_exception"], "failed_last_run")
+        # The failure budget parks this exact signature as before; evidence
+        # that moves the signature past it still meets the interval.
+        self.assertEqual(coordinator.dispatch_once()["status"], "parked")
+        self.harness.tag("late-f", "demand_drivers", statement="新一批材料。")
+        waiting = coordinator.dispatch_once()
+        self.assertEqual(waiting["status"], "held", waiting)
+        self.assertIn(ACN, waiting["pacing"])
+        self.assertEqual(len(launcher.started), 2)
+
+    def test_an_exception_does_not_bypass_the_content_refusal_cooldown(self):
+        row, published = self._published_head()
+        now = [published + timedelta(minutes=5)]
+        launcher = self.Launcher(summary={"dossier_status": "rubric_refused",
+                                          "failure_reason": "numbers_without_refs"})
+        coordinator = MissionDossierLaneCoordinator(
+            connection=self.connection, launcher=launcher, companies=lambda: [ACN],
+            failure_clock=lambda: now[0])
+        self._retire_one_cited(row)
+        self.assertEqual(coordinator.dispatch_once()["status"], "launched")
+        self.harness.tag("late-c", "demand_drivers", statement="新材料。")
+        held = coordinator.dispatch_once()
+        self.assertEqual(held["status"], "held", held)
+        self.assertIn(ACN, held["cooling_down"])
+        self.assertEqual(len(launcher.started), 1)
+
+    def test_a_company_with_no_dossier_or_an_old_one_is_not_paced(self):
+        launcher = self.Launcher()
+        coordinator = MissionDossierLaneCoordinator(
+            connection=self.connection, launcher=launcher, companies=lambda: [ACN])
+        self.assertIsNone(coordinator.redraft_pacing(ACN))
+        _row, published = self._published_head()
+        coordinator._cooldown_clock = lambda: published + timedelta(hours=3, seconds=1)
+        self.assertIsNone(coordinator.redraft_pacing(ACN))
 
     def test_the_signature_moves_when_a_dossier_version_lands(self):
         before = ledger_signature(self.connection)

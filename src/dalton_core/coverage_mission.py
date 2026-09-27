@@ -3415,6 +3415,89 @@ class CoverageMissionAuthority:
             result.append({**entry, "status": status, "record_id": record_id})
         return result
 
+    def carry_forward_awaiting_reviews(
+        self, mission_ref: str, *, limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Carry every open review a superseded version left behind into the current one.
+
+        2026-09-27: :meth:`carry_forward_superseded_documents` runs from the
+        three plan-driven discovery coordinators, each for its own source, so a
+        document from a feed lane (sales notes, the company wiki) whose review
+        was still open when a new version was published stayed on the old
+        version -- and the extraction queue reads the version in force only.
+        policy-5 published ws-7d's v5 at 08:57:50 over five open v4 reviews
+        (four sales notes, one wiki page); the lane read ``awaiting: 0`` from
+        09:00 on and stopped launching altogether.
+
+        Same rules as the other two carries: only the newest row of a document
+        speaks for it (a document a later version holds, or decided, is left
+        alone); the current version's own grant decides, so a company that
+        left the universe or a source no longer connected is reported, not
+        carried; the carried review keeps ``created_at`` so it re-enters the
+        queue where it was (:meth:`_carry_review_into_version`).  The old
+        review is left as it is.  Idempotent: a carried document is held by
+        the current version and is never selected again.
+        """
+
+        mission_ref = _text(mission_ref, "mission_ref")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
+            raise CoverageMissionValidationError("carry-forward limit must be 1..500")
+        pointer = self.connection.execute(
+            "SELECT mission_version_id FROM coverage_mission_pointer WHERE mission_ref=?",
+            (mission_ref,),
+        ).fetchone()
+        if pointer is None:
+            return []
+        current_ref = pointer["mission_version_id"]
+        rows = self.connection.execute(
+            "SELECT r.* FROM coverage_mission_document_reviews r "
+            "JOIN coverage_mission_versions v ON v.mission_version_id=r.mission_version_ref "
+            "JOIN coverage_mission_discovered_documents d ON d.record_id=r.discovered_document_ref "
+            "WHERE v.mission_ref=? AND r.mission_version_ref<>? "
+            "AND r.state='awaiting_human_extraction' AND d.status='acquired' "
+            "AND NOT EXISTS (SELECT 1 FROM coverage_mission_discovered_documents n "
+            "  JOIN coverage_mission_versions nv ON nv.mission_version_id=n.mission_version_ref "
+            "  WHERE nv.mission_ref=v.mission_ref AND nv.version_number>v.version_number "
+            "  AND n.document_ref=r.document_ref) "
+            "AND NOT EXISTS (SELECT 1 FROM coverage_mission_document_reviews n "
+            "  JOIN coverage_mission_versions nv ON nv.mission_version_id=n.mission_version_ref "
+            "  WHERE nv.mission_ref=v.mission_ref AND nv.version_number>v.version_number "
+            "  AND n.document_ref=r.document_ref) "
+            "ORDER BY v.version_number DESC, r.created_at, r.review_id LIMIT ?",
+            (mission_ref, current_ref, limit),
+        ).fetchall()
+        if not rows:
+            return []
+        principal = self.mission(current_ref)["autonomy"]["automation_principal"]
+        grants: dict[tuple[str, str], dict[str, Any] | str] = {}
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            entry = {"review_id": row["review_id"], "document_ref": row["document_ref"],
+                     "from_version_ref": row["mission_version_ref"],
+                     "company_ref": row["company_ref"], "source_ref": row["source_ref"]}
+            key = (row["company_ref"], row["source_ref"])
+            if key not in grants:
+                try:
+                    grants[key] = self.authorize_source_discovery(
+                        company_ref=key[0], source_ref=key[1], requested_by=principal,
+                        mission_version_ref=current_ref,
+                    )
+                except CoverageMissionError as exc:
+                    grants[key] = f"{type(exc).__name__}: {exc}"
+            grant = grants[key]
+            if isinstance(grant, str):
+                result.append({**entry, "status": "skipped", "reason": grant})
+                continue
+            try:
+                with self._transaction() as cur:
+                    carried = self._carry_review_into_version(
+                        cur, row, current_ref, registered_by=grant["actor_ref"], now=_now())
+            except CoverageMissionConflict as exc:
+                result.append({**entry, "status": "skipped", "reason": str(exc)})
+                continue
+            result.append({**entry, "status": "carried", "carried_to": carried})
+        return result
+
     def backfill_document_reviews(
         self, mission_ref: str, *, limit: int = 100, deadline: float | None = None,
     ) -> list[dict[str, Any]]:

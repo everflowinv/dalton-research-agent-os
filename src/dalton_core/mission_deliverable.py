@@ -139,7 +139,16 @@ _BARE_MONTH_DAY_RE = re.compile(
     _MONTH_DAY_RE.pattern + r"(?!\s*,?\s*(?:19|20)\d{2})",
     re.IGNORECASE,
 )
-NUMBER_SOURCE_CONTRACT_VERSION = "number-source-contract:0.5"
+# The day-first spelling the sell side prints in a period -- "23 Jun 2026" --
+# which is how IBM's history_of_price_drivers was refused twice on 2026-09-27
+# ($0.88 a round) for writing "6 月 23 日".  The month must be capitalised:
+# "23 may" is more often a verb than a date.
+_DAY_MONTH_RE = re.compile(
+    r"(?<![\d.,/])(0?[1-9]|[12]\d|3[01])\s+(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|"
+    r"Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t|tember)?|Oct(?:ober)?|"
+    r"Nov(?:ember)?|Dec(?:ember)?)(?![A-Za-z])(?:,?\s+((?:19|20)\d{2})(?!\d))?",
+)
+NUMBER_SOURCE_CONTRACT_VERSION = "number-source-contract:0.6"
 
 
 def number_source_contract_fingerprint() -> str:
@@ -152,7 +161,8 @@ def number_source_contract_fingerprint() -> str:
         "number_source_fields": ["text", "period"],
         "bound_period_equivalence": (
             "iso-date-to-english-month-date-or-exact-cited-month-day"
-            "+cjk-and-slash-month-day"),
+            "+cjk-and-slash-month-day+day-first-month-date"
+            "+read-from-period-and-text"),
         "print_equivalence": "percent-word+english-number-words-exact",
     })
 
@@ -234,18 +244,51 @@ def _normalise_date(value: str) -> str | None:
     return None
 
 
+def _source_fields(item: Mapping[str, Any]) -> tuple[str, str]:
+    """The two fields of a cited row a date may be read from: period and text.
+
+    A row states its date in either: "23 Jun 2026" in the period column, or
+    "on 2026-06-23 the stock ..." in the statement.  Both are the row's own
+    words, so both bind; nothing else does.
+    """
+
+    return str(item.get("period") or ""), str(item.get("text") or "")
+
+
+def _month_number(name: str) -> str | None:
+    try:
+        return datetime.strptime(name[:3].title(), "%b").strftime("%m")
+    except ValueError:
+        return None
+
+
+def _day_first_date(match: re.Match[str]) -> str | None:
+    month = _month_number(match.group(2))
+    if month is None or match.group(3) is None:
+        return None
+    try:
+        return datetime(int(match.group(3)), int(month), int(match.group(1))).date().isoformat()
+    except ValueError:
+        return None
+
+
 def _bound_period_dates(numbers: Sequence[Mapping[str, Any]]) -> set[str]:
+    """Every complete date a cited row names, in its period or its text."""
+
     dates: set[str] = set()
     for item in numbers:
-        period = str(item.get("period") or "")
-        for match in _ISO_DATE_RE.finditer(period):
-            normalised = _normalise_date(match.group(1))
-            if normalised is not None:
-                dates.add(normalised)
-        for match in _MONTH_DATE_RE.finditer(period):
-            normalised = _normalise_date(match.group(0))
-            if normalised is not None:
-                dates.add(normalised)
+        for field in _source_fields(item):
+            for match in _ISO_DATE_RE.finditer(field):
+                normalised = _normalise_date(match.group(1))
+                if normalised is not None:
+                    dates.add(normalised)
+            for match in _MONTH_DATE_RE.finditer(field):
+                normalised = _normalise_date(match.group(0))
+                if normalised is not None:
+                    dates.add(normalised)
+            for match in _DAY_MONTH_RE.finditer(field):
+                if (normalised := _day_first_date(match)) is not None:
+                    dates.add(normalised)
     return dates
 
 
@@ -253,20 +296,8 @@ def _month_day(value: str) -> tuple[str, int] | None:
     match = _MONTH_DAY_RE.search(value)
     if match is None:
         return None
-    try:
-        parsed = datetime.strptime(match.group(1)[:3], "%b")
-    except ValueError:
-        return None
-    return (parsed.strftime("%m"), int(match.group(2)))
-
-
-def _bound_period_month_days(
-    numbers: Sequence[Mapping[str, Any]],
-) -> set[tuple[str, int]]:
-    return {
-        found for item in numbers
-        if (found := _month_day(str(item.get("period") or ""))) is not None
-    }
+    month = _month_number(match.group(1))
+    return None if month is None else (month, int(match.group(2)))
 
 
 def _remove_bound_month_dates(
@@ -285,12 +316,25 @@ def _remove_bound_month_dates(
         if _normalise_date(match.group(0)) in bound_dates else match.group(0),
         body,
     )
-    bound_month_days = _bound_period_month_days(numbers)
+    checked = _DAY_MONTH_RE.sub(
+        lambda match: (" " * len(match.group(0)))
+        if match.group(3) is not None and _day_first_date(match) in bound_dates
+        else match.group(0),
+        checked,
+    )
+    bound_month_days = _bound_month_day_keys(numbers)
     if not bound_month_days:
         return checked
-    return _BARE_MONTH_DAY_RE.sub(
+    checked = _BARE_MONTH_DAY_RE.sub(
         lambda match: (" " * len(match.group(0)))
         if _month_day(match.group(0)) in bound_month_days else match.group(0),
+        checked,
+    )
+    return _DAY_MONTH_RE.sub(
+        lambda match: (" " * len(match.group(0)))
+        if match.group(3) is None
+        and (_month_number(match.group(2)), int(match.group(1))) in bound_month_days
+        else match.group(0),
         checked,
     )
 
@@ -315,16 +359,27 @@ _SLASH_MONTH_DAY_RE = re.compile(
 
 
 def _bound_month_day_keys(numbers: Sequence[Mapping[str, Any]]) -> set[tuple[str, int]]:
-    """Every month and day a cited period names, in any of its spellings."""
+    """Every month and day a cited row names, in any of its spellings.
 
-    keys = set(_bound_period_month_days(numbers))
+    Read from the row's period *and* its text: "Jun 23", "23 Jun 2026",
+    "2026-06-23", "6/23", "6月23日".  Equality only -- the key is the exact
+    (month, day), so a cited 23 June never sources a 24 June or a bare 23.
+    """
+
+    keys: set[tuple[str, int]] = set()
     for iso in _bound_period_dates(numbers):
         keys.add((iso[5:7], int(iso[8:10])))
     for item in numbers:
-        period = str(item.get("period") or "")
-        for pattern in (_CJK_MONTH_DAY_RE, _SLASH_MONTH_DAY_RE):
-            for match in pattern.finditer(period):
-                keys.add((f"{int(match.group(1)):02d}", int(match.group(2))))
+        for field in _source_fields(item):
+            for match in _MONTH_DAY_RE.finditer(field):
+                if (month := _month_number(match.group(1))) is not None:
+                    keys.add((month, int(match.group(2))))
+            for match in _DAY_MONTH_RE.finditer(field):
+                if (month := _month_number(match.group(2))) is not None:
+                    keys.add((month, int(match.group(1))))
+            for pattern in (_CJK_MONTH_DAY_RE, _SLASH_MONTH_DAY_RE):
+                for match in pattern.finditer(field):
+                    keys.add((f"{int(match.group(1)):02d}", int(match.group(2))))
     return keys
 
 

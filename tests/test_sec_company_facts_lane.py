@@ -162,6 +162,9 @@ class LaneTests(unittest.TestCase):
             self.assertEqual(summary["facts"]["growth_percent"] is not None, True)
             self.assertEqual([v["verdict"] for v in summary["verifications"]], ["pass", "pass"])
             self.assertEqual(summary["integrity"]["core"], "ok")
+            self.assertEqual(summary["integrity_check"]["mode"], "quick_check")
+            self.assertFalse(summary["integrity_check"]["core_cached"])
+            self.assertTrue((self.state / "sec-lane-integrity-cache.json").is_file())
             # WorkOrders live in core.sqlite, not a separate scheduler db.
             self.assertFalse((self.state / "scheduler.sqlite").exists())
             self.assertIs(lane.scheduler.connection, lane.core.connection)
@@ -677,6 +680,95 @@ class LaneTests(unittest.TestCase):
         )
         self.assertEqual(US_IT_SERVICES_ISSUERS[3].company_ref, "company:sec-cik:0000051143")
         self.assertEqual(US_IT_SERVICES_ISSUERS[4].company_ref, "company:sec-cik:001688568")
+
+
+class CoreIntegrityCacheTests(unittest.TestCase):
+    """2026-09-27: integrity_check on the 3 GB Core outlived every run's 60 s.
+
+    ws-7d sec-lane-run a1ba4288's run.log dumped its stack at
+    ``_integrity``'s PRAGMA integrity_check.  quick_check alone still takes
+    about a minute on that Core, so the Core's answer is also cached.
+    """
+
+    def setUp(self) -> None:
+        import sqlite3
+        from datetime import datetime, timezone
+
+        self._dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._dir.cleanup)
+        self.root = Path(self._dir.name)
+        self.db = self.root / "core.sqlite"
+        self.connection = sqlite3.connect(self.db)
+        self.addCleanup(self.connection.close)
+        self.connection.execute("CREATE TABLE t (x INTEGER PRIMARY KEY, y TEXT UNIQUE)")
+        self.connection.commit()
+        self.cache = self.root / "sec-lane-integrity-cache.json"
+        self.now = datetime(2026, 9, 27, 10, tzinfo=timezone.utc)
+
+    def test_quick_check_not_integrity_check(self) -> None:
+        from dalton_core import sec_company_facts_lane as lane
+
+        seen: list[str] = []
+        real = self.connection
+
+        class Spy:
+            def execute(self, sql, *args):
+                seen.append(sql)
+                return real.execute(sql, *args)
+
+        self.assertEqual(lane._integrity(Spy()), "ok")
+        self.assertEqual(seen, ["PRAGMA quick_check"])
+
+    def test_the_core_answer_is_cached_for_a_day_and_only_when_ok(self) -> None:
+        from datetime import timedelta
+
+        from dalton_core import sec_company_facts_lane as lane
+
+        first = lane.cached_integrity(self.connection, self.cache, now=self.now)
+        self.assertEqual((first["result"], first["cached"]), ("ok", False))
+        with patch.object(lane, "_integrity", side_effect=AssertionError("re-ran")):
+            again = lane.cached_integrity(
+                self.connection, self.cache, now=self.now + timedelta(hours=23))
+        self.assertEqual((again["result"], again["cached"]), ("ok", True))
+        self.assertEqual(again["checked_at"], first["checked_at"])
+        self.assertEqual(os.stat(self.cache).st_mode & 0o777, 0o600)
+        # A day later it is checked again; a failure is reported and never
+        # cached, so the next run checks again too.
+        with patch.object(lane, "_integrity", return_value="*** page 3 never used"):
+            bad = lane.cached_integrity(
+                self.connection, self.cache, now=self.now + timedelta(days=1))
+        self.assertEqual((bad["result"], bad["cached"]), ("*** page 3 never used", False))
+        with patch.object(lane, "_integrity", return_value="ok") as rerun:
+            lane.cached_integrity(
+                self.connection, self.cache, now=self.now + timedelta(days=1, minutes=5))
+        rerun.assert_called_once()
+
+    def test_a_replaced_database_file_is_checked_afresh(self) -> None:
+        import sqlite3
+
+        from dalton_core import sec_company_facts_lane as lane
+
+        lane.cached_integrity(self.connection, self.cache, now=self.now)
+        # A restore puts another file at the same path.  The old one stays
+        # open, so its inode cannot be handed to the new file.
+        staged = self.root / "restored.sqlite"
+        restored = sqlite3.connect(staged)
+        restored.execute("CREATE TABLE u (x)")
+        restored.commit()
+        restored.close()
+        os.replace(staged, self.db)
+        replaced = sqlite3.connect(self.db)
+        self.addCleanup(replaced.close)
+        result = lane.cached_integrity(replaced, self.cache, now=self.now)
+        self.assertFalse(result["cached"])
+
+    def test_an_unwritable_cache_only_costs_a_check(self) -> None:
+        from dalton_core import sec_company_facts_lane as lane
+
+        missing = self.root / "no-such-dir" / "cache.json"
+        for _ in range(2):
+            result = lane.cached_integrity(self.connection, missing, now=self.now)
+            self.assertEqual((result["result"], result["cached"]), ("ok", False))
 
 
 if __name__ == "__main__":

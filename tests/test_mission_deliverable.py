@@ -224,7 +224,7 @@ class NumberDisciplineTests(unittest.TestCase):
     def test_the_number_contract_moved_so_held_rounds_are_asked_again(self) -> None:
         from dalton_core.mission_deliverable import NUMBER_SOURCE_CONTRACT_VERSION
 
-        self.assertEqual(NUMBER_SOURCE_CONTRACT_VERSION, "number-source-contract:0.5")
+        self.assertEqual(NUMBER_SOURCE_CONTRACT_VERSION, "number-source-contract:0.6")
 
     def test_the_drafting_prompt_asks_for_the_row_s_own_wording(self) -> None:
         from dalton_core.company_dossier_draft import (
@@ -297,6 +297,42 @@ class NumberDisciplineTests(unittest.TestCase):
 
         self.assertNotIn(NUMBER_SOURCE_CONTRACT_VERSION, (
             "number-source-contract:0.3",))
+
+    def test_a_day_first_period_or_a_dated_row_text_sources_its_month_day(
+        self,
+    ) -> None:
+        # IBM history_of_price_drivers (4f29556e, d4c74314; replies
+        # c4606084 and 4c6611f2 replayed): refused twice for the "23" of
+        # "6 月 23 日", which C23's period "23 Jun 2026" names day first.
+        c23 = {"text": ("IBM was named among the top five contributors to the "
+                        "upside in the S&P, indicating the stock traded higher "
+                        "while tech, memory and semis led a broad selloff."),
+               "period": "23 Jun 2026"}
+        others = [{"text": "Trump publicly praised IBM's CEO.", "period": "not specified"},
+                  {"text": "a squeeze higher", "period": "prior trading day (undated note)"}]
+        live = ("但 2026 年 6 月 23 日科技股普跌时，IBM 反而是标普涨幅贡献前五的个股之一。"
+                "在此之前，6 月 23 日 IBM 逆势领涨。")
+        self.assertEqual(unsourced_numbers(live, [c23, *others]), [])
+        self.assertEqual(unsourced_numbers(live, others), ["23", "23"])
+        # Exact: a neighbouring day, another month, or the same digits as a
+        # quantity are still figures no cited row carries.
+        self.assertEqual(unsourced_numbers("6 月 24 日领涨。", [c23]), ["24"])
+        self.assertEqual(unsourced_numbers("7月23日领涨。", [c23]), ["23"])
+        self.assertEqual(unsourced_numbers("领涨 23 家。", [c23]), ["23"])
+        self.assertEqual(unsourced_numbers("IBM rose on 23 Jun 2026.", [c23]), [])
+        self.assertEqual(unsourced_numbers("IBM rose on 23 Jun 2025.", [c23]), ["23"])
+        self.assertEqual(unsourced_numbers("IBM rose on June 23.", [c23]), [])
+        self.assertEqual(unsourced_numbers("IBM rose on 6/23.", [c23]), [])
+        # The row's statement binds as surely as its period column, in any
+        # spelling -- but only the day it names.
+        for text in ("IBM led the S&P on 2026-06-23.", "IBM led the S&P on June 23.",
+                     "IBM led on 6/23.", "IBM 在6月23日领涨。"):
+            row = {"text": text, "period": "not specified"}
+            self.assertEqual(unsourced_numbers("6 月 23 日领涨。", [row]), [], text)
+            self.assertEqual(unsourced_numbers("6 月 25 日领涨。", [row]), ["25"], text)
+        # "may" in a period is a verb before it is a month.
+        self.assertEqual(unsourced_numbers(
+            "5月23日。", [{"text": "x", "period": "day 23 may slip"}]), ["23"])
 
 
 class AuthorityTests(DeliverableHarness):

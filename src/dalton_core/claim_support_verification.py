@@ -77,7 +77,15 @@ _SCHEMA_PATH = Path(__file__).with_name("claim_support_schema.sql")
 # added facts.  Under v1 about half of the day's ``not_supported`` verdicts
 # were statements the cited text said almost word for word
 # (``claim_support_context``).
-CONTRACT_REF = "claim-support-verification:v2"
+# v3 (2026-09-27): the question says a conclusion one passage of the cited text
+# directly states in other words, or that follows from it with no further
+# premise, is supported -- with examples either way -- and a statement is
+# rejected only when a model of a second, independent family does not admit it
+# either (``ClaimSupportVerifier`` second opinion).  Legacy's v2 rejections of
+# the day still read EPAM's "the software and high tech decline was due to
+# non-AI ramp-downs outweighing AI growth" -- the call's own words -- as an
+# added conclusion.
+CONTRACT_REF = "claim-support-verification:v3"
 # Before admission, and after it for the Claims admitted before this existed.
 # Two purposes rather than one so the day ledger, the model page and the caps
 # can tell a morning's admissions from the backlog being worked down.
@@ -112,6 +120,12 @@ DEFAULT_SETTINGS: Mapping[str, Any] = {
     "backfill_batches_per_run": 1,
     "backfill_items_per_batch": 20,
     "backfill_claim_sources": ["sales_notes", "alphaengine"],
+    # 2026-09-27: a first answer that does not admit a statement is put to a
+    # model of another family before it counts (``ClaimSupportVerifier``).
+    # Same purpose, so the same daily ceiling.  Needs a second
+    # verify-capable family in the purpose's chain; without one the first
+    # answer stands, and the run summary says so.
+    "second_opinion_on_rejection": True,
 }
 # One call carries at most this many statements; a window rarely has more
 # than five suggestions, each filed under one or two subjects.  The forward
@@ -163,6 +177,13 @@ def route_unavailable_failure(text: Any) -> bool:
     return isinstance(text, str) and any(phrase in text for phrase in _ROUTE_UNAVAILABLE_PHRASES)
 
 
+def _not_independent(text: Any) -> bool:
+    """Whether a refusal is the chain having no model independent of the families given."""
+
+    return isinstance(text, str) and ("verifier_not_independent" in text
+                                      or "is independent of the" in text)
+
+
 def systemic_failure(text: Any) -> bool:
     """A failure that is never counted towards holding statements for a person."""
 
@@ -210,7 +231,8 @@ def load_settings(state_dir: str | Path | None) -> dict[str, Any]:
          "backfill_daily_cap_usd": 0.50,   # backfill, USD per UTC day
          "backfill_batches_per_run": 1,    # calls per extraction run
          "backfill_items_per_batch": 20,   # statements per call (max 20)
-         "backfill_claim_sources": ["sales_notes", "alphaengine"]}
+         "backfill_claim_sources": ["sales_notes", "alphaengine"],
+         "second_opinion_on_rejection": true}  # a rejection needs two families
 
     The backfill starts slow on purpose (one call of twenty statements per
     extraction run): what it rejects is challenged and *retired*, retirements
@@ -239,6 +261,8 @@ def load_settings(state_dir: str | Path | None) -> dict[str, Any]:
             value = wire[key]
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 100:
                 raise ClaimSupportError(f"{key} must be 0..100 dollars")
+    if "second_opinion_on_rejection" in wire and not isinstance(wire["second_opinion_on_rejection"], bool):
+        raise ClaimSupportError("second_opinion_on_rejection must be true or false")
     for key, maximum in (("backfill_batches_per_run", 20), ("backfill_items_per_batch", MAX_ITEMS_PER_CALL)):
         if key in wire:
             value = wire[key]
@@ -327,12 +351,24 @@ def build_prompt(items: Sequence[Mapping[str, Any]]) -> str:
         "earnings call or filing speaks for that company) or a speaker label in the cited_text shows "
         "it, e.g. 'EPAM said', 'Cognizant's Ravi Kumar said', 'BofA noted', 'the desk', 'an analyst "
         "asked', and reading 'we'/'our' as that party; (c) paraphrase, synonyms, translation, "
-        "and condensation or summary that keeps the meaning. "
+        "and condensation or summary that keeps the meaning; (d) a conclusion that one passage of the "
+        "cited_text states in other words, or that follows from that passage with no further premise, "
+        "e.g. text 'Software and high tech experienced project ramp downs concentrated in non-AI "
+        "services, which outweighed the growth in AI, cloud, and cybersecurity work' stated as 'the "
+        "software and high tech vertical declined because non-AI ramp-downs outweighed AI growth' "
+        "(ramp-downs that outweigh the growth are a decline, and the text gives the cause); text 'the "
+        "stock is down 10% on these concerns, which Fred views as overdone' stated as 'Fred sees the "
+        "sell-off as an overreaction'. "
         "'not_supported' when the statement adds a fact, a cause, a magnitude, a comparison or a "
         "conclusion that neither the cited_text nor the document facts give; overstates, reverses or "
         "drops the hedging of what the text says; or attributes the words to a party other than the "
         "one the cited_text or the document facts show speaking -- a third party the text quotes "
-        "is not the house.\n"
+        "is not the house. A conclusion that needs a premise the text does not give is added, not "
+        "restated: e.g. 'revenue fell' and, elsewhere, 'hiring slowed' stated as 'revenue fell because "
+        "hiring slowed'; 'could lift the low end of guidance' stated as 'will raise guidance'; one "
+        "segment's or one client's trend stated as the whole company's; or whose stock, guidance or "
+        "segment it is, when the cited_text does not show it (a heading or company name outside "
+        "cited_text is not shown).\n"
         "subject: 'about_subject' when the statement's finding is about the named subject company, "
         "or the cited_text itself says how it bears on that company; 'about_other' when the finding "
         "is really about another company, a sector or the market and the cited_text does not connect "
@@ -586,6 +622,36 @@ class ClaimSupportVerdictStore:
              None if detail is None else str(detail)[:500], _now()),
         )
 
+    def first_opinions(self, keys: Sequence[str]) -> dict[str, dict[str, Any]]:
+        """item key -> the first family's answer that did not admit it (contract v3)."""
+
+        found: dict[str, dict[str, Any]] = {}
+        for key in dict.fromkeys(keys):
+            try:
+                row = self.connection.execute(
+                    "SELECT record_json, content_hash FROM claim_support_first_opinions "
+                    "WHERE item_key=? AND contract_ref=?", (key, CONTRACT_REF)).fetchone()
+            except sqlite3.Error:
+                return {}
+            if row is None:
+                continue
+            record = json.loads(row[0])
+            if content_hash({k: v for k, v in record.items() if k != "content_hash"}) != row[1]:
+                raise ClaimSupportError("claim support first opinion drifted")
+            found[key] = record
+        return found
+
+    def record_first_opinion(self, record: Mapping[str, Any]) -> None:
+        self.write(
+            "INSERT OR IGNORE INTO claim_support_first_opinions(item_key,contract_ref,purpose,support,"
+            "subject_relation,other_subject,work_order_ref,route_decision_ref,record_json,content_hash,"
+            "created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (record["item_key"], record["contract_ref"], record["purpose"], record["support"],
+             record["subject_relation"], record.get("other_subject"), record["work_order_ref"],
+             record.get("route_decision_ref"), canonical_json(dict(record)), record["content_hash"],
+             record["created_at"]),
+        )
+
     def recheck_marks(self, rule_ref: str) -> dict[str, str]:
         """candidate ref -> outcome, for every held candidate the recheck marked under ``rule_ref``."""
 
@@ -707,6 +773,8 @@ class ClaimSupportVerifier:
         max_attempts: int = MAX_ATTEMPTS,
         max_prompt_bytes: int = 48000,
         max_items_per_call: int = MAX_ITEMS_PER_CALL,
+        second_opinion: bool = False,
+        second_opinion_route: Callable[[frozenset[str]], str | None] | None = None,
     ) -> None:
         self.store = store
         self.connection = store.connection
@@ -722,6 +790,13 @@ class ClaimSupportVerifier:
         self.max_attempts = int(max_attempts)
         self.max_prompt_bytes = int(max_prompt_bytes)
         self.max_items_per_call = max(1, min(int(max_items_per_call), MAX_ITEMS_PER_CALL))
+        # 2026-09-27 (v3): a first answer that does not admit a statement is
+        # put to a model of another family; the statement is rejected only if
+        # that one does not admit it either.  ``second_opinion_route`` answers,
+        # for the families already involved (drafter and first verifier), why
+        # no link of the chain is outside them -- or None when one is.
+        self.second_opinion = bool(second_opinion)
+        self.second_opinion_route = second_opinion_route
         self.records = ClaimSupportVerdictStore(store)
 
     # -- reads --------------------------------------------------------------------
@@ -774,7 +849,8 @@ class ClaimSupportVerifier:
         self._record_attempt(request_key + suffix, bucket, reason)
 
     def _record_verdict(self, item: Mapping[str, Any], verdict: Mapping[str, Any],
-                        call: Mapping[str, Any], producer_refs: Sequence[str]) -> dict[str, Any]:
+                        call: Mapping[str, Any], producer_refs: Sequence[str],
+                        extra: Mapping[str, Any] | None = None) -> dict[str, Any]:
         record = {
             "schema_version": SCHEMA_VERSION, "contract_ref": CONTRACT_REF,
             "item_key": item["item_key"], "subject_ref": item["subject_ref"],
@@ -787,6 +863,7 @@ class ClaimSupportVerifier:
             "route_decision_ref": call.get("route_decision_ref"),
             "invocation_ref": call.get("invocation_ref"),
             "producer_route_refs": list(producer_refs),
+            **dict(extra or {}),
             "created_at": _now(),
         }
         record["content_hash"] = content_hash(record)
@@ -858,10 +935,30 @@ class ClaimSupportVerifier:
         pending = [item for item in items
                    if item["item_key"] not in verdicts and item["item_key"] not in unverifiable]
         outcome: dict[str, Any] = {"verdicts": verdicts, "unverifiable": unverifiable,
-                                   "cost_micros": 0, "calls": 0, "work_order_refs": []}
+                                   "cost_micros": 0, "calls": 0, "work_order_refs": [],
+                                   "second_opinions": {"asked": 0, "overturned": 0, "confirmed": 0,
+                                                       "unavailable": None}}
         now = self.clock().astimezone(timezone.utc)
-        for chunk in self._chunks(pending):
+        # v3: a first answer that did not admit a statement and is still
+        # waiting for its second opinion is not asked again.
+        opinions = self.records.first_opinions([item["item_key"] for item in pending])
+        if opinions and not self.second_opinion:
+            # Switched off since: the first answer is the verdict.
+            for item in pending:
+                if item["item_key"] in opinions:
+                    self._settle_on_first(item, opinions[item["item_key"]], outcome,
+                                          {"status": "disabled"})
+        for chunk in self._chunks([item for item in pending if item["item_key"] not in opinions]):
             status = self._ask(mission, chunk, now, outcome)
+            if status == "deferred":
+                outcome.update({"status": "deferred"})
+                return outcome
+        opinions = {**opinions, **outcome.pop("_first_opinions", {})}
+        second = [item for item in pending
+                  if item["item_key"] in opinions and item["item_key"] not in outcome["verdicts"]
+                  and item["item_key"] not in outcome["unverifiable"]]
+        for chunk in self._chunks(second):
+            status = self._ask_second(mission, chunk, opinions, now, outcome)
             if status == "deferred":
                 outcome.update({"status": "deferred"})
                 return outcome
@@ -874,6 +971,178 @@ class ClaimSupportVerifier:
             return outcome
         outcome["status"] = "exhausted" if outcome["unverifiable"] else "verified"
         return outcome
+
+    # -- the second opinion (v3) ------------------------------------------------------
+
+    def _settle_first_answer(self, item: Mapping[str, Any], verdict: Mapping[str, Any],
+                             call: Mapping[str, Any], producer_refs: Sequence[str],
+                             outcome: dict[str, Any]) -> None:
+        """Record an admitting first answer; keep a rejecting one for a second family."""
+
+        key = item["item_key"]
+        if admissible(verdict) or not self.second_opinion:
+            outcome["verdicts"][key] = self._record_verdict(item, verdict, call, producer_refs)
+            return
+        opinion = {
+            "schema_version": SCHEMA_VERSION, "contract_ref": CONTRACT_REF, "item_key": key,
+            "purpose": self.purpose, "support": verdict["support"],
+            "subject_relation": verdict["subject_relation"],
+            "other_subject": verdict.get("other_subject"),
+            "work_order_ref": str(call.get("work_order_ref") or ""),
+            "route_decision_ref": call.get("route_decision_ref"),
+            "invocation_ref": call.get("invocation_ref"),
+            "producer_route_refs": list(producer_refs), "created_at": _now(),
+        }
+        opinion["content_hash"] = content_hash(opinion)
+        why = self._no_second_family(producer_refs, call.get("route_decision_ref"))
+        if why:
+            self._settle_on_first(item, opinion, outcome, {"status": "unavailable", "reason": why})
+            return
+        self.records.record_first_opinion(opinion)
+        outcome.setdefault("_first_opinions", {})[key] = self.records.first_opinions([key]).get(key, opinion)
+
+    def _no_second_family(self, producer_refs: Sequence[str], first_route: Any) -> str | None:
+        """Why no model of another family can give a second opinion, or None when one can."""
+
+        if self.second_opinion_route is None:
+            return None  # nothing to check against: the router decides
+        if not isinstance(first_route, str) or not first_route:
+            return "the first answer's route is unknown, so no other family can be chosen"
+        families: set[str] = set()
+        for ref in (*producer_refs, first_route):
+            if self.producer_family is None:
+                break
+            try:
+                family = self.producer_family(ref)
+            except Exception as exc:  # noqa: BLE001 - unknown lineage: say so, keep the first answer
+                return f"the model family of {ref} cannot be read: {exc}"
+            if isinstance(family, str) and family:
+                families.add(family)
+        try:
+            return self.second_opinion_route(frozenset(families))
+        except Exception:  # noqa: BLE001 - an unreadable chain is the router's to refuse
+            return None
+
+    def _settle_on_first(self, item: Mapping[str, Any], opinion: Mapping[str, Any],
+                         outcome: dict[str, Any], second: Mapping[str, Any]) -> None:
+        """The first answer is the verdict: no second family could be asked."""
+
+        if second.get("status") == "unavailable":
+            outcome["second_opinions"]["unavailable"] = second.get("reason")
+        outcome["verdicts"][item["item_key"]] = self._record_verdict(
+            item, opinion, opinion, opinion.get("producer_route_refs") or (),
+            extra={"second_opinion": dict(second)})
+
+    def _ask_second(self, mission: Mapping[str, Any], chunk: Sequence[Mapping[str, Any]],
+                    opinions: Mapping[str, Mapping[str, Any]], now: datetime,
+                    outcome: dict[str, Any]) -> str:
+        """Put the first family's rejections to a model of another family.
+
+        The same purpose -- so the same daily ceiling and the same hourly
+        retry -- with the first answer's own route decision added to the
+        producers the router must be independent of, so the chain skips the
+        drafter's family *and* the first verifier's.  A statement is rejected
+        only when this answer does not admit it either; the verdict carries
+        both answers.  A chain with no model outside both families keeps the
+        first answer and says so.
+        """
+
+        from .cockpit_model import CockpitModelPoolExhausted, CockpitModelRouteUnavailable
+
+        keys = sorted(item["item_key"] for item in chunk)
+        request_key = content_hash({"purpose": self.purpose, "items": keys,
+                                    "stage": "second_opinion"})[:32] + ":second"
+        bucket = now.strftime("%Y-%m-%dT%H")
+        prior = self._attempts(request_key)
+        side = [self._attempts(request_key + suffix) for suffix in _SIDE_KEY_SUFFIXES]
+        if (prior is not None and prior["attempts"] >= self.max_attempts
+                and not systemic_failure(prior["last_reason"])):
+            for item in chunk:
+                outcome["unverifiable"][item["item_key"]] = (
+                    f"the second opinion failed {prior['attempts']} times "
+                    f"(last: {prior['last_reason']})")
+            return "exhausted"
+        if any(row is not None and row["last_bucket"] == bucket for row in (prior, *side)):
+            outcome["reason"] = "the second opinion already failed this hour; retried next hour"
+            return "deferred"
+        try:
+            spent = int(self.spend_today(self.purpose, now.date().isoformat()))
+        except Exception as exc:  # noqa: BLE001 - an unreadable ceiling defers
+            outcome["reason"] = f"the daily ceiling cannot be read: {exc}"
+            return "deferred"
+        if spent >= self.daily_cap_micros:
+            outcome["reason"] = (f"the {self.purpose} daily ceiling is reached "
+                                 f"({spent} of {self.daily_cap_micros} micros)")
+            outcome["cap_reached"] = True
+            return "deferred"
+        producer_refs = sorted(
+            {str(item["producer_route_ref"]) for item in chunk}
+            | {str(opinions[item["item_key"]]["route_decision_ref"]) for item in chunk
+               if opinions[item["item_key"]].get("route_decision_ref")})
+        try:
+            call = self.model_call(
+                purpose=self.purpose, request_id=f"{request_key}:{bucket}", prompt=build_prompt(chunk),
+                mission=mission, producer_route_decision_refs=producer_refs,
+            )
+        except CockpitModelPoolExhausted as exc:
+            outcome["reason"] = f"{type(exc).__name__}: {exc}"
+            return "deferred"
+        except Exception as exc:  # noqa: BLE001 - classified below
+            reason = f"{type(exc).__name__}: {exc}"
+            outcome["reason"] = reason
+            if _not_independent(reason):
+                # The chain lost its other family between the check and the call.
+                for item in chunk:
+                    self._settle_on_first(item, opinions[item["item_key"]], outcome,
+                                          {"status": "unavailable", "reason": reason[:300]})
+                return "verified"
+            if isinstance(exc, CockpitModelRouteUnavailable) or systemic_failure(reason):
+                self._record_systemic(request_key, bucket, reason)
+                outcome["systemic"] = True
+                return "deferred"
+            attempts = self._record_attempt(request_key, bucket, reason)
+            if attempts >= self.max_attempts:
+                for item in chunk:
+                    outcome["unverifiable"][item["item_key"]] = (
+                        f"the second opinion failed {attempts} times (last: {reason})")
+                return "exhausted"
+            return "deferred"
+        outcome["calls"] += 1
+        outcome["cost_micros"] += int(call.get("cost_micros") or 0)
+        outcome["work_order_refs"].append(call.get("work_order_ref"))
+        answers, problems = parse_verdicts(call.get("text"), len(chunk))
+        for index, answer in answers.items():
+            item = chunk[index]
+            first = opinions[item["item_key"]]
+            second = {"status": "answered", "support": answer["support"],
+                      "subject_relation": answer["subject_relation"],
+                      "other_subject": answer.get("other_subject"),
+                      "work_order_ref": str(call.get("work_order_ref") or ""),
+                      "route_decision_ref": call.get("route_decision_ref")}
+            first_view = {key: first.get(key) for key in (
+                "support", "subject_relation", "other_subject", "work_order_ref", "route_decision_ref")}
+            outcome["second_opinions"]["asked"] += 1
+            if admissible(answer):
+                outcome["second_opinions"]["overturned"] += 1
+                chosen, source = answer, call
+            else:
+                outcome["second_opinions"]["confirmed"] += 1
+                chosen, source = first, first
+            outcome["verdicts"][item["item_key"]] = self._record_verdict(
+                item, chosen, source, first.get("producer_route_refs") or (),
+                extra={"first_opinion": first_view, "second_opinion": second})
+        if len(answers) < len(chunk):
+            reason = "; ".join(problems[:3]) or "the reply left statements unanswered"
+            attempts = self._record_attempt(request_key, bucket, reason)
+            outcome["reason"] = reason
+            if attempts >= self.max_attempts:
+                for index, item in enumerate(chunk):
+                    if index not in answers:
+                        outcome["unverifiable"][item["item_key"]] = (
+                            f"the second opinion failed {attempts} times (last: {reason})")
+                return "exhausted"
+            return "deferred"
+        return "verified"
 
     def _chunks(self, items: Sequence[Mapping[str, Any]]) -> list[list[Mapping[str, Any]]]:
         """Consecutive calls' worth of items, each prompt inside the input bound."""
@@ -954,9 +1223,7 @@ class ClaimSupportVerifier:
         outcome["work_order_refs"].append(call.get("work_order_ref"))
         answers, problems = parse_verdicts(call.get("text"), len(chunk))
         for index, verdict in answers.items():
-            item = chunk[index]
-            outcome["verdicts"][item["item_key"]] = self._record_verdict(
-                item, verdict, call, producer_refs)
+            self._settle_first_answer(chunk[index], verdict, call, producer_refs, outcome)
         if len(answers) < len(chunk):
             reason = "; ".join(problems[:3]) or "the reply left statements unanswered"
             attempts = self._record_attempt(counting_key, bucket, reason)
@@ -975,7 +1242,8 @@ class ClaimSupportVerifier:
 
 def build_verifier(*, store: Any, model_config: Mapping[str, Any], scheduler_db: str | Path,
                    purpose: str, daily_cap_usd: Any,
-                   max_items_per_call: int = FORWARD_ITEMS_PER_CALL) -> ClaimSupportVerifier:
+                   max_items_per_call: int = FORWARD_ITEMS_PER_CALL,
+                   second_opinion: bool = False) -> ClaimSupportVerifier:
     """The production verifier: CockpitModel on the extraction lane's own configuration."""
 
     from .call_budget import default_call_budget
@@ -1004,6 +1272,14 @@ def build_verifier(*, store: Any, model_config: Mapping[str, Any], scheduler_db:
                     router, model_config["routing_policy_ref"], purpose)
         return no_independent_link(chain_links, producer, purpose=purpose)
 
+    def second_opinion_route(families: frozenset[str]) -> str | None:
+        nonlocal chain_links
+        if chain_links is None:
+            with ModelRouter(model_config["model_router_db"], read_only=True) as router:
+                chain_links = verifier_chain_links(
+                    router, model_config["routing_policy_ref"], purpose)
+        return no_link_outside(chain_links, families, purpose=purpose)
+
     return ClaimSupportVerifier(
         store=store, model_call=model.call, purpose=purpose,
         max_prompt_bytes=int(model.budget_for(purpose)["max_input_tokens"]),
@@ -1013,6 +1289,8 @@ def build_verifier(*, store: Any, model_config: Mapping[str, Any], scheduler_db:
             model_config["budget_db"], name, day, scheduler_db=scheduler_db),
         producer_family=family,
         independent_route=independent_route,
+        second_opinion=second_opinion,
+        second_opinion_route=second_opinion_route,
     )
 
 
@@ -1034,6 +1312,26 @@ def verifier_chain_links(router: Any, policy_version_ref: str, purpose: str) -> 
         if profile_id in profiles
         and "provider-controlled-verify" in (profiles[profile_id].get("capabilities") or ())
     ]
+
+
+def no_link_outside(links: Sequence[tuple[str, str]], families: frozenset[str], *,
+                    purpose: str) -> str | None:
+    """Why no verify-capable link of ``links`` is outside ``families``, or None when one is.
+
+    The second opinion (v3) must come from a family that neither drafted the
+    statement nor gave the first answer.  Live on 2026-09-27 both support
+    purposes' chains offered only google-gemini-3 links that can serve a
+    verifier WorkOrder, so there is no such family until the owner adds one.
+    """
+
+    from .model_router import independent_families
+
+    if any(all(independent_families(family, other) for other in families)
+           for _profile_id, family in links):
+        return None
+    return (f"no model of the {purpose} chain that can verify "
+            f"({', '.join(profile_id for profile_id, _family in links) or 'none'}) is outside the "
+            f"families {sorted(families)} that drafted the statement and gave the first answer")
 
 
 def no_independent_link(links: Sequence[tuple[str, str]], producer: str, *,
@@ -1077,6 +1375,7 @@ __all__ = [
     "item_key",
     "load_settings",
     "no_independent_link",
+    "no_link_outside",
     "parse_verdicts",
     "never_sent_admissions",
     "purpose_spend_micros",
