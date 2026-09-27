@@ -9,7 +9,48 @@
 
 ---
 
-（当前没有待部署批次。）
+## 批次 2026-09-27f（main `3fb7dfe9` 及之后）
+
+### 这批解决什么（批次 e 部署后验证中发现，外加"新建工作环境开箱即用"）
+
+| 主题 | 效果 |
+|---|---|
+| **ws-7d 核验停摆**（`70ef64ee` `cd1cae38` `09242179`） | 抽取队列为空时照样启动 support-only 子进程，跑核验、recheck、回补复核和 P13i 复评。mission 升版时，待处理 review 迁到新版本（ws-7d 有 47 条、legacy 有 168 条卡在旧版本，部署后会自动迁过去）。recheck 对同义改写去重（阈值 0.85，数字和否定词必须完全一致）。核验升到 v3："由原文直接推出的结论"算作支持；拒绝需要第二个模型家族也同意（目前线上只有 Gemini 一个家族，暂时回退为单家族判定）。 |
+| **dossier 与 SEC**（`7ad98f15` `58e6bea8` `9d7c882c` `16e67cb8`） | IBM 的"23 Jun 2026"这种日在前的日期能识别了；每家公司的 dossier 最多每 3 小时重写一次；SEC 传输超时不计入次数，并改为退避重试；SEC 的完整性检查改用 quick_check，每天缓存一次。 |
+| **model_spec**（`b6f8728b`） | 同一份申报里精度不同的重复事实，四舍五入后一致就取精确值（IBM 的 EPS 因此能算出来）；"营业利润"缺口不再误诊；DXC 的 EPS 枚举错误变成可修复；旧修复免费重放；META 地域分部不再重复计入国家成员。预计新调用 3 次，约 $1–3。 |
+| **新建工作环境开箱即用**（`010154ad` `b6bc016a` `224019b4` `e0339154` `e2ab0a9b` `cc85ea3e`） | 首个 mission 一次签入整套运行基线（auto-commit 全部规则 + research_plan_auto_start + 封闭格式的预算）。修复了只认 legacy 公司的硬编码（CIK 解析、cockpit 公司名、`source:sec-filings` → `source:sec-edgar`，后者曾让所有环境都显示"0 份可研究的 10-K"）。预算编辑不再误删 independence predicates。新增 parity 检查工具 `scripts/check_workspace_parity.py`，以及新 workspace 端到端 canary 测试：用正式流程新建 workspace，跑完整条链，再做一次升版，任何破坏新环境的改动都会让测试失败。 |
+
+全量测试：见文末"测试记录"。
+
+### 部署与部署后（按顺序，每行一条命令）
+
+```zsh
+zsh ~/Projects/dalton-research-agent-os/docs/ops/deploy.sh
+zsh ~/Projects/dalton-research-agent-os/docs/ops/run-2026-09-27-workspace-parity-owner-steps.sh
+```
+
+第二条会给 ws-7d 补签缺的两条 auto-commit 规则（policy-6），并前后各跑一次 parity 检查。它会先核对当前 release 是否已包含本批代码，没有部署就会直接停止。
+
+### 可选
+
+- **撤回 6 条同义改写的重复 claim**（legacy）：`zsh ~/Projects/dalton-research-agent-os/docs/ops/withdraw-recheck-near-duplicates-2026-09-27.sh` 先 dry-run，确认后在末尾加 `apply`。
+- **让交叉复核生效**：在 cockpit 模型页，给 `claim_support_verifier` / `claim_support_backfill` 加一个非 Gemini 家族、能做核验的模型。
+- **补齐运行项**：ws-7d 缺 verifier 路由和 xai 凭证槽位，ws-e399 缺凭证槽位。用 `align_model_routing.py --apply` 和 `repair_workspace_lane_parity.py --apply` 修复，需要重启对应服务，parity 工具会给出具体命令。
+
+### 需要你决定
+
+- **independence predicates**（要求 producer 与 verifier 的模型家族不同）：legacy policy-14 和 ws-7d policy-2 做预算编辑时被顺带删掉了（bug 已修）。**我建议恢复**。这是一条安全约束，而且它本来就存在，只是被 bug 误删。恢复需要各发一版策略，会触发一次 mission 升版（费用最多约 $3）。可以等下次有其他理由升版时一起做。
+- **IBM 按百万元四舍五入导致无法精确勾稽**：要放宽，需要先在入库时保存 XBRL decimals，按申报精度设容差。属于设计改动，留待以后。
+- **ACN 的 EPS 分子**：需要补一条附注证据（归母净利 + 可赎回少数股东权益）。
+
+### 已知未修
+
+- SEC 车道在 mission 升版后，用同一个 run_key 重放已提交的 run 时会抛 `ResearchPlanClosurePending`（正常运行不会触发）。
+- `research_task` 的 ADHOC_PROBE_TEMPLATES 写死了 legacy 公司。目前三个环境都没有发布这个模板，将来如果发布，需要按 workspace 生成。
+
+### 测试记录
+
+在 main `3fb7dfe9` 上跑全量：10612 个，全部通过（skipped 4），其中包括新 workspace 的 canary。
 
 ---
 
