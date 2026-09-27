@@ -104,9 +104,23 @@ class PlanError(SystemExit):
     """A refusal that is the owner's to resolve, not a crash."""
 
 
-def _next_version_id(current_id: str, version: int) -> str:
-    """``…:15`` for version 15 becomes ``…:16``; the prefix is never guessed."""
+_IDENTITY_SEGMENT = re.compile(r"^[0-9a-f]{16,64}$")
 
+
+def _next_version_id(current_id: str, version: int) -> str:
+    """``…:15`` for version 15 becomes ``…:16``; the prefix is never guessed.
+
+    A workspace's first mission version is named by its proposal hash
+    (``coverage-mission-version:<slug>:<24 hex>``), not by a number.  Reading
+    trailing digits out of a hash either refused (ws-7d's ``…a5c``) or, for a
+    hash that happens to end in digits, silently minted a wrong id; the hash
+    segment is replaced by the version, the name the writer's own cascade
+    gives every later version (``coverage-mission-version:<slug>:2``).
+    """
+
+    prefix, _, last = current_id.rpartition(":")
+    if prefix and _IDENTITY_SEGMENT.fullmatch(last):
+        return f"{prefix}:{version}"
     match = _VERSION_SUFFIX.match(current_id)
     if match is None:
         raise PlanError(f"cannot derive the next version id from {current_id!r}")
