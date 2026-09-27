@@ -114,7 +114,13 @@ def support_progress(summary: Any) -> bool:
     backfill_moved = bool(backfill.get("examined") or backfill.get("unreadable")
                           or backfill.get("unverifiable") or backfill.get("challenged")
                           or backfill.get("retired")) and not backfill.get("deferred")
-    return recheck_moved or rereview_moved or backfill_moved
+    # The P13i subject re-check keeps a drafting run's cadence too: a run that
+    # checked something is followed a tick later, as inside a busy queue.
+    reevaluations = summary.get("subject_reevaluation")
+    reevaluation_moved = isinstance(reevaluations, list) and any(
+        isinstance(item, dict) and (item.get("checked") or item.get("reopened"))
+        for item in reevaluations)
+    return recheck_moved or rereview_moved or backfill_moved or reevaluation_moved
 
 
 def _configuration_fingerprint(path: Path) -> str:

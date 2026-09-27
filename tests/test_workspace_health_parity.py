@@ -113,6 +113,35 @@ class ParityTests(unittest.TestCase):
         self.assertIn("sign_research_plan_auto_start.py",
                       next(row for row in rows if row["check"] == "mission_sec_quarters.precondition")["fix"])
 
+    def _tick(self, lanes):
+        ledger = sqlite3.connect(self.state / "tick-ledger.sqlite")
+        ledger.executescript((ROOT / "src/dalton_core/tick_ledger_schema.sql").read_text())
+        ledger.execute(
+            "INSERT INTO tick_ledger_ticks VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("tick:2", "2026-09-27", "2026-09-27T01:00:00+00:00", "2026-09-27T01:00:01+00:00",
+             "ok", 0, 0, 0, 0, len(lanes), 0, "{}", "{}", None, "0" * 64,
+             "2026-09-27T01:00:01+00:00"))
+        for key, status, counts in lanes:
+            ledger.execute(
+                "INSERT INTO tick_ledger_lanes VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                ("tick:2", "2026-09-27", "2026-09-27T01:00:00+00:00", key, "dispatch_" + key,
+                 "coverage", status, status, 0, 0, json.dumps(counts), None,
+                 "2026-09-27T01:00:01+00:00"))
+        ledger.commit(); ledger.close()
+
+    def test_an_empty_queue_without_maintenance_is_flagged(self):
+        self._mission()
+        self._tick([("document_extraction", "idle", {"awaiting": 0})])
+        statuses = _statuses(check_lanes(self._env()))
+        self.assertEqual(statuses["document_extraction.maintenance_when_queue_empty"], "warn")
+
+    def test_an_empty_queue_with_a_support_only_child_is_fine(self):
+        self._mission()
+        self._tick([("document_extraction", "idle",
+                     {"awaiting": 0, "support": "held", "hold_seconds": 3600})])
+        statuses = _statuses(check_lanes(self._env()))
+        self.assertEqual(statuses["document_extraction.maintenance_when_queue_empty"], "ok")
+
     def test_the_check_writes_nothing_and_the_cli_reports(self):
         self._mission()
         self.store.close()
@@ -144,7 +173,7 @@ class StrandedReviewParityTests(_carry._VersionHarness):
             env.close()
         self.assertEqual(row["status"], "gap")
         self.assertIn("source:alphaengine v2->v3: 1", row["detail"])
-        self.m.carry_open_reviews_forward(_carry.REF)
+        self.m.carry_forward_awaiting_reviews(_carry.REF)
         env = Environment("test", Path(path).parent)
         try:
             report = check_environment(env, include_host=False)

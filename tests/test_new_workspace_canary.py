@@ -585,13 +585,18 @@ class NewWorkspaceCanaryTests(unittest.TestCase):
         # The stall ws-7d hit: the open review stayed on the old version and
         # the extraction queue under the new one was empty.
         self.assertEqual(self.awaiting_in_active_version(), 0)
-        carried = self.writer._carry_open_reviews_forward()  # the extraction tick's first step
-        self.assertEqual(carried, {"carried": 1}, carried)
+        # The extraction tick's first step (DocumentExtractionCoordinator
+        # .dispatch_once -> _carry_awaiting -> carry_forward_awaiting_reviews).
+        from dalton_core.document_extraction_launcher import DocumentExtractionCoordinator
+        tick = object.__new__(DocumentExtractionCoordinator)
+        tick.missions = self.missions
+        carried = tick._carry_awaiting()
+        self.assertEqual([item["status"] for item in carried], ["carried"], carried)
         self.assertEqual(self.awaiting_in_active_version(), 1)
         v2_reviews = self.missions.document_reviews(v2["id"])
         self.assertEqual([(r["document_ref"], r["state"]) for r in v2_reviews],
                          [(still_open[0], "awaiting_human_extraction")])
-        self.assertEqual(self.writer._carry_open_reviews_forward(), {})  # idempotent
+        self.assertEqual(tick._carry_awaiting(), [])  # idempotent
         self.assert_governance_baseline(workspace, v2)  # ... and none after it
 
         # Discovery under v2 does not fetch what v1 already acquired.
@@ -637,6 +642,59 @@ class NewWorkspaceCanaryTests(unittest.TestCase):
         fresh, _ = self.judge(state, run="v2")
         self.assertEqual((fresh["status"], fresh["judged"]), ("succeeded", 1), fresh)
         self.assertEqual(self.judged(), 2)
+
+        # ---- maintenance with the extraction queue empty ----
+        # Nothing is open under v2 any more.  The claim-support checks and the
+        # P13i subject re-check used to run only inside a drafting child, so an
+        # empty queue stopped them; the lane now starts a support-only child
+        # and that child runs all of them.
+        self.assertEqual(self.awaiting_in_active_version(), 0)
+        self.assert_maintenance_runs_with_an_empty_queue(state, v2)
+
+    def assert_maintenance_runs_with_an_empty_queue(self, state: Path, mission) -> None:
+        from dalton_core import document_extraction_cli
+        from dalton_core.document_extraction_cli import run_extraction
+        from dalton_core.document_extraction_launcher import DocumentExtractionCoordinator
+        from tests.test_support_lane_independent import SupportFakeLauncher
+
+        launcher_root = self.root / "support-launcher"
+        launcher_root.mkdir()
+        launcher = SupportFakeLauncher(launcher_root)
+        tick = DocumentExtractionCoordinator(missions=self.missions, launcher=launcher).dispatch_once()
+        self.assertEqual((tick["status"], tick.get("mode"), tick["awaiting"]),
+                         ("launched", "support_only", 0), tick)
+        self.assertTrue(launcher.starts[-1].get("support_only"))
+
+        fixture = state / "canary-fixture-support-only.json"
+        _write_json(fixture, {"schema_version": "0.1", "suggestions": []})
+        ran: list[str] = []
+        base = document_extraction_cli.ExtractionHost
+
+        class Host(base):
+            def __init__(inner, **kwargs):
+                super().__init__(**kwargs)
+                inner._claim_support_verifier = object()
+
+        with patch.object(document_extraction_cli, "ExtractionHost", Host), \
+                patch.object(document_extraction_cli, "_run_claim_support_recheck",
+                             lambda host, db: ran.append("support_recheck") or {"status": "idle"}), \
+                patch.object(document_extraction_cli, "_secondary_sweep",
+                             side_effect=AssertionError("a support-only run reads no document")):
+            summary = run_extraction(
+                state_dir=state, model_config_path=self.model_config,
+                summary_dir=state / "extractions" / "canary-support-only", spool_dir=state / "spool",
+                scheduler_db=state / "scheduler.sqlite", requested_by=None,
+                max_windows=1, max_numeric_windows=0, max_discovery_windows=0,
+                connector_governance=None, web_fetch_governance=None,
+                hermetic_fixture=fixture,
+                candidate_staging=state / "research-review" / "candidate-staging.sqlite",
+                support_only=True)
+        self.assertEqual((summary["stop_reason"], summary["reviews_scanned"], summary["drafted"]),
+                         ("support_only", 0, []), summary)
+        self.assertEqual(ran, ["support_recheck"])
+        [reevaluation] = summary["subject_reevaluation"]
+        self.assertEqual((reevaluation["mission_version_ref"], reevaluation["stop_reason"]),
+                         (mission["id"], None), reevaluation)
 
 
 class NextVersionIdTests(unittest.TestCase):

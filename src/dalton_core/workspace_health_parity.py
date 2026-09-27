@@ -282,6 +282,7 @@ def _last_ticks(env: Environment) -> dict[str, dict[str, Any]]:
             "status": row["status"], "word": row["status_word"],
             "reason": str((counts or {}).get("reason") or "")[:240],
             "reason_code": (counts or {}).get("reason_code"),
+            "counts": counts if isinstance(counts, dict) else {},
             "tick_started_at": tick["started_at"],
         }
     return result
@@ -383,7 +384,32 @@ def check_lanes(env: Environment) -> list[dict[str, Any]]:
         rows.append(_row(section, key, status, detail, fix, operation=spec.operation))
     if env.mission is not None and "mission_sec_quarters" in ticks:
         rows.append(_sec_precondition(env))
+    if env.mission is not None and "document_extraction" in ticks:
+        rows.append(_maintenance_with_empty_queue(ticks["document_extraction"]))
     return rows
+
+
+def _maintenance_with_empty_queue(tick: Mapping[str, Any]) -> dict[str, Any]:
+    """Do the claim-support checks and the P13i re-check run when nothing is queued?
+
+    They ran only inside a drafting child, and no child was started while the
+    queue was empty (ws-7d from 09:00 on 2026-09-27).  Since 93ccbcb8 an empty
+    queue starts a support-only child, held between runs with ``support:
+    held``; a bare ``idle`` over ``awaiting: 0`` is a release without it.
+    """
+
+    counts = tick.get("counts") or {}
+    idle_empty = (str(tick.get("word")) == "idle" and counts.get("awaiting") == 0
+                  and "support" not in counts and counts.get("mode") != "support_only")
+    return _row(
+        "lanes", "document_extraction.maintenance_when_queue_empty", WARN if idle_empty else OK,
+        ("last tick was idle over an empty queue without a support-only child: the claim-"
+         "support recheck/backfill and the P13i subject re-check are not running"
+         if idle_empty else
+         f"last tick: {tick.get('status')} (awaiting {counts.get('awaiting')}"
+         + (f", support {counts.get('support') or counts.get('mode')}" if counts.get('support')
+            or counts.get('mode') else "") + ")"),
+        fix="deploy a release with the support-only extraction child (93ccbcb8 and later)")
 
 
 def _sec_precondition(env: Environment) -> dict[str, Any]:
@@ -520,8 +546,9 @@ def check_mission_reviews(env: Environment) -> list[dict[str, Any]]:
          f"{active_open} open under the active version"
          + (" -- extraction sees nothing to do and its child (and the claim-support "
             "recheck inside it) never starts" if not active_open else "")),
-        fix=("deploy the release with CoverageMissionAuthority.carry_open_reviews_forward: "
-             "the document-extraction tick carries them into the active version by itself"),
+        fix=("deploy a release with CoverageMissionAuthority.carry_forward_awaiting_reviews "
+             "(70ef64ee): the document-extraction tick carries them into the active version "
+             "by itself"),
         stranded=stranded or None))
     try:
         versions = env.core.execute(
