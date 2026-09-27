@@ -75,23 +75,27 @@ MAX_CANDIDATES_PER_COMPANY = 25
 MAX_REMEMBERED_ACCESSIONS = 4000
 
 
-def issuer_for(company_ref: str) -> str | None:
-    """The SEC CIK inside a company ref, or None when there is not one."""
+def issuer_for(company_ref: str, *, state_dir: Any | None = None) -> str | None:
+    """The SEC CIK of a covered company, or None when there is not one.
 
-    if not isinstance(company_ref, str):
-        return None
-    if not company_ref.startswith(COMPANY_REF_CIK_PREFIX):
-        return None
-    cik = company_ref[len(COMPANY_REF_CIK_PREFIX):].strip()
-    return cik if cik.isdigit() else None
+    The ref's own CIK for ``company:sec-cik:`` refs; for the
+    ``company:ticker:`` refs a created workspace uses, the CIK that workspace
+    resolved at first publish (``mission_company_cik``).  Without it every
+    company of ws-7d was skipped and the lane read nothing at all.
+    """
+
+    from .mission_company_cik import company_cik
+
+    return company_cik(company_ref, state_dir=state_dir)
 
 
-def _universe(mission: Mapping[str, Any]) -> list[dict[str, str]]:
+def _universe(mission: Mapping[str, Any], *,
+              state_dir: Any | None = None) -> list[dict[str, str]]:
     """The covered companies with a CIK, in the order the mission prioritised.
 
     A company with no CIK is skipped rather than guessed at: everything this
-    lane reads is keyed by one, and there is no route from a ticker to a CIK
-    that does not involve asking somebody.
+    lane reads is keyed by one, and the only route from a ticker to a CIK is
+    the one the workspace already resolved.
     """
 
     rows: list[dict[str, str]] = []
@@ -102,7 +106,7 @@ def _universe(mission: Mapping[str, Any]) -> list[dict[str, str]]:
         if not isinstance(company_ref, str) or not company_ref.strip():
             continue
         company_ref = company_ref.strip()
-        issuer = issuer_for(company_ref)
+        issuer = issuer_for(company_ref, state_dir=state_dir)
         if issuer is None:
             continue
         rows.append({
@@ -433,7 +437,7 @@ class MissionOwnershipLaneCoordinator:
         from .sec_ownership_core import FORM13F_OPERATION
 
         skipped: list[dict[str, Any]] = []
-        for company in _universe(mission):
+        for company in _universe(mission, state_dir=self.state_dir):
             company_ref = company["company_ref"]
             blocked = self.budget.blocked(company_ref)
             if blocked is not None:

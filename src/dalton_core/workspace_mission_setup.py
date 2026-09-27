@@ -312,61 +312,48 @@ def publish_first_mission(
     )
 
 
-#: The first mission's governance policy already names this rule.  Without it
-#: ``DocumentExtractionService._admit_complete_reviews`` holds every completed
-#: document review with "active governance policy does not list
-#: research-auto-commit:mission-document-qualitative:v1" -- reviews the owner
-#: finished, gated on a signature nobody in a fresh workspace knows to make.
-#: The bootstrap policy a blank Core installs carries no auto-commit block at
-#: all, so the first mission is where the owner's confirmation can carry it.
-#: Only the qualitative rule: it asserts no number (value/unit/scale are null)
-#: and is bound to an exact raw span in a verified original.  The SEC and
-#: filed-figure numeric rules stay unsigned until an owner asks for them, with
-#: ``scripts/sign_auto_commit_rules.py``.
+#: A blank Core's bootstrap policy carries no auto-commit block, no plan
+#: auto-start block and no research budget, so the first mission is where the
+#: owner's confirmation carries the whole runtime baseline in one policy
+#: version -- see ``workspace_governance_baseline`` for what is in it, why,
+#: and what of legacy ``policy-18`` is deliberately left out.  Until
+#: 2026-09-27 only the qualitative document rule was signed here, and ws-7d
+#: met the rest as lane refusals one at a time (policy-3, -4, -5 by hand).
 FIRST_MISSION_AUTO_COMMIT_MAX_RECORDS = 20
 
 
 def ensure_first_mission_auto_commit_policy(
-    store: Any, *, actor_ref: str,
+    store: Any, *, actor_ref: str, mission_budget: Mapping[str, Any] | None = None,
 ) -> dict[str, str]:
-    """Return the policy binding, publishing one that names the document rule.
+    """Return the policy binding, publishing one that carries the baseline.
 
-    Idempotent: a policy that already lists the rule is bound unchanged and
-    nothing is published.  A policy carrying the exclusive filing-count rule
-    is also left alone -- that rule is only valid as the entire rule set, so
-    extending it would publish a set the evaluator rejects.
+    Idempotent: a policy that already carries every baseline rule and a
+    closed research budget is bound unchanged and nothing is published.
+    Whatever the active policy already holds is kept -- an owner's raised
+    budget, a disabled block, the exclusive filing-count rule set -- and only
+    what is missing is added.  ``mission_budget`` is the first mission's
+    budget; the policy's closed ``research_budget`` is its three caps.
     """
 
-    from .research_auto_commit import DOCUMENT_QUALITATIVE_RULE_REF, RULE_REF
+    from .workspace_governance_baseline import baseline_policy_body
 
     version = store.active_policy_version().to_dict()
-    rule = version["policy"].get("research_candidate_auto_commit")
-    listed = list(rule.get("rules") or []) if isinstance(rule, Mapping) else []
-    if DOCUMENT_QUALITATIVE_RULE_REF in listed or RULE_REF in listed:
-        return {"ref": version["id"], "hash": version["content_hash"]}
-    body = {
-        **version["policy"],
+    body, added = baseline_policy_body(
+        version["policy"], mission_budget=mission_budget,
         # ``policy_json`` carries the predicates beside the executable policy;
         # dropping them here would silently relax the independence gate.
-        "independence_predicates": version["independence_predicates"],
-        "research_candidate_auto_commit": {
-            "enabled": True,
-            "rules": listed + [DOCUMENT_QUALITATIVE_RULE_REF],
-            "max_records": (rule.get("max_records") if isinstance(rule, Mapping)
-                            else None) or FIRST_MISSION_AUTO_COMMIT_MAX_RECORDS,
-        },
-    }
+        independence_predicates=version["independence_predicates"])
+    if not added:
+        return {"ref": version["id"], "hash": version["content_hash"]}
     number = int(version["version"]) + 1
     published = store.create_policy(
         body, policy_version_id=f"policy-{number}", version_number=number,
         activate=True, policy_ref=version["policy_ref"],
         prior_version_ref=version["id"], actor_ref=actor_ref,
         change_reason=(
-            "workspace first mission: list "
-            f"{DOCUMENT_QUALITATIVE_RULE_REF} in "
-            "policy.research_candidate_auto_commit.rules so this mission's own "
-            "completed document reviews may be admitted as qualitative Claims "
-            "bound to exact raw spans; every other rule is unchanged"),
+            "workspace first mission: the runtime governance baseline every "
+            "workspace needs for its lanes to run (" + ", ".join(added) + "); "
+            "every other rule is unchanged"),
     )
     return {"ref": published["policy_version_id"],
             "hash": published["content_hash"]}
@@ -412,11 +399,17 @@ def prepare_first_mission_bindings(
         raise WorkspaceMissionSetupError("driver pack template is incomplete")
 
     mission_budget = dict(body.get("budget", {}))
+    # The mandate's budget is read by the same closed-shape checks as the
+    # policy's (document extraction, annual SEC reads).  The foundation's
+    # ceilings also carry ``max_alphaengine_probe_calls_24h``, which those
+    # checks refuse, so the mandate binds the three caps they read.
+    from .workspace_governance_baseline import closed_research_budget
     agenda = AgendaStore(store)
     mandate_ref = f"mandate:first-mission:{suffix}"
     mandate = agenda.create_mandate(
         mandate_ref, objective=_text(body.get("objective"), "objective"),
-        scope_refs=[industry_ref], constraints={"research_budget": mission_budget},
+        scope_refs=[industry_ref],
+        constraints={"research_budget": closed_research_budget(mission_budget)},
         success_criteria={"deliverables": list(body.get("deliverables", [])),
                           "research_questions": list(body.get("research_questions", []))},
         effective_from="1970-01-01T00:00:00.000000+00:00", effective_until=None,
@@ -438,7 +431,8 @@ def prepare_first_mission_bindings(
     method = method_spec.get("value") if isinstance(method_spec, Mapping) else None
     if not isinstance(method, Mapping) or method_spec.get("content_hash") != content_hash(method):
         raise WorkspaceMissionSetupError("constitution method template differs")
-    policy = ensure_first_mission_auto_commit_policy(store, actor_ref=actor_ref)
+    policy = ensure_first_mission_auto_commit_policy(
+        store, actor_ref=actor_ref, mission_budget=mission_budget)
     constitution = ResearchConstitutionAuthority(store).publish_constitution(
         f"constitution:first-mission:{suffix}", industry_ref=industry_ref,
         title=f"{body['title']} Research Constitution",
@@ -463,8 +457,13 @@ def publish_first_mission_to_store(
     store: Any, workspace: WorkspacePaths, *, proposal: Mapping[str, Any],
     proposal_hash: str, actor_ref: str,
     method_foundation: Mapping[str, Any], sec_resolver_identity: str | None = None,
+    sec_ticker_resolver: Callable[[str], Mapping[str, str]] | None = None,
 ) -> dict[str, Any]:
-    """Production entry point used by the owner-only writer operation."""
+    """Production entry point used by the owner-only writer operation.
+
+    ``sec_ticker_resolver`` replaces the workspace-local resolver process; a
+    hermetic rehearsal passes recorded issuers, the writer passes nothing.
+    """
     foundation = _foundation(method_foundation, workspace)
     if proposal.get("method_foundation_hash") != foundation["content_hash"]:
         raise WorkspaceMissionSetupError("proposal method foundation binding differs")
@@ -487,7 +486,7 @@ def publish_first_mission_to_store(
     issuer_names: dict[str, list[str]] = {}
     materialize_first_mission_discovery_plans(
         workspace, mission, sec_resolver_identity=sec_resolver_identity,
-        issuer_names=issuer_names)
+        sec_ticker_resolver=sec_ticker_resolver, issuer_names=issuer_names)
     materialize_first_mission_lane_plans(
         workspace, mission, company_names=issuer_names)
     return mission

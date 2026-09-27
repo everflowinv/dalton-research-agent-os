@@ -2634,9 +2634,50 @@ class CockpitPlane:
 
     # -- labels ----------------------------------------------------------------
 
-    @staticmethod
-    def _members(mission: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
-        return {m["company_ref"]: dict(m) for m in mission["universe"]}
+    def _members(self, mission: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+        """The universe by company ref, each member named where a name is known.
+
+        ``COMPANY_NAMES`` is the legacy universe's five rows; a workspace
+        created through setup covers other companies, and its names live in
+        the mission feed plan its first publish wrote (the SEC resolver's
+        registered names).  Without them the ask context had no name to
+        resolve "Microsoft" to MSFT and the goal editor listed "MSFT ()".
+        """
+
+        members = {m["company_ref"]: dict(m) for m in mission["universe"]}
+        names = self._mission_company_names()
+        for member in members.values():
+            if not member.get("name"):
+                name = names.get(member.get("company_ref")) or COMPANY_NAMES.get(
+                    str(member.get("ticker") or ""))
+                if name:
+                    member["name"] = name
+        return members
+
+    def _mission_company_names(self) -> dict[str, str]:
+        """company_ref -> the first name the mission feed plan gives it."""
+
+        state_dir = getattr(self, "state_dir", None)
+        if state_dir is None:
+            return {}
+        path = Path(state_dir) / "feed-plans" / "mission-feeds-v1.json"
+        try:
+            stamp = path.stat().st_mtime_ns
+        except OSError:
+            return {}
+        cached = getattr(self, "_mission_names_cache", None)
+        if cached is not None and cached[0] == stamp:
+            return cached[1]
+        try:
+            from .mission_company_names import names_from_plan
+            by_ref = names_from_plan(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, ValueError, TypeError):
+            return {}
+        names = {ref: next((name for name in values if name), "")
+                 for ref, values in by_ref.items()}
+        names = {ref: name for ref, name in names.items() if name}
+        self._mission_names_cache = (stamp, names)
+        return names
 
     @staticmethod
     def _label(members: Mapping[str, Mapping[str, Any]], company_ref: str | None) -> str:
@@ -2646,7 +2687,7 @@ class CockpitPlane:
         if member is None:
             return "行业" if company_ref.startswith("industry:") else company_ref.rsplit(":", 1)[-1]
         ticker = member["ticker"]
-        name = COMPANY_NAMES.get(ticker)
+        name = member.get("name") or COMPANY_NAMES.get(ticker)
         return f"{ticker} · {name}" if name and name.upper() != ticker.upper() else ticker
 
     def _url_map(self, tickets: Sequence[Mapping[str, Any]] | None = None
@@ -7847,7 +7888,10 @@ class CockpitPlane:
             members = self._members(mission)
             context = ask_context.build_context(
                 core, question=question, mission=mission, members=members,
-                claims=claims, theses=theses, company_names=COMPANY_NAMES,
+                claims=claims, theses=theses,
+                company_names={**COMPANY_NAMES, **{
+                    str(m.get("ticker")): m["name"] for m in members.values()
+                    if m.get("ticker") and m.get("name")}},
                 label=lambda ref: self._label(members, ref),
                 today=today,
                 duplicates_dropped=len(everything) - len(claims),
@@ -8285,7 +8329,7 @@ class CockpitPlane:
             f"Current objective: {mission['objective']}",
             "Current research questions:",
             *[f"- {q}" for q in mission["research_questions"]],
-            "Companies under coverage: " + ", ".join(f"{m['ticker']} ({COMPANY_NAMES.get(m['ticker'], '')})" for m in members.values()),
+            "Companies under coverage: " + ", ".join(f"{m['ticker']} ({m.get('name') or COMPANY_NAMES.get(m['ticker'], '')})" for m in members.values()),
             "Connected sources: " + ", ".join(SOURCE_LABELS.get(s["source_ref"], s["source_ref"]) for s in mission["source_plan"] if s["status"] == "connected"),
         ]
 

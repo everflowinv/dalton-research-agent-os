@@ -498,6 +498,16 @@ def run_extraction(
         ).fetchall()
         # 2026-09-27: a support-only run reads no window, runs no secondary
         # pass and admits nothing; it goes straight to the support checks.
+        # The P13i subject re-check is maintenance of the same kind -- it reads
+        # pinned bytes of dismissed reviews, never a queue window -- and it ran
+        # only inside the mission loop below, so an empty queue stopped it
+        # too.  It runs here with the same allowances per run.
+        if support_only:
+            for pointer in pointers:
+                mission = host.coverage_mission.mission(pointer["mission_version_id"])
+                actor = requested_by or mission["autonomy"]["automation_principal"]
+                summary.setdefault("subject_reevaluation", []).append(
+                    _reevaluate_unattributed(host, service, windows, mission, actor))
         for pointer in () if support_only else pointers:
             if stop_reason is not None:
                 break
