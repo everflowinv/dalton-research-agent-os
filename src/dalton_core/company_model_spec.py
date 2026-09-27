@@ -345,7 +345,7 @@ class CompanyModelSpecError(ValueError):
 # agree, which is the one thing it must never be asked to do.  So the list is
 # an allow-list keyed on the rule's own message, anything unrecognised stays
 # ``semantic``, and adding to it is a reviewed decision with a version.
-REPAIRABLE_STRUCTURE_RULES_REF = "rule:company-model-spec-repairable-structure:0.3"
+REPAIRABLE_STRUCTURE_RULES_REF = "rule:company-model-spec-repairable-structure:0.4"
 REPAIRABLE_STRUCTURE_RULES: tuple[str, ...] = (
     "a derived line cannot claim a filed concept",
     "a filed subtotal may only be actual/tie authority or unavailable",
@@ -369,6 +369,14 @@ REPAIRABLE_STRUCTURE_RULES: tuple[str, ...] = (
     # derived line cannot claim a filed concept", which has been repairable
     # since 0.1.  Nothing here asks the model to make a number agree.
     "company-presented components must be filed and subtotals must be derived",
+    # 0.4, live 2026-09-27 (DXC 09:36Z, IBM 09:12Z): the diluted_eps line's
+    # ``annual_semantics`` was ``not_applicable``.  The schema the model was
+    # shown enumerates the two admissible values (``direct_annual`` for a filed
+    # annual EPS, ``annual_ratio`` for a derived divide); picking a third is
+    # the same kind of enum choice as the diluted-share rule above, repairable
+    # since 0.1.  DXC's refusal had no repair at all because this rule was
+    # read as ``semantic``.  Nothing here asks the model to make a number agree.
+    "diluted EPS cannot be aggregated from quarterly EPS",
 )
 
 
@@ -679,6 +687,23 @@ REQUIRED_STATEMENT_ROLES: dict[str, tuple[tuple[str, str], ...]] = {
 }
 
 
+# A filed pretax subtotal answers "operating income" for a company that
+# presents none.  IBM's income statement runs Revenue, Cost, Gross profit,
+# "Expense and other (income)" (SG&A, R&D, IP income, other (income) and
+# expense, interest expense), "Total expense and other (income)"
+# (``ibm:ExpenseAndIncomeOther``) and then "Income from continuing operations
+# before income taxes"; no ``us-gaap:OperatingIncomeLoss`` exists in any of its
+# nine held filings.  The structure contract bridges exactly that presentation
+# (gross profit or revenue less company-presented totals = pretax income), so
+# no structure rule depends on an operating subtotal IBM does not file, and the
+# refusal of 2026-09-27 09:12Z blaming one sent the reader after a line that
+# does not exist.  Pretax income is not *called* operating income here; it is
+# the line the company presents in that position.  Exact concepts only.
+PRETAX_INCOME_CONCEPTS: tuple[str, ...] = (
+    "us-gaap:IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest",
+    "us-gaap:IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments",
+)
+
 # Exact concepts that answer a required line whatever the filer calls it, and
 # the statements they may be filed on. A label is the filer's wording, and two
 # of the most common are misses for the needles above: Amazon's capital
@@ -687,6 +712,8 @@ REQUIRED_STATEMENT_ROLES: dict[str, tuple[tuple[str, str], ...]] = {
 # onto the cash-flow statement only. The concept is the filer's claim about
 # what the number *is*; a label is not, so concepts are matched exactly.
 REQUIRED_ROLE_CONCEPTS: dict[tuple[str, str], tuple[tuple[str, ...], tuple[str, ...]]] = {
+    ("income", "operating income"): (
+        ("us-gaap:OperatingIncomeLoss", *PRETAX_INCOME_CONCEPTS), ("income",)),
     ("income", "net income"): (NET_INCOME_CONCEPTS, ("income", "cash")),
     ("cash", "capital expenditure"): (
         CASH_FLOW_ROLE_CONCEPTS["capital_expenditure"], ("cash",)),

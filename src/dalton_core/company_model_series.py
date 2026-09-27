@@ -107,6 +107,54 @@ def period_kind(period_start: Any, period_end: Any) -> str:
     return UNKNOWN
 
 
+#: One filing may state the same fact twice at two precisions: IBM's income
+#: statement shows diluted weighted-average shares "in millions" (953.3) and
+#: its EPS note shows the exact count (953,263,534), both as
+#: ``us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding`` for 2026-04-01..
+#: 06-30 in accession 0000051143-26-000078.  XBRL requires duplicate facts in
+#: one report to agree once rounded to the coarser one's precision, and then
+#: the more precise fact is the value.  Before this, every IBM quarter was
+#: ``ambiguous``, the share series was empty, and a correct diluted-EPS divide
+#: could never be tested.  Values that do not agree that way stay ambiguous.
+DUPLICATE_FACT_POLICY_REF = "series-consistent-duplicate-facts:0.1"
+
+
+def _last_digit_exponent(value: Decimal) -> int:
+    """Power of ten of the last nonzero digit: 946700000 -> 5, 3.80 -> -1."""
+
+    if value == 0:
+        return 0
+    _sign, digits, exponent = value.as_tuple()
+    trailing = 0
+    for digit in reversed(digits):
+        if digit != 0:
+            break
+        trailing += 1
+    return int(exponent) + trailing
+
+
+def _consistent_duplicate(values: set[tuple[Decimal, str]]) -> Decimal | None:
+    """The most precise of two or more facts that agree after rounding.
+
+    Only for one unit and a unique finest precision, and only when every
+    coarser value lies within half a unit of its own last nonzero digit of the
+    finest one (953,300,000 against 953,263,534: 36,466 <= 50,000).  Anything
+    else is a genuine conflict and returns ``None``.
+    """
+
+    if len(values) < 2 or len({unit for _, unit in values}) != 1:
+        return None
+    ordered = sorted((value for value, _ in values), key=_last_digit_exponent)
+    finest = ordered[0]
+    if _last_digit_exponent(ordered[1]) == _last_digit_exponent(finest):
+        return None
+    for coarse in ordered[1:]:
+        half_unit = Decimal(5).scaleb(_last_digit_exponent(coarse) - 1)
+        if abs(coarse - finest) > half_unit:
+            return None
+    return finest
+
+
 def _latest_by_period(
     rows: Iterable[Mapping[str, Any]], *, legacy_replay: bool = False,
 ) -> tuple[dict[tuple[str, str], dict[str, Any]], list[dict[str, Any]]]:
@@ -163,6 +211,11 @@ def _latest_by_period(
             (item["value"], str(item.get("unit") or "").casefold())
             for item in latest
         }
+        precise = _consistent_duplicate(values)
+        if precise is not None:
+            best[key] = next(
+                item for item in reversed(latest) if item["value"] == precise)
+            continue
         if len(values) != 1:
             ambiguous.append({
                 "period_start": key[0] or None, "period_end": key[1],

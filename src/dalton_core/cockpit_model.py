@@ -1281,6 +1281,30 @@ def _validate_structured_output_repair_authority(
         _validate_model_spec_request_namespace(
             parent_work["metadata"].get("request_id", ""), parent_base, config,
         )
+    # ``repair_number`` is the depth below the root; ``max_attempts`` bounds
+    # the repairs asked under one repair contract.  An ancestor answered under
+    # an earlier contract was replayed, not asked again, so it is not this
+    # contract's attempt (company_model_cli.REPAIR_REPLAY_POLICY_REF).  Count
+    # the contiguous same-contract ancestors from the Scheduler itself.
+    same_contract = 1
+    walk = (None if number == 1 else
+            (parent_work.get("metadata") or {}).get("structured_output_repair"))
+    while (
+        isinstance(walk, Mapping)
+        and walk.get("repair_contract_hash") == binding.get("repair_contract_hash")
+    ):
+        same_contract += 1
+        if walk.get("repair_number") == 1:
+            break
+        ancestor = scheduler.work_order_authority(
+            (walk.get("repair_parent") or {}).get("work_order_ref"))
+        if ancestor is None:
+            raise CockpitModelError("structured output repair ancestry is not contiguous")
+        walk = ((ancestor["work_order"].get("metadata") or {})
+                .get("structured_output_repair"))
+    if same_contract > binding["repair_config"]["max_attempts"]:
+        raise CockpitModelError(
+            "structured output repair exceeds its contract's attempts")
     error = CompanyModelSpecError(
         binding["validation_error"]["message"],
         code=binding["validation_error"]["code"],

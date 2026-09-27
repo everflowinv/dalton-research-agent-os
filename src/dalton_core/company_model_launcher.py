@@ -60,10 +60,9 @@ class CompanyModelSpecLauncher(LaneChildLauncher):
         return content_hash(structured_output_repair_config(config))
 
     def financial_validation_contract_hash(self) -> str:
-        from .model_forecast_driver import (
-            CASH_FLOW_COMPANION_VALIDATION_CONTRACT_HASH,
-        )
-        return CASH_FLOW_COMPANION_VALIDATION_CONTRACT_HASH
+        from .company_model_cli import model_spec_validation_contract_hash
+
+        return model_spec_validation_contract_hash()
 
     def permission_control_projection(self) -> dict[str, str]:
         """Runtime code whose change can authorize a held model Work anew."""

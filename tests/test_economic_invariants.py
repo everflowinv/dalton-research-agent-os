@@ -259,7 +259,7 @@ class DirectionPremiseTests(unittest.TestCase):
 
     def test_the_premise_change_is_a_new_validator_contract(self):
         self.assertEqual(ei.FORECAST_INVARIANT_CONTRACT_REF,
-                         "forecast-economic-invariants:7")
+                         "forecast-economic-invariants:8")
         self.assertIn("direction_premise", ei.FORECAST_INVARIANT_CONTRACT)
 
 

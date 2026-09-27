@@ -105,7 +105,7 @@ class GooglStructureRuleTests(unittest.TestCase):
 
     def test_the_rule_list_and_the_contract_are_versioned_together(self):
         self.assertEqual(REPAIRABLE_STRUCTURE_RULES_REF,
-                         "rule:company-model-spec-repairable-structure:0.3")
+                         "rule:company-model-spec-repairable-structure:0.4")
         self.assertEqual(REPAIR_CONTRACT["eligible_structure_rules_ref"],
                          REPAIRABLE_STRUCTURE_RULES_REF)
         self.assertIn(GOOGL_RULE, REPAIR_CONTRACT["eligible_structure_rules"])
@@ -340,7 +340,7 @@ class RequestInFlightTests(unittest.TestCase):
         # the same judgement is bought once.  Minting a fresh id to dodge the
         # lease would buy it twice.
         self.assertEqual(REQUEST_IN_FLIGHT_STATUS, "request_in_flight")
-        self.assertIn("0.4", REPAIR_CONTRACT_REF)
+        self.assertIn("0.5", REPAIR_CONTRACT_REF)
 
 
 if __name__ == "__main__":  # pragma: no cover

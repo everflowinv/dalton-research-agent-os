@@ -111,6 +111,21 @@ ADDITIVE_SEGMENT_AXES = frozenset({
     "srt:ProductOrServiceAxis",
     "us-gaap:ProductOrServiceAxis",
 })
+# Geographic axes carry two granularities side by side.  Meta's 10-K
+# (accession 0001628280-26-003942) files revenue on srt:StatementGeographicalAxis
+# as United States & Canada 52,888, Europe 31,210, Asia-Pacific 36,154 and Rest
+# of World 14,650 -- which add to the consolidated 134,902 for 2023 -- and also
+# ``country:US`` 49,780, the United States inside "United States & Canada".
+# Summing all five gave 184,682 and failed every forecast of META since
+# 2026-09-25.  An ISO country member beside regional members is therefore
+# either a disjoint part ("United States" + "International") or an "of which"
+# inside one region; both readings are checked exactly and neither is assumed.
+GEOGRAPHIC_AXES = frozenset({
+    "srt:StatementGeographicalAxis",
+    "us-gaap:StatementGeographicalAxis",
+})
+COUNTRY_MEMBER_PREFIX = "country:"
+
 # Durable identity for the closed semantics used to admit a forecast. This is
 # deliberately narrower than a source-code or release hash: only a change to
 # the validator contract may release a run held by a previous invariant
@@ -125,7 +140,10 @@ ADDITIVE_SEGMENT_AXES = frozenset({
 # Version 7 applies the direction check only where operating income is
 # provably revenue times a constant: a cost line carried on its own growth
 # rate no longer counts as a "held cost ratio".
-FORECAST_INVARIANT_CONTRACT_REF = "forecast-economic-invariants:7"
+# Version 8 reads an ISO ``country:`` member beside regional members on one
+# geographic axis as a possible "of which" country (see
+# ``GEOGRAPHIC_AXES``), not as a sixth disjoint region.
+FORECAST_INVARIANT_CONTRACT_REF = "forecast-economic-invariants:8"
 FORECAST_INVARIANT_CONTRACT = {
     "schema_version": "forecast-economic-invariant-contract-0.1",
     "contract_ref": FORECAST_INVARIANT_CONTRACT_REF,
@@ -133,6 +151,7 @@ FORECAST_INVARIANT_CONTRACT = {
         "additive_axes": sorted(ADDITIVE_SEGMENT_AXES),
         "required_dimension_count": 1,
         "members_must_be_unique": True,
+        "geographic_country_members": "partition-or-nested-in-region:v1",
     },
     # The model validator is part of admission just as the economic checks
     # are. Version the optional cost-slot wire here so a run refused by the
@@ -634,6 +653,8 @@ def _segment_sum(groups: Sequence[Mapping[str, Any]]) -> InvariantResult:
             summed = sum((value for value, _ in usable), Decimal(0))
             if _close(summed, total):
                 continue
+            if _nested_countries_close(group, usable, total):
+                continue
             findings.append(
                 f"{group.get('line')} for {group.get('period')} on axis "
                 f"{group.get('axis')}: {len(usable)} segments add to {summed} "
@@ -647,6 +668,32 @@ def _segment_sum(groups: Sequence[Mapping[str, Any]]) -> InvariantResult:
             reason="no line has both a consolidated figure and a breakdown to "
                    "check it against")
     return InvariantResult(SEGMENT_SUM, PASS, checked=checked)
+
+
+def _nested_countries_close(
+    group: Mapping[str, Any], usable: Sequence[tuple[Decimal, str]], total: Decimal,
+) -> bool:
+    """The regional members alone add to the whole, the countries nest inside.
+
+    Only on a geographic axis that mixes ISO ``country:`` members with at
+    least two regional members, only when the regions add to the
+    consolidated line exactly as any partition must, and only when every
+    country is no larger than some region that could hold it.  Anything else
+    is still the failure it was.
+    """
+
+    if str(group.get("axis")) not in GEOGRAPHIC_AXES:
+        return False
+    countries = [value for value, member in usable
+                 if member.startswith(COUNTRY_MEMBER_PREFIX)]
+    regions = [value for value, member in usable
+               if not member.startswith(COUNTRY_MEMBER_PREFIX)]
+    if not countries or len(regions) < 2:
+        return False
+    if not _close(sum(regions, Decimal(0)), total):
+        return False
+    largest = max(regions)
+    return all(value <= largest for value in countries)
 
 
 def _period_basis(lines: Sequence[Mapping[str, Any]]) -> InvariantResult:
