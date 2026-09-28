@@ -180,6 +180,46 @@ MAX_FINDINGS_REPAIR_UNITS = 3
 # The two things a unit can be repaired against after it has been drafted.
 VERIFICATION_REPAIR = "verification"
 OUTPUT_RUBRIC_REPAIR = "output_rubric"
+# The third: a drafted unit the deterministic ``numbers_without_refs`` gate
+# refused.  Live 2026-09-26..28, DXC's supply_and_cost was refused nine runs
+# running over one figure (C1 prints "$970 million"; the draft printed
+# "970000000 美元").  A unit's drafting request is content-addressed on its
+# prompt, so with unchanged material every later run *replayed the same
+# refused reply* at no cost -- and paid $0.57-0.90 for the other units of a
+# run that could then never publish.  Nothing but new evidence would ever
+# have moved it.  Handing the exact figure back once, inside the same bounded
+# repair round, breaks that loop; the repaired text is verified and gated
+# again like any other, so the gate itself is unchanged.
+NUMBERS_REPAIR = "numbers_without_refs"
+
+
+def numbers_repair_findings(
+    repair_targets: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """The gate's figure findings, each with the instruction that fixes it.
+
+    Deterministic in the finding: the section, the figure and one fixed
+    sentence.  The sentence restates the drafting rule for this figure only --
+    copy what the cited row prints, or delete -- and never suggests a value.
+    """
+
+    findings: list[dict[str, Any]] = []
+    for target in repair_targets:
+        if target.get("check") != NUMBERS_REPAIR:
+            continue
+        figure = str(target.get("figure") or "")
+        section = target.get("section")
+        if not figure or not isinstance(section, str):
+            continue
+        findings.append({
+            "check": NUMBERS_REPAIR, "section": section, "figure": figure,
+            "detail": (
+                f"the figure {figure} is refused: no row this part cites prints "
+                "it. Write the figure exactly as the cited row prints it -- same "
+                "digits, same scale word (a row saying $970 million is written "
+                "970 million 美元, never 970000000 or 9.7 亿) -- or delete it."),
+        })
+    return findings
 # The six fields that name one model call in the formal record.
 _CALL_KEYS = ("work_order_ref", "result_envelope_ref", "invocation_ref",
               "route_decision_ref", "request_id", "prompt_hash")
@@ -2411,6 +2451,23 @@ def run_dossier(
                 record["unit_provenance"] = unit_provenance
             gate = rubric_gate(store.connection, record, prior=prior)
             summary["rubric"] = gate["summary"]
+            if gate["failed"] == [NUMBERS_REPAIR]:
+                # Only when the figure check is the *only* hard failure, and
+                # only when every refused figure sits in a unit drafted on this
+                # run: a carried-forward section has no call to hand back, and
+                # a repair that cannot clear the gate is money spent to be
+                # refused anyway.
+                number_findings = numbers_repair_findings(gate["repair_targets"])
+                targets = findings_repair_targets(number_findings, blocks, key="section")
+                covered = sum(len(rows) for rows in targets.values())
+                if (targets and covered == len(number_findings)
+                        and len(number_findings) == len(gate["repair_targets"])
+                        and findings_rounds < MAX_FINDINGS_REPAIR_ROUNDS
+                        and repair_round(targets, kind=NUMBERS_REPAIR)):
+                    findings_rounds += 1
+                    summary["findings_repair_rounds"] = findings_rounds
+                    # Back to the verifier: the body it signs off moved.
+                    continue
             summary["repair_targets"].extend(
                 gate["repair_targets"][:MAX_REPAIR_TARGETS - len(summary["repair_targets"])])
             if gate["failed"]:
@@ -2419,7 +2476,11 @@ def run_dossier(
                     target, ensure_ascii=False, sort_keys=True)
                 summary.update({"status": "succeeded", "dossier_status": "rubric_refused",
                                 "failure_reason": "hard checks failed: "
-                                                  + ", ".join(gate["failed"]) + detail})
+                                                  + ", ".join(gate["failed"])
+                                                  + (" after one repair call per "
+                                                     "named section"
+                                                     if findings_rounds else "")
+                                                  + detail})
                 return summary
             findings = output_rubric_findings(
                 record, constitution=constitution, policy=policy, prior=prior,
@@ -2694,6 +2755,7 @@ __all__ = [
     "HARD_CHECKS",
     "MAX_FINDINGS_REPAIR_ROUNDS",
     "MAX_FINDINGS_REPAIR_UNITS",
+    "NUMBERS_REPAIR",
     "OUTPUT_RUBRIC_REPAIR",
     "VERIFICATION_REPAIR",
     "assemble",
@@ -2705,6 +2767,7 @@ __all__ = [
     "dossier_freshness",
     "findings_repair_contract_name",
     "findings_repair_targets",
+    "numbers_repair_findings",
     "granted_scope",
     "guidance_material",
     "main",

@@ -259,7 +259,7 @@ class DirectionPremiseTests(unittest.TestCase):
 
     def test_the_premise_change_is_a_new_validator_contract(self):
         self.assertEqual(ei.FORECAST_INVARIANT_CONTRACT_REF,
-                         "forecast-economic-invariants:8")
+                         "forecast-economic-invariants:9")
         self.assertIn("direction_premise", ei.FORECAST_INVARIANT_CONTRACT)
 
 
@@ -1104,3 +1104,178 @@ class CockpitVisibilityTests(unittest.TestCase):
         connection = sqlite3.connect(":memory:")
         connection.row_factory = sqlite3.Row
         self.assertEqual(self.plane._invariants(connection), {})
+
+
+# ---------------------------------------------------------------------------
+# Alphabet's unallocated costs (ws-7d GOOGL forecast held since 09-28 11:05 UTC)
+# ---------------------------------------------------------------------------
+
+_COSTS = "us-gaap:CostsAndExpenses"
+_REVENUE = "us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax"
+_SEGMENTS = "us-gaap:StatementBusinessSegmentsAxis"
+_GEOGRAPHY = "srt:StatementGeographicalAxis"
+
+
+def _row(concept, value, axis=None, member=None, *, start="2024-01-01",
+         end="2024-03-31", dimension_count=None):
+    return {"concept": concept, "period_start": start, "period_end": end,
+            "value": value, "is_breakdown": axis is not None,
+            "dimension_axis": axis, "dimension_member": member,
+            "dimension_count": (1 if axis else 0) if dimension_count is None
+            else dimension_count}
+
+
+def _googl_q1_2024(*, corporate=True, all_other=True, geography=True):
+    """Alphabet 10-Q 0001652044-24-000053, quarter to 2024-03-31, as stored."""
+
+    rows = [
+        _row(_COSTS, "55067000000"),
+        _row(_COSTS, "8674000000", _SEGMENTS, "goog:GoogleCloudMember"),
+        _row(_COSTS, "42501000000", _SEGMENTS, "goog:GoogleServicesMember"),
+        _row(_REVENUE, "80539000000"),
+        _row(_REVENUE, "9574000000", _SEGMENTS, "goog:GoogleCloudMember"),
+        _row(_REVENUE, "70398000000", _SEGMENTS, "goog:GoogleServicesMember"),
+        _row("us-gaap:OperatingIncomeLoss", "25472000000"),
+    ]
+    if all_other:
+        rows.append(_row(_REVENUE, "495000000", _SEGMENTS,
+                         "us-gaap:AllOtherSegmentsMember"))
+    if corporate:
+        rows.append(_row("us-gaap:OperatingIncomeLoss", "-2305000000",
+                         "srt:ConsolidationItemsAxis",
+                         "us-gaap:CorporateNonSegmentMember"))
+    if geography:
+        rows += [
+            _row(_REVENUE, "38737000000", _GEOGRAPHY, "country:US"),
+            _row(_REVENUE, "4653000000", _GEOGRAPHY,
+                 "goog:AmericasExcludingUnitedStatesMember"),
+            _row(_REVENUE, "13289000000", _GEOGRAPHY, "srt:AsiaPacificMember"),
+            _row(_REVENUE, "23788000000", _GEOGRAPHY, "us-gaap:EMEAMember"),
+        ]
+    return rows
+
+
+class UnallocatedSegmentResidualTests(unittest.TestCase):
+    def verdict(self, rows):
+        return ei._segment_sum(ei.segment_groups(rows))
+
+    def test_googl_costs_without_other_bets_or_alphabet_level_are_not_a_failure(self):
+        # Services 42,501 + Cloud 8,674 = 51,175 against 55,067: Other Bets
+        # and Alphabet-level activities are the rest, and neither is a member.
+        verdict = self.verdict(_googl_q1_2024())
+        self.assertEqual(verdict.status, ei.NOT_APPLICABLE)
+        self.assertEqual(verdict.findings, ())
+        self.assertIn("us-gaap:AllOtherSegmentsMember", verdict.reason)
+        self.assertIn("not checkable", verdict.reason)
+
+    def test_a_corporate_non_segment_amount_alone_marks_segments_partial(self):
+        # The 2026 filings no longer break revenue out by segment, so the only
+        # declaration left for a costs quarter is the corporate operating loss.
+        verdict = self.verdict(_googl_q1_2024(all_other=False, geography=False))
+        self.assertEqual(verdict.status, ei.NOT_APPLICABLE)
+        self.assertIn("us-gaap:CorporateNonSegmentMember", verdict.reason)
+
+    def test_geography_that_agrees_with_the_partial_segments_is_the_same_scope(self):
+        # Four regions add to 80,467, the three segments to 80,467 too; the
+        # 72 of hedging gains is Alphabet-level in both tables.
+        groups = ei.segment_groups(_googl_q1_2024())
+        geography = [g for g in groups if g["axis"] == _GEOGRAPHY]
+        self.assertEqual(len(geography), 1)
+        self.assertNotIn("undeclared_members", geography[0])
+        self.assertEqual(self.verdict(_googl_q1_2024()).status, ei.NOT_APPLICABLE)
+
+    def test_geography_that_disagrees_with_the_segments_still_fails(self):
+        rows = _googl_q1_2024()
+        for row in rows:
+            if row["dimension_member"] == "us-gaap:EMEAMember":
+                row["value"] = "23000000000"
+        verdict = self.verdict(rows)
+        self.assertEqual(verdict.status, ei.FAIL)
+        self.assertEqual(len(verdict.findings), 1)
+        self.assertIn(_GEOGRAPHY, verdict.findings[0])
+
+    def test_without_any_declaration_a_short_breakdown_still_fails(self):
+        rows = _googl_q1_2024(corporate=False, all_other=False, geography=False)
+        verdict = self.verdict(rows)
+        self.assertEqual(verdict.status, ei.FAIL)
+        self.assertIn("2 segments add to 51175000000 and the consolidated line "
+                      "is 55067000000", verdict.findings[0])
+
+    def test_corporate_amounts_do_not_excuse_a_geographic_breakdown_alone(self):
+        rows = _googl_q1_2024(all_other=False)
+        rows = [row for row in rows
+                if row["dimension_axis"] != _SEGMENTS or row["concept"] != _REVENUE]
+        verdict = self.verdict(rows)
+        self.assertEqual(verdict.status, ei.FAIL)
+        self.assertIn(_GEOGRAPHY, verdict.findings[0])
+
+    def test_a_gap_equal_to_a_declared_reconciling_item_is_reconciled(self):
+        rows = [
+            _row(_COSTS, "100"),
+            _row(_COSTS, "60", _SEGMENTS, "x:AMember"),
+            _row(_COSTS, "30", _SEGMENTS, "x:BMember"),
+            _row(_COSTS, "10", "srt:ConsolidationItemsAxis",
+                 "us-gaap:CorporateNonSegmentMember"),
+        ]
+        verdict = self.verdict(rows)
+        self.assertEqual(verdict.status, ei.PASS)
+        self.assertEqual(verdict.checked, 1)
+
+    def test_several_reconciling_items_may_close_the_gap_together(self):
+        rows = [
+            _row(_COSTS, "100"),
+            _row(_COSTS, "60", _SEGMENTS, "x:AMember"),
+            _row(_COSTS, "35", _SEGMENTS, "x:BMember"),
+            _row(_COSTS, "8", "srt:ConsolidationItemsAxis",
+                 "us-gaap:CorporateNonSegmentMember"),
+            _row(_COSTS, "-3", "srt:ConsolidationItemsAxis",
+                 "us-gaap:IntersegmentEliminationMember"),
+        ]
+        self.assertEqual(self.verdict(rows).status, ei.PASS)
+
+    def test_a_declared_item_of_the_wrong_size_is_a_failure_not_an_excuse(self):
+        rows = [
+            _row(_COSTS, "100"),
+            _row(_COSTS, "60", _SEGMENTS, "x:AMember"),
+            _row(_COSTS, "30", _SEGMENTS, "x:BMember"),
+            _row(_COSTS, "7", "srt:ConsolidationItemsAxis",
+                 "us-gaap:CorporateNonSegmentMember"),
+        ]
+        verdict = self.verdict(rows)
+        self.assertEqual(verdict.status, ei.FAIL)
+        self.assertIn("2 segments add to 90", verdict.findings[0])
+
+    def test_declarations_from_another_period_do_not_count(self):
+        rows = _googl_q1_2024(geography=False)
+        for row in rows:
+            if row["dimension_member"] in {"us-gaap:AllOtherSegmentsMember",
+                                           "us-gaap:CorporateNonSegmentMember"}:
+                row["period_start"], row["period_end"] = "2023-01-01", "2023-03-31"
+        verdict = self.verdict(rows)
+        self.assertEqual(verdict.status, ei.FAIL)
+
+    def test_a_group_that_adds_up_still_passes_beside_an_excused_one(self):
+        rows = _googl_q1_2024(geography=False) + [
+            _row("us-gaap:Revenues", "100"),
+            _row("us-gaap:Revenues", "60", _GEOGRAPHY, "x:NorthMember"),
+            _row("us-gaap:Revenues", "40", _GEOGRAPHY, "x:SouthMember"),
+        ]
+        verdict = self.verdict(rows)
+        self.assertEqual(verdict.status, ei.PASS)
+        self.assertEqual(verdict.checked, 1)
+        self.assertIn("not checkable", verdict.reason)
+
+    def test_undeclared_breakdowns_are_byte_for_byte_what_they_were(self):
+        rows = _googl_q1_2024(corporate=False, all_other=False, geography=False)
+        self.assertEqual(
+            set(ei.segment_groups(rows)[0]),
+            {"line", "period", "axis", "total", "parts"})
+
+    def test_the_contract_version_moved(self):
+        self.assertEqual(ei.FORECAST_INVARIANT_CONTRACT_REF,
+                         "forecast-economic-invariants:9")
+        contract = ei.FORECAST_INVARIANT_CONTRACT["segment_sum"]
+        self.assertEqual(contract["unallocated_residual"],
+                         "declared-reconciling-item-or-declared-incomplete-members:v1")
+        self.assertIn("us-gaap:CorporateNonSegmentMember",
+                      contract["reconciling_members"])

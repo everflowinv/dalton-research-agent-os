@@ -506,7 +506,10 @@ def _call_provenance(value: Any, name: str) -> dict[str, str]:
 # because the record is read back and re-hashed on every publication, and a
 # verifier that answered with an essay must not be able to make a company's
 # chain unpublishable.
-REPAIR_FINDING_KINDS: tuple[str, ...] = ("verification", "output_rubric")
+# ``numbers_without_refs`` (2026-09-28): the deterministic gate's figure check,
+# whose finding names the section and the exact figure no cited row carries.
+REPAIR_FINDING_KINDS: tuple[str, ...] = (
+    "verification", "output_rubric", "numbers_without_refs")
 MAX_REPAIR_FINDINGS = 20
 MAX_REPAIR_FINDING_CHARS = 500
 
