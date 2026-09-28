@@ -53,6 +53,7 @@ from .research_auto_commit import (
     KNOWN_RULE_REFS,
     MISSION_VERIFIED_FIGURE_RULE_REF,
     RULE_REF as FILING_COUNT_RULE_REF,
+    SEC_FY_MINUS_9M_RULE_REF,
     SEC_STATEMENT_LINE_RULE_REF,
 )
 from .research_plan import (
@@ -67,13 +68,16 @@ RESEARCH_BUDGET_BLOCK = "research_budget"
 
 #: Every auto-commit rule that may share a policy with the others, in the
 #: order legacy ``policy-18`` lists them.  The filing-count rule is not here:
-#: the evaluator accepts it only as the entire rule set.
+#: the evaluator accepts it only as the entire rule set.  The FY - 9M rule
+#: (2026-09-28) came after policy-18: a new workspace signs it with the rest,
+#: legacy and ws-7d get it from the owner's signing script.
 BASELINE_AUTO_COMMIT_RULES: tuple[str, ...] = (
     COMPANY_FACTS_RULE_REF,
     COMPANY_FACTS_ANNUAL_RULE_REF,
     DOCUMENT_QUALITATIVE_RULE_REF,
     MISSION_VERIFIED_FIGURE_RULE_REF,
     SEC_STATEMENT_LINE_RULE_REF,
+    SEC_FY_MINUS_9M_RULE_REF,
 )
 #: The SEC company-facts plan rules legacy ``policy-18`` lists.  The
 #: list-filings rule is no lane's precondition and stays unsigned.
@@ -98,6 +102,8 @@ RULE_CONSUMERS: dict[str, str] = {
     DOCUMENT_QUALITATIVE_RULE_REF: "document extraction (finished reviews become Claims)",
     MISSION_VERIFIED_FIGURE_RULE_REF: "quantitative claim promotion (re-verified document figures)",
     SEC_STATEMENT_LINE_RULE_REF: "SEC statement lines (filed financial statement lines)",
+    SEC_FY_MINUS_9M_RULE_REF: (
+        "SEC quarter lane (fourth quarter of a fiscal-year-only 10-K, FY - 9M)"),
     PLAN_COMPANY_FACTS_AUTO_START_RULE_REF: "SEC company-facts lane precondition (10-Q plans)",
     PLAN_COMPANY_FACTS_ANNUAL_AUTO_START_RULE_REF: "SEC company-facts lane (10-K plans)",
 }

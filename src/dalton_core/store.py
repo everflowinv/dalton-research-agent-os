@@ -1529,7 +1529,7 @@ class DaltonStore:
         document_source_verification: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Shared atomic Ledger writer for human and policy authorization."""
-        from .research_auto_commit import SEC_STATEMENT_LINE_RULE_REF
+        from .research_auto_commit import SEC_FY_MINUS_9M_RULE_REF, SEC_STATEMENT_LINE_RULE_REF
         from .research_review import (
             validate_claim_version_v0_2,
             validate_evidence_version_v0_2,
@@ -1661,7 +1661,8 @@ class DaltonStore:
             elif (
                 active_policy_binding is not None
                 and decision_wire.get("authorization") == "versioned_governance_policy"
-                and decision_wire.get("rule_ref") == SEC_STATEMENT_LINE_RULE_REF
+                and decision_wire.get("rule_ref") in (
+                    SEC_STATEMENT_LINE_RULE_REF, SEC_FY_MINUS_9M_RULE_REF)
             ):
                 # WP-F.  A filed XBRL statement line has no connector
                 # SourceEnvelope and never had one: the SEC financial-statements
@@ -1672,7 +1673,10 @@ class DaltonStore:
                 # fabricated provenance, so the filing row is verified as the
                 # envelope of this mode instead -- and only under this one
                 # signed rule, whose evaluator has already replayed every digit
-                # of the candidate out of the same two tables.
+                # of the candidate out of the same two tables.  The FY - 9M
+                # rule rests on the same rows (several filings; the envelope is
+                # the 10-K whose fourth quarter it answers, and its evaluator
+                # re-verified every other filing down to its dispatch).
                 producer_execution_ref = self._statement_line_commit_authority(
                     cur, evidence_wire)
             else:

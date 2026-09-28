@@ -748,7 +748,11 @@ class FourthQuarterTests(unittest.TestCase):
         self.assertIn("都已入账", json.dumps(done["skipped"], ensure_ascii=False))
 
     def test_a_10k_of_year_totals_only_is_not_queued(self) -> None:
-        """MSFT/AMZN/GOOGL/META: the 10-K has no Q4 row; FY - 9M is not a rule."""
+        """MSFT/AMZN/GOOGL/META: the 10-K has no Q4 row, so no connector run.
+
+        With the FY - 9M rule unsigned (this policy) the skip says so; the
+        derivation itself is ``tests.test_sec_fy_minus_9m.QuarterLaneTests``.
+        """
 
         digest = self.spool(MSFT_ANNUAL_ONLY)
         # The statement lane lists the 10-K too; company facts say what is in it.
@@ -760,6 +764,8 @@ class FourthQuarterTests(unittest.TestCase):
         text = json.dumps(result["skipped"], ensure_ascii=False)
         self.assertIn(MSFT_10K, text)
         self.assertIn("只报全年数", text)
+        self.assertIn("research-auto-commit:sec-statement-line-growth-fy-minus-9m:v1", text)
+        self.assertIn("还没有签入当前策略", text)
 
     def test_a_10k_only_the_index_lists_is_queued_once_and_not_after_it_proves_annual(self) -> None:
         digest = self.spool(SUBMISSIONS)

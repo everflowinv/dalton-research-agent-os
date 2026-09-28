@@ -37,7 +37,8 @@ COMPANY_FACTS_RULE_REF = "research-auto-commit:sec-public-company-facts-growth:v
 # P9b (2026-09-02): the same same-accession quarterly growth rule applied to a
 # 10-K that reports the fourth-quarter pair (Accenture).  It is a separate
 # rule ref so a policy listing only the 10-Q rule keeps rejecting annual
-# candidates; the FY - 9M derivation is not a rule yet.
+# candidates.  The FY - 9M derivation, for the 10-Ks that report only the
+# fiscal year, is its own rule below (``SEC_FY_MINUS_9M_RULE_REF``).
 COMPANY_FACTS_ANNUAL_RULE_REF = (
     "research-auto-commit:sec-public-company-facts-growth-annual:v1"
 )
@@ -63,9 +64,20 @@ MISSION_VERIFIED_FIGURE_RULE_REF = _MISSION_VERIFIED_FIGURE_RULE_REF
 # figure rule on purpose: a policy that trusts prose figures has not thereby
 # said anything about statement lines, and vice versa.
 SEC_STATEMENT_LINE_RULE_REF = "research-auto-commit:sec-statement-line:v1"
+# 2026-09-28: the fourth quarter of a 10-K that reports only its fiscal year,
+# derived as fiscal year less nine months from filed statement rows of the
+# 10-K and the fiscal year's three 10-Qs (``sec_fy_minus_9m``), and compared
+# with the prior year's fourth quarter derived the same way.  Its own rule
+# ref: a policy that admits filed rows and filed pairs has said nothing about
+# a number computed from several filings, and the Claim it admits says it is
+# derived (basis ``official-filing-xbrl-derived``).
+SEC_FY_MINUS_9M_RULE_REF = (
+    "research-auto-commit:sec-statement-line-growth-fy-minus-9m:v1"
+)
 KNOWN_RULE_REFS: frozenset[str] = frozenset({
     RULE_REF, *COMPANY_FACTS_RULE_REFS.values(), DOCUMENT_QUALITATIVE_RULE_REF,
     MISSION_VERIFIED_FIGURE_RULE_REF, SEC_STATEMENT_LINE_RULE_REF,
+    SEC_FY_MINUS_9M_RULE_REF,
 })
 _RULE_FINDINGS: dict[str, str] = {
     RULE_REF: "matched exact deterministic SEC filing-count rule",
@@ -84,6 +96,11 @@ _RULE_FINDINGS: dict[str, str] = {
     SEC_STATEMENT_LINE_RULE_REF: (
         "matched the SEC statement-line rule: filed XBRL row rebuilt from Core "
         "field by field, anchored to its accession, statement, ordinal and concept"
+    ),
+    SEC_FY_MINUS_9M_RULE_REF: (
+        "matched the SEC FY-9M rule: fourth quarter derived as fiscal year less nine "
+        "months from filed rows of one concept with aligned fiscal boundaries, no "
+        "restatement, both years rebuilt from Core field by field"
     ),
 }
 ACTOR_REF = "system:research-auto-commit"
@@ -575,6 +592,63 @@ def _authorize_sec_statement_line(
     return _decision(
         policy_version, claim_wire=claim_wire, evidence_wire=evidence_wire,
         rule_ref=SEC_STATEMENT_LINE_RULE_REF, rationale=rationale,
+    )
+
+
+_FY_MINUS_9M_PAYLOAD_KIND = "fy_minus_9m_growth"
+
+
+def _authorize_sec_fy_minus_9m(
+    *, connection: sqlite3.Connection, policy_version: Mapping[str, Any],
+    rule: Mapping[str, Any], evidence_wire: Mapping[str, Any],
+    claim_wire: Mapping[str, Any], material: Mapping[str, Any] | None,
+    source_verification: Mapping[str, Any] | None,
+    numeric_verification: Mapping[str, Any] | None,
+    numeric_spec: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Admit one derived fourth-quarter growth, replayed from Core (FY - 9M)."""
+
+    if SEC_FY_MINUS_9M_RULE_REF not in rule["rules"]:
+        raise ResearchAutoCommitRejected(
+            "active governance policy does not list "
+            f"{SEC_FY_MINUS_9M_RULE_REF}; this derived fourth quarter stays staged "
+            "until the owner signs a policy that names it"
+        )
+    from .quantitative_claim_promotion import QuantitativeClaimPromotionError
+    from .research_verification import ResearchVerificationError
+    from .sec_fy_minus_9m import build_fy_minus_9m_candidate
+
+    material_wire = _authority_material(material)
+    payload = material_wire.get("normalized_payload")
+    if not isinstance(payload, Mapping) or payload.get("kind") != _FY_MINUS_9M_PAYLOAD_KIND:
+        raise ResearchAutoCommitRejected("FY-9M payload is unavailable")
+    actor = _automation_actor(claim_wire)
+    try:
+        rebuilt = build_fy_minus_9m_candidate(
+            connection, ingest_id=str(payload.get("ingest_id")), actor_ref=actor)
+    except (QuantitativeClaimPromotionError, ResearchVerificationError, sqlite3.Error) as exc:
+        raise ResearchAutoCommitRejected(
+            f"the filed rows this derivation rests on cannot be replayed: {exc}"
+        ) from exc
+    _replay_is_exact("FY-9M source material", rebuilt["material"], material)
+    _replay_is_exact("FY-9M source verification", rebuilt["source_verification"],
+                     source_verification)
+    _replay_is_exact("FY-9M numeric spec", rebuilt["numeric_spec"], numeric_spec)
+    validate_numeric_verification_spec(numeric_spec or {})
+    _replay_is_exact("FY-9M numeric verification", rebuilt["numeric_verification"],
+                     numeric_verification)
+    _replay_is_exact("FY-9M candidate evidence", rebuilt["evidence"], evidence_wire)
+    _replayed_expected_claim("FY-9M candidate", rebuilt["claim"], claim_wire)
+    _replay_is_exact("FY-9M candidate claim", rebuilt["claim"], claim_wire)
+    derivation = payload.get("derivation") or {}
+    return _decision(
+        policy_version, claim_wire=claim_wire, evidence_wire=evidence_wire,
+        rule_ref=SEC_FY_MINUS_9M_RULE_REF,
+        rationale=(
+            "Fourth quarter derived as fiscal year less nine months from filed statement "
+            f"rows of {derivation.get('concept')} (10-K {payload.get('accession')}), "
+            "for this year and the prior one, rebuilt from this Core's own rows."
+        ),
     )
 
 
@@ -1109,9 +1183,15 @@ def authorize_policy_candidate(
     # never part of.
     provenance_mode = (material or {}).get("provenance_mode") if isinstance(material, Mapping) else None
     if provenance_mode in (MISSION_FIGURE_AUTHORITY_MODE, SEC_STATEMENT_LINE_AUTHORITY_MODE):
+        payload_kind = (
+            (material.get("normalized_payload") or {}).get("kind")
+            if isinstance(material.get("normalized_payload"), Mapping) else None
+        )
         branch = (
             _authorize_mission_verified_figure
             if provenance_mode == MISSION_FIGURE_AUTHORITY_MODE
+            else _authorize_sec_fy_minus_9m
+            if payload_kind == _FY_MINUS_9M_PAYLOAD_KIND
             else _authorize_sec_statement_line
         )
         return branch(
@@ -1399,6 +1479,7 @@ __all__ = [
     "ACTOR_REF",
     "MISSION_VERIFIED_FIGURE_RULE_REF",
     "SEC_STATEMENT_LINE_RULE_REF",
+    "SEC_FY_MINUS_9M_RULE_REF",
     "COMPANY_FACTS_ANNUAL_RULE_REF",
     "COMPANY_FACTS_RULE_REF",
     "COMPANY_FACTS_RULE_REFS",

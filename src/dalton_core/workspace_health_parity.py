@@ -71,6 +71,7 @@ LANE_POLICY_RULES: dict[str, tuple[str, ...]] = {
     "mission_sec_quarters": (
         "research-auto-commit:sec-public-company-facts-growth:v1",
         "research-auto-commit:sec-public-company-facts-growth-annual:v1",
+        "research-auto-commit:sec-statement-line-growth-fy-minus-9m:v1",
     ),
 }
 LANE_PLAN_RULES: dict[str, tuple[str, ...]] = {

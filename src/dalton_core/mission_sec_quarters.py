@@ -58,12 +58,25 @@ dispatch, which the lane runs under ``COMPANY_FACTS_RULE_REFS["10-K"]``.
 
 The annual rule is the same-accession quarterly pair, nothing more: a 10-K
 that reports only fiscal-year totals has no quarter to compare, and the
-FY - 9M derivation is not a rule.  When the company facts already held show
+FY - 9M derivation was not a rule (it is now, below).  When company facts show
 that a 10-K carries no fourth-quarter row, it is not queued (it could only
 fail); when nothing held says either way it is queued once, and a run that
 proves the 10-K annual-only ends its chase.  A 10-K the bounded-planner path
 already queued is the company's open dispatch, and one it already answered is
 a held period, so neither path runs a filing the other has.
+
+2026-09-28 (later): FY - 9M is a rule now
+(``research-auto-commit:sec-statement-line-growth-fy-minus-9m:v1``,
+``sec_fy_minus_9m``).  A 10-K shown to report only its fiscal year is no
+longer a dead end: when the active policy lists that rule and Core holds the
+10-K's filed statement rows and the same fiscal year's first three quarters,
+the fourth quarter is derived here -- fiscal year less nine months, for this
+year and the prior one -- staged, and offered to the Ledger, which admits it
+only after rebuilding every byte from the same rows.  No connector call: the
+rows are already in Core.  Anything the rule refuses (a concept change, a
+restatement, fiscal boundaries that do not meet, a quarter not held, filed
+precision too coarse) is reported with its reason and nothing is queued, as
+before.
 """
 
 from __future__ import annotations
@@ -596,8 +609,14 @@ class MissionSecQuartersCoordinator:
         checklist: Callable[[], Sequence[Mapping[str, Any]]],
         clock: Callable[[], datetime] | None = None,
         governance_check: Callable[[], Any] | None = None,
+        staging: Any | None = None,
     ) -> None:
         self.store = store
+        # The shared candidate staging store (the writer's
+        # ``research_review.candidate_staging_path``).  Only the FY - 9M path
+        # uses it; without one a derivable fourth quarter is reported, not
+        # staged.
+        self.staging = staging
         self.connection = store.connection
         self.missions = missions
         self.state_dir = Path(state_dir).expanduser().resolve()
@@ -904,6 +923,7 @@ class MissionSecQuartersCoordinator:
             wanted: list[dict[str, Any]] = []
             deferred = 0
             no_rule = 0
+            derivations: list[dict[str, Any]] = []
             seen_accessions: set[str] = set()
             # Only the newest four: a quarter older than those does not make the
             # weekly report current, and walking further back is how the lane
@@ -917,13 +937,18 @@ class MissionSecQuartersCoordinator:
                         or filing["accession"] in annual_only):
                     # The annual rule compares a fourth quarter with the same
                     # quarter a year earlier, both reported by this 10-K.  A
-                    # 10-K of fiscal-year totals has neither, and FY - 9M is
-                    # not a rule: queued, it could only fail.
+                    # 10-K of fiscal-year totals has neither: queued, it could
+                    # only fail.  Its fourth quarter is derived instead, from
+                    # the filed rows Core already holds (FY - 9M).
+                    derived = self._derive_fourth_quarter(company_ref, filing)
+                    derivations.append(derived)
+                    if derived["status"] == "committed":
+                        held_ends.add(filing["end"])
+                        continue
                     no_rule += 1
                     skipped.append({"ticker": entry.get("ticker"), "accession": filing["accession"],
                                     "form": ANNUAL_FORM, "period_end": filing["end"],
-                                    "reason": "这份 10-K 只报全年数，没有第四季单季行；"
-                                              "全年减前三季（FY−9M）还不是规则，不排队"})
+                                    "reason": derived["reason"]})
                     continue
                 if tried >= MAX_ATTEMPTS_PER_FILING:
                     skipped.append({"ticker": entry.get("ticker"), "accession": filing["accession"],
@@ -952,9 +977,18 @@ class MissionSecQuartersCoordinator:
                                "window_salt": windows_used.get(filing["accession"], 0)})
                 if len(wanted) >= len(missing):
                     break
+            committed = [d for d in derivations if d["status"] == "committed"]
+            if not wanted and committed:
+                return {
+                    "status": "committed", "ticker": entry.get("ticker"),
+                    "company_ref": company_ref, "quarters_held": item["have"],
+                    "recent_quarters_missing": [filing["end"] for filing in missing],
+                    "queued": [], "derived": derivations, "skipped": skipped,
+                }
             if not wanted:
                 if no_rule == len(missing):
-                    reason = "最近四个季度里缺的只有第四季，而那份 10-K 只报全年数，现有规则答不了"
+                    reason = ("最近四个季度里缺的只有第四季，那份 10-K 只报全年数，"
+                              "FY−9M 推导也没有成立（原因见同一家公司的上一条）")
                 elif deferred:
                     reason = "最近四个季度里缺的那几份在等 SEC company facts 收录、在超时退避中或已试满次数"
                 else:
@@ -1000,9 +1034,104 @@ class MissionSecQuartersCoordinator:
                     "status": "queued", "ticker": entry.get("ticker"),
                     "company_ref": company_ref, "quarters_held": item["have"],
                     "recent_quarters_missing": [filing["end"] for filing in missing],
-                    "queued": queued, "skipped": skipped,
+                    "queued": queued, "derived": derivations, "skipped": skipped,
                 }
         return {"status": "idle", "skipped": skipped}
+
+    # -- FY - 9M -------------------------------------------------------------
+
+    def _derive_fourth_quarter(self, company_ref: str,
+                               filing: Mapping[str, Any]) -> dict[str, Any]:
+        """Derive, stage and offer one annual-only 10-K's fourth quarter.
+
+        ``status`` is ``committed`` (the Ledger took it), ``staged`` (verified
+        and staged, the Ledger said no and why), ``refused`` (the rule does not
+        hold for these rows), ``unsigned`` or ``unavailable``.  Every status but
+        ``committed`` carries the reason the skip list shows.
+        """
+
+        from .quantitative_claim_promotion import QuantitativeClaimPromotionError
+        from .quantitative_claim_promotion_cli import WRITE_SCOPES, _signed_rules
+        from .research_auto_commit import (
+            SEC_FY_MINUS_9M_RULE_REF,
+            ResearchAutoCommitRejected,
+        )
+        from .research_verification import ResearchVerificationError
+        from .sec_fy_minus_9m import FyMinus9mRefused, annual_filing, derive
+        from .store import GateRejected
+
+        head = "这份 10-K 只报全年数，没有第四季单季行；"
+        result: dict[str, Any] = {
+            "accession": filing["accession"], "form": ANNUAL_FORM,
+            "period_end": filing["end"], "rule_ref": SEC_FY_MINUS_9M_RULE_REF,
+        }
+        try:
+            signed = _signed_rules(self.store.active_policy())
+        except Exception:  # noqa: BLE001 - no readable policy signs nothing
+            signed = frozenset()
+        if SEC_FY_MINUS_9M_RULE_REF not in signed:
+            return {**result, "status": "unsigned",
+                    "reason": head + f"全年减前三季（FY−9M）规则 {SEC_FY_MINUS_9M_RULE_REF} "
+                                     "还没有签入当前策略，不推导也不排队"}
+        annual = annual_filing(self.connection, company_ref=company_ref,
+                               accession=filing["accession"])
+        if annual is None:
+            return {**result, "status": "unavailable",
+                    "reason": head + "它的申报行还没有由报表车道入库，FY−9M 无从推导"}
+        try:
+            derivation = derive(self.connection, annual["ingest_id"])
+        except FyMinus9mRefused as exc:
+            return {**result, "status": "refused", "reason": head + f"FY−9M 推导不成立：{exc}"}
+        except (QuantitativeClaimPromotionError, ResearchVerificationError) as exc:
+            return {**result, "status": "refused",
+                    "reason": head + f"FY−9M 推导失败：{type(exc).__name__}: {exc}"}
+        result.update({"period": derivation["current"]["q4"]["period"],
+                       "value": derivation["growth"],
+                       "q4": derivation["current"]["q4"]["value"],
+                       "prior_q4": derivation["prior"]["q4"]["value"]})
+        if self.staging is None:
+            return {**result, "status": "unavailable",
+                    "reason": head + "FY−9M 可以推导，但本车道没有配置候选暂存库，不写入"}
+        try:
+            mission = self.missions.mission(self._active_mission_version())
+        except Exception as exc:  # noqa: BLE001 - no mission writes nothing
+            return {**result, "status": "unavailable",
+                    "reason": head + f"读不到生效中的任务：{type(exc).__name__}: {exc}"}
+        missing = WRITE_SCOPES - set(mission["autonomy"]["may_write"])
+        if missing:
+            return {**result, "status": "unavailable",
+                    "reason": head + f"任务还没有授予 {sorted(missing)} 写入范围，FY−9M 结论算好但不写入"}
+        from .sec_fy_minus_9m import stage_fy_minus_9m_candidate
+
+        actor = mission["autonomy"]["automation_principal"]
+        try:
+            bundle = stage_fy_minus_9m_candidate(
+                self.connection, self.staging, ingest_id=annual["ingest_id"], actor_ref=actor)
+        except (QuantitativeClaimPromotionError, ResearchVerificationError) as exc:
+            return {**result, "status": "refused",
+                    "reason": head + f"FY−9M 候选暂存被拒：{type(exc).__name__}: {exc}"}
+        result["candidate_claim_ref"] = bundle["claim"]["id"]
+        try:
+            promoted = self.store.commit_policy_candidate(
+                evidence=bundle["evidence"], claim=bundle["claim"],
+                material=bundle["material"], numeric_spec=bundle["numeric_spec"],
+                source_verification=bundle["source_verification"],
+                numeric_verification=bundle["numeric_verification"],
+                idempotency_key="policy-ledger:" + bundle["claim"]["id"])
+        except (ResearchAutoCommitRejected, GateRejected) as exc:
+            return {**result, "status": "staged",
+                    "reason": head + f"FY−9M 候选已暂存，入账被拒：{type(exc).__name__}: {exc}"}
+        return {**result, "status": "committed",
+                "claim_version_ref": promoted.get("claim_version_ref"),
+                "ledger_write": promoted.get("status") == "fresh"}
+
+    def _active_mission_version(self) -> str:
+        rows = self.connection.execute(
+            "SELECT mission_version_id FROM coverage_mission_pointer ORDER BY mission_ref LIMIT 1"
+        ).fetchall()
+        if not rows:
+            raise LookupError("no active mission")
+        return rows[0]["mission_version_id"]
 
     def _automation(self) -> str:
         rows = self.connection.execute(
@@ -1027,7 +1156,17 @@ def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
         missions=server.coverage_mission,
         state_dir=server.state_dir,
         checklist=server.lane_company_checklist(),
+        staging=_server_staging(server),
     ).dispatch_once()
+
+
+def _server_staging(server: Any) -> Any | None:
+    """The writer's candidate staging store, or None when it has none."""
+
+    try:
+        return server.candidate_staging
+    except Exception:  # noqa: BLE001 - WriterServerError: not configured
+        return None
 
 
 LANE = register_lane(LaneSpec(
