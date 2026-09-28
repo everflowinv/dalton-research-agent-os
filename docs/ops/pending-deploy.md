@@ -9,6 +9,16 @@
 
 ---
 
+（当前没有待部署批次。）
+
+---
+
+## 已部署
+
+- 2026-09-28 10:50 UTC：批次 2026-09-27f，release `f9fe3f3e…`。第一次构建因 pypi 超时失败，已清理半成品后重建。controller 和 writer 首次 bootstrap 都返回 5，重试后成功。部署后：ws-7d 签入 policy-6，恢复 backfill（v3），撤回 6 条同义改写的重复 claim。
+
+<details><summary>批次 2026-09-27f 说明</summary>
+
 ## 批次 2026-09-27f（main `3fb7dfe9` 及之后）
 
 ### 这批解决什么（批次 e 部署后验证中发现，外加"新建工作环境开箱即用"）
@@ -52,9 +62,8 @@ zsh ~/Projects/dalton-research-agent-os/docs/ops/run-2026-09-27-workspace-parity
 
 在 main `3fb7dfe9` 上跑全量：10612 个，全部通过（skipped 4），其中包括新 workspace 的 canary。
 
----
+</details>
 
-## 已部署
 
 - 2026-09-27 09:08 UTC：批次 2026-09-26e，release `1b5f6b04…`（源 `3acdb54f`）。部署前 ws-7d 签入 policy-5，归还 SEC 次数 47 次；部署后恢复回补。controller 首次 bootstrap 返回 5，重试后成功。
 
