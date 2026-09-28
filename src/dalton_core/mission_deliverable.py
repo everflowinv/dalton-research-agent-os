@@ -148,7 +148,7 @@ _DAY_MONTH_RE = re.compile(
     r"Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t|tember)?|Oct(?:ober)?|"
     r"Nov(?:ember)?|Dec(?:ember)?)(?![A-Za-z])(?:,?\s+((?:19|20)\d{2})(?!\d))?",
 )
-NUMBER_SOURCE_CONTRACT_VERSION = "number-source-contract:0.6"
+NUMBER_SOURCE_CONTRACT_VERSION = "number-source-contract:0.7"
 
 
 def number_source_contract_fingerprint() -> str:
@@ -163,7 +163,8 @@ def number_source_contract_fingerprint() -> str:
             "iso-date-to-english-month-date-or-exact-cited-month-day"
             "+cjk-and-slash-month-day+day-first-month-date"
             "+read-from-period-and-text"),
-        "print_equivalence": "percent-word+english-number-words-exact",
+        "print_equivalence": (
+            "percent-word+english-number-words-exact+currency-symbol-as-word"),
     })
 
 
@@ -500,6 +501,16 @@ def english_number_tokens(text: str) -> set[str]:
     return found
 
 
+# A cited row saying "$970 million" and Chinese prose saying "970 million 美元"
+# state one figure: the digits are the row's, and the currency symbol has only
+# moved into a word -- exactly what the drafting prompt asks for ("18857000000
+# usd is written 18857000000 美元").  Live 2026-09-26..28 that refused DXC's
+# supply_and_cost seven times over "970" (C1: "Adjusted EBIT was $970
+# million").  Only the symbol is dropped: the digits must still match exactly,
+# so a rescaled "970000000" or a rounded "9.7 亿" stays unsourced.
+_CURRENCY_SYMBOLS = "$€£¥"
+
+
 def unsourced_numbers(body: str, numbers: Sequence[Mapping[str, Any]]) -> list[str]:
     """Figures in the body that no supplied, Claim-bound number accounts for."""
 
@@ -507,7 +518,10 @@ def unsourced_numbers(body: str, numbers: Sequence[Mapping[str, Any]]) -> list[s
     for item in numbers:
         text = str(item.get("text", ""))
         for token in value_tokens(text):
-            sourced.add(_normalise_number(token))
+            normalised = _normalise_number(token)
+            sourced.add(normalised)
+            if normalised[:1] in _CURRENCY_SYMBOLS:
+                sourced.add(normalised[1:])
         for match in _PERCENT_WORD_RE.finditer(text):
             sourced.add(_normalise_number(match.group(1)) + "%")
         sourced |= english_number_tokens(text)

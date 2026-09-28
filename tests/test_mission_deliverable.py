@@ -224,7 +224,7 @@ class NumberDisciplineTests(unittest.TestCase):
     def test_the_number_contract_moved_so_held_rounds_are_asked_again(self) -> None:
         from dalton_core.mission_deliverable import NUMBER_SOURCE_CONTRACT_VERSION
 
-        self.assertEqual(NUMBER_SOURCE_CONTRACT_VERSION, "number-source-contract:0.6")
+        self.assertEqual(NUMBER_SOURCE_CONTRACT_VERSION, "number-source-contract:0.7")
 
     def test_the_drafting_prompt_asks_for_the_row_s_own_wording(self) -> None:
         from dalton_core.company_dossier_draft import (
