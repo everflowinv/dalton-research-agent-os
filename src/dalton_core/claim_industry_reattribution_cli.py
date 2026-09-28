@@ -5,8 +5,12 @@
         --state-dir "~/Library/Application Support/Dalton/state/dalton-core"
 
     # read-only: what the automatic backfill would append today, and why the
-    # rest were refused
+    # rest were refused (subject-absent and, since 2026-09-28, support
+    # retirements whose verdict is supported and about the mission's industry)
     .venv/bin/python -m dalton_core.claim_industry_reattribution_cli simulate --state-dir "..."
+    # ... as if the current contract's re-review had upheld every verdict in hand
+    .venv/bin/python -m dalton_core.claim_industry_reattribution_cli simulate --state-dir "..." \
+        --assume-rereview-upholds
 
     # read-only: which automatic reattributions today's rule (v2: a lone
     # "capex" is no longer the industry's) would withdraw
@@ -69,7 +73,8 @@ def status(state: Path) -> dict[str, Any]:
         connection.close()
 
 
-def simulate(state: Path, *, max_documents: int, show: int) -> dict[str, Any]:
+def simulate(state: Path, *, max_documents: int, show: int,
+             assume_rereview_upholds: bool = False) -> dict[str, Any]:
     from .claim_review import ClaimReviewDriver, needles_from_plans, review_spool
     from .claim_subject import mission_subject_needles
 
@@ -86,10 +91,15 @@ def simulate(state: Path, *, max_documents: int, show: int) -> dict[str, Any]:
         )
         summary = driver.reattribute_industry_findings(
             principal=None, max_documents=max_documents, max_writes=10 ** 6, dry_run=True,
-            show=None)
+            show=None, defer_pending_rereview=not assume_rereview_upholds)
     finally:
         connection.close()
     summary["would_reattribute_count"] = len(summary.get("would_reattribute") or [])
+    by_reason: dict[str, int] = {}
+    for item in summary.get("would_reattribute") or []:
+        reason = str(item.get("retired_reason_code"))
+        by_reason[reason] = by_reason.get(reason, 0) + 1
+    summary["would_reattribute_by_reason"] = by_reason
     summary["would_reattribute"] = (summary.get("would_reattribute") or [])[:show]
     summary["refused_examples"] = (summary.get("refused_examples") or [])[:show]
     return summary
@@ -233,6 +243,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             command.add_argument("--max-documents", type=int, default=10 ** 6)
         if name == "simulate":
             command.add_argument("--show", type=int, default=50)
+            command.add_argument("--assume-rereview-upholds", action="store_true")
         if name in ("reattribute", "withdraw"):
             command.add_argument("--claim-version-ref", required=True)
             command.add_argument("--reason", required=True)
@@ -243,7 +254,8 @@ def main(argv: Iterable[str] | None = None) -> int:
     if args.command == "status":
         _print(status(state))
     elif args.command == "simulate":
-        _print(simulate(state, max_documents=args.max_documents, show=args.show))
+        _print(simulate(state, max_documents=args.max_documents, show=args.show,
+                        assume_rereview_upholds=args.assume_rereview_upholds))
     elif args.command == "recheck":
         _print(recheck(state, max_documents=args.max_documents))
     elif args.command == "withdraw":

@@ -769,6 +769,51 @@ def recorded_support(connection: sqlite3.Connection, *, claim_version_ref: str,
     return None
 
 
+def contract_version(contract_ref: Any) -> int:
+    """``claim-support-verification:v3`` -> 3; anything unreadable -> 0."""
+
+    match = re.search(r":v([0-9]+)$", str(contract_ref or ""))
+    return int(match.group(1)) if match else 0
+
+
+def governing_verdicts(connection: sqlite3.Connection, *, claim_version_ref: str,
+                       claim: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The verdicts that speak for exactly this Claim version now (2026-09-28).
+
+    Every verdict a backfill mark binds to this claim version *and its hash*,
+    about this subject and this statement, re-hashed on read -- and of those,
+    only the ones asked under the newest contract any of them was asked
+    under: a later contract's answer supersedes an earlier one's.  Each
+    carries its ``item_key``.  Empty when there is none.  Read by the industry
+    reattribution of a ``citation_support_rejected`` retirement, which acts
+    only when every governing verdict is supported and about another subject.
+    """
+
+    try:
+        rows = connection.execute(
+            "SELECT item_key, claim_version_hash FROM claim_support_backfill_marks "
+            "WHERE claim_version_ref=? AND outcome='verdict' AND item_key IS NOT NULL",
+            (claim_version_ref,),
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    statement = claim.get("normalized_statement")
+    if not isinstance(statement, str):
+        return []
+    keys = [row[0] for row in rows if row[1] == claim.get("content_hash")]
+    found = [
+        {**verdict, "item_key": key} for key, verdict in _verdicts(connection, keys).items()
+        if verdict.get("subject_ref") == claim.get("subject_ref")
+        and verdict.get("statement_sha256") == _sha256(statement)
+    ]
+    if not found:
+        return []
+    newest = max(contract_version(verdict.get("contract_ref")) for verdict in found)
+    return sorted((verdict for verdict in found
+                   if contract_version(verdict.get("contract_ref")) == newest),
+                  key=lambda verdict: verdict["item_key"])
+
+
 # -- the verifier -----------------------------------------------------------------
 
 class ClaimSupportVerifier:
@@ -1383,7 +1428,9 @@ __all__ = [
     "admissible",
     "build_prompt",
     "build_verifier",
+    "contract_version",
     "contract_wiring_failure",
+    "governing_verdicts",
     "route_unavailable_failure",
     "systemic_failure",
     "hold_reason",
