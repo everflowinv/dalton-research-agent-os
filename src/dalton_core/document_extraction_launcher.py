@@ -490,6 +490,30 @@ class DocumentExtractionCoordinator:
             carried.append({"status": "error", "reason": f"{type(exc).__name__}: {exc}"})
         return carried
 
+    def _carry_filtered(self) -> dict[str, int]:
+        """Open superseded-version reviews the carry did not select, by reason.
+
+        2026-09-28: the carry used to return an empty list for 164 legacy
+        Guidepoint reviews, every tick, and the tick summary said nothing.
+        Only the reasons that are not "carryable" are counted here; a
+        carryable review the carry refused is in ``skipped`` with its reason.
+        """
+
+        census = getattr(self.missions, "awaiting_review_carry_census", None)
+        if census is None:
+            return {}
+        filtered: dict[str, int] = {}
+        try:
+            for row in self.missions.connection.execute(
+                "SELECT mission_ref FROM coverage_mission_pointer ORDER BY mission_ref"
+            ).fetchall():
+                for reason, count in census(row["mission_ref"])["dispositions"].items():
+                    if reason != "carryable" and count:
+                        filtered[reason] = filtered.get(reason, 0) + count
+        except Exception as exc:  # noqa: BLE001 - maintenance, reported
+            filtered[f"census_error:{type(exc).__name__}"] = 1
+        return filtered
+
     def _has_mission(self) -> bool:
         try:
             return self.missions.connection.execute(
@@ -540,10 +564,14 @@ class DocumentExtractionCoordinator:
         carried = self._carry_awaiting()
         awaiting, awaiting_fingerprint = self._awaiting_state()
         result: dict[str, Any] = {"awaiting": awaiting}
-        if carried:
+        filtered = self._carry_filtered()
+        if carried or filtered:
+            skipped = [row for row in carried if row.get("status") != "carried"]
             result["carried_awaiting"] = {
                 "carried": sum(1 for row in carried if row.get("status") == "carried"),
-                "skipped": [row for row in carried if row.get("status") != "carried"][:5],
+                "skipped_count": len(skipped),
+                "skipped": skipped[:5],
+                "filtered": filtered,
             }
         permission_changed = False
         blocked = self.failure_budget.blocked(self._permission_item)

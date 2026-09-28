@@ -46,6 +46,8 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from .coverage_mission import AWAITING_REVIEW_DISPOSITION_SQL
+
 SCHEMA_VERSION = "dalton-workspace-health-parity-0.1"
 
 OK, GAP, WARN, DRIFT, PENDING, INFO = "ok", "gap", "warn", "drift", "pending", "info"
@@ -506,19 +508,21 @@ def _core_principal(env: Environment) -> dict[str, Any]:
 # -- mission / review consistency -----------------------------------------------------
 
 
+# 2026-09-28: the carry's own predicate (``AWAITING_REVIEW_DISPOSITION_SQL``),
+# not a second copy of it.  This check used to call an open review stranded
+# only when no later version had a *review* of the document, while the carry
+# refused it when a later version had *any row* of it: the check reported 164
+# Guidepoint reviews stranded and said "deploy 70ef64ee", the carry -- already
+# deployed -- moved none of them, and neither said why.
+REVIEW_DISPOSITIONS_SQL = (
+    "SELECT source_ref, review_version, active_version, carry_disposition, COUNT(*) AS n "
+    "FROM (" + AWAITING_REVIEW_DISPOSITION_SQL + ") "
+    "GROUP BY source_ref, review_version, active_version, carry_disposition "
+    "ORDER BY source_ref, review_version, carry_disposition"
+)
 STRANDED_REVIEWS_SQL = (
-    "SELECT r.source_ref AS source_ref, v.version_number AS review_version, "
-    "p.version_number AS active_version, COUNT(*) AS n "
-    "FROM coverage_mission_document_reviews r "
-    "JOIN coverage_mission_versions v ON v.mission_version_id=r.mission_version_ref "
-    "JOIN coverage_mission_pointer p ON p.mission_ref=v.mission_ref "
-    "WHERE r.state='awaiting_human_extraction' AND r.mission_version_ref<>p.mission_version_id "
-    "AND NOT EXISTS (SELECT 1 FROM coverage_mission_document_reviews n "
-    "JOIN coverage_mission_versions nv ON nv.mission_version_id=n.mission_version_ref "
-    "WHERE nv.mission_ref=v.mission_ref AND nv.version_number>v.version_number "
-    "AND n.document_ref=r.document_ref) "
-    "GROUP BY r.source_ref, v.version_number, p.version_number "
-    "ORDER BY r.source_ref, v.version_number"
+    "SELECT source_ref, review_version, active_version, n FROM (" + REVIEW_DISPOSITIONS_SQL + ") "
+    "WHERE carry_disposition='carryable' ORDER BY source_ref, review_version"
 )
 
 
@@ -528,28 +532,40 @@ def check_mission_reviews(env: Environment) -> list[dict[str, Any]]:
         return [_row(section, "reviews", PENDING, "no mission published yet")]
     rows: list[dict[str, Any]] = []
     try:
-        stranded = [dict(row) for row in env.core.execute(STRANDED_REVIEWS_SQL)]
+        dispositions = [dict(row) for row in env.core.execute(REVIEW_DISPOSITIONS_SQL)]
         active_open = env.core.execute(
             "SELECT COUNT(*) FROM coverage_mission_document_reviews r "
             "JOIN coverage_mission_pointer p ON p.mission_version_id=r.mission_version_ref "
             "WHERE r.state='awaiting_human_extraction'").fetchone()[0]
     except sqlite3.Error as exc:
         return [_row(section, "reviews", WARN, f"cannot read reviews: {exc}")]
+    stranded = [{key: item[key] for key in ("source_ref", "review_version", "active_version", "n")}
+                for item in dispositions if item["carry_disposition"] == "carryable"]
+    held_later: dict[str, int] = {}
+    for item in dispositions:
+        if item["carry_disposition"] != "carryable":
+            held_later[item["carry_disposition"]] = (
+                held_later.get(item["carry_disposition"], 0) + item["n"])
     total = sum(item["n"] for item in stranded)
     summary = ", ".join(f"{item['source_ref']} v{item['review_version']}->v{item['active_version']}:"
                         f" {item['n']}" for item in stranded)
+    not_owed = ("; not carried by design: " + ", ".join(
+        f"{name} {count}" for name, count in sorted(held_later.items()))) if held_later else ""
     rows.append(_row(
         section, "reviews.stranded_on_superseded_version", OK if not total else GAP,
-        (f"{active_open} open review(s) under the active version; none stranded"
+        (f"{active_open} open review(s) under the active version; none stranded" + not_owed
          if not total else
-         f"{total} open review(s) sit on superseded mission versions ({summary}); "
+         f"{total} open review(s) on superseded mission versions are owed a carry ({summary}); "
          f"{active_open} open under the active version"
          + (" -- extraction sees nothing to do and its child (and the claim-support "
-            "recheck inside it) never starts" if not active_open else "")),
-        fix=("deploy a release with CoverageMissionAuthority.carry_forward_awaiting_reviews "
-             "(70ef64ee): the document-extraction tick carries them into the active version "
-             "by itself"),
-        stranded=stranded or None))
+            "recheck inside it) never starts" if not active_open else "")
+         + not_owed),
+        fix=("the document-extraction tick carries these every tick "
+             "(carry_forward_awaiting_reviews); if the count does not fall, its tick "
+             "summary's carried_awaiting.skipped names the refusal (a grant the active "
+             "version no longer gives, or a document the active version already decided)"),
+        stranded=stranded or None,
+        dispositions=held_later or None))
     try:
         versions = env.core.execute(
             "SELECT COUNT(*) FROM coverage_mission_versions WHERE mission_ref=?",
@@ -805,7 +821,7 @@ def render(reports: Sequence[Mapping[str, Any]], *, verbose: bool = False) -> st
 
 
 __all__ = [
-    "Environment", "SCHEMA_VERSION", "STRANDED_REVIEWS_SQL", "check_authorization",
+    "Environment", "REVIEW_DISPOSITIONS_SQL", "SCHEMA_VERSION", "STRANDED_REVIEWS_SQL", "check_authorization",
     "check_config", "check_environment", "check_governance", "check_host", "check_lanes",
     "check_mission_reviews", "render",
 ]
