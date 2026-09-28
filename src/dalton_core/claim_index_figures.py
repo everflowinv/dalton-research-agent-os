@@ -162,6 +162,20 @@ class DocumentFigureResolver:
             raise FigureNotFound(f"no document figure {figure_id!r}")
         return {key: row[key] for key in row.keys()}
 
+    def identity(self, figure: Mapping[str, Any]) -> dict[str, Any]:
+        """The figure's period as dates, amount and label (``document_figure_identity``).
+
+        Derived from this Core alone, so the promoter, the staging gate and the
+        auto-commit replay all compute the same answer.
+        """
+
+        from .document_figure_identity import figure_identity
+
+        return figure_identity(self.connection, figure)
+
+    def claim_period(self, figure: Mapping[str, Any]) -> str:
+        return self.identity(figure)["period"]
+
     def retracted(self, figure_id: str) -> bool:
         if not self._table("coverage_mission_document_figure_retractions"):
             return False
@@ -692,29 +706,51 @@ def _numeric_candidate(figure: Mapping[str, Any]) -> dict[str, Any]:
 
 # -- the promoter ----------------------------------------------------------
 
-def figure_claim_semantics(figure: Mapping[str, Any]) -> dict[str, Any]:
+def figure_claim_semantics(
+    figure: Mapping[str, Any], identity: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """What the Claim says, derived from the figure and nothing else.
 
     The statement is generated, not drafted: a figure is a value for a measure
     in a period, and the sentence that says so has no room for judgement.  The
     grade's qualifier is appended by ``document_figure_grade`` so a reader of
     one Claim is told, in the Claim, whether the number was filed or spoken.
+
+    2026-09-28: with an ``identity`` (``document_figure_identity``) the period
+    is the dates it names and the label is the filer's -- the filed XBRL
+    line's, or the document's own row label -- rather than the words the
+    drafting model wrote beside the number ("net income adjusted for certain
+    non-cash items", "Consolidated").  The period as the document spelled it
+    stays in the sentence when it was normalised.
     """
 
     from .document_figure_grade import basis_for, qualify
 
+    label = figure["as_reported_label"]
+    period = figure["period"]
+    reported = ""
+    if identity is not None:
+        label = identity.get("label") or label
+        if identity.get("span") and identity.get("period") != figure["period"]:
+            period = identity["period"]
+            reported = f" (reported as: {figure['period']})"
     scale = f"{figure['scale']} " if figure.get("scale") else ""
     currency = f"{figure['currency']} " if figure.get("currency") else ""
     statement = (
-        f"{figure['as_reported_label']} for {figure['period']} was "
+        f"{label} for {period}{reported} was "
         f"{currency}{figure['value']} {scale}({figure['unit']})"
     )
     return {
         "metric_or_aspect": figure["metric_ref"],
-        "period": figure["period"],
+        "period": period,
         "basis": basis_for(figure["source_grade"]),
         "normalized_statement": qualify(statement, figure["source_grade"]),
     }
+
+
+def _identity_changes_semantics(figure: Mapping[str, Any], identity: Mapping[str, Any]) -> bool:
+    return (identity.get("label") or figure["as_reported_label"]) != figure["as_reported_label"] \
+        or (bool(identity.get("span")) and identity.get("period") != figure["period"])
 
 
 def build_figure_candidate(
@@ -750,12 +786,18 @@ def build_figure_candidate(
             "mission figure authority verification rejected: " + ", ".join(failed))
 
     when = material["retrieved_at"]
-    semantics = figure_claim_semantics(held)
-    numerics = figure_candidate_numerics(held)
+    identity = figures.identity(held)
+    semantics = figure_claim_semantics(held, identity)
+    numerics = figure_candidate_numerics(held, period=semantics["period"])
     evidence_ref = "candidate-evidence:mission-figure:" + held["content_hash"][:32]
-    claim_ref = "candidate-claim:mission-figure:" + content_hash({
+    claim_identity: dict[str, Any] = {
         "figure_id": held["figure_id"], "figure_hash": held["content_hash"],
-    })[:32]
+    }
+    if _identity_changes_semantics(held, identity):
+        # A different sentence is a different candidate: one staged under the
+        # figure's raw period and label before 2026-09-28 keeps its own ref.
+        claim_identity["semantics"] = identity["version"]
+    claim_ref = "candidate-claim:mission-figure:" + content_hash(claim_identity)[:32]
     evidence = validate_candidate_evidence(build_candidate_evidence(
         material, source_verification, candidate_evidence_ref=evidence_ref,
         actor_ref=actor_ref, created_at=when,
@@ -878,16 +920,43 @@ def promote_verified_figures(
     them in one dedupe group with one canonical member, which is where the
     collapsing belongs.  Refusing to stage the second and third would throw
     away the fact that two documents agree.
+
+    2026-09-28: *one* document reporting one number three times is not
+    agreement, it is the figures pass reading the same line three times
+    ("2025", "full year 2025", "Year Ended December 31, 2025").  Within a
+    document, one company, metric, period (as dates) and amount (value x
+    scale, at the coarser precision) is staged once
+    (``document_figure_identity.duplicate_groups``); the rest are listed in
+    ``skipped`` with the figure they repeat.  A number one of whose copies was
+    already promoted (``promoted``) is not staged again under another copy.
     """
+
+    from .document_figure_identity import duplicate_groups
 
     resolver = MissionFigureAuthorityResolver(core.connection)
     already = set(promoted or ())
     results: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
-    held_figures = [
-        item for item in resolver.figures(company_ref=company_ref)
-        if item["figure_id"] not in already
-    ]
+    everything = resolver.figures(company_ref=company_ref)
+    duplicates, _identities = duplicate_groups(
+        core.connection,
+        [item for item in everything if item["source_grade"] in _ADMISSIBLE_GRADES])
+    keepers_promoted = {duplicates.get(item, item) for item in already}
+    held_figures = []
+    for item in everything:
+        figure_id = item["figure_id"]
+        if figure_id in already:
+            continue
+        keeper = duplicates.get(figure_id, figure_id)
+        if keeper != figure_id or keeper in keepers_promoted:
+            skipped.append({
+                "figure_id": figure_id,
+                "duplicate_of": keeper,
+                "reason": "same document, metric, period and amount as "
+                          f"{keeper}; staged once",
+            })
+            continue
+        held_figures.append(item)
     truncated = 0
     for index, held in enumerate(held_figures):
         if len(results) >= limit:

@@ -205,13 +205,18 @@ SEC_STATEMENT_LINE_SOURCE_VERIFIER_HASH = content_hash({
 })
 
 
-def figure_candidate_numerics(figure: Mapping[str, Any]) -> dict[str, Any]:
+def figure_candidate_numerics(
+    figure: Mapping[str, Any], *, period: str | None = None,
+) -> dict[str, Any]:
     """The numeric fields a CandidateClaim takes from a verified figure row.
 
     One mapping, in one place, because two of the four fields need one: a
     figure with no scale word is scale ``one`` (the CandidateClaim contract has
     no null scale for a number), and the value is canonicalised the way every
     other decimal in this module is.  Everything else is copied.
+
+    ``period`` (2026-09-28): the period as dates, when the figure resolver
+    derived one from Core (``document_figure_identity``); otherwise the row's.
     """
 
     scale = figure.get("scale")
@@ -220,7 +225,7 @@ def figure_candidate_numerics(figure: Mapping[str, Any]) -> dict[str, Any]:
         "unit": figure["unit"],
         "currency": figure.get("currency"),
         "scale": scale if scale else "one",
-        "period": figure["period"],
+        "period": figure["period"] if period is None else period,
     }
 
 
@@ -2154,7 +2159,12 @@ class CandidateStagingStore:
             # point at it and every numeric field has to equal the row's.  The
             # value is compared as a number rather than as text: "5.60" and
             # "5.6" are the same figure and only one of them is canonical.
-            expected_numerics = figure_candidate_numerics(figure_wire)
+            # The period is the one the resolver derives from Core -- dates
+            # where the figure's words name them -- never the caller's.
+            claim_period = getattr(figure_resolver, "claim_period", None)
+            expected_numerics = figure_candidate_numerics(
+                figure_wire,
+                period=None if claim_period is None else claim_period(figure_wire))
             claim_checks.extend((
                 claim_wire["numeric_spec_ref"] == figure_wire["figure_id"],
                 claim_wire["numeric_spec_hash"] == figure_wire["content_hash"],

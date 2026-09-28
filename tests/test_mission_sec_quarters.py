@@ -11,6 +11,7 @@ from pathlib import Path
 
 from dalton_core.mission_sec_quarters import (
     MAX_ATTEMPTS_PER_FILING,
+    accession_in_hand,
     MissionSecQuartersCoordinator,
     classify_failure,
     source_lag_retry_at,
@@ -151,8 +152,12 @@ def _entry(have: int) -> dict:
 class PayloadTests(unittest.TestCase):
     def test_only_true_quarters_are_filings_to_queue(self) -> None:
         filings = quarterly_filings(PAYLOAD)
-        self.assertEqual([f["period"] for f in filings],
-                         ["2026-03-01..2026-05-31", "2025-12-01..2026-02-28"])
+        # The 10-K stands for the quarter ending on its fiscal year end; it
+        # reports only the year, so it names no quarterly start.
+        self.assertEqual([(f["period"], f["form"]) for f in filings],
+                         [("2026-03-01..2026-05-31", "10-Q"), ("2025-12-01..2026-02-28", "10-Q"),
+                          (None, "10-K")])
+        self.assertEqual((filings[2]["end"], filings[2]["fourth_quarter"]), ("2025-08-31", False))
         self.assertEqual(filings[0]["accession"], "0001467373-26-000032")
         self.assertEqual(filings[0]["filed"], "2026-06-18")
         self.assertEqual(quarterly_filings({}), [])
@@ -251,7 +256,9 @@ class CoordinatorTests(unittest.TestCase):
             periods=("2026-03-01..2026-05-31", "2025-12-01..2026-02-28"),
         )).dispatch_once()
         self.assertEqual(done["status"], "idle")
-        self.assertIn("都已入账", json.dumps(done["skipped"], ensure_ascii=False))
+        # The one quarter still missing is the fiscal fourth, in a 10-K of
+        # year totals only: nothing any rule can answer, so nothing queued.
+        self.assertIn("只报全年数", json.dumps(done["skipped"], ensure_ascii=False))
         missing = self.coordinator(_entry(1), store=_Store(artifact_hash=None)).dispatch_once()
         self.assertEqual(missing["status"], "idle")
         self.assertIn("原始件", json.dumps(missing["skipped"], ensure_ascii=False))
@@ -302,8 +309,10 @@ SUBMISSIONS = {
                        "2025-09-30", "2025-06-30", "2025-03-31"],
     }},
 }
+# 2026-09-28: the fourth quarter is held too, so these fixtures keep asking
+# about the 10-Q they were written for (the 10-K has its own tests below).
 CTSH_HELD = ("2025-01-01..2025-03-31", "2025-04-01..2025-06-30",
-             "2025-07-01..2025-09-30", "2026-01-01..2026-03-31")
+             "2025-07-01..2025-09-30", "2025-10-01..2025-12-31", "2026-01-01..2026-03-31")
 
 
 def _ctsh_entry() -> dict:
@@ -340,8 +349,11 @@ class NewestQuarterTests(unittest.TestCase):
 
     def test_submissions_list_only_quarterly_reports(self) -> None:
         filings = submissions_filings(SUBMISSIONS)
-        self.assertEqual([f["end"] for f in filings],
-                         ["2026-06-30", "2026-03-31", "2025-09-30", "2025-06-30", "2025-03-31"])
+        self.assertEqual([(f["end"], f["form"]) for f in filings],
+                         [("2026-06-30", "10-Q"), ("2026-03-31", "10-Q"), ("2025-12-31", "10-K"),
+                          ("2025-09-30", "10-Q"), ("2025-06-30", "10-Q"), ("2025-03-31", "10-Q")])
+        # The index does not say whether a 10-K reports its fourth quarter.
+        self.assertIsNone(filings[2]["fourth_quarter"])
         self.assertEqual(filings[0]["accession"], "0001058290-26-000031")
         self.assertEqual(submissions_filings({}), [])
         self.assertEqual(submissions_filings({"filings": {"recent": {"form": "10-Q"}}}), [])
@@ -389,8 +401,9 @@ class NewestQuarterTests(unittest.TestCase):
 
     def test_only_the_newest_four_quarters_are_chased(self) -> None:
         digest = self.spool(SUBMISSIONS)
-        # The newest four are held; the fifth (2025-03-31) is not and never matters.
-        held = ("2025-04-01..2025-06-30", "2025-07-01..2025-09-30",
+        # The newest four are held; the fifth and sixth (2025-06-30, 2025-03-31)
+        # are not and never matter.
+        held = ("2025-07-01..2025-09-30", "2025-10-01..2025-12-31",
                 "2026-01-01..2026-03-31", "2026-04-01..2026-06-30")
         result, missions = self.run_once(_Store(artifacts=(digest,), periods=held), _ctsh_entry())
         self.assertEqual((result["status"], missions.queued), ("idle", []))
@@ -640,6 +653,164 @@ class FailuresThatAreNotTheFilingsTests(unittest.TestCase):
         self.assertEqual(transport_retry_at([first] * 2), first + timedelta(hours=1))
         self.assertEqual(transport_retry_at([first] * 5), first + timedelta(hours=6))
         self.assertEqual(transport_retry_at([first] * 400), first + timedelta(hours=6))
+
+
+# 2026-09-28: ws-7d signed the annual rule and the lane still said
+# ``idle skipped 4``; nothing here ever looked at a 10-K.
+ACN_10K = "0001467373-25-000217"
+ACN_ANNUAL = {"cik": 1467373, "facts": {"us-gaap": {"Revenues": {"units": {"USD": [
+    # ACN's fiscal year ends 31 August.  Its 10-K reports the year and, in its
+    # quarterly note, every quarter of it and of the year before.
+    {"form": "10-K", "start": "2024-09-01", "end": "2025-08-31", "accn": ACN_10K,
+     "filed": "2025-10-10", "val": 69672977000, "fp": "FY"},
+    {"form": "10-K", "start": "2023-09-01", "end": "2024-08-31", "accn": ACN_10K,
+     "filed": "2025-10-10", "val": 64896000000, "fp": "FY"},
+    {"form": "10-K", "start": "2025-06-01", "end": "2025-08-31", "accn": ACN_10K,
+     "filed": "2025-10-10", "val": 17596260000, "fp": "FY"},
+    {"form": "10-K", "start": "2025-03-01", "end": "2025-05-31", "accn": ACN_10K,
+     "filed": "2025-10-10", "val": 17728000000, "fp": "FY"},
+    {"form": "10-K", "start": "2024-06-01", "end": "2024-08-31", "accn": ACN_10K,
+     "filed": "2025-10-10", "val": 16405819000, "fp": "FY"},
+    {"form": "10-Q", "start": "2026-03-01", "end": "2026-05-31",
+     "accn": "0001467373-26-000032", "filed": "2026-06-18", "val": 1},
+    {"form": "10-Q", "start": "2025-12-01", "end": "2026-02-28",
+     "accn": "0001467373-26-000014", "filed": "2026-03-19", "val": 1},
+    {"form": "10-Q", "start": "2025-09-01", "end": "2025-11-30",
+     "accn": "0001467373-25-000222", "filed": "2025-12-18", "val": 1},
+    {"form": "10-Q", "start": "2025-03-01", "end": "2025-05-31",
+     "accn": "0001467373-25-000150", "filed": "2025-06-20", "val": 1},
+]}}}}}
+ACN_10Q_HELD = ("2025-09-01..2025-11-30", "2025-12-01..2026-02-28", "2026-03-01..2026-05-31")
+
+MSFT = "company:ticker:msft"
+MSFT_10K = "0001193125-26-323660"
+# MSFT's fiscal year ends 30 June, and its 10-K reports only fiscal years.
+MSFT_ANNUAL_ONLY = {"cik": 789019, "facts": {"us-gaap": {
+    "RevenueFromContractWithCustomerExcludingAssessedTax": {"units": {"USD": [
+        {"form": "10-K", "start": "2025-07-01", "end": "2026-06-30", "accn": MSFT_10K,
+         "filed": "2026-07-29", "val": 1, "fp": "FY"},
+        {"form": "10-K", "start": "2024-07-01", "end": "2025-06-30", "accn": MSFT_10K,
+         "filed": "2026-07-29", "val": 1, "fp": "FY"},
+        {"form": "10-Q", "start": "2026-01-01", "end": "2026-03-31",
+         "accn": "0001193125-26-191507", "filed": "2026-04-29", "val": 1},
+        {"form": "10-Q", "start": "2025-10-01", "end": "2025-12-31",
+         "accn": "0001193125-26-027207", "filed": "2026-01-28", "val": 1},
+        {"form": "10-Q", "start": "2025-07-01", "end": "2025-09-30",
+         "accn": "0001193125-25-256321", "filed": "2025-10-29", "val": 1},
+    ]}}}}}
+MSFT_10Q_HELD = ("2025-07-01..2025-09-30", "2025-10-01..2025-12-31", "2026-01-01..2026-03-31")
+
+
+class FourthQuarterTests(unittest.TestCase):
+    """The quarter a 10-K reports is one of the newest four, whatever the fiscal year."""
+
+    setUp = NewestQuarterTests.setUp
+    spool = NewestQuarterTests.spool
+    run_once = NewestQuarterTests.run_once
+
+    @staticmethod
+    def entry(company_ref, ticker):
+        return {"company_ref": company_ref, "ticker": ticker,
+                "items": [{"item_ref": "quarterly_financials", "have": 300, "required": 4}]}
+
+    def test_a_10k_stands_for_the_quarter_ending_on_its_fiscal_year_end(self) -> None:
+        filings = quarterly_filings(ACN_ANNUAL)
+        fourth = next(item for item in filings if item["form"] == "10-K")
+        self.assertEqual((fourth["accession"], fourth["period"], fourth["fourth_quarter"]),
+                         (ACN_10K, "2025-06-01..2025-08-31", True))
+        # Its other quarterly rows are comparatives, not quarters to chase.
+        self.assertEqual([item["form"] for item in filings].count("10-K"), 1)
+        self.assertEqual([item["end"] for item in filings][:4],
+                         ["2026-05-31", "2026-02-28", "2025-11-30", "2025-08-31"])
+        msft = next(item for item in quarterly_filings(MSFT_ANNUAL_ONLY) if item["form"] == "10-K")
+        self.assertEqual((msft["end"], msft["start"], msft["fourth_quarter"]),
+                         ("2026-06-30", None, False))
+
+    def test_a_missing_fourth_quarter_is_queued_as_a_10k(self) -> None:
+        digest = self.spool(ACN_ANNUAL)
+        result, missions = self.run_once(
+            _Store(artifacts=(digest,), periods=ACN_10Q_HELD), self.entry(ACN, "ACN"))
+        self.assertEqual(result["status"], "queued", result)
+        self.assertEqual(result["recent_quarters_missing"], ["2025-08-31"])
+        self.assertEqual([(q["accession"], q["form"]) for q in result["queued"]],
+                         [(ACN_10K, "10-K")])
+        [queued] = missions.queued
+        # Form 10-K selects COMPANY_FACTS_RULE_REFS["10-K"] in the lane.
+        self.assertEqual(queued["form"], "10-K")
+        self.assertEqual(queued["expected_accession"], ACN_10K)
+        self.assertEqual((queued["filed_from"], queued["filed_to"]), ("2025-10-08", "2025-10-12"))
+        self.assertEqual(queued["observation_ref"], f"sec-company-facts-artifact:{digest}")
+        # Held, it is done: the fourth quarter is one of the four.
+        done, missions = self.run_once(
+            _Store(artifacts=(digest,), periods=ACN_10Q_HELD + ("2025-06-01..2025-08-31",)),
+            self.entry(ACN, "ACN"))
+        self.assertEqual((done["status"], missions.queued), ("idle", []))
+        self.assertIn("都已入账", json.dumps(done["skipped"], ensure_ascii=False))
+
+    def test_a_10k_of_year_totals_only_is_not_queued(self) -> None:
+        """MSFT/AMZN/GOOGL/META: the 10-K has no Q4 row; FY - 9M is not a rule."""
+
+        digest = self.spool(MSFT_ANNUAL_ONLY)
+        # The statement lane lists the 10-K too; company facts say what is in it.
+        store = _Store(artifacts=(digest,), periods=MSFT_10Q_HELD, statement_filings=({
+            "ingest_id": "statement-ingest:k", "accession": MSFT_10K, "form": "10-K",
+            "filed": "2026-07-29", "report_date": "2026-06-30"},))
+        result, missions = self.run_once(store, self.entry(MSFT, "MSFT"))
+        self.assertEqual((result["status"], missions.queued), ("idle", []))
+        text = json.dumps(result["skipped"], ensure_ascii=False)
+        self.assertIn(MSFT_10K, text)
+        self.assertIn("只报全年数", text)
+
+    def test_a_10k_only_the_index_lists_is_queued_once_and_not_after_it_proves_annual(self) -> None:
+        digest = self.spool(SUBMISSIONS)
+        held = ("2025-07-01..2025-09-30", "2026-01-01..2026-03-31", "2026-04-01..2026-06-30")
+        result, missions = self.run_once(_Store(artifacts=(digest,), periods=held), _ctsh_entry())
+        self.assertEqual([(q["accession"], q["form"]) for q in result["queued"]],
+                         [("0001058290-26-000008", "10-K")])
+        # The run found only fiscal-year totals: that ends the chase.
+        runs = ({"dispatch_id": "mission-sec-dispatch:k", "form": "10-K",
+                 "expected_accession": "0001058290-26-000008", "status": "launched",
+                 "ticket_ref": "sec-lane-run:k", "dispatch_reason": None,
+                 "updated_at": "2026-09-28T00:00:00+00:00", "settled_at": "2026-09-28T00:00:00+00:00",
+                 "settled_reason": "SecPublicAdapterError: no allowlisted revenue concept "
+                                   "resolves on the latest 10-K accession"},)
+        store = _Store(artifacts=(digest,), periods=held, failed_runs=runs,
+                       attempts={"0001058290-26-000008": 1})
+        result, missions = self.run_once(store, _ctsh_entry())
+        self.assertEqual((result["status"], missions.queued), ("idle", []))
+        self.assertIn("只报全年数", json.dumps(result["skipped"], ensure_ascii=False))
+
+    def test_a_10k_the_planner_path_has_queued_is_left_to_it(self) -> None:
+        digest = self.spool(ACN_ANNUAL)
+        result, missions = self.run_once(
+            _Store(artifacts=(digest,), periods=ACN_10Q_HELD, open_dispatches=1),
+            self.entry(ACN, "ACN"))
+        self.assertEqual((result["status"], missions.queued), ("idle", []))
+        self.assertIn("在队列里等着跑", json.dumps(result["skipped"], ensure_ascii=False))
+
+    def test_accession_in_hand_sees_open_and_succeeded_dispatches_only(self) -> None:
+        import sqlite3
+
+        connection = sqlite3.connect(":memory:")
+        connection.row_factory = sqlite3.Row
+        connection.executescript(
+            "CREATE TABLE coverage_mission_sec_dispatches(dispatch_id TEXT, form TEXT, "
+            "status TEXT, expected_accession TEXT, created_at TEXT);"
+            "CREATE TABLE coverage_mission_sec_dispatch_settlements(dispatch_id TEXT, detail TEXT);")
+        rows = (("d-failed", "launched", "failed"), ("d-open", "pending", None),
+                ("d-ok", "launched", "succeeded"), ("d-rejected", "rejected", None))
+        for index, (dispatch_id, status, detail) in enumerate(rows):
+            connection.execute("INSERT INTO coverage_mission_sec_dispatches VALUES(?,?,?,?,?)",
+                               (dispatch_id, "10-K", status, f"acc-{index}", "2026-09-28"))
+            if detail:
+                connection.execute(
+                    "INSERT INTO coverage_mission_sec_dispatch_settlements VALUES(?,?)",
+                    (dispatch_id, detail))
+        self.assertIsNone(accession_in_hand(connection, "acc-0"))
+        self.assertEqual(accession_in_hand(connection, "acc-1")["state"], "open")
+        self.assertEqual(accession_in_hand(connection, "acc-2")["state"], "succeeded")
+        self.assertIsNone(accession_in_hand(connection, "acc-3"))
+        self.assertIsNone(accession_in_hand(connection, "nope"))
 
 
 if __name__ == "__main__":

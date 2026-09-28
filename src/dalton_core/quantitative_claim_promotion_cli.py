@@ -141,6 +141,8 @@ def run_promotion(
         # Numbers newly written down this run, by where they came from.
         "promoted": {"statement_line": 0, "derived_ratio": 0, "document_figure": 0},
         "duplicates": 0,
+        # Figures that repeat another figure of the same document (2026-09-28).
+        "duplicate_figures": 0,
         "staged": 0,
         "admitted": 0,
         "staged_candidates": [],
@@ -247,15 +249,34 @@ def run_promotion(
             from .claim_index_figures import promote_verified_figures
             from .research_verification import CandidateStagingStore
 
+            from .document_figure_identity import duplicate_groups
+
             staging = CandidateStagingStore(str(staging_db))
+            # 2026-09-28: a figure already admitted is not restaged.  Its
+            # candidate's sentence may differ now (the filer's label, the
+            # period as dates), and a different sentence is a different
+            # candidate -- restaged, it would enter the Ledger a second time.
+            admitted_figures = _admitted_figures(store)
             figures = promote_verified_figures(
                 store, staging, actor_ref=actor_ref,
-                company_ref=company_ref, limit=limit,
+                company_ref=company_ref, limit=limit, promoted=admitted_figures,
             )
             summary["skipped"].extend(figures["skipped"])
             results_by_figure = {item["figure_id"]: item for item in figures["results"]}
-            for figure in _held_figures(store, company_ref):
-                proposal = document_figure_proposal(figure)
+            held = _held_figures(store, company_ref)
+            duplicates, identities = duplicate_groups(store.connection, [
+                item for item in held if item.get("source_grade") == "company-filed-document"])
+            answered = {duplicates.get(item, item) for item in admitted_figures}
+            for figure in held:
+                if figure["figure_id"] in admitted_figures:
+                    continue
+                if figure["figure_id"] in duplicates or figure["figure_id"] in answered:
+                    # The same number from the same document: written down
+                    # once, under the figure it repeats.
+                    summary["duplicate_figures"] += 1
+                    continue
+                proposal = document_figure_proposal(
+                    figure, identities.get(figure["figure_id"]))
                 if proposal is None:
                     continue
                 result = results_by_figure.get(figure["figure_id"])
@@ -342,6 +363,18 @@ def run_promotion(
         if staging is not None:
             staging.close()
         store.close()
+
+
+def _admitted_figures(store: Any) -> set[str]:
+    """Figure ids this ledger has already seen into ``claim_versions``."""
+
+    try:
+        rows = store.connection.execute(
+            "SELECT origin_ref FROM quantitative_claim_promotions "
+            "WHERE origin_kind='document_figure' AND disposition='admitted'").fetchall()
+    except Exception:  # noqa: BLE001 - a fresh install has no ledger yet
+        return set()
+    return {str(row[0]) for row in rows}
 
 
 def _held_figures(store: Any, company_ref: str | None) -> list[dict[str, Any]]:

@@ -32,7 +32,9 @@ this file.  Every promoted number is:
     (``claim_index_tagging.QUANTITATIVE_ASPECT_RULES``), which keeps the whole
     path free of model calls end to end;
   * idempotent by ``(company_ref, metric_or_aspect, period, origin_ref)``, so
-    a new filing adds its own numbers and changes nothing already promoted.
+    a new filing adds its own numbers and changes nothing already promoted --
+    and a document figure, since 2026-09-28, by its document, period as dates
+    and amount, so one document's three spellings of one number are one.
 
 What this module does **not** do is decide that a number may enter the Ledger.
 That decision belongs to the governance policy: a candidate reaches
@@ -406,7 +408,9 @@ def derived_ratio_proposals(
     return out
 
 
-def document_figure_proposal(figure: Mapping[str, Any]) -> dict[str, Any] | None:
+def document_figure_proposal(
+    figure: Mapping[str, Any], identity: Mapping[str, Any] | None = None,
+) -> dict[str, Any] | None:
     """One verified document figure as a quantitative Claim proposal.
 
     This is where bookings, backlog, headcount and a guidance range come from:
@@ -414,6 +418,10 @@ def document_figure_proposal(figure: Mapping[str, Any]) -> dict[str, Any] | None
     prose and the figures pass already verified against the quoted bytes.
     Only ``company-filed-document`` grade is promoted -- a number a person said
     on a call is evidence of what was said, not of what was reported.
+
+    2026-09-28: with an ``identity`` (``document_figure_identity``) the
+    proposal's period is dates and its label the filer's, as the Claim's are,
+    and it carries the key ``promotion_id_for`` de-duplicates on.
     """
 
     if str(figure.get("source_grade")) != "company-filed-document":
@@ -428,13 +436,24 @@ def document_figure_proposal(figure: Mapping[str, Any]) -> dict[str, Any] | None
     currency = figure.get("currency") or None
     scale = str(figure.get("scale") or "one").strip() or "one"
     label = str(figure.get("as_reported_label") or figure.get("metric_ref") or "")
+    same_document_key = None
+    if identity is not None:
+        label = str(identity.get("label") or label)
+        if identity.get("span"):
+            period = str(identity["period"])
+            if identity.get("amount") is not None:
+                same_document_key = {
+                    "document_ref": str(figure["document_ref"]),
+                    "amount": identity["amount"], "precision": identity["precision"],
+                    "unit": unit, "currency": currency,
+                }
     statement = (
         f"公司在其自有披露文件中列报的「{label}」，期间 {period}，"
         f"为 {_amount_text(value, unit, currency)}"
         f"{'（' + scale + '）' if scale != 'one' else ''}。"
         f"该数字已对照原文引文 {figure.get('quote_id')} 逐位校验。"
     )
-    return {
+    proposal = {
         "origin_kind": "document_figure",
         "origin_ref": str(figure["figure_id"]),
         "company_ref": str(figure["company_ref"]),
@@ -462,9 +481,31 @@ def document_figure_proposal(figure: Mapping[str, Any]) -> dict[str, Any] | None
             "verified_by": str(figure.get("verified_by") or ""),
         },
     }
+    if same_document_key is not None:
+        proposal["same_document_key"] = same_document_key
+    return proposal
 
 
 def promotion_id_for(proposal: Mapping[str, Any]) -> str:
+    """The identity a promotion is recorded, and refused as a duplicate, under.
+
+    2026-09-28: a document figure used to be keyed on its free-text period and
+    its own row id, so "2025", "full year 2025" and "Year Ended December 31,
+    2025" of one 10-K were three numbers (META revenue, ws-7d).  A figure whose
+    period normalised to dates is keyed on the document and the amount instead
+    of its row: one document, company, metric, period and amount, one
+    promotion.  Statement lines, derived ratios, and figures whose period did
+    not normalise keep the key they always had.
+    """
+
+    key = proposal.get("same_document_key")
+    if proposal.get("origin_kind") == "document_figure" and isinstance(key, Mapping):
+        return "quantitative-claim-promotion:" + content_hash({
+            "company_ref": proposal["company_ref"],
+            "metric_or_aspect": proposal["metric_or_aspect"],
+            "period": proposal["period"],
+            "same_document": dict(key),
+        })[:32]
     return "quantitative-claim-promotion:" + content_hash({
         "company_ref": proposal["company_ref"],
         "metric_or_aspect": proposal["metric_or_aspect"],

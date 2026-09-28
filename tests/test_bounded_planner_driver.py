@@ -276,6 +276,49 @@ class MissionObservationDispatchTests(unittest.TestCase):
         self.assertEqual(launcher.request["form"], "10-Q")
         self.assertEqual(launcher.request["mission_context"]["paid_calls_reserved"], 0)
 
+    def test_an_accession_the_quarterly_lane_already_ran_is_not_queued_again(self) -> None:
+        """2026-09-28: the coordinator queues 10-Ks now; one accession, one run."""
+
+        import sqlite3
+
+        class Launcher:
+            started = 0
+
+            def start(self, **_request):
+                Launcher.started += 1
+                return {"id": "sec-lane-run:" + "1" * 24}
+
+        server = self._server(Launcher())
+        connection = sqlite3.connect(":memory:")
+        connection.row_factory = sqlite3.Row
+        connection.executescript(
+            "CREATE TABLE coverage_mission_sec_dispatches(dispatch_id TEXT, form TEXT, "
+            "status TEXT, expected_accession TEXT, created_at TEXT);"
+            "CREATE TABLE coverage_mission_sec_dispatch_settlements(dispatch_id TEXT, detail TEXT);")
+        server._coverage_mission.connection = connection
+        for detail in ("failed", "succeeded"):
+            connection.execute(
+                "INSERT INTO coverage_mission_sec_dispatches VALUES(?,?,?,?,?)",
+                (f"mission-sec-dispatch:{detail}", "10-Q", "launched",
+                 "0001467373-26-000031", "2026-09-27T00:00:00+00:00"))
+            connection.execute("INSERT INTO coverage_mission_sec_dispatch_settlements VALUES(?,?)",
+                               (f"mission-sec-dispatch:{detail}", detail))
+        result = server._op_bounded_planner_record_observation({
+            "round_ref": "round:1", "mandate_version_ref": "mandate:1",
+        })
+        self.assertEqual(result["lane_status"], "already_dispatched", result)
+        self.assertEqual(result["lane_dispatch_ref"], "mission-sec-dispatch:succeeded")
+        self.assertEqual((Launcher.started, server._coverage_mission.pending), (0, []))
+        # A failed run alone is not an answer: the observation is queued as before.
+        connection.execute("DELETE FROM coverage_mission_sec_dispatch_settlements "
+                           "WHERE detail='succeeded'")
+        connection.execute("DELETE FROM coverage_mission_sec_dispatches "
+                           "WHERE dispatch_id='mission-sec-dispatch:succeeded'")
+        result = server._op_bounded_planner_record_observation({
+            "round_ref": "round:1", "mandate_version_ref": "mandate:1",
+        })
+        self.assertEqual(result["lane_status"], "launched", result)
+
     def test_a_lane_the_policy_does_not_authorize_is_held_not_launched(self) -> None:
         """2026-09-26: ws-7d launched runs its policy refused, one attempt each."""
 

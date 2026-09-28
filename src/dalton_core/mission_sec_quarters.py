@@ -45,6 +45,25 @@ SEC company facts lags the filing index: CTSH's 10-Q was listed and not yet
 in company facts, so each run answered "no 10-Q accession in the filing
 window".  That is the source being late, not the filing being bad: it is not
 counted either, and the filing is retried on a backoff instead of at once.
+
+2026-09-28: a fiscal year's fourth quarter is never in a 10-Q.  ws-7d signed
+the annual rule (``research-auto-commit:sec-public-company-facts-growth-annual:v1``)
+and the lane still sat at ``idle skipped 4``: every read here was
+``form='10-Q'``, so "the newest four quarters" skipped the quarter a 10-K
+reports and its absence was never noticed.  The newest four are now read from
+10-Qs *and* 10-Ks -- the 10-K standing for the quarter that ends on its fiscal
+year end, which is its report date whatever the calendar (MSFT's June, ACN's
+August, DXC's March) -- and a missing fourth quarter is queued as a 10-K
+dispatch, which the lane runs under ``COMPANY_FACTS_RULE_REFS["10-K"]``.
+
+The annual rule is the same-accession quarterly pair, nothing more: a 10-K
+that reports only fiscal-year totals has no quarter to compare, and the
+FY - 9M derivation is not a rule.  When the company facts already held show
+that a 10-K carries no fourth-quarter row, it is not queued (it could only
+fail); when nothing held says either way it is queued once, and a run that
+proves the 10-K annual-only ends its chase.  A 10-K the bounded-planner path
+already queued is the company's open dispatch, and one it already answered is
+a held period, so neither path runs a filing the other has.
 """
 
 from __future__ import annotations
@@ -116,6 +135,16 @@ TRANSPORT_TIMEOUT_PATTERN = re.compile(
 # public reads a day, none of them counted.
 TRANSPORT_RETRY_BASE = timedelta(minutes=30)
 TRANSPORT_RETRY_MAX = timedelta(hours=6)
+# 2026-09-28: the lane's answer for a 10-K that reports only fiscal-year
+# totals (``sec_public_adapter.normalize_sec_company_facts``).  The filing
+# will never carry a fourth-quarter pair, so one such run ends its chase.
+ANNUAL_ONLY_PATTERN = re.compile(
+    r"no allowlisted revenue concept resolves on the latest 10-K accession"
+    r"|lacks a same-filing prior-year quarterly comparison")
+QUARTERLY_FORM = "10-Q"
+ANNUAL_FORM = "10-K"
+# A fiscal year, as company facts spans one (364..371 days, 52/53-week years).
+MIN_YEAR_DAYS = 350
 EXCUSED_GOVERNANCE = "governance"
 EXCUSED_SOURCE_LAG = "source_lag"
 EXCUSED_TRANSPORT = "transport_timeout"
@@ -133,30 +162,55 @@ def _parse_date(value: Any) -> date | None:
 def quarterly_filings(
     payload: Mapping[str, Any], *, limit: int = RECENT_FILINGS
 ) -> list[dict[str, Any]]:
-    """The most recent quarterly 10-Q periods in a company-facts payload.
+    """The most recent quarters in a company-facts payload: 10-Qs and 10-Ks.
 
     Company facts carry every filing the issuer ever made.  The Playbook asks
     for the *past* four quarters, so only the newest few are candidates; live,
     without this bound the lane walked back into 2023 filings whose revenue
     concepts no longer resolve.
+
+    A 10-K stands for the quarter ending on its fiscal year end (its newest
+    fiscal-year row), whatever month that is.  ``fourth_quarter`` says whether
+    the 10-K reports what the annual rule compares: a revenue concept the lane
+    reads, for that quarter and for the same quarter a year earlier, both as
+    quarters and both in this accession.  Any other quarterly row a 10-K
+    carries (live: AMZN's severance, META's dividends, MSFT's dividends per
+    share) is not revenue and answers nothing.  When the pair is absent the
+    entry names no start: there is no quarterly revenue row to name one from.
     """
+
+    from .research_plan import DEFAULT_REVENUE_CONCEPT_CANDIDATES
 
     facts = (payload.get("facts") or {}).get("us-gaap") or {}
     seen: dict[tuple[str, str], dict[str, Any]] = {}
-    for concept in facts.values():
+    # accession -> filed, fiscal year end, revenue quarters {end: start}
+    annual: dict[str, dict[str, Any]] = {}
+    for name, concept in facts.items():
+        revenue = name in DEFAULT_REVENUE_CONCEPT_CANDIDATES
         units = (concept or {}).get("units") or {}
         for rows in units.values():
             if not isinstance(rows, list):
                 continue
             for row in rows:
-                if not isinstance(row, Mapping) or row.get("form") != "10-Q":
+                if not isinstance(row, Mapping) or row.get("form") not in (
+                        QUARTERLY_FORM, ANNUAL_FORM):
                     continue
                 start, end = _parse_date(row.get("start")), _parse_date(row.get("end"))
                 filed, accession = _parse_date(row.get("filed")), row.get("accn")
                 if start is None or end is None or filed is None or not isinstance(accession, str):
                     continue
                 span = (end - start).days
-                if not MIN_QUARTER_DAYS <= span <= MAX_QUARTER_DAYS:
+                quarter = MIN_QUARTER_DAYS <= span <= MAX_QUARTER_DAYS
+                if row["form"] == ANNUAL_FORM:
+                    held = annual.setdefault(accession, {
+                        "filed": filed, "year_end": None, "quarters": {}})
+                    if span >= MIN_YEAR_DAYS:
+                        if held["year_end"] is None or end > held["year_end"]:
+                            held["year_end"] = end
+                    elif quarter and revenue:
+                        held["quarters"].setdefault(end, start)
+                    continue
+                if not quarter:
                     continue
                 key = (start.isoformat(), end.isoformat())
                 if key in seen:
@@ -165,7 +219,45 @@ def quarterly_filings(
                     "period": f"{start.isoformat()}..{end.isoformat()}",
                     "start": start.isoformat(), "end": end.isoformat(),
                     "accession": accession, "filed": filed.isoformat(),
+                    "form": QUARTERLY_FORM,
                 }
+    # The quarter a 10-Q is *for* is its newest; its older quarterly rows are
+    # comparatives.  Live, ACN's Q1 10-Q (0001467373-25-000222) carries a
+    # 2025-06-01..2025-08-31 row, and standing in for the fiscal fourth
+    # quarter it hid the 10-K that reports it -- a filing already run for its
+    # own quarter, which could never answer that one.
+    own_end: dict[str, str] = {}
+    for item in seen.values():
+        if item["end"] > own_end.get(item["accession"], ""):
+            own_end[item["accession"]] = item["end"]
+    by_end = {item["end"]: key for key, item in seen.items()}
+    for accession, held in annual.items():
+        year_end = held["year_end"]
+        if year_end is None:
+            continue
+        standing = by_end.get(year_end.isoformat())
+        if standing is not None:
+            if own_end.get(seen[standing]["accession"]) == year_end.isoformat():
+                continue
+            del seen[standing]
+            by_end.pop(year_end.isoformat())
+        start = held["quarters"].get(year_end)
+        # The comparative: the same quarter a year earlier, in this filing.
+        paired = start is not None and any(
+            350 <= (year_end - end).days <= 380
+            for end in held["quarters"] if end != year_end)
+        entry = {
+            "period": f"{start.isoformat()}..{year_end.isoformat()}" if paired else None,
+            "start": start.isoformat() if paired else None,
+            "end": year_end.isoformat(), "accession": accession,
+            "filed": held["filed"].isoformat(), "form": ANNUAL_FORM,
+            "fourth_quarter": paired,
+        }
+        key = (ANNUAL_FORM, year_end.isoformat())
+        current = seen.get(key)
+        # Two 10-Ks for one year end (an amendment): the later filing speaks.
+        if current is None or entry["filed"] > current["filed"]:
+            seen[key] = entry
     ordered = sorted(seen.values(), key=lambda item: item["end"], reverse=True)
     return ordered[: max(1, int(limit))]
 
@@ -173,11 +265,14 @@ def quarterly_filings(
 def submissions_filings(
     payload: Mapping[str, Any], *, limit: int = RECENT_FILINGS
 ) -> list[dict[str, Any]]:
-    """The most recent 10-Qs listed in an EDGAR submissions payload.
+    """The most recent 10-Qs and 10-Ks listed in an EDGAR submissions payload.
 
     A submissions payload names each filing's accession, filing date and the
     period it reports, but not the period's start; the quarter is identified by
-    its end, which is what a held Claim period is matched on.
+    its end, which is what a held Claim period is matched on.  A 10-K's report
+    date is its fiscal year end, which is where its fourth quarter ends;
+    whether it reports that quarter as a quarter is not something the index
+    says (``fourth_quarter`` is None).
     """
 
     recent = ((payload.get("filings") or {}).get("recent")) if isinstance(payload, Mapping) else None
@@ -188,15 +283,17 @@ def submissions_filings(
         return []
     seen: dict[str, dict[str, Any]] = {}
     for form, accession, filed, report in zip(*columns):
-        if form != "10-Q" or not isinstance(accession, str):
+        if form not in (QUARTERLY_FORM, ANNUAL_FORM) or not isinstance(accession, str):
             continue
         filed_day, end = _parse_date(filed), _parse_date(report)
         if filed_day is None or end is None or end.isoformat() in seen:
             continue
         seen[end.isoformat()] = {
             "period": None, "start": None, "end": end.isoformat(),
-            "accession": accession, "filed": filed_day.isoformat(),
+            "accession": accession, "filed": filed_day.isoformat(), "form": form,
         }
+        if form == ANNUAL_FORM:
+            seen[end.isoformat()]["fourth_quarter"] = None
     ordered = sorted(seen.values(), key=lambda item: item["end"], reverse=True)
     return ordered[: max(1, int(limit))]
 
@@ -321,7 +418,8 @@ def attempt_ledger(connection: Any, state_dir: Path | None = None) -> dict[str, 
     governance, source lag or a connector transport timeout.  ``source_lag``
     and ``transport``: when each accession's failures of that kind happened,
     for their backoffs.  ``excused``: how many were forgiven, by kind, so the
-    report can say so.
+    report can say so.  ``annual_only``: 10-K accessions a run has shown to
+    carry no fourth-quarter pair (2026-09-28); they are not chased again.
     """
 
     from .coverage_mission import SEC_RUN_SUCCEEDED
@@ -335,13 +433,14 @@ def attempt_ledger(connection: Any, state_dir: Path | None = None) -> dict[str, 
             "WHERE v.dispatch_id IS NULL GROUP BY d.expected_accession"
         ).fetchall()
     except Exception:  # noqa: BLE001
-        return {"counted": {}, "source_lag": {}, "transport": {}, "excused": {}}
+        return {"counted": {}, "source_lag": {}, "transport": {}, "excused": {},
+                "annual_only": set()}
     counted = {row["expected_accession"]: int(row["n"])
                for row in rows if row["expected_accession"]}
     try:
         failed = connection.execute(
             "SELECT d.dispatch_id AS dispatch_id, d.expected_accession AS expected_accession, "
-            "d.status AS status, d.ticket_ref AS ticket_ref, "
+            "d.status AS status, d.ticket_ref AS ticket_ref, d.form AS form, "
             "d.failure_reason AS dispatch_reason, d.updated_at AS updated_at, "
             "s.failure_reason AS settled_reason, s.settled_at AS settled_at "
             "FROM coverage_mission_sec_dispatches d "
@@ -358,6 +457,7 @@ def attempt_ledger(connection: Any, state_dir: Path | None = None) -> dict[str, 
     lag: dict[str, list[datetime]] = {}
     transport: dict[str, list[datetime]] = {}
     excused: dict[str, dict[str, int]] = {}
+    annual_only: set[str] = set()
     for row in failed:
         accession = row["expected_accession"]
         if not accession:
@@ -372,6 +472,9 @@ def attempt_ledger(connection: Any, state_dir: Path | None = None) -> dict[str, 
             reason = row["settled_reason"] or run_failure_text(
                 connection, state_dir, row["ticket_ref"])
             kind = classify_failure(reason)
+            if (kind is None and _column(row, "form") == ANNUAL_FORM
+                    and isinstance(reason, str) and ANNUAL_ONLY_PATTERN.search(reason)):
+                annual_only.add(accession)
         if kind is None:
             continue
         counted[accession] = max(0, counted.get(accession, 0) - 1)
@@ -383,7 +486,49 @@ def attempt_ledger(connection: Any, state_dir: Path | None = None) -> dict[str, 
                 (lag if kind == EXCUSED_SOURCE_LAG else transport).setdefault(
                     accession, []).append(when)
     return {"counted": counted, "source_lag": lag, "transport": transport,
-            "excused": excused}
+            "excused": excused, "annual_only": annual_only}
+
+
+def _column(row: Any, name: str, default: Any = None) -> Any:
+    """``row[name]`` for a sqlite3.Row or a mapping that may lack the column."""
+
+    try:
+        return row[name]
+    except (IndexError, KeyError):
+        return default
+
+
+def accession_in_hand(connection: Any, accession: str) -> dict[str, Any] | None:
+    """A dispatch of this accession that is still open or already succeeded.
+
+    2026-09-28: two paths queue SEC dispatches -- this coordinator and the
+    bounded-planner observation follow-up (``writer_server``) -- and a
+    dispatch's identity includes its observation and window, so the same
+    accession queued by both is two dispatches, two plans and, if both run,
+    two Claims for one quarter.  The coordinator already stands aside while a
+    company has an open dispatch and once the period is held; this is the
+    same question asked from the other side, by accession.
+    """
+
+    from .coverage_mission import SEC_RUN_SUCCEEDED
+
+    try:
+        row = connection.execute(
+            "SELECT d.dispatch_id AS dispatch_id, d.form AS form, d.status AS status, "
+            "s.detail AS detail FROM coverage_mission_sec_dispatches d "
+            "LEFT JOIN coverage_mission_sec_dispatch_settlements s "
+            "ON s.dispatch_id=d.dispatch_id "
+            "WHERE d.expected_accession=? AND ("
+            "(d.status IN ('pending','launched') AND s.dispatch_id IS NULL) "
+            "OR s.detail=?) ORDER BY d.created_at DESC LIMIT 1",
+            (accession, SEC_RUN_SUCCEEDED),
+        ).fetchone()
+    except Exception:  # noqa: BLE001 - an older Core has no dispatch journal
+        return None
+    if row is None:
+        return None
+    return {"dispatch_id": row["dispatch_id"], "form": row["form"],
+            "state": "succeeded" if row["detail"] == SEC_RUN_SUCCEEDED else "open"}
 
 
 def read_artifact(state_dir: Path, content_sha256: str) -> Mapping[str, Any] | None:
@@ -408,6 +553,35 @@ def read_artifact(state_dir: Path, content_sha256: str) -> Mapping[str, Any] | N
             return None
         return value if isinstance(value, Mapping) else None
     return None
+
+
+# digest -> ("facts" | "submissions" | None, filings).  An artifact is
+# content-addressed and verified against its hash, so what it lists never
+# changes; since 10-Ks joined the newest four, a company whose fourth quarter
+# no rule can answer is re-examined every tick, and re-parsing megabytes of
+# company facts to learn the same thing each time is waste.
+_ARTIFACT_VIEWS: dict[str, tuple[str | None, list[dict[str, Any]]]] = {}
+_ARTIFACT_VIEWS_MAX = 64
+
+
+def _artifact_view(state_dir: Path, digest: str) -> tuple[str | None, list[dict[str, Any]]]:
+    held = _ARTIFACT_VIEWS.get(digest)
+    if held is not None:
+        return held
+    payload = read_artifact(state_dir, digest)
+    if payload is None:
+        # Not cached: a missing or corrupt object may be restored.
+        return None, []
+    view: tuple[str | None, list[dict[str, Any]]] = (None, [])
+    held_facts = payload.get("facts")
+    if isinstance(held_facts, Mapping) and isinstance(held_facts.get("us-gaap"), Mapping):
+        view = ("facts", quarterly_filings(payload))
+    elif isinstance(payload.get("filings"), Mapping):
+        view = ("submissions", submissions_filings(payload))
+    if len(_ARTIFACT_VIEWS) >= _ARTIFACT_VIEWS_MAX:
+        _ARTIFACT_VIEWS.pop(next(iter(_ARTIFACT_VIEWS)))
+    _ARTIFACT_VIEWS[digest] = view
+    return view
 
 
 class MissionSecQuartersCoordinator:
@@ -491,7 +665,7 @@ class MissionSecQuartersCoordinator:
                     yield artifact["artifact_content_hash"]
 
     def _artifact_filings(self, company_ref: str) -> tuple[list[dict[str, Any]], bool]:
-        """10-Qs named by the newest company-facts and submissions payloads held.
+        """10-Qs and 10-Ks named by the newest company-facts and submissions payloads held.
 
         The second value says whether any SEC artifact was held at all.  The
         newest artifact is not necessarily company facts -- live it was a
@@ -505,21 +679,17 @@ class MissionSecQuartersCoordinator:
             any_held = True
             if count >= MAX_ARTIFACTS_READ or (facts is not None and listed is not None):
                 break
-            payload = read_artifact(self.state_dir, digest)
-            if payload is None:
-                continue
-            held_facts = payload.get("facts")
-            if facts is None and isinstance(held_facts, Mapping) \
-                    and isinstance(held_facts.get("us-gaap"), Mapping):
+            kind, items = _artifact_view(self.state_dir, digest)
+            if kind == "facts" and facts is None:
                 facts = [{**item, "observation_ref": f"sec-company-facts-artifact:{digest}"}
-                         for item in quarterly_filings(payload)]
-            elif listed is None and isinstance(payload.get("filings"), Mapping):
+                         for item in items]
+            elif kind == "submissions" and listed is None:
                 listed = [{**item, "observation_ref": f"sec-submissions-artifact:{digest}"}
-                          for item in submissions_filings(payload)]
+                          for item in items]
         return [*(facts or []), *(listed or [])], any_held
 
     def _statement_filings(self, company_ref: str) -> list[dict[str, Any]]:
-        """10-Qs the statement lane has ingested for this company.
+        """10-Qs and 10-Ks the statement lane has ingested for this company.
 
         Each is an accession SEC served for this company, recorded under the
         mission's own governance: an observation, and the only one that is
@@ -528,9 +698,9 @@ class MissionSecQuartersCoordinator:
 
         try:
             rows = self.connection.execute(
-                "SELECT ingest_id, accession, filed, report_date "
+                "SELECT ingest_id, accession, form, filed, report_date "
                 "FROM coverage_mission_statement_filings "
-                "WHERE company_ref=? AND form='10-Q'", (company_ref,),
+                "WHERE company_ref=? AND form IN ('10-Q','10-K')", (company_ref,),
             ).fetchall()
         except Exception:  # noqa: BLE001 - an older Core has no statement lane
             return []
@@ -539,21 +709,38 @@ class MissionSecQuartersCoordinator:
             filed, end = _parse_date(row["filed"]), _parse_date(row["report_date"])
             if filed is None or end is None or not isinstance(row["accession"], str):
                 continue
-            result.append({
+            form = _column(row, "form") or QUARTERLY_FORM
+            item = {
                 "period": None, "start": None, "end": end.isoformat(),
                 "accession": row["accession"], "filed": filed.isoformat(),
                 "observation_ref": f"statement-ingest:{row['ingest_id']}",
-            })
+                "form": form,
+            }
+            if form == ANNUAL_FORM:
+                # The statement lane reads the 10-K's statements, not its
+                # quarterly note; whether a Q4 pair is in company facts is
+                # the company-facts artifact's to say.
+                item["fourth_quarter"] = None
+            result.append(item)
         return result
 
     @staticmethod
     def _recent_quarters(filings: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-        """One filing per quarter end, newest first, preferring one that names its start."""
+        """One filing per quarter end, newest first, preferring the best-known one.
+
+        A filing that names its start beats one that does not; after that, a
+        10-K whose company facts say whether it carries a fourth-quarter row
+        beats one only the index or the statement lane listed.
+        """
+
+        def known(item: Mapping[str, Any]) -> tuple[bool, bool]:
+            return (item.get("start") is not None,
+                    item.get("form") != ANNUAL_FORM or item.get("fourth_quarter") is not None)
 
         by_end: dict[str, dict[str, Any]] = {}
         for filing in filings:
             current = by_end.get(filing["end"])
-            if current is None or (current.get("start") is None and filing.get("start")):
+            if current is None or known(filing) > known(current):
                 by_end[filing["end"]] = dict(filing)
         ordered = sorted(by_end.values(), key=lambda item: item["end"], reverse=True)
         return ordered[:RECENT_FILINGS]
@@ -669,6 +856,7 @@ class MissionSecQuartersCoordinator:
         attempts = ledger["counted"]
         lagging = ledger["source_lag"]
         timed_out = ledger.get("transport") or {}
+        annual_only = ledger.get("annual_only") or set()
         now = self.clock()
         windows_used = self._dispatch_windows_used()
         skipped: list[dict[str, Any]] = []
@@ -703,7 +891,7 @@ class MissionSecQuartersCoordinator:
                 newest = recent[:REQUIRED_QUARTERS]
                 if not recent:
                     skipped.append({"ticker": entry.get("ticker"),
-                                    "reason": "原始件读不到、哈希不符或里面没有 10-Q，不据此排队"})
+                                    "reason": "原始件读不到、哈希不符或里面没有 10-Q/10-K，不据此排队"})
                     continue
             missing = [filing for filing in newest if filing["end"] not in held_ends]
             if not missing:
@@ -715,6 +903,7 @@ class MissionSecQuartersCoordinator:
             # it twice would spend the lane on a filing already fetched.
             wanted: list[dict[str, Any]] = []
             deferred = 0
+            no_rule = 0
             seen_accessions: set[str] = set()
             # Only the newest four: a quarter older than those does not make the
             # weekly report current, and walking further back is how the lane
@@ -722,6 +911,19 @@ class MissionSecQuartersCoordinator:
             for filing in newest:
                 tried = attempts.get(filing["accession"], 0)
                 if filing["end"] in held_ends or filing["accession"] in seen_accessions:
+                    continue
+                if filing.get("form") == ANNUAL_FORM and (
+                        filing.get("fourth_quarter") is False
+                        or filing["accession"] in annual_only):
+                    # The annual rule compares a fourth quarter with the same
+                    # quarter a year earlier, both reported by this 10-K.  A
+                    # 10-K of fiscal-year totals has neither, and FY - 9M is
+                    # not a rule: queued, it could only fail.
+                    no_rule += 1
+                    skipped.append({"ticker": entry.get("ticker"), "accession": filing["accession"],
+                                    "form": ANNUAL_FORM, "period_end": filing["end"],
+                                    "reason": "这份 10-K 只报全年数，没有第四季单季行；"
+                                              "全年减前三季（FY−9M）还不是规则，不排队"})
                     continue
                 if tried >= MAX_ATTEMPTS_PER_FILING:
                     skipped.append({"ticker": entry.get("ticker"), "accession": filing["accession"],
@@ -751,9 +953,14 @@ class MissionSecQuartersCoordinator:
                 if len(wanted) >= len(missing):
                     break
             if not wanted:
-                skipped.append({"ticker": entry.get("ticker"),
-                                "reason": ("最近四个季度里缺的那几份在等 SEC company facts 收录、在超时退避中或已试满次数"
-                                           if deferred else "最近四个季度里缺的那几份都已试满次数")})
+                if no_rule == len(missing):
+                    reason = "最近四个季度里缺的只有第四季，而那份 10-K 只报全年数，现有规则答不了"
+                elif deferred:
+                    reason = "最近四个季度里缺的那几份在等 SEC company facts 收录、在超时退避中或已试满次数"
+                else:
+                    reason = "最近四个季度里缺的那几份都已试满次数" + (
+                        "或是只报全年数的 10-K" if no_rule else "")
+                skipped.append({"ticker": entry.get("ticker"), "reason": reason})
                 continue
             try:
                 authorization = self.missions.authorize_sec_lane(
@@ -769,7 +976,9 @@ class MissionSecQuartersCoordinator:
                 span = FILING_WINDOW_DAYS + int(filing.get("window_salt", 0))
                 try:
                     record = self.missions.queue_sec_dispatch(
-                        authorization=authorization, form="10-Q",
+                        # The form selects the lane's rule: a 10-K runs under
+                        # COMPANY_FACTS_RULE_REFS["10-K"], the annual pair.
+                        authorization=authorization, form=filing.get("form") or QUARTERLY_FORM,
                         filed_from=(filed - timedelta(days=span)).isoformat(),
                         filed_to=(filed + timedelta(days=span)).isoformat(),
                         expected_accession=filing["accession"],
@@ -781,6 +990,7 @@ class MissionSecQuartersCoordinator:
                     continue
                 queued.append({
                     "accession": filing["accession"],
+                    "form": filing.get("form") or QUARTERLY_FORM,
                     "period": filing.get("period") or f"..{filing['end']}",
                     "filed": filing["filed"], "attempt": int(filing.get("attempt", 0)) + 1,
                     "status": record.get("status", "queued"),
@@ -831,7 +1041,10 @@ LANE = register_lane(LaneSpec(
 
 
 __all__ = [
+    "ANNUAL_FORM",
     "LANE",
+    "QUARTERLY_FORM",
+    "accession_in_hand",
     "attempt_ledger",
     "classify_failure",
     "run_failure_text",

@@ -59,6 +59,21 @@ def _write_json(path: Path, value) -> None:
 
 
 SEC_ACCESSION = "0009900001-26-000101"
+# WDGT's 10-K for calendar 2025.  Like Accenture's, it reports its fourth
+# quarter and the same quarter a year earlier as quarters, so the annual rule
+# (COMPANY_FACTS_RULE_REFS["10-K"]) can answer it.
+SEC_ANNUAL_ACCESSION = "0009900001-26-000050"
+
+
+def annual_rows(accession: str) -> list[dict]:
+    return [
+        {"start": "2025-01-01", "end": "2025-12-31", "val": 440000000000, "accn": accession,
+         "fy": 2025, "fp": "FY", "form": "10-K", "filed": "2026-02-10", "frame": "CY2025"},
+        {"start": "2024-10-01", "end": "2024-12-31", "val": 104000000000, "accn": accession,
+         "fy": 2025, "fp": "FY", "form": "10-K", "filed": "2026-02-10", "frame": "CY2024Q4"},
+        {"start": "2025-10-01", "end": "2025-12-31", "val": 117000000000, "accn": accession,
+         "fy": 2025, "fp": "FY", "form": "10-K", "filed": "2026-02-10", "frame": "CY2025Q4"},
+    ]
 DOC_A = "alphaengine-doc:990000000000001"
 DOC_B = "alphaengine-doc:990000000000002"
 
@@ -354,7 +369,8 @@ class NewWorkspaceCanaryTests(unittest.TestCase):
     # -- stage 5: SEC company facts ----------------------------------------------------
 
     def sec_company_facts(self, state: Path, mission, *, run_key: str, ticker: str = "WDGT",
-                          accession: str | None = None, day: int = 0):
+                          accession: str | None = None, day: int = 0, form: str = "10-Q",
+                          annual_accession: str | None = None):
         from dalton_core.sec_authority_harness import MutableClock
         from dalton_core.sec_company_facts_lane import Issuer, RehearsalGovernance, SecCompanyFactsLane
         from tests.test_research_plan_executor import _sec_company_facts_body
@@ -365,9 +381,12 @@ class NewWorkspaceCanaryTests(unittest.TestCase):
         body = json.loads(_sec_company_facts_body())
         body.update({"cik": int(ISSUERS[ticker]["cik"]),
                      "entityName": ISSUERS[ticker]["name"].upper()})
-        for fact in body["facts"]["us-gaap"][
-                "RevenueFromContractWithCustomerExcludingAssessedTax"]["units"]["USD"]:
+        rows = body["facts"]["us-gaap"][
+            "RevenueFromContractWithCustomerExcludingAssessedTax"]["units"]["USD"]
+        for fact in rows:
             fact["accn"] = accession
+        if annual_accession is not None:
+            rows.extend(annual_rows(annual_accession))
         clock = MutableClock()
         clock.advance(day * 86400)  # a new connector quota day
         issuer = Issuer(ticker, ISSUERS[ticker]["cik"], company_ref, ISSUERS[ticker]["name"])
@@ -378,11 +397,56 @@ class NewWorkspaceCanaryTests(unittest.TestCase):
         with lane:
             return lane.run_issuer(
                 issuer, actor_ref=AUTOMATION, run_key=run_key,
-                filed_from="2025-08-20", filed_to="2026-08-20",
-                expected_accession=accession,
+                filed_from="2025-08-20", filed_to="2026-08-20", form=form,
+                expected_accession=annual_accession if form == "10-K" else accession,
                 mission_context={"mission_version_ref": mission["id"],
                                  "mission_version_hash": mission["content_hash"],
                                  "company_ref": company_ref})
+
+    def assert_fourth_quarter_is_dispatched(self, state: Path, mission) -> None:
+        from dalton_core.mission_sec_quarters import (
+            MissionSecQuartersCoordinator,
+            accession_in_hand,
+        )
+
+        def coordinator():
+            return MissionSecQuartersCoordinator(
+                store=self.harness.core, missions=self.missions, state_dir=state,
+                checklist=lambda: [{"company_ref": WDGT, "ticker": "WDGT", "items": [
+                    {"item_ref": "quarterly_financials", "have": 1, "required": 4}]}],
+                clock=lambda: datetime(2026, 9, 28, tzinfo=timezone.utc))
+
+        first = coordinator().dispatch_once()
+        self.assertEqual(first["status"], "queued", json.dumps(first, indent=1, default=str))
+        self.assertIn("2025-12-31", first["recent_quarters_missing"])
+        [annual] = [q for q in first["queued"] if q["form"] == "10-K"]
+        self.assertEqual((annual["accession"], annual["period"]),
+                         (SEC_ANNUAL_ACCESSION, "2025-10-01..2025-12-31"))
+        pending = {row["expected_accession"]: row
+                   for row in self.missions.pending_sec_dispatches(limit=10)}
+        self.assertEqual(pending[SEC_ANNUAL_ACCESSION]["form"], "10-K")
+        claims = self.claim_count()
+        q4 = self.sec_company_facts(state, mission, run_key="canary-q4", form="10-K",
+                                    annual_accession=SEC_ANNUAL_ACCESSION, day=2)
+        self.assertEqual(q4["status"], "committed", json.dumps(q4, indent=1, default=str)[-3000:])
+        self.assertEqual((q4["form"], q4["candidate"]["period"]), ("10-K", "2025-10-01..2025-12-31"))
+        self.assertEqual(q4["facts"]["growth_percent"], "12.50")
+        self.assertEqual(self.claim_count(), claims + 1)
+        # The drain's bookkeeping, as the writer does it after the lane ran.
+        for accession, row in pending.items():
+            ticket = f"sec-lane-run:canary-{accession[-6:]}"
+            self.missions.mark_sec_dispatch_launched(row["dispatch_id"], ticket)
+            self.missions.settle_sec_dispatch(
+                row["dispatch_id"], outcome="finished", ticket_ref=ticket,
+                detail="succeeded" if accession == SEC_ANNUAL_ACCESSION else "failed")
+        # The bounded-planner path sees the accession answered ...
+        self.assertEqual(accession_in_hand(self.harness.core.connection,
+                                           SEC_ANNUAL_ACCESSION)["state"], "succeeded")
+        # ... and the coordinator sees the quarter held.
+        again = coordinator().dispatch_once()
+        self.assertNotIn(SEC_ANNUAL_ACCESSION,
+                         [q["accession"] for q in again.get("queued", [])], again)
+        self.assertEqual(self.claim_count(), claims + 1)
 
     # -- stage 6: claim index and dossier -------------------------------------------
 
@@ -588,14 +652,20 @@ class NewWorkspaceCanaryTests(unittest.TestCase):
 
         # Nothing signed by hand: the first mission's policy already carries
         # research_plan_auto_start and the company-facts rule.
-        sec = self.sec_company_facts(state, mission, run_key="canary-v1")
+        sec = self.sec_company_facts(state, mission, run_key="canary-v1",
+                                     annual_accession=SEC_ANNUAL_ACCESSION)
         self.assertEqual(sec["status"], "committed", json.dumps(sec, indent=1, default=str)[-3000:])
         self.assertEqual(sec["mission_stage_claim"]["actor_ref"], AUTOMATION)
         # A replayed run is the same run: no second claim for the accession.
         claims = self.claim_count()
-        replay_v1 = self.sec_company_facts(state, mission, run_key="canary-v1")
+        replay_v1 = self.sec_company_facts(state, mission, run_key="canary-v1",
+                                           annual_accession=SEC_ANNUAL_ACCESSION)
         self.assertEqual(replay_v1["status"], "duplicate", replay_v1)
         self.assertEqual(self.claim_count(), claims)
+        # The fourth quarter lives in the 10-K: the quarterly coordinator
+        # queues it by itself, the lane commits it under the annual rule, and
+        # nothing -- neither path -- queues it again.
+        self.assert_fourth_quarter_is_dispatched(state, mission)
 
         self.pass_screen(mission)
         index, dossier, _ = self.index_and_dossier(state, run="v1")
