@@ -401,7 +401,22 @@ class GuidepointAcquisitionLauncher(LaneChildLauncher):
 
         if not isinstance(document_ref, str) or not document_ref:
             raise GuidepointLaunchRejected("document_ref is required")
-        best: tuple[str, str] | None = None
+        ticket_ref = self.succeeded_tickets_by_document().get(document_ref)
+        if ticket_ref is None:
+            raise GuidepointLaunchRejected(
+                "no completed acquisition ticket for this excerpt"
+            )
+        return self.read_completed_manifest(ticket_ref, document_ref)
+
+    def succeeded_tickets_by_document(self) -> dict[str, str]:
+        """The latest succeeded acquisition ticket of every excerpt, one directory scan.
+
+        What :meth:`locate_completed_manifest` asks per excerpt, asked for all
+        of them at once, so a tick reconciling a hundred rows reads the ticket
+        directory once rather than a hundred times.
+        """
+
+        best: dict[str, tuple[str, str]] = {}
         for ticket_path in self.tickets_dir.glob("*/ticket.json"):
             try:
                 record = json.loads(ticket_path.read_text(encoding="utf-8"))
@@ -410,17 +425,14 @@ class GuidepointAcquisitionLauncher(LaneChildLauncher):
             if (
                 not isinstance(record, dict)
                 or record.get("status") != "succeeded"
-                or record.get("document_ref") != document_ref
+                or not isinstance(record.get("document_ref"), str)
             ):
                 continue
             key = (str(record.get("started_at", "")), str(record.get("id", "")))
-            if best is None or key > best:
-                best = key
-        if best is None:
-            raise GuidepointLaunchRejected(
-                "no completed acquisition ticket for this excerpt"
-            )
-        return self.read_completed_manifest(best[1], document_ref)
+            ref = record["document_ref"]
+            if ref not in best or key > best[ref]:
+                best[ref] = key
+        return {ref: key[1] for ref, key in best.items()}
 
 
 def _plan_hash(path: Path) -> str:

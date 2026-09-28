@@ -183,6 +183,34 @@ class StrandedReviewParityTests(_carry._VersionHarness):
                  if row["check"] == "reviews.stranded_on_superseded_version"]
         self.assertEqual(row["status"], "ok")
 
+    def _stranded_row(self):
+        path = self.h.h.core.connection.execute("PRAGMA database_list").fetchone()[2]
+        env = Environment("test", Path(path).parent)
+        try:
+            [row] = [row for row in check_mission_reviews(env)
+                     if row["check"] == "reviews.stranded_on_superseded_version"]
+        finally:
+            env.close()
+        return row
+
+    def test_the_check_counts_what_the_carry_would_carry(self):
+        # 2026-09-28: re-searches under v3 and v4 found the document again
+        # (already_in_authority, no review).  The check and the carry must
+        # agree it is owed a carry -- and agree again once it is carried.
+        for number in (3, 4):
+            self._publish(number, carry=False)
+            self._rediscover()
+        row = self._stranded_row()
+        self.assertEqual(row["status"], "gap")
+        self.assertIn("source:alphaengine v2->v4: 1", row["detail"])
+        self.assertNotIn("70ef64ee", row["fix"])
+        carried = [c for c in self.m.carry_forward_awaiting_reviews(_carry.REF)
+                   if c["status"] == "carried"]
+        self.assertEqual(len(carried), sum(item["n"] for item in row["stranded"]))
+        row = self._stranded_row()
+        self.assertEqual(row["status"], "ok")
+        self.assertIn("later_version_review", row["dispositions"])
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

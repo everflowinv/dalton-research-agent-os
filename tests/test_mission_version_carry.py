@@ -227,6 +227,85 @@ class RediscoveryTests(_VersionHarness):
 
 
 @_own_tests_only
+class RediscoveredOpenReviewTests(_VersionHarness):
+    """2026-09-28: an open review whose document later searches found again.
+
+    Guidepoint shape: the review opens under vN, the searches under vN+1 and
+    vN+2 record the document ``already_in_authority``, and no plan-driven
+    carry-forward runs for the source.  The review carry excluded any document
+    a later version had *a row* for, so it carried nothing -- 164 legacy and
+    42 ws-7d reviews -- and said nothing.
+    """
+
+    def _bump_and_research(self, number):
+        version = self._publish(number, carry=False)
+        self._rediscover()
+        [row] = self.m.discovered_documents(version["id"])
+        self.assertEqual(row["status"], "already_in_authority")
+        return version
+
+    def test_the_review_is_carried_after_two_re_searches_once(self) -> None:
+        old = self._review()
+        old_row = self.m.discovered_documents(self.v2["id"])[0]
+        self._bump_and_research(3)
+        v4 = self._bump_and_research(4)
+        self.assertEqual(self._owed_reads(), [])
+        [carried] = self.m.carry_forward_awaiting_reviews(REF)
+        self.assertEqual((carried["status"], carried["review_id"]), ("carried", self.review_id))
+        # v4's unsettled row is settled as the carry writes it; one open review.
+        [row] = self.m.discovered_documents(v4["id"])
+        self.assertEqual((row["status"], row["ticket_ref"], row["discovery_ref"], row["record_id"]),
+                         ("acquired", old_row["ticket_ref"], old_row["discovery_ref"],
+                          carried["carried_to"]["discovered_document_ref"]))
+        new = self._review(carried["carried_to"]["review_id"])
+        self.assertEqual((new["state"], new["created_at"]), ("awaiting_human_extraction", old["created_at"]))
+        self.assertEqual(self._owed_reads(), [(v4["id"], NEW_DOC)])
+        # Once: every later pass agrees the document is v4's now.
+        self.assertEqual(self.m.carry_forward_awaiting_reviews(REF), [])
+        self.assertEqual(self.m.carry_forward_superseded_documents(REF), [])
+        self._settle_like_a_tick()
+        self._rediscover()
+        self.assertEqual(self._owed_reads(), [(v4["id"], NEW_DOC)])
+
+    def test_bumped_again_the_carry_follows_the_newest_review(self) -> None:
+        self._bump_and_research(3)
+        self._bump_and_research(4)
+        # Published before the carry ran at all: v5 has no row of its own.
+        v5 = self._publish(5, carry=False)
+        [carried] = self.m.carry_forward_awaiting_reviews(REF)
+        self.assertEqual(carried["from_version_ref"], self.v2["id"])
+        self.assertEqual(self._owed_reads(), [(v5["id"], NEW_DOC)])
+        v6 = self._bump_and_research(6)
+        [carried] = self.m.carry_forward_awaiting_reviews(REF)
+        # v5's review is the newest word on the document, not v2's.
+        self.assertEqual(carried["from_version_ref"], v5["id"])
+        self.assertEqual(self._owed_reads(), [(v6["id"], NEW_DOC)])
+        self.assertEqual(self.m.carry_forward_awaiting_reviews(REF), [])
+
+    def test_a_decision_under_a_later_version_still_wins(self) -> None:
+        v3 = self._publish(3)  # the ordinary carry opens v3's own review
+        [review] = [r for r in self.m.document_reviews(v3["id"])
+                    if r["state"] == "awaiting_human_extraction"]
+        self.review_id = review["review_id"]
+        self._decide()
+        self._publish(4, carry=False)
+        self._rediscover()  # v3's decision is carried into v4, not v2's open review
+        self.assertEqual(self.m.carry_forward_awaiting_reviews(REF), [])
+        self.assertEqual(self._owed_reads(), [])
+        census = self.m.awaiting_review_carry_census(REF)
+        self.assertEqual(census["dispositions"]["carryable"], 0)
+        self.assertGreaterEqual(census["dispositions"]["later_version_review"], 1)
+
+    def test_a_row_the_version_in_force_settled_is_not_overwritten(self) -> None:
+        v3 = self._bump_and_research(3)
+        self._settle_like_a_tick()  # v3 settles its own row and opens its review
+        [row] = self.m.discovered_documents(v3["id"])
+        self.assertEqual(row["status"], "acquired")
+        self.assertEqual(self.m.carry_forward_awaiting_reviews(REF), [])
+        self.assertEqual(self._owed_reads(), [(v3["id"], NEW_DOC)])
+
+
+@_own_tests_only
 class HumanReopenTests(_VersionHarness):
     """Item 2: the owner's supplemental reopen works on any version of the mission."""
 

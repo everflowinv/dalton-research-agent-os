@@ -224,6 +224,22 @@ class AwaitingCarryTests(_carry._VersionHarness):
                          ("launched", 1, 1))
         self.assertNotIn("support_only", launcher.starts[0])
 
+    def test_the_tick_says_what_it_did_not_carry_and_why(self) -> None:
+        # 2026-09-28: a carry that selects nothing must not read as "nothing
+        # stranded".  The review left on v2 is decided under v3 by then.
+        v3 = self._publish(3)
+        [review] = [r for r in self.m.document_reviews(v3["id"])
+                    if r["state"] == "awaiting_human_extraction"]
+        self.review_id = review["review_id"]
+        self._decide()
+        self._publish(4, carry=False)
+        (self.root / "coordinator").mkdir()
+        coordinator = DocumentExtractionCoordinator(
+            missions=self.m, launcher=SupportFakeLauncher(self.root / "coordinator"))
+        summary = coordinator.dispatch_once()["carried_awaiting"]
+        self.assertEqual((summary["carried"], summary["skipped_count"]), (0, 0))
+        self.assertGreaterEqual(summary["filtered"]["later_version_review"], 1)
+
 
 @_own_tests_only
 class SupportOnlyChildTests(_automation.AutomationDraftingTests):

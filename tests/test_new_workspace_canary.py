@@ -13,7 +13,9 @@ issuers, ``company:ticker:`` refs), and without signing anything by hand runs
 then upgrades the mission through the real policy -> constitution -> mission
 cascade and runs them again.  After the upgrade nothing may stall (an open
 review left under the old version must reach the extraction queue) and nothing
-may be read twice.
+may be read twice -- including when a search under the intermediate version
+found the open document again and a second version was published over it
+before any carry ran (the Guidepoint re-search shape, 2026-09-28).
 
 Hermetic: every model is a fake, every connector a fake handle or a recorded
 body, the SEC ticker resolver a fixture, and opening a socket fails the test.
@@ -509,6 +511,47 @@ class NewWorkspaceCanaryTests(unittest.TestCase):
         apply_chain(chain, apply)
         return self.missions.active_mission(current["mission_ref"])
 
+    def republish_mission(self) -> dict:
+        """A mission-only version over the one in force (P2's weekly-brief switch)."""
+
+        from scripts.sign_research_plan_auto_start import BODY_FIELDS, _next_version_id
+
+        current = self.missions.active_mission(self.missions.active_mission(
+            self.search.plan["mission_ref"])["mission_ref"])
+        number = int(current["version"]) + 1
+        self.missions.create_mission(
+            current["mission_ref"], actor_ref=OWNER,
+            **{field: json.loads(json.dumps(current[field])) for field in BODY_FIELDS},
+            version_id=_next_version_id(current["id"], number),
+            prior_version_ref=current["id"],
+            idempotency_key=f"{current['mission_ref']}:{number}:canary-republish")
+        return self.missions.active_mission(current["mission_ref"])
+
+    def research_without_reconciling(self, version) -> None:
+        """One search under ``version`` recorded as a Guidepoint child records it.
+
+        The row lands as the search saw it -- ``already_in_authority`` for a
+        document Core holds -- and nothing settles it or opens a review.  The
+        first version's search result is recorded again (the page a re-search
+        would return), so no second governed call is needed.
+        """
+
+        [first] = self.missions.source_discoveries(
+            version["id"], company_ref=WDGT, across_versions=True, limit=1000)[-1:]
+        grant = self.missions.authorize_source_discovery(
+            company_ref=WDGT, source_ref="source:alphaengine", requested_by=AUTOMATION,
+            mission_version_ref=version["id"])
+        self.missions.record_source_discovery(
+            authorization=grant, discovery_plan_ref=first["discovery_plan_ref"],
+            discovery_plan_hash=first["discovery_plan_hash"], spec_ref=first["spec_ref"],
+            query_hash=first["query_hash"], parameters=first["parameters"],
+            connector_invocation_ref=first["connector_invocation_ref"],
+            connector_invocation_hash=first["connector_invocation_hash"],
+            source_envelope_ref=first["source_envelope_ref"],
+            source_envelope_hash=first["source_envelope_hash"],
+            document_refs=first["document_refs"],
+            in_authority_document_refs=first["document_refs"])
+
     def awaiting_in_active_version(self) -> int:
         # Exactly the extraction launcher's queue (``_awaiting_state``).
         return self.harness.core.connection.execute(
@@ -585,6 +628,19 @@ class NewWorkspaceCanaryTests(unittest.TestCase):
         # The stall ws-7d hit: the open review stayed on the old version and
         # the extraction queue under the new one was empty.
         self.assertEqual(self.awaiting_in_active_version(), 0)
+        # 2026-09-28, the Guidepoint shape: before any carry runs, a search
+        # under the new version finds the open document again and records it
+        # already_in_authority (no reconciliation turns it into a review),
+        # and the mission is upgraded a second time over it.
+        intermediate = v2
+        self.research_without_reconciling(intermediate)
+        rows = {row["document_ref"]: row["status"]
+                for row in self.missions.discovered_documents(intermediate["id"])}
+        self.assertEqual(rows.get(still_open[0]), "already_in_authority", rows)
+        v2 = self.republish_mission()
+        self.assertNotIn(v2["id"], {mission["id"], intermediate["id"]})
+        self.research_without_reconciling(v2)
+        self.assertEqual(self.awaiting_in_active_version(), 0)
         # The extraction tick's first step (DocumentExtractionCoordinator
         # .dispatch_once -> _carry_awaiting -> carry_forward_awaiting_reviews).
         from dalton_core.document_extraction_launcher import DocumentExtractionCoordinator
@@ -592,10 +648,25 @@ class NewWorkspaceCanaryTests(unittest.TestCase):
         tick.missions = self.missions
         carried = tick._carry_awaiting()
         self.assertEqual([item["status"] for item in carried], ["carried"], carried)
+        self.assertEqual(carried[0]["from_version_ref"], mission["id"])
         self.assertEqual(self.awaiting_in_active_version(), 1)
+        self.assertEqual(tick._carry_filtered().get("carryable"), None)
+        env = Environment("canary", state, service_config=workspace.config_path)
+        try:
+            [stranded] = [row for row in check_mission_reviews(env)
+                          if row["check"] == "reviews.stranded_on_superseded_version"]
+        finally:
+            env.close()
+        self.assertEqual(stranded["status"], "ok", stranded)
         v2_reviews = self.missions.document_reviews(v2["id"])
-        self.assertEqual([(r["document_ref"], r["state"]) for r in v2_reviews],
+        # The one open review, and the re-searched decided document carried
+        # with its decision (the search under this version found it again).
+        self.assertEqual([(r["document_ref"], r["state"]) for r in v2_reviews
+                          if r["state"] == "awaiting_human_extraction"],
                          [(still_open[0], "awaiting_human_extraction")])
+        self.assertEqual({r["document_ref"]: r["state"] for r in v2_reviews
+                          if r["document_ref"] == closed[0]},
+                         {closed[0]: states[closed[0]]})
         self.assertEqual(tick._carry_awaiting(), [])  # idempotent
         self.assert_governance_baseline(workspace, v2)  # ... and none after it
 
@@ -612,7 +683,8 @@ class NewWorkspaceCanaryTests(unittest.TestCase):
         self.assertEqual(summary["partial"]["reviews_complete"], 1)
         self.assertEqual(self.awaiting_in_active_version(), 0)
         v2_states = {r["document_ref"]: r["state"] for r in self.missions.document_reviews(v2["id"])}
-        self.assertNotIn(closed[0], v2_states, "a document finished under v1 was reopened")
+        self.assertEqual(v2_states.get(closed[0], states[closed[0]]), states[closed[0]],
+                         "a document finished under v1 was reopened")
         self.assertNotEqual(v2_states[still_open[0]], "awaiting_human_extraction")
         extraction_claims = self.claim_count() - claims_before_upgrade
         # The statement and citation were already checked under v1: the verdict
