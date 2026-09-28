@@ -38,6 +38,72 @@ TRANSCRIPT = (
 )
 
 
+#: DXC Q2 FY26 (alphaengine-doc:130000041555098): machine-diarised numbers.
+DIARISED = (
+    "发言人1： Speaking on today's call, our old fernandez, our president and ceo and rob dell "
+    "benny, our chief financial officer.\n"
+    "发言人3： Free cash flow was 94 million in the quarter.\n"
+)
+#: DXC Q3 FY26 (alphaengine-doc:130000050727286): one ``Name : `` turn per line.
+LINE_LABELLED = (
+    "Operator : Ladies and gentlemen, thank you for standing by.\n"
+    "Roger Sachs : Thank you, operator.Speaking on today's call are Raul Fernandez and Rob Del "
+    "Bene, our Chief Financial Officer.\n"
+    "Robert Del Bene : Free cash flow was $221 million in the quarter.\n"
+    "Keith Bachman : A question on free cash flow."
+)
+
+
+class SpeakerLabelTests(unittest.TestCase):
+    """2026-09-28: "the CFO said" rejected on DXC's calls although the words were his."""
+
+    def test_an_anonymous_diarisation_number_names_nobody(self) -> None:
+        position = DIARISED.index("Free cash flow")
+        self.assertIsNone(speaker_at(DIARISED, position))
+        # A named label before an anonymous turn is not carried over it.
+        mixed = "发言人Jatin Dalal： Hello.\n发言人2： Free cash flow rose."
+        self.assertIsNone(speaker_at(mixed, mixed.index("Free cash")))
+        self.assertEqual(speaker_at(mixed, mixed.index("Hello")), "Jatin Dalal")
+        self.assertEqual(speaker_at(TRANSCRIPT, TRANSCRIPT.index("A question")), "Maggie Nolan")
+
+    def test_a_line_labelled_transcript_names_the_turn(self) -> None:
+        position = LINE_LABELLED.index("$221 million")
+        self.assertEqual(speaker_at(LINE_LABELLED, position), "Robert Del Bene")
+        self.assertEqual(speaker_at(LINE_LABELLED, LINE_LABELLED.index("A question")), "Keith Bachman")
+        self.assertEqual(speaker_at(LINE_LABELLED, 0), "Operator")
+        passage = cited_passage(LINE_LABELLED, position, position + 12, max_chars=2400)
+        self.assertEqual(passage["speaker"], "Robert Del Bene")
+        # A window that starts mid-turn: its first line has no label and no speaker.
+        window = LINE_LABELLED[LINE_LABELLED.index("operator.Speaking"):]
+        self.assertIsNone(speaker_at(window, 3))
+        self.assertEqual(speaker_at(window, window.index("$221")), "Robert Del Bene")
+
+    def test_a_research_note_line_is_not_a_speaker(self) -> None:
+        note = ("DXC Technology F1Q27 Results\n"
+                "Revenue declined 4% organically.\n"
+                "Source : Company data, Guggenheim estimates\n"
+                "Note : fiscal year ends March.\n")
+        for needle in ("Company data", "fiscal year", "Revenue"):
+            self.assertIsNone(speaker_at(note, note.index(needle)))
+        self.assertIsNone(speaker_at("Source : Bloomberg", 3))
+
+    def test_the_question_says_an_absent_speaker_is_unknown_not_other(self) -> None:
+        item = support_item(
+            subject_ref="company:sec-cik:0001688568", subject_name="DXC Technology (DXC)",
+            statement="DXC's CFO said free cash flow was $94 million in the quarter.",
+            cited_text="Free cash flow was 94 million in the quarter.",
+            document={"title": "DXC Technology Q2 2026", "date": "2025-10-31"},
+            producer_route_ref="route-decision:drafter")
+        prompt = build_prompt([item])
+        for phrase in ("document.speaker absent means the speaker is unknown",
+                       "never that somebody else spoke",
+                       "positively show speaking",
+                       "a speaker the metadata does not name is unknown, not other"):
+            self.assertIn(phrase, prompt)
+        payload = json.loads(prompt[prompt.rindex("UNTRUSTED_ITEMS=") + len("UNTRUSTED_ITEMS="):])
+        self.assertNotIn("speaker", payload[0]["document"])
+
+
 class SentenceTests(unittest.TestCase):
     def test_a_slice_cut_mid_sentence_is_widened_to_the_whole_sentences(self) -> None:
         start = TRANSCRIPT.index("growth at the high end")
@@ -153,7 +219,7 @@ class PromptTests(unittest.TestCase):
         self.assertNotIn("including its direction, negation, uncertainty and who said it", prompt)
 
     def test_the_question_is_keyed_by_contract_and_facts(self) -> None:
-        self.assertEqual(CONTRACT_REF, "claim-support-verification:v3")
+        self.assertEqual(CONTRACT_REF, "claim-support-verification:v4")
         base = dict(subject_ref="s", statement="a", cited_text="b")
         self.assertNotEqual(item_key(**base), item_key(**base, document={"period": "Q2"}))
         self.assertEqual(item_key(**base, document={}), item_key(**base))

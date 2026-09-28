@@ -52,7 +52,7 @@ NO = ("not_supported", "about_subject", None)
 
 class PromptTests(unittest.TestCase):
     def test_v3_says_a_directly_drawn_conclusion_is_supported_with_examples_either_way(self) -> None:
-        self.assertEqual(CONTRACT_REF, "claim-support-verification:v3")
+        self.assertEqual(CONTRACT_REF, "claim-support-verification:v4")
         prompt = build_prompt([_item(1)])
         self.assertIn("(d) a conclusion that one passage of the cited_text states in other words", prompt)
         # The positive examples: the EPAM vertical and a paraphrased analyst view.

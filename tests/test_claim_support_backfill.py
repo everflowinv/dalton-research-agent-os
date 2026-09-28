@@ -246,7 +246,7 @@ class AuthorityTests(BackfillHarness):
         challenge = self.authority.challenge(
             claim_version_ref=claim["ref"], claim_version_hash=claim["hash"],
             reason_code=SUPPORT_REASON, rationale="said so", actor_ref=AUTOMATION)
-        self.assertEqual(challenge["detector_ref"], "claim-verifier:citation-support:v3")
+        self.assertEqual(challenge["detector_ref"], "claim-verifier:citation-support:v4")
         with self.assertRaises(ClaimRetirementConflict):
             self.authority.decide(challenge_ref=challenge["id"], challenge_hash=challenge["content_hash"],
                                   decision="retired", actor_ref=AUTOMATION, rationale="said so")
@@ -380,7 +380,7 @@ class SupportRereviewTests(BackfillHarness):
         record = self.authority.reinstatements()[0]
         self.assertEqual((record["reason_code"], record["rule_ref"], record["actor_ref"]),
                          ("citation_support_upheld_under_current_rule",
-                          "claim-rereview:citation-support:v3", AUTOMATION))
+                          "claim-rereview:citation-support:v4", AUTOMATION))
         # Once per contract: nothing is asked or written again.
         again = self.backfill().run_once(max_items=10)
         self.assertEqual((again["rereview"]["candidates"], again["rereview"]["asked"],

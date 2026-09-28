@@ -20,7 +20,9 @@ recheck) now gives the verifier with each statement:
   cuts, never beyond ``MAX_CITED_CHARS`` (the prompt's own bound), so no
   sentence the citation touches is shown in part;
 * ``speaker_at`` -- who is speaking at the span, from a transcript's own
-  speaker label (``发言人Ravi Kumar：``), never inferred from prose;
+  speaker label (``发言人Ravi Kumar：``, or a line-labelled transcript's
+  ``Ravi Kumar : ``), never inferred from prose, and nobody when the label is
+  an anonymous diarisation number (``发言人3：``);
 * ``document_facts`` -- the title, date and publishing house the Core already
   holds for the document (``document_provenance_records``; a sales note's
   subject, send date and sending house off the raw ``get_note`` header, the
@@ -35,6 +37,7 @@ import json
 import re
 import sqlite3
 from collections.abc import Mapping
+from functools import lru_cache
 from typing import Any
 
 #: The sentence ends the extraction quotes are cut at
@@ -48,6 +51,20 @@ _SENTENCE_END_RE = re.compile(
 )
 #: AlphaEngine's transcripts label every turn ``发言人<name>：``.
 _SPEAKER_RE = re.compile(r"发言人\s*([^：:\n]{1,80}?)\s*[：:]")
+#: 2026-09-28: AlphaEngine's machine-diarised transcripts (DXC Q2 FY26,
+#: ``alphaengine-doc:130000041555098``, and 156 others in legacy's spool) label
+#: turns ``发言人1：`` .. ``发言人11：`` -- a cluster number, not a person, and the
+#: document carries no list the numbers index into (who "2" is can only be
+#: guessed from a hand-off like "let me turn the call over to raoul").  Such a
+#: label names nobody: the speaker is unknown, not "2".
+_ANONYMOUS_SPEAKER_RE = re.compile(r"[0-9０-９]+")
+#: 2026-09-28: the edited transcripts (DXC Q3 FY26,
+#: ``alphaengine-doc:130000050727286``; IBM's and one other call) carry no
+#: ``发言人`` at all: every line is one turn, ``Robert Del Bene : <words>``.
+#: A research note has the odd ``Source : Bloomberg`` line too, so this label
+#: is read only from a text that is a turn transcript throughout
+#: (``_line_labelled_transcript``).
+_LINE_LABEL_RE = re.compile(r"([A-Z][^\s:：]{0,30}(?: [^\s:：]{1,30}){0,5}) : ")
 _SPEAKER_LOOKBACK = 200_000
 MAX_FACT_CHARS = 200
 FACT_KEYS = ("title", "date", "house", "period", "speaker")
@@ -98,8 +115,37 @@ def sentence_bounds(text: str, start: int, end: int, *, max_chars: int) -> tuple
     return new_start, new_end
 
 
+@lru_cache(maxsize=16)
+def _line_labelled_transcript(text: str) -> bool:
+    """Whether every turn line of ``text`` opens with a ``Name : `` label.
+
+    The first line may be the tail of a turn a window cut into, and the last
+    the head of one a window cut off before its label ended; every line
+    between must be labelled, and at least two must be.  A research note, whose
+    lines are prose, fails at its first unlabelled line.
+    """
+
+    lines = [line for line in text.split("\n") if line.strip()]
+    if len(lines) < 2:
+        return False
+    labelled = 0
+    for index, line in enumerate(lines):
+        if _LINE_LABEL_RE.match(line):
+            labelled += 1
+        elif index == 0 or (index == len(lines) - 1 and ":" not in line and len(line) <= 80):
+            continue
+        else:
+            return False
+    return labelled >= 2
+
+
 def speaker_at(text: str, position: int) -> str | None:
-    """The transcript speaker whose turn ``position`` is in, or None."""
+    """The transcript speaker whose turn ``position`` is in, or None.
+
+    None whenever the text does not name the speaker: no label before the
+    position, or an anonymous diarisation label (``发言人3：``).  None means
+    *unknown*, never "someone else".
+    """
 
     if not isinstance(text, str) or not 0 <= position <= len(text):
         return None
@@ -110,9 +156,19 @@ def speaker_at(text: str, position: int) -> str | None:
         match = _SPEAKER_RE.match(text, index)
         if match is not None:
             name = match.group(1).strip()
+            if _ANONYMOUS_SPEAKER_RE.fullmatch(name):
+                return None
             return name[:MAX_FACT_CHARS] or None
         index = text.rfind("发言人", floor, index)
-    return None
+    if "发言人" in text or not _line_labelled_transcript(text):
+        return None
+    # The line ``position`` is in (a position on a line break belongs to the
+    # line it ends); its label is the turn's.
+    start = text.rfind("\n", 0, position) + 1
+    match = _LINE_LABEL_RE.match(text, start)
+    if match is None:
+        return None
+    return match.group(1).strip()[:MAX_FACT_CHARS] or None
 
 
 def cited_passage(text: str, start: int, end: int, *, max_chars: int) -> dict[str, Any]:

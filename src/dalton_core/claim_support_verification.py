@@ -85,7 +85,15 @@ _SCHEMA_PATH = Path(__file__).with_name("claim_support_schema.sql")
 # the day still read EPAM's "the software and high tech decline was due to
 # non-AI ramp-downs outweighing AI growth" -- the call's own words -- as an
 # added conclusion.
-CONTRACT_REF = "claim-support-verification:v3"
+# v4 (2026-09-28): who is speaking when the metadata does not say.  DXC's
+# Q3 FY26 call is labelled ``Robert Del Bene : `` per line and read no speaker;
+# its Q2 FY26 call is machine-diarised ``发言人3：`` and read speaker "3".  A
+# statement the CFO's own words gave verbatim, filed "the CFO said", was
+# rejected as a misattribution.  ``claim_support_context.speaker_at`` now reads
+# the line labels and treats a numbered label as no speaker, and the question
+# says an absent speaker is unknown, never another party: only a speaker the
+# text or facts positively show makes an attribution not_supported.
+CONTRACT_REF = "claim-support-verification:v4"
 # Before admission, and after it for the Claims admitted before this existed.
 # Two purposes rather than one so the day ledger, the model page and the caps
 # can tell a morning's admissions from the backlog being worked down.
@@ -350,7 +358,12 @@ def build_prompt(items: Sequence[Mapping[str, Any]]) -> str:
         "(b) saying who is speaking when document.speaker, document.house, the title (a company's own "
         "earnings call or filing speaks for that company) or a speaker label in the cited_text shows "
         "it, e.g. 'EPAM said', 'Cognizant's Ravi Kumar said', 'BofA noted', 'the desk', 'an analyst "
-        "asked', and reading 'we'/'our' as that party; (c) paraphrase, synonyms, translation, "
+        "asked', and reading 'we'/'our' as that party; (b2) who is speaking when the metadata does "
+        "not say: document.speaker absent means the speaker is unknown (a transcript whose turns "
+        "carry no label or only an anonymous number), never that somebody else spoke -- then "
+        "'the CFO said', 'management said' or 'DXC's Rob Del Bene said' is judged on what was said "
+        "alone, and so is a role (CFO, CEO) given to a named document.speaker when neither the "
+        "cited_text nor the facts give that speaker a different role; (c) paraphrase, synonyms, translation, "
         "and condensation or summary that keeps the meaning; (d) a conclusion that one passage of the "
         "cited_text states in other words, or that follows from that passage with no further premise, "
         "e.g. text 'Software and high tech experienced project ramp downs concentrated in non-AI "
@@ -362,8 +375,10 @@ def build_prompt(items: Sequence[Mapping[str, Any]]) -> str:
         "'not_supported' when the statement adds a fact, a cause, a magnitude, a comparison or a "
         "conclusion that neither the cited_text nor the document facts give; overstates, reverses or "
         "drops the hedging of what the text says; or attributes the words to a party other than the "
-        "one the cited_text or the document facts show speaking -- a third party the text quotes "
-        "is not the house. A conclusion that needs a premise the text does not give is added, not "
+        "one the cited_text or the document facts positively show speaking (document.speaker names "
+        "someone else, e.g. an analyst asking, or the cited_text shows another speaker) -- a third "
+        "party the text quotes is not the house; a speaker the metadata does not name is unknown, "
+        "not other. A conclusion that needs a premise the text does not give is added, not "
         "restated: e.g. 'revenue fell' and, elsewhere, 'hiring slowed' stated as 'revenue fell because "
         "hiring slowed'; 'could lift the low end of guidance' stated as 'will raise guidance'; one "
         "segment's or one client's trend stated as the whole company's; or whose stock, guidance or "
