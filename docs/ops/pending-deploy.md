@@ -38,12 +38,12 @@ zsh ~/Projects/dalton-research-agent-os/docs/ops/run-batch-g-post-deploy.sh
 2. 对齐 ws-7d 的模型路由，共 19 项选择。
 3. 补上 ws-7d 的 xai 凭证槽位。这一步会自动停掉 ws-7d 的 3 个服务，补完后再拉起来。
 4. 撤回 10 条重复的数字 claim。
+5. 签入 FY−9M 第四季推导规则。legacy、ws-7d 各升一次 mission 版本；签入后，季度车道的下一个 tick 会自动推导并入账 7 家公司的 Q4。
 
 每一步都会先 dry-run 核对，任何一步失败都会停下来。
 
 ### 待办（需要新规则或新设计，没放进本批）
 
-- **第四季用"全年减前三季"推导（FY−9M）**：大多数公司的 10-K 只报全年数，不报第四季单季，所以 Q4 增速目前一直缺失。要补上，需要新增一条自动入账规则（新的 rule ref），并由 owner 签入新策略。**我建议做**，下一批会实现这条规则和签入脚本。
 - AMZN 和 MSFT 的产品轴同时申报了两套粒度（加起来是合并数的 2 倍），走到 forecast 门禁时会像 GOOGL 一样被卡住。
 - model_spec 的 structure repair 只看到第一个错误就付费修复；应该一次把错误收集全，确认都能修再付费。
 - legacy 的 brain 和 verifier 两个类别在路由对齐里被跳过了，因为 legacy 自身在这两项上前后不一致，需要定一条统一的链。
