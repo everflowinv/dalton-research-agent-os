@@ -236,6 +236,45 @@ DISCOVERED_DOCUMENT_STATUSES: tuple[str, ...] = (
     "discovered", "already_in_authority", "acquisition_launched", "acquired",
     "acquisition_failed",
 )
+# Rows that record a document without deciding it: the already-held
+# reconciliation (``settle_document_already_held``) may move them to acquired.
+_UNSETTLED_DOCUMENT_STATUSES: tuple[str, ...] = (
+    "discovered", "already_in_authority", "acquisition_failed",
+)
+# 2026-09-28: what an open review left on a superseded mission version is owed,
+# decided in one place for the carry (:meth:`carry_forward_awaiting_reviews`)
+# and for the health check that reports reviews it has not carried.  A later
+# version speaks for the document only when it *settled* it (an ``acquired``
+# row) or opened a review of its own.  An unsettled later row --
+# ``already_in_authority``, ``discovered``, ``acquisition_failed``,
+# ``acquisition_launched`` with no review -- is only a search that found the
+# document again; Guidepoint writes one on every re-search, and counting it
+# stranded all 164 legacy and 42 ws-7d Guidepoint reviews with no reason given.
+AWAITING_REVIEW_CARRY_DISPOSITIONS: tuple[str, ...] = (
+    "carryable", "source_row_not_acquired", "later_version_review",
+    "later_version_settled",
+)
+AWAITING_REVIEW_DISPOSITION_SQL = (
+    "SELECT r.*, v.mission_ref AS mission_ref, v.version_number AS review_version, "
+    "p.version_number AS active_version, p.mission_version_id AS active_version_ref, "
+    "CASE "
+    "WHEN d.record_id IS NULL OR d.status<>'acquired' "
+    "  OR d.document_ref<>r.document_ref THEN 'source_row_not_acquired' "
+    "WHEN EXISTS (SELECT 1 FROM coverage_mission_document_reviews n "
+    "  JOIN coverage_mission_versions nv ON nv.mission_version_id=n.mission_version_ref "
+    "  WHERE nv.mission_ref=v.mission_ref AND nv.version_number>v.version_number "
+    "  AND n.document_ref=r.document_ref) THEN 'later_version_review' "
+    "WHEN EXISTS (SELECT 1 FROM coverage_mission_discovered_documents n "
+    "  JOIN coverage_mission_versions nv ON nv.mission_version_id=n.mission_version_ref "
+    "  WHERE nv.mission_ref=v.mission_ref AND nv.version_number>v.version_number "
+    "  AND n.document_ref=r.document_ref AND n.status='acquired') THEN 'later_version_settled' "
+    "ELSE 'carryable' END AS carry_disposition "
+    "FROM coverage_mission_document_reviews r "
+    "JOIN coverage_mission_versions v ON v.mission_version_id=r.mission_version_ref "
+    "JOIN coverage_mission_pointer p ON p.mission_ref=v.mission_ref "
+    "LEFT JOIN coverage_mission_discovered_documents d ON d.record_id=r.discovered_document_ref "
+    "WHERE r.state='awaiting_human_extraction' AND r.mission_version_ref<>p.mission_version_id"
+)
 CHECKPOINT_KINDS: tuple[str, ...] = (
     "deep_insight_gate",
     "investment_memo",
@@ -3416,7 +3455,7 @@ class CoverageMissionAuthority:
         return result
 
     def carry_forward_awaiting_reviews(
-        self, mission_ref: str, *, limit: int = 100,
+        self, mission_ref: str, *, limit: int = 100, source_ref: str | None = None,
     ) -> list[dict[str, Any]]:
         """Carry every open review a superseded version left behind into the current one.
 
@@ -3437,6 +3476,15 @@ class CoverageMissionAuthority:
         queue where it was (:meth:`_carry_review_into_version`).  The old
         review is left as it is.  Idempotent: a carried document is held by
         the current version and is never selected again.
+
+        2026-09-28: "a later version holds it" means a later version settled
+        the document (``acquired``) or opened a review of it -- see
+        :data:`AWAITING_REVIEW_DISPOSITION_SQL`.  Before, any later row at all
+        excluded the review, and Guidepoint records ``already_in_authority``
+        under every version that searches again: every stranded Guidepoint
+        review was filtered out and the carry returned nothing, every tick.
+        :meth:`awaiting_review_carry_census` says what was filtered and why.
+        ``source_ref`` narrows the carry to one source's reviews.
         """
 
         mission_ref = _text(mission_ref, "mission_ref")
@@ -3449,23 +3497,17 @@ class CoverageMissionAuthority:
         if pointer is None:
             return []
         current_ref = pointer["mission_version_id"]
-        rows = self.connection.execute(
-            "SELECT r.* FROM coverage_mission_document_reviews r "
-            "JOIN coverage_mission_versions v ON v.mission_version_id=r.mission_version_ref "
-            "JOIN coverage_mission_discovered_documents d ON d.record_id=r.discovered_document_ref "
-            "WHERE v.mission_ref=? AND r.mission_version_ref<>? "
-            "AND r.state='awaiting_human_extraction' AND d.status='acquired' "
-            "AND NOT EXISTS (SELECT 1 FROM coverage_mission_discovered_documents n "
-            "  JOIN coverage_mission_versions nv ON nv.mission_version_id=n.mission_version_ref "
-            "  WHERE nv.mission_ref=v.mission_ref AND nv.version_number>v.version_number "
-            "  AND n.document_ref=r.document_ref) "
-            "AND NOT EXISTS (SELECT 1 FROM coverage_mission_document_reviews n "
-            "  JOIN coverage_mission_versions nv ON nv.mission_version_id=n.mission_version_ref "
-            "  WHERE nv.mission_ref=v.mission_ref AND nv.version_number>v.version_number "
-            "  AND n.document_ref=r.document_ref) "
-            "ORDER BY v.version_number DESC, r.created_at, r.review_id LIMIT ?",
-            (mission_ref, current_ref, limit),
-        ).fetchall()
+        query = (
+            "SELECT * FROM (" + AWAITING_REVIEW_DISPOSITION_SQL + ") "
+            "WHERE mission_ref=? AND active_version_ref=? AND carry_disposition='carryable'"
+        )
+        params: list[Any] = [mission_ref, current_ref]
+        if source_ref is not None:
+            query += " AND source_ref=?"
+            params.append(_text(source_ref, "source_ref"))
+        query += " ORDER BY review_version DESC, created_at, review_id LIMIT ?"
+        params.append(limit)
+        rows = self.connection.execute(query, params).fetchall()
         if not rows:
             return []
         principal = self.mission(current_ref)["autonomy"]["automation_principal"]
@@ -3497,6 +3539,27 @@ class CoverageMissionAuthority:
                 continue
             result.append({**entry, "status": "carried", "carried_to": carried})
         return result
+
+    def awaiting_review_carry_census(self, mission_ref: str) -> dict[str, Any]:
+        """Open reviews on superseded versions of ``mission_ref``, by carry disposition.
+
+        The carry returns only what it moved or refused; this is the rest --
+        how many open reviews it did not select and why -- so a tick that
+        carries nothing says so instead of returning an empty list.
+        """
+
+        mission_ref = _text(mission_ref, "mission_ref")
+        counts = {name: 0 for name in AWAITING_REVIEW_CARRY_DISPOSITIONS}
+        by_source: dict[str, dict[str, int]] = {}
+        for row in self.connection.execute(
+            "SELECT source_ref, carry_disposition, COUNT(*) AS n FROM ("
+            + AWAITING_REVIEW_DISPOSITION_SQL + ") WHERE mission_ref=? "
+            "GROUP BY source_ref, carry_disposition ORDER BY source_ref, carry_disposition",
+            (mission_ref,),
+        ).fetchall():
+            counts[row["carry_disposition"]] += row["n"]
+            by_source.setdefault(row["source_ref"], {})[row["carry_disposition"]] = row["n"]
+        return {"mission_ref": mission_ref, "dispositions": counts, "by_source": by_source}
 
     def backfill_document_reviews(
         self, mission_ref: str, *, limit: int = 100, deadline: float | None = None,
@@ -4038,33 +4101,64 @@ class CoverageMissionAuthority:
         the old decision (state, staged candidate, rationale, ``updated_at``)
         instead of opening, so the document is held by the version in force
         without a second paid read.
+
+        2026-09-28: a row the current version holds *unsettled* -- a search
+        under it found the document again (``already_in_authority``, as
+        Guidepoint records on every re-search), or it is still ``discovered``
+        or ``acquisition_failed`` -- does not decide the document; the old
+        ``acquired`` row already proves the original is held.  That row is
+        settled as the carry would have written it (same ``discovery_ref``,
+        ticket, host and timestamps, ``acquired``) and the review is opened
+        against it.  A settled or in-flight row, or a review, still refuses.
         """
 
-        held = cur.execute(
-            "SELECT 1 FROM coverage_mission_discovered_documents WHERE mission_version_ref=? AND document_ref=? "
-            "UNION ALL SELECT 1 FROM coverage_mission_document_reviews WHERE mission_version_ref=? AND document_ref=?",
-            (current_ref, review["document_ref"], current_ref, review["document_ref"]),
+        document_ref = review["document_ref"]
+        if cur.execute(
+            "SELECT 1 FROM coverage_mission_document_reviews WHERE mission_version_ref=? AND document_ref=?",
+            (current_ref, document_ref),
+        ).fetchone() is not None:
+            raise CoverageMissionConflict(
+                "the current mission version already holds this document; it is decided there")
+        present = cur.execute(
+            "SELECT record_id,status FROM coverage_mission_discovered_documents "
+            "WHERE mission_version_ref=? AND document_ref=?",
+            (current_ref, document_ref),
         ).fetchone()
-        if held is not None:
+        if present is not None and present["status"] not in _UNSETTLED_DOCUMENT_STATUSES:
             raise CoverageMissionConflict(
                 "the current mission version already holds this document; it is decided there")
         source = cur.execute(
             "SELECT * FROM coverage_mission_discovered_documents WHERE record_id=?",
             (review["discovered_document_ref"],),
         ).fetchone()
-        if source is None or source["status"] != "acquired" or source["document_ref"] != review["document_ref"]:
+        if source is None or source["status"] != "acquired" or source["document_ref"] != document_ref:
             raise CoverageMissionConflict("review no longer binds an acquired document")
         record_id = _ref("mission-discovered-document",
-                         {"mission_version_ref": current_ref, "document_ref": review["document_ref"]})
-        cur.execute(
-            "INSERT INTO coverage_mission_discovered_documents"
-            "(record_id,mission_version_ref,company_ref,source_ref,document_ref,"
-            "discovery_ref,status,ticket_ref,failure_reason,failure_retryable,created_at,updated_at,host) "
-            "VALUES(?,?,?,?,?,?,'acquired',?,NULL,NULL,?,?,?)",
-            (record_id, current_ref, source["company_ref"], source["source_ref"], source["document_ref"],
-             source["discovery_ref"], source["ticket_ref"], source["created_at"], source["updated_at"],
-             source["host"]),
-        )
+                         {"mission_version_ref": current_ref, "document_ref": document_ref})
+        carried_row = (source["company_ref"], source["source_ref"], source["discovery_ref"],
+                       source["ticket_ref"], source["created_at"], source["updated_at"],
+                       source["host"])
+        if present is None:
+            cur.execute(
+                "INSERT INTO coverage_mission_discovered_documents"
+                "(record_id,mission_version_ref,company_ref,source_ref,document_ref,"
+                "discovery_ref,status,ticket_ref,failure_reason,failure_retryable,created_at,updated_at,host) "
+                "VALUES(?,?,?,?,?,?,'acquired',?,NULL,NULL,?,?,?)",
+                (record_id, current_ref, carried_row[0], carried_row[1], document_ref,
+                 *carried_row[2:]),
+            )
+        else:
+            if present["record_id"] != record_id:
+                raise CoverageMissionConflict("current version row has an unexpected identity")
+            cur.execute(
+                "UPDATE coverage_mission_discovered_documents SET company_ref=?,source_ref=?,"
+                "discovery_ref=?,status='acquired',ticket_ref=?,failure_reason=NULL,"
+                "failure_retryable=NULL,created_at=?,updated_at=?,host=? "
+                "WHERE record_id=? AND status IN (%s)" % ",".join("?" * len(_UNSETTLED_DOCUMENT_STATUSES)),
+                (*carried_row, record_id, *_UNSETTLED_DOCUMENT_STATUSES),
+            )
+            if cur.rowcount != 1:
+                raise CoverageMissionConflict("discovered document state changed concurrently")
         new_review_id = _ref("mission-document-review", {
             "mission_version_ref": current_ref, "document_ref": review["document_ref"]})
         if keep_decision:
@@ -5933,6 +6027,8 @@ class CoverageMissionAuthority:
 
 __all__ = [
     "AUTOMATION_WRITE_SCOPES",
+    "AWAITING_REVIEW_CARRY_DISPOSITIONS",
+    "AWAITING_REVIEW_DISPOSITION_SQL",
     "DISCOVERY_SOURCES",
     "BOOTSTRAP_PRIORITIES",
     "CHECKPOINT_KINDS",
