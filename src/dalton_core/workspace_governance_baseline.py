@@ -253,8 +253,9 @@ def governance_baseline_checks(
         f"{policy_id} carries {len(predicates or [])} independence predicate(s); a fresh "
         "Core starts with producer.model_family != verifier.model_family, and a cockpit "
         "budget edit before 2026-09-27 dropped it silently",
-        fix="owner decision: republish the policy with the default predicate if the "
-            "producer/verifier family gate should apply again",
+        fix="owner decision: scripts/restore_independence_predicates.py --state-dir <this "
+            "environment> (dry run first) republishes the policy with the default predicate "
+            "and rebinds the constitution and mission",
         severity="drift"))
     return rows
 
