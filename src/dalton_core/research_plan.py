@@ -169,7 +169,8 @@ PLAN_COMPANY_FACTS_AUTO_START_RULE_REF = (
 # (Accenture).  Annual-form plans are authorized by their own policy rule
 # so an active policy that lists only the ``v1`` rule keeps rejecting them;
 # the FY - 9M derivation for issuers whose 10-K carries only fiscal-year
-# facts is a separate, not yet frozen rule.
+# facts is a separate rule that starts no plan at all: it reads the filed
+# statement rows Core already holds (``sec_fy_minus_9m``).
 SEC_COMPANY_FACTS_FORMS: tuple[str, ...] = ("10-Q", "10-K")
 PLAN_COMPANY_FACTS_ANNUAL_AUTO_START_RULE_REF = (
     "research-plan-auto-start:sec-public-company-facts-annual:v1"

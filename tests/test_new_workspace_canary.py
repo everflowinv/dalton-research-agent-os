@@ -8,7 +8,8 @@ mission that has nothing to do with US IT services (two fictional robotics
 issuers, ``company:ticker:`` refs), and without signing anything by hand runs
 
     discovery -> extraction -> claim-support check -> ledger commit
-    -> SEC company facts -> claim index -> dossier -> event judgement,
+    -> SEC company facts (10-Q, the 10-K pair, and FY - 9M for a 10-K of
+       fiscal-year totals) -> claim index -> dossier -> event judgement,
 
 then upgrades the mission through the real policy -> constitution -> mission
 cascade and runs them again.  After the upgrade nothing may stall (an open
@@ -74,6 +75,46 @@ def annual_rows(accession: str) -> list[dict]:
         {"start": "2025-10-01", "end": "2025-12-31", "val": 117000000000, "accn": accession,
          "fy": 2025, "fp": "FY", "form": "10-K", "filed": "2026-02-10", "frame": "CY2025Q4"},
     ]
+# GZMO's 10-K for calendar 2025 reports fiscal years only, like AMZN's.  Its
+# fourth quarter is derived as fiscal year less nine months from the filed
+# statement rows of the 10-K and the year's three 10-Qs (FY - 9M), in millions:
+# 2025: 414,000 - (100,000 + 102,000 + 104,000) = 108,000
+# 2024: 372,000 - ( 90,000 +  92,000 +  94,000) =  96,000  -> +12.5%
+GZMO_ANNUAL_ACCESSION = "0009900002-26-000050"
+MILLION = 1_000_000
+
+
+def annual_only_rows(accession: str) -> list[dict]:
+    return [
+        {"start": start, "end": end, "val": value * MILLION, "accn": accession,
+         "fy": 2025, "fp": "FY", "form": "10-K", "filed": "2026-02-12", "frame": frame}
+        for start, end, value, frame in (("2025-01-01", "2025-12-31", 414000, "CY2025"),
+                                         ("2024-01-01", "2024-12-31", 372000, "CY2024"))]
+
+
+def gzmo_statement_filings() -> dict[str, tuple[str, str, str, list[dict]]]:
+    def line(start, end, value):
+        return {"statement": "income",
+                "concept": "us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax",
+                "label": "Revenue", "level": 0, "parent_concept": None, "is_breakdown": False,
+                "dimension_axis": None, "dimension_member": None, "period_start": start,
+                "period_end": end, "value": str(value * MILLION), "unit": "usd",
+                "balance": "credit"}
+
+    return {
+        "0009900002-25-000011": ("10-Q", "2025-05-01", "2025-03-31", [
+            line("2024-01-01", "2024-03-31", 90000), line("2025-01-01", "2025-03-31", 100000)]),
+        "0009900002-25-000022": ("10-Q", "2025-08-01", "2025-06-30", [
+            line("2024-04-01", "2024-06-30", 92000), line("2024-01-01", "2024-06-30", 182000),
+            line("2025-04-01", "2025-06-30", 102000), line("2025-01-01", "2025-06-30", 202000)]),
+        "0009900002-25-000033": ("10-Q", "2025-10-30", "2025-09-30", [
+            line("2024-07-01", "2024-09-30", 94000), line("2024-01-01", "2024-09-30", 276000),
+            line("2025-07-01", "2025-09-30", 104000), line("2025-01-01", "2025-09-30", 306000)]),
+        GZMO_ANNUAL_ACCESSION: ("10-K", "2026-02-12", "2025-12-31", [
+            line("2024-01-01", "2024-12-31", 372000), line("2025-01-01", "2025-12-31", 414000)]),
+    }
+
+
 DOC_A = "alphaengine-doc:990000000000001"
 DOC_B = "alphaengine-doc:990000000000002"
 
@@ -225,6 +266,10 @@ class NewWorkspaceCanaryTests(unittest.TestCase):
             check_core_governance_rules(store)  # ws-7d's policy-4 failed exactly here
             active = store.active_policy_version().to_dict()
             self.assertTrue(policy_lists_document_rule(active))
+            # FY - 9M is signed with the rest of the baseline, by the flow.
+            from dalton_core.research_auto_commit import SEC_FY_MINUS_9M_RULE_REF
+            self.assertIn(SEC_FY_MINUS_9M_RULE_REF,
+                          active["policy"]["research_candidate_auto_commit"]["rules"])
             self.assertEqual(active["policy"]["research_budget"], {
                 "max_alphaengine_calls_24h": 50, "max_daily_cost_usd": 100.0,
                 "max_daily_paid_calls": 100})
@@ -370,7 +415,8 @@ class NewWorkspaceCanaryTests(unittest.TestCase):
 
     def sec_company_facts(self, state: Path, mission, *, run_key: str, ticker: str = "WDGT",
                           accession: str | None = None, day: int = 0, form: str = "10-Q",
-                          annual_accession: str | None = None):
+                          annual_accession: str | None = None,
+                          annual_only_accession: str | None = None):
         from dalton_core.sec_authority_harness import MutableClock
         from dalton_core.sec_company_facts_lane import Issuer, RehearsalGovernance, SecCompanyFactsLane
         from tests.test_research_plan_executor import _sec_company_facts_body
@@ -387,6 +433,8 @@ class NewWorkspaceCanaryTests(unittest.TestCase):
             fact["accn"] = accession
         if annual_accession is not None:
             rows.extend(annual_rows(annual_accession))
+        if annual_only_accession is not None:
+            rows.extend(annual_only_rows(annual_only_accession))
         clock = MutableClock()
         clock.advance(day * 86400)  # a new connector quota day
         issuer = Issuer(ticker, ISSUERS[ticker]["cik"], company_ref, ISSUERS[ticker]["name"])
@@ -446,6 +494,87 @@ class NewWorkspaceCanaryTests(unittest.TestCase):
         again = coordinator().dispatch_once()
         self.assertNotIn(SEC_ANNUAL_ACCESSION,
                          [q["accession"] for q in again.get("queued", [])], again)
+        self.assertEqual(self.claim_count(), claims + 1)
+
+    def ingest_statements(self, mission, company_ref: str, ticker: str, filings) -> None:
+        """The financial-statements lane's record of these filings, as its child leaves it."""
+
+        authorization = self.missions.authorize_sec_lane(
+            company_ref=company_ref, ticker=ticker, actor_ref=AUTOMATION,
+            mission_version_ref=mission["id"], mission_version_hash=mission["content_hash"])
+        for form in ("10-Q", "10-K"):
+            batch = [{"accession": accession, "form": kind, "filed": filed,
+                      "report_date": report, "lines": lines}
+                     for accession, (kind, filed, report, lines) in sorted(filings.items())
+                     if kind == form]
+            dispatch = self.missions.queue_statement_dispatch(authorization=authorization, form=form)
+            self.missions.mark_statement_dispatch_launched(
+                dispatch["dispatch_id"], f"sec-financials-run:canary-{form.lower()}")
+            self.missions.record_statement_observation(
+                dispatch_id=dispatch["dispatch_id"],
+                observation={"schema_version": "0.1", "cik": ISSUERS[ticker]["cik"].zfill(10),
+                             "entity_name": ISSUERS[ticker]["name"], "filings": batch,
+                             "source_record_refs": ["raw-sink:" + ("9" if form == "10-K" else "8") * 64],
+                             "next_cursor": None, "provider_status": 200},
+                governance_ref="connector-governance:sec-financial-statements:v2",
+                governance_hash="b" * 64)
+            self.missions.settle_statement_dispatch(dispatch["dispatch_id"], outcome="succeeded")
+
+    def assert_fourth_quarter_is_derived(self, state: Path, mission) -> None:
+        """A 10-K of fiscal-year totals: the quarter lane derives Q4 as FY - 9M.
+
+        No 10-K connector run (it could only fail) and no hand-signed rule: the
+        workspace's baseline policy lists the FY - 9M rule, the statement lane's
+        rows are in Core, and the coordinator stages the derivation and the
+        Ledger admits it after rebuilding it from those rows.
+        """
+
+        from dalton_core.mission_sec_quarters import MissionSecQuartersCoordinator
+        from dalton_core.research_auto_commit import SEC_FY_MINUS_9M_RULE_REF
+        from dalton_core.research_verification import CandidateStagingStore
+
+        self.ingest_statements(mission, GZMO, "GZMO", gzmo_statement_filings())
+        staging = CandidateStagingStore(state / "research-review" / "candidate-staging.sqlite")
+        self.addCleanup(staging.close)
+
+        def coordinator():
+            return MissionSecQuartersCoordinator(
+                store=self.harness.core, missions=self.missions, state_dir=state,
+                checklist=lambda: [{"company_ref": GZMO, "ticker": "GZMO", "items": [
+                    {"item_ref": "quarterly_financials", "have": 1, "required": 4}]}],
+                clock=lambda: datetime(2026, 9, 28, tzinfo=timezone.utc), staging=staging)
+
+        claims = self.claim_count()
+        first = coordinator().dispatch_once()
+        self.assertIn(first["status"], {"queued", "committed"},
+                      json.dumps(first, indent=1, default=str))
+        [derived] = first["derived"]
+        self.assertEqual(derived["status"], "committed", json.dumps(derived, indent=1))
+        self.assertEqual((derived["accession"], derived["period"], derived["value"],
+                          derived["rule_ref"]),
+                         (GZMO_ANNUAL_ACCESSION, "2025-10-01..2025-12-31", "12.5",
+                          SEC_FY_MINUS_9M_RULE_REF))
+        self.assertEqual((derived["q4"], derived["prior_q4"]),
+                         (str(108000 * MILLION), str(96000 * MILLION)))
+        # The 10-K itself is never sent to the SEC lane.
+        self.assertNotIn(GZMO_ANNUAL_ACCESSION, [q["accession"] for q in first["queued"]])
+        self.assertNotIn(GZMO_ANNUAL_ACCESSION,
+                         [row["expected_accession"]
+                          for row in self.missions.pending_sec_dispatches(limit=20)])
+        self.assertEqual(self.claim_count(), claims + 1)
+        row = self.harness.core.connection.execute(
+            "SELECT claim_json FROM claim_versions WHERE json_extract(claim_json,'$.subject_ref')=? "
+            "AND json_extract(claim_json,'$.metric_or_aspect')='quarterly_revenue_yoy_growth' "
+            "AND json_extract(claim_json,'$.period')='2025-10-01..2025-12-31'", (GZMO,)).fetchone()
+        claim = json.loads(row[0])
+        self.assertEqual(claim["basis"], "official-filing-xbrl-derived")
+        self.assertIn("not a filed quarter", claim["normalized_statement"])
+        # Held now: the next tick neither derives it again nor queues its 10-K.
+        again = coordinator()
+        self.assertIn("2025-10-01..2025-12-31", again._held_periods(GZMO))
+        second = again.dispatch_once()
+        self.assertFalse([item for item in second.get("derived", [])
+                          if item["accession"] == GZMO_ANNUAL_ACCESSION], second)
         self.assertEqual(self.claim_count(), claims + 1)
 
     # -- stage 6: claim index and dossier -------------------------------------------
@@ -765,9 +894,14 @@ class NewWorkspaceCanaryTests(unittest.TestCase):
         # governance precondition and grant resolve against the new version),
         # and the v1 accession still has exactly one claim.
         sec2 = self.sec_company_facts(state, v2, run_key="canary-v2", ticker="GZMO",
-                                      accession="0009900002-26-000101", day=1)
+                                      accession="0009900002-26-000101", day=1,
+                                      annual_only_accession=GZMO_ANNUAL_ACCESSION)
         self.assertEqual(sec2["status"], "committed", json.dumps(sec2, indent=1, default=str)[-3000:])
         self.assertEqual(self.claim_count() - claims_before_upgrade, extraction_claims + 1)
+        # GZMO's 10-K reports only fiscal years: its fourth quarter is FY - 9M,
+        # derived by the quarter lane under v2 from the statement rows in Core.
+        self.assert_fourth_quarter_is_derived(state, v2)
+        self.assertEqual(self.claim_count() - claims_before_upgrade, extraction_claims + 2)
 
         # Dossier under v2: nothing new from SEC, so it may redraw or stay, but not fail.
         index2, dossier2, _ = self.index_and_dossier(state, run="v2")

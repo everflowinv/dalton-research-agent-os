@@ -256,7 +256,8 @@ def _decimal_integer(value: Any, name: str) -> Decimal:
 # is the historical rule; ``10-K`` (P9b, 2026-09-02) admits the fourth-quarter
 # pair that some issuers (Accenture) report inside the annual filing.  Both
 # forms use the same same-accession quarterly selection below; a 10-K that
-# carries only fiscal-year facts fails closed.
+# carries only fiscal-year facts fails closed here (its fourth quarter is the
+# FY - 9M rule's, ``sec_fy_minus_9m``, which never calls this adapter).
 SEC_COMPANY_FACTS_FORMS: tuple[str, ...] = ("10-Q", "10-K")
 
 
@@ -357,8 +358,8 @@ def normalize_sec_company_concept(
     filing).  That binds both values to one comparative filing and avoids
     silently mixing later restatements, different duration contexts, annual
     facts, or two taxonomy concepts.  A 10-K that only carries fiscal-year
-    facts fails closed here; the FY - 9M derivation is a separate, not yet
-    frozen rule.
+    facts fails closed here; the FY - 9M derivation is a separate rule over
+    filed statement rows (``sec_fy_minus_9m``).
     """
 
     if not isinstance(payload, Mapping):
