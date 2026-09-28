@@ -6,12 +6,13 @@ cd ~/Projects/dalton-research-agent-os
 # pypi 偶尔超时：放宽 pip 超时；构建失败时清掉半成品目录（没有 release-manifest.json、也没被任何服务引用），最多重试 3 次。
 export PIP_DEFAULT_TIMEOUT=60 PIP_RETRIES=8
 OUT=/tmp/dalton-build-$(date -u +%Y%m%dT%H%M%SZ).json
+MARK=$(mktemp /tmp/dalton-build-start.XXXXXX)   # 只清理这次构建期间新建的目录，旧发布（回滚目标）一律不碰
 for attempt in 1 2 3; do
   if .venv/bin/python scripts/build_release.py --apply > "$OUT"; then break; fi
   echo "!! 第 $attempt 次构建失败（多半是网络），清理半成品后重试……" >&2
   for d in ~/.dalton/runtime/releases/*(N/); do
     h=${d:t}
-    if [[ ! -e $d/release-manifest.json ]] && ! grep -rqs "$h" ~/Library/LaunchAgents ~/.dalton/manager.json; then
+    if [[ $d -nt $MARK ]] && [[ ! -e $d/release-manifest.json ]] && ! grep -rqs "$h" ~/Library/LaunchAgents ~/.dalton/manager.json; then
       echo "   删除半成品 $h" >&2; rm -rf "$d"
     fi
   done
