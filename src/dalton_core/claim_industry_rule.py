@@ -403,8 +403,226 @@ def judge(
     return verdict
 
 
+# -- the verifier's "about another subject" (2026-09-28) -----------------------
+#
+# The support check (``claim_support_verification``) retires a Claim on
+# ``citation_support_rejected`` when an independent model finds the cited
+# sentences support it but that it is about someone else, and names that
+# someone (``other_subject``).  When the someone is an industry the finding is
+# industry evidence; when it is a company it is that company's, and a mission
+# that does not cover it has nowhere to put it.  The name is a model's words,
+# so it is read strictly and deterministically, and it only ever *narrows*
+# what the rule above keeps -- it never lets a statement through the rule.
+#
+# 1. **No company.**  Every capitalised or ticker-shaped word of the name must
+#    be ordinary vocabulary (:data:`NEUTRAL_WORDS`, :data:`OTHER_SUBJECT_WORDS`);
+#    anything else -- "CoreWeave", "Infineon Technologies (IFX)", "OKLO",
+#    "S&P", "Anthropic" -- is a company or an unknown name, and so is a covered
+#    company's name in any case ("amazon").  A name with Chinese characters
+#    outside :data:`OTHER_SUBJECT_CJK_WORDS` cannot be read and is refused.
+# 2. **This mission's industry.**  The name is cut into parts ("A / B",
+#    "A & B", "A and B", "A, B", "A vs B").  Each part must be the mission's
+#    industry (:data:`OTHER_SUBJECT_SCOPE`: "hyperscalers", "cloud service
+#    providers", "AI infrastructure" for the hyperscaler mission; "IT services
+#    sector", "IT consulting" for US IT services) or an umbrella that contains
+#    it (:data:`OTHER_SUBJECT_UMBRELLAS`: "tech sector", "AI trade", "TMT").  A
+#    part that is neither -- semiconductors, software, equities, credit,
+#    consumer, industrials -- is another industry, and a part naming one of
+#    :data:`OTHER_SUBJECT_EXCLUDED` (a supplier industry: "AI infrastructure
+#    semiconductors") is too, even beside a scope word.  One such part refuses
+#    the whole name: "Hyperscalers / Industrials" is not only hyperscalers.
+# 3. **This mission's geography.**  A mission whose industry ref is a US one
+#    ("industry:us-…", "industry:美国-…") does not take a part qualified by
+#    another region ("European IT Services", "China AI data center sector").
+# 4. **An umbrella is not enough on its own.**  When no part names the
+#    mission's industry itself, the statement's main clause must: one of the
+#    industry's own collectives (:data:`INDUSTRY_COLLECTIVES` -- "hyperscaler",
+#    "big tech", "data center" ...).  "The AI trade is de-grossing" is about
+#    the trade; "hyperscaler capex drove the AI trade" is about hyperscalers.
+#
+# No other_subject at all refuses: the verifier did not say who it is about.
+
+ABOUT_OTHER_RULE_REF = "claim-industry-reattribution:about-other-subject:v1"
+#: Generic words a verifier's subject name may be made of (lowercase).  Only
+#: what makes a word *not a company*; which industry it is comes below.
+OTHER_SUBJECT_WORDS = frozenset((
+    "hyperscaler", "hyperscalers", "hyperscale", "csp", "csps", "neocloud", "neoclouds",
+    "mag7", "mag", "magnificent", "seven", "builders", "builder", "buildout", "build-out",
+    "tmt", "info", "sector", "sectors", "industry", "industries", "market", "markets",
+    "names", "peers", "peer", "players", "vendors", "providers", "provider", "service",
+    "services", "cloud", "data", "center", "centers", "centre", "centres", "datacenter",
+    "datacenters", "ai", "infrastructure", "infra", "capex", "compute", "trade", "complex",
+    "tech", "technology", "it", "its", "consulting", "consultancies", "digital",
+    "engineering", "outsourcing", "outsourcers", "bpo", "integrators", "systems", "us",
+    "u.s.", "global", "general", "credit", "bond", "bonds", "index", "indices", "space",
+    "group", "theme", "themes", "megacap", "mega-cap", "large-cap", "internet", "software",
+    "hardware", "security", "cybersecurity", "consumer", "industrials", "industrial",
+    "utilities", "energy", "power", "power-gen", "financials", "banks", "payments",
+    "processors", "telecom", "media", "equities", "equity", "macro", "economy", "hedge",
+    "funds", "semiconductor", "semiconductors", "semis", "semicaps", "chips", "memory",
+    "optical", "supply", "chain", "suppliers", "coverage", "sentiment", "information",
+    "business", "enablers", "adoption", "ecosystem", "ai-related", "gpus", "gpu",
+    "communication", "communications", "companies", "vs", "and",
+))
+#: Chinese words a subject name may be made of; any other Chinese is unreadable.
+OTHER_SUBJECT_CJK_WORDS: tuple[str, ...] = (
+    "超大规模", "云厂商", "云计算", "数据中心", "算力", "人工智能", "科技", "行业", "板块",
+    "美国", "资本开支", "外包", "咨询", "服务", "IT服务",
+)
+#: A subject name that is the mission's industry itself, by lexicon key.
+OTHER_SUBJECT_SCOPE: Mapping[str, tuple[str, ...]] = {
+    "hyperscaler": (
+        "hyperscaler", "hyperscalers", "hyperscale", "cloud service providers",
+        "cloud service provider", "cloud providers", "cloud provider", "csp", "csps", "cloud",
+        "data center", "data centers", "data-center", "datacenter", "datacenters",
+        "data centre", "data centres", "ai infrastructure", "ai infra", "ai capex",
+        "ai compute", "compute", "neocloud", "neoclouds", "big tech", "mag7", "mag 7",
+        "magnificent 7", "magnificent seven", "megacap tech", "mega-cap tech", "ai builders",
+        "ai buildout", "ai build-out", "超大规模", "云厂商", "云计算", "数据中心", "算力",
+    ),
+    "it-services": (
+        "it services", "it service", "it consulting", "consulting", "consultancies",
+        "digital engineering", "digital it services", "digital its", "outsourcing",
+        "outsourcers", "bpo", "systems integrators", "it服务", "外包", "咨询",
+    ),
+}
+#: A subject name wider than the mission's industry that contains it.
+OTHER_SUBJECT_UMBRELLAS: Mapping[str, tuple[str, ...]] = {
+    "hyperscaler": ("tech", "technology", "ai trade", "ai sector", "ai market", "ai complex",
+                    "tmt", "科技", "人工智能"),
+    "it-services": ("info tech", "information technology", "technology services"),
+}
+#: Industries that sit next to the mission's and are not it: a part naming
+#: one is another industry even beside a scope word.
+OTHER_SUBJECT_EXCLUDED: Mapping[str, tuple[str, ...]] = {
+    "hyperscaler": (
+        "semiconductor", "semiconductors", "semis", "semicaps", "chips", "memory", "optical",
+        "hardware", "supply chain", "suppliers", "industrials", "power-gen", "utilities",
+        "software", "security", "cybersecurity", "consumer", "equities", "equity",
+    ),
+    "it-services": (
+        "software", "semiconductor", "semiconductors", "semis", "payments", "processors",
+        "hardware", "security", "cybersecurity", "hedge", "equities", "equity",
+    ),
+}
+#: Words that put a part in another region than a US mission's.
+FOREIGN_REGION_WORDS: tuple[str, ...] = (
+    "europe", "european", "eu", "uk", "british", "sterling", "china", "chinese", "india",
+    "indian", "japan", "japanese", "korea", "korean", "kospi", "asia", "asian", "apac",
+    "emea", "taiwan", "taiwanese", "germany", "german", "france", "french", "canada",
+    "canadian", "australia", "australian", "brazil", "latam", "中国", "欧洲", "印度",
+    "日本", "韩国", "台湾",
+)
+#: A part made only of these says nothing of its own ("IT Services vendors /
+#: industry"): it is skipped, neither in scope nor another industry.  "market"
+#: is not one of them -- "hyperscalers / market" is also the broad market.
+GENERIC_PART_WORDS = frozenset((
+    "industry", "industries", "sector", "sectors", "group", "peers", "peer", "names",
+    "vendors", "players", "companies", "space", "行业", "板块",
+))
+_US_INDUSTRY_RE = re.compile(r"^industry:(?:us-|美国-)")
+_PART_SPLIT_RE = re.compile(
+    r"\s*(?:/|&|\+|;|,|、|与|和|\bvs\.?(?=\s|$)|\bversus\b|\band\b)\s*", re.IGNORECASE)
+_PAREN_RE = re.compile(r"[（(][^()（）]*[)）]")
+_NAME_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9&.'’-]*")
+
+
+def _other_subject_names(text: str, roster: Mapping[str, Sequence[str]]) -> list[str]:
+    """The company names (or unknown capitalised words) in a subject name."""
+
+    found = [f"covered:{ref}" for ref in _covered_named(text, roster)]
+    for match in _NAME_TOKEN_RE.finditer(text):
+        word = re.sub(r"(’s|'s)$", "", match.group(0)).rstrip(".'’-")
+        if not word:
+            continue
+        lowered = word.lower()
+        if lowered in OTHER_SUBJECT_WORDS or lowered in NEUTRAL_WORDS:
+            continue
+        if not (word[:1].isupper() or any(ch.isupper() for ch in word[1:])):
+            continue  # an ordinary lowercase word names nobody
+        found.append(word)
+    rest = text
+    for word in sorted(OTHER_SUBJECT_CJK_WORDS, key=len, reverse=True):
+        rest = rest.replace(word, " ")
+    if _CJK_RE.search(rest):
+        found.append("unreadable:" + "".join(_CJK_RE.findall(rest))[:20])
+    return found
+
+
+def other_subject_scope(other_subject: Any, *, industry_ref: Any,
+                        roster: Mapping[str, Sequence[str]]) -> dict[str, Any]:
+    """Is the verifier's ``other_subject`` the mission's industry?  (``ABOUT_OTHER_RULE_REF``)
+
+    Returns ``{"ok": bool, "refusal": str | None, "scope": "industry" |
+    "umbrella" | None, "parts": [...]}``.  ``scope`` is ``umbrella`` when no
+    part names the industry itself; the caller then also needs the
+    statement to (:func:`statement_names_industry`).
+    """
+
+    result: dict[str, Any] = {"rule_ref": ABOUT_OTHER_RULE_REF, "ok": False,
+                              "refusal": None, "scope": None, "parts": []}
+
+    def refuse(reason: str) -> dict[str, Any]:
+        result["refusal"] = reason
+        return result
+
+    if not isinstance(other_subject, str) or not other_subject.strip():
+        return refuse("other_subject_missing")
+    text = other_subject.strip()
+    names = _other_subject_names(text, roster)
+    covered = [name for name in names if name.startswith("covered:")]
+    if covered:  # a covered company is never an industry, whichever the mission's is
+        return refuse("other_subject_names_company:" + ",".join(names[:4]))
+    key = lexicon_key(industry_ref)
+    if key is None or key not in OTHER_SUBJECT_SCOPE:
+        return refuse("no_industry_lexicon")
+    if names:  # a name the vocabulary does not know is a company's until shown otherwise
+        return refuse("other_subject_names_company:" + ",".join(names[:4]))
+    body = _PAREN_RE.sub(" ", text)  # "(CSPs)": an alias, read as a name above
+    parts = [part.strip(" .-").lower() for part in _PART_SPLIT_RE.split(body)]
+    parts = [part for part in parts if part]
+    result["parts"] = parts
+    if not parts:
+        return refuse("other_subject_missing")
+    us_mission = bool(_US_INDUSTRY_RE.match(str(industry_ref)))
+    in_scope = umbrella = 0
+    for part in parts:
+        if all(word in GENERIC_PART_WORDS for word in part.split()):
+            continue
+        if us_mission and _hits(part, FOREIGN_REGION_WORDS):
+            return refuse(f"other_subject_other_region:{part}")
+        excluded = _hits(part, OTHER_SUBJECT_EXCLUDED.get(key, ()))
+        if excluded:
+            return refuse(f"other_subject_other_industry:{part}")
+        if _hits(part, OTHER_SUBJECT_SCOPE[key]):
+            in_scope += 1
+        elif _hits(part, OTHER_SUBJECT_UMBRELLAS.get(key, ())):
+            umbrella += 1
+        else:
+            return refuse(f"other_subject_other_industry:{part}")
+    if not in_scope and not umbrella:
+        return refuse("other_subject_names_no_industry")
+    result["scope"] = "industry" if in_scope else "umbrella"
+    result["ok"] = True
+    return result
+
+
+def statement_names_industry(statement: Any, industry_ref: Any) -> list[str]:
+    """The industry's own collectives the statement's main clause names."""
+
+    key = lexicon_key(industry_ref)
+    if key is None or not isinstance(statement, str):
+        return []
+    return _hits(main_clause(statement), INDUSTRY_COLLECTIVES.get(key, ()))
+
+
 __all__ = [
+    "ABOUT_OTHER_RULE_REF",
     "CO_OCCURRENCE_TERMS",
+    "OTHER_SUBJECT_SCOPE",
+    "OTHER_SUBJECT_UMBRELLAS",
+    "other_subject_scope",
+    "statement_names_industry",
     "COLLECTIVE_TERMS",
     "INDUSTRY_COLLECTIVES",
     "INDUSTRY_LEXICONS",

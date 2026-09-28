@@ -26,9 +26,12 @@ Who may write one:
 
 * **automation** -- the mission's automation principal, only when the mission
   grants ``claim_challenge`` (the grant that let it retire the Claim), only
-  for a ``subject_absent_from_source`` retirement, and only when the
-  deterministic rule (``claim_industry_rule.judge``) fires on the exact
-  statement and cited span, re-run here rather than trusted;
+  for a ``subject_absent_from_source`` retirement -- or, since 2026-09-28, a
+  ``citation_support_rejected`` one whose governing support verdict is
+  *supported* and *about another subject* that is this mission's industry
+  (:func:`about_other_evidence`) -- and only when the deterministic rule
+  (``claim_industry_rule.judge``) fires on the exact statement and cited
+  span, re-run here rather than trusted;
 * **a person** (``human:``) -- any retired Claim except a boilerplate
   disclaimer, through the writer's ``reattribute_claim_to_industry``
   operation (``claim_industry_reattribution_cli ... --apply --actor human:``).
@@ -49,7 +52,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
-from .claim_industry_rule import PRIOR_RULE_REFS, RULE_REF, judge
+from .claim_industry_rule import (
+    ABOUT_OTHER_RULE_REF,
+    PRIOR_RULE_REFS,
+    RULE_REF,
+    judge,
+    other_subject_scope,
+    statement_names_industry,
+)
 from .store import DaltonStore, authorization_flag, authorized_flag, content_hash
 
 SCHEMA_VERSION = "0.1"
@@ -62,9 +72,18 @@ WITHDRAWAL_REASONS: tuple[str, ...] = ("not_industry_level_under_current_rule", 
 REASON_CODES: tuple[str, ...] = ("industry_level_under_rule", "human_judgment")
 #: The mission grant automation writes under: the one that let it retire.
 WRITE_SCOPE = "claim_challenge"
+#: Retirements automation may reattribute.  2026-09-28: a support retirement
+#: too, when the verifier found the Claim supported and about another subject
+#: that is this mission's industry (:func:`about_other_evidence`).
+SUBJECT_ABSENT_REASON = "subject_absent_from_source"
+SUPPORT_REASON = "citation_support_rejected"
+AUTOMATIC_RETIREMENT_REASONS: tuple[str, ...] = (SUBJECT_ABSENT_REASON, SUPPORT_REASON)
 #: Originals read per tick by the backfill, and records written per tick.
 DEFAULT_MAX_DOCUMENTS = 20
 DEFAULT_MAX_WRITES = 50
+#: 2026-09-28: support retirements decided on their recorded verdicts alone
+#: (no original read) per tick -- each is a review-cache write.
+DEFAULT_MAX_VERDICT_REVIEWS = 100
 _HUMAN_RE = re.compile(r"^human:[A-Za-z0-9._:-]{1,128}$")
 _AUTOMATION_RE = re.compile(r"^automation:[A-Za-z0-9._:-]{1,128}$")
 
@@ -239,9 +258,113 @@ def mission_roster(universe: Sequence[Mapping[str, Any]],
     return {ref: sorted(values) for ref, values in roster.items()}
 
 
-def inputs_hash(industry_ref: Any, roster: Mapping[str, Sequence[str]]) -> str:
-    return content_hash({"rule": RULE_REF, "industry": industry_ref,
-                         "roster": {ref: sorted(values) for ref, values in roster.items()}})
+def inputs_hash(industry_ref: Any, roster: Mapping[str, Sequence[str]],
+                verdict_keys: Sequence[str] | None = None) -> str:
+    """What a review-cache mark was judged with.
+
+    A support retirement's also names its governing verdicts and the
+    about-other rule, so a newer verdict (the next contract's re-review) or a
+    new rule judges it once more.
+    """
+
+    body: dict[str, Any] = {"rule": RULE_REF, "industry": industry_ref,
+                            "roster": {ref: sorted(values) for ref, values in roster.items()}}
+    if verdict_keys is not None:
+        body.update({"about_other_rule": ABOUT_OTHER_RULE_REF,
+                     "verdicts": sorted(verdict_keys)})
+    return content_hash(body)
+
+
+# -- a support retirement: supported, about another subject (2026-09-28) ----
+
+
+def _rereview_pending(connection: Any, claim_version_ref: str, newest: int) -> bool:
+    """An earlier contract's verdict the current contract has not re-asked yet.
+
+    ``claim_support_backfill.rereview_retirements`` asks every support
+    retirement once under each new contract; until it has (a mark under its
+    pass ref, whatever it says), the verdict in hand may be about to change,
+    so nothing is decided on it.
+    """
+
+    from .claim_support_verification import CONTRACT_REF, contract_version
+
+    if newest >= contract_version(CONTRACT_REF):
+        return False
+    from .claim_support_backfill import REREVIEW_PASS_REF
+
+    try:
+        row = connection.execute(
+            "SELECT 1 FROM claim_support_backfill_marks WHERE claim_version_ref=? AND pass_ref=?",
+            (claim_version_ref, REREVIEW_PASS_REF)).fetchone()
+    except sqlite3.Error:
+        return True
+    return row is None
+
+
+def about_other_evidence(
+    connection: Any, *, claim_version_ref: str, claim: Mapping[str, Any],
+    industry_ref: Any, roster: Mapping[str, Sequence[str]],
+    defer_pending_rereview: bool = True,
+) -> dict[str, Any]:
+    """May a ``citation_support_rejected`` retirement be read as industry evidence?
+
+    Everything before the original is read, from the recorded verdicts alone
+    (``claim_support_verification.governing_verdicts`` -- the newest contract's
+    verdicts bound to this exact claim version, re-hashed):
+
+    * none -> ``no_governing_verdict``; an earlier contract's verdict the
+      current contract has not re-asked -> ``deferred`` (not a refusal);
+    * every governing verdict must be ``supported`` and ``about_other``: a
+      verdict that the cited sentences do *not* support the Claim is never
+      reattributed, whoever it is about;
+    * every one's ``other_subject`` must be this mission's industry, never a
+      company (``claim_industry_rule.other_subject_scope``); an umbrella
+      ("AI trade / tech sector") only when the statement's main clause names
+      the industry's own collective (``statement_names_industry``).
+
+    The industry-level rule on the exact span is the caller's next step.
+    """
+
+    from .claim_support_verification import contract_version, governing_verdicts
+
+    result: dict[str, Any] = {
+        "rule_ref": ABOUT_OTHER_RULE_REF, "ok": False, "deferred": False, "refusal": None,
+        "verdict_keys": [], "contract_ref": None, "other_subjects": [], "scope": None,
+    }
+
+    def refuse(reason: str) -> dict[str, Any]:
+        result["refusal"] = reason
+        return result
+
+    verdicts = governing_verdicts(connection, claim_version_ref=claim_version_ref, claim=claim)
+    result["verdict_keys"] = [verdict["item_key"] for verdict in verdicts]
+    if not verdicts:
+        return refuse("no_governing_verdict")
+    result["contract_ref"] = verdicts[0].get("contract_ref")
+    if defer_pending_rereview and _rereview_pending(
+            connection, claim_version_ref, contract_version(result["contract_ref"])):
+        result["deferred"] = True
+        return refuse("awaiting_current_contract_rereview")
+    for verdict in verdicts:
+        if (verdict.get("support"), verdict.get("subject_relation")) != ("supported", "about_other"):
+            return refuse(f"verdict_{verdict.get('support')}_{verdict.get('subject_relation')}")
+    others = sorted({str(verdict.get("other_subject") or "") for verdict in verdicts})
+    result["other_subjects"] = others
+    scopes = []
+    for other in others:
+        scope = other_subject_scope(other or None, industry_ref=industry_ref, roster=roster)
+        if not scope["ok"]:
+            return refuse(scope["refusal"])
+        scopes.append(scope["scope"])
+    result["scope"] = "industry" if "industry" in scopes else "umbrella"
+    if result["scope"] == "umbrella":
+        named = statement_names_industry(claim.get("normalized_statement"), industry_ref)
+        result["statement_industry_terms"] = named
+        if not named:
+            return refuse("umbrella_subject_without_industry_in_statement")
+    result["ok"] = True
+    return result
 
 
 # -- the authority ---------------------------------------------------------
@@ -384,14 +507,25 @@ class ClaimIndustryReattributionAuthority:
             raise ClaimReattributionConflict(
                 "industry_ref must be the covering mission's own industry")
         verdict: dict[str, Any] | None = None
+        about_other: dict[str, Any] | None = None
         roster = mission_roster(mission["universe"], roster_aliases)
         if automated:
             if not mission["granted"] or mission["principal"] != actor:
                 raise ClaimReattributionConflict(
                     f"the mission does not grant {WRITE_SCOPE} to this automation principal")
-            if challenge.get("reason_code") != "subject_absent_from_source":
+            if challenge.get("reason_code") not in AUTOMATIC_RETIREMENT_REASONS:
                 raise ClaimReattributionConflict(
-                    "automation may only reattribute a subject-absent retirement")
+                    "automation may only reattribute a subject-absent retirement or a support "
+                    "retirement about another subject")
+            if challenge.get("reason_code") == SUPPORT_REASON:
+                # The recorded verdicts are re-read here, never taken from the caller.
+                about_other = about_other_evidence(
+                    self.connection, claim_version_ref=claim_version_ref, claim=claim,
+                    industry_ref=mission["industry_ref"], roster=roster)
+                if not about_other["ok"]:
+                    raise ClaimReattributionConflict(
+                        f"the support verdict does not make this industry evidence: "
+                        f"{about_other['refusal']}")
             if cited_span is None:
                 raise ClaimReattributionConflict(
                     "the cited span cannot be read; nothing is reattributed unverified")
@@ -423,9 +557,14 @@ class ClaimIndustryReattributionAuthority:
             "reason_code": reason_code,
             "rule_ref": rule_ref,
             "rule_evidence": None if verdict is None else {
-                key: verdict[key] for key in (
+                **{key: verdict[key] for key in (
                     "form", "statement_companies", "collective_terms",
                     "industry_terms", "survey_source") if key in verdict},
+                **({} if about_other is None else {"about_other": {
+                    key: about_other[key] for key in (
+                        "rule_ref", "verdict_keys", "contract_ref", "other_subjects",
+                        "scope", "statement_industry_terms") if key in about_other}}),
+            },
             "cited_span_sha256": None if cited_span is None
             else hashlib.sha256(cited_span.encode("utf-8")).hexdigest(),
             "actor_ref": actor,
@@ -502,26 +641,41 @@ class ClaimIndustryReattributionAuthority:
             if mission is None or not mission["granted"] or mission["principal"] != actor:
                 raise ClaimReattributionConflict(
                     f"the mission does not grant {WRITE_SCOPE} to this automation principal")
-            if (record.get("reason_code") != "industry_level_under_rule"
-                    or record.get("rule_ref") not in PRIOR_RULE_REFS):
+            automatic = record.get("reason_code") == "industry_level_under_rule"
+            # 2026-09-28: one made on a support verdict is re-judged on today's
+            # verdicts too -- the next contract's re-review may say otherwise.
+            on_support = automatic and record.get("retired_reason_code") == SUPPORT_REASON
+            if not automatic or not (record.get("rule_ref") in PRIOR_RULE_REFS or on_support):
                 raise ClaimReattributionConflict(
                     "automation may only withdraw an automatic reattribution made under an "
-                    "earlier rule")
-            if cited_span is None:
-                raise ClaimReattributionConflict(
-                    "the cited span cannot be read; nothing is withdrawn unverified")
+                    "earlier rule or on a support verdict")
             claim_row = self.connection.execute(
-                "SELECT claim_json FROM claim_versions WHERE claim_version_id=?",
+                "SELECT claim_json, content_hash FROM claim_versions WHERE claim_version_id=?",
                 (claim_version_ref,),
             ).fetchone()
-            claim = {} if claim_row is None else json.loads(claim_row["claim_json"])
-            verdict = judge(
-                statement=claim.get("normalized_statement"), cited_span=cited_span,
-                industry_ref=record.get("industry_ref"),
-                roster=mission_roster(mission["universe"], roster_aliases),
-                document_title=document_title, source_text=source_text,
-                issuer_document=issuer_document,
-            )
+            claim = {} if claim_row is None else {
+                **json.loads(claim_row["claim_json"]), "content_hash": claim_row["content_hash"]}
+            roster = mission_roster(mission["universe"], roster_aliases)
+            about_other = None
+            if on_support:
+                about_other = about_other_evidence(
+                    self.connection, claim_version_ref=claim_version_ref, claim=claim,
+                    industry_ref=record.get("industry_ref"), roster=roster)
+                if about_other["deferred"]:
+                    raise ClaimReattributionConflict(
+                        "the support verdict is awaiting the current contract's re-review")
+            if about_other is not None and not about_other["ok"]:
+                verdict = {"industry_level": False, "refusal": about_other["refusal"]}
+            else:
+                if cited_span is None:
+                    raise ClaimReattributionConflict(
+                        "the cited span cannot be read; nothing is withdrawn unverified")
+                verdict = judge(
+                    statement=claim.get("normalized_statement"), cited_span=cited_span,
+                    industry_ref=record.get("industry_ref"), roster=roster,
+                    document_title=document_title, source_text=source_text,
+                    issuer_document=issuer_document,
+                )
             if verdict["industry_level"]:
                 raise ClaimReattributionConflict(
                     "today's industry-level rule still keeps this Claim")
@@ -569,7 +723,12 @@ class ClaimIndustryReattributionAuthority:
 
 
 def retired_candidates(connection: Any) -> list[dict[str, Any]]:
-    """Retired-now subject-absent Claims with no reattribution yet, oldest first."""
+    """Retired-now Claims automation may reattribute, none reattributed yet, oldest first.
+
+    Subject-absent retirements, and (2026-09-28) support retirements; which
+    support retirement qualifies is decided per Claim from its recorded
+    verdicts (:func:`about_other_evidence`).
+    """
 
     from .claim_retirement import retired_claim_version_refs
 
@@ -580,16 +739,26 @@ def retired_candidates(connection: Any) -> list[dict[str, Any]]:
     if _table_exists(connection, TABLE):
         done = {str(row[0]) for row in connection.execute(
             f"SELECT claim_version_ref FROM {TABLE}").fetchall()}
+    marks = ",".join("?" for _ in AUTOMATIC_RETIREMENT_REASONS)
     rows = connection.execute(
         "SELECT c.claim_version_ref AS ref, c.subject_ref AS subject_ref, "
-        "d.content_hash AS decision_hash, v.claim_json AS claim_json "
+        "c.reason_code AS reason_code, d.content_hash AS decision_hash, "
+        "v.claim_json AS claim_json, v.content_hash AS claim_hash "
         "FROM claim_retirement_challenges c "
         "JOIN claim_retirement_decisions d ON d.challenge_ref=c.challenge_id "
         "JOIN claim_versions v ON v.claim_version_id=c.claim_version_ref "
-        "WHERE d.decision='retired' AND c.reason_code='subject_absent_from_source' "
-        "ORDER BY d.created_at, c.claim_version_ref"
+        f"WHERE d.decision='retired' AND c.reason_code IN ({marks}) "
+        "ORDER BY d.created_at, c.claim_version_ref",
+        AUTOMATIC_RETIREMENT_REASONS,
     ).fetchall()
     return [dict(row) for row in rows if row["ref"] in retired and row["ref"] not in done]
+
+
+def _claim_of(row: Mapping[str, Any]) -> dict[str, Any]:
+    claim = json.loads(row["claim_json"])
+    if row.get("claim_hash") is not None:
+        claim.setdefault("content_hash", row["claim_hash"])
+    return claim
 
 
 def run_backfill(
@@ -603,26 +772,39 @@ def run_backfill(
     max_writes: int = DEFAULT_MAX_WRITES,
     dry_run: bool = False,
     show: int | None = None,
+    defer_pending_rereview: bool = True,
+    max_verdict_reviews: int = DEFAULT_MAX_VERDICT_REVIEWS,
 ) -> dict[str, Any]:
     """Judge retired Claims under the industry rule; append what it keeps.
 
     ``driver`` is a ``claim_review.ClaimReviewDriver`` (read-only is fine for
     a dry run): it resolves each Claim's citation chain and reads the exact
     original, re-hashed.  Bounded per tick (``max_documents`` originals read,
-    ``max_writes`` records appended) and idempotent: a reattributed Claim
+    ``max_writes`` records appended, ``max_verdict_reviews`` support
+    retirements refused on their verdicts alone) and idempotent: a reattributed Claim
     leaves the candidate query, and a refused one is marked with the rule ref
-    and the hash of the alias table it was judged with, and is looked at
-    again only when either changes.  Without a principal (no grant) it marks
-    refusals and reports what it would append; on ``dry_run`` it writes
-    nothing at all; without an authority it does nothing unless dry-running.
+    and the hash of the alias table it was judged with (and, for a support
+    retirement, of its governing verdicts), and is looked at again only when
+    one of them changes.  Without a principal (no grant) it marks refusals and
+    reports what it would append; on ``dry_run`` it writes nothing at all;
+    without an authority it does nothing unless dry-running.
+
+    A support retirement (2026-09-28) is first judged on its recorded
+    verdicts alone -- no original is read for one the verdict already
+    refuses -- and one whose verdict the current contract has not re-asked
+    yet is ``awaiting_rereview``: neither marked nor judged, looked at again
+    next tick.  ``defer_pending_rereview=False`` (read-only simulations only)
+    judges it on the verdict in hand, to show what the re-review would leave.
     """
 
     connection = driver.connection
     summary: dict[str, Any] = {
-        "rule_ref": RULE_REF, "candidates": 0, "examined": 0,
+        "rule_ref": RULE_REF, "about_other_rule_ref": ABOUT_OTHER_RULE_REF,
+        "candidates": 0, "examined": 0,
         "reattributed": [], "would_reattribute": [], "not_industry_level": 0,
         "refusals": {}, "no_industry": 0, "unreadable": 0, "deferred": 0,
-        "already_reviewed": 0, "skipped": [], "refused_examples": [],
+        "awaiting_rereview": 0, "already_reviewed": 0, "skipped": [], "refused_examples": [],
+        "by_reason": {},
     }
     try:
         candidates = retired_candidates(connection)
@@ -630,6 +812,8 @@ def run_backfill(
         summary["skipped"].append({"reason": f"{type(exc).__name__}: {exc}"})
         return summary
     summary["candidates"] = len(candidates)
+    for row in candidates:
+        summary["by_reason"][row["reason_code"]] = summary["by_reason"].get(row["reason_code"], 0) + 1
     if not candidates:
         return summary
     if authority is None and not dry_run:
@@ -645,16 +829,36 @@ def run_backfill(
     can_mark = not dry_run and authority is not None
     writable = can_mark and principal is not None
     markers = authority.reviews() if authority is not None else {}
-    if not citations or any(row["ref"] not in citations for row in candidates):
-        citations = {**driver._citations(), **(citations or {})}
-    texts = {} if texts is None else texts
     extra = dict(getattr(driver, "needles", {}) or {})
-    read_here = written = 0
+    texts = {} if texts is None else texts
+    read_here = written = verdict_reviews = 0
+    chain_read = False  # the citation chain is read once, and only if needed
+
+    def refused(row: Mapping[str, Any], item: dict[str, Any], digest_inputs: str,
+                refusal: str) -> None:
+        summary["not_industry_level"] += 1
+        key = str(refusal).split(":", 1)[0]
+        summary["refusals"][key] = summary["refusals"].get(key, 0) + 1
+        if show is None or len(summary["refused_examples"]) < show:
+            summary["refused_examples"].append({**item, "refusal": refusal})
+        if can_mark:
+            authority.record_review(claim_version_ref=row["ref"], inputs_hash=digest_inputs,
+                                    outcome="not_industry_level", refusal=refusal)
+
     for row in candidates:
         mission = missions.get(row["subject_ref"])
         industry = None if mission is None else mission["industry_ref"]
         roster = {} if mission is None else mission_roster(mission["universe"], extra)
-        digest_inputs = inputs_hash(industry, roster)
+        on_support = row["reason_code"] == SUPPORT_REASON
+        claim = _claim_of(row)
+        about_other: dict[str, Any] | None = None
+        if on_support and industry is not None:
+            about_other = about_other_evidence(
+                connection, claim_version_ref=row["ref"], claim=claim, industry_ref=industry,
+                roster=roster, defer_pending_rereview=defer_pending_rereview)
+        digest_inputs = inputs_hash(
+            industry, roster,
+            None if not on_support else (about_other or {}).get("verdict_keys", []))
         marker = markers.get(row["ref"])
         if (marker is not None and marker["rule_ref"] == RULE_REF
                 and marker["inputs_hash"] == digest_inputs
@@ -667,10 +871,31 @@ def run_backfill(
                 authority.record_review(claim_version_ref=row["ref"],
                                         inputs_hash=digest_inputs, outcome="no_industry")
             continue
+        item = {"claim_version_ref": row["ref"], "subject_ref": row["subject_ref"],
+                "industry_ref": industry, "retired_reason_code": row["reason_code"],
+                "statement": str(claim.get("normalized_statement") or "")[:240]}
+        if about_other is not None:
+            item.update({"other_subjects": about_other["other_subjects"],
+                         "verdict_contract_ref": about_other["contract_ref"],
+                         "about_other_scope": about_other["scope"]})
+            if about_other["deferred"]:
+                summary["awaiting_rereview"] += 1
+                continue
+            if not about_other["ok"]:
+                # Decided on the recorded verdicts; no original is read for it.
+                if can_mark and verdict_reviews >= max(1, int(max_verdict_reviews)):
+                    summary["deferred"] += 1
+                    continue
+                verdict_reviews += 1
+                summary["examined"] += 1
+                refused(row, item, digest_inputs, about_other["refusal"])
+                continue
         if writable and written >= max(0, int(max_writes)):
             summary["deferred"] += 1
             continue
-        citation = citations.get(row["ref"])
+        if not chain_read and (citations is None or row["ref"] not in citations):
+            citations, chain_read = {**driver._citations(), **(citations or {})}, True
+        citation = (citations or {}).get(row["ref"])
         text = None
         if citation is not None:
             digest = citation["digest"]
@@ -694,38 +919,35 @@ def run_backfill(
                                         inputs_hash=digest_inputs, outcome="unreadable")
             continue
         facts = driver._document_facts(citation.get("document_ref"))
-        claim = json.loads(row["claim_json"])
         verdict = judge(
             statement=claim.get("normalized_statement"), cited_span=span,
             industry_ref=industry, roster=roster, document_title=facts.get("title"),
             source_text=text, issuer_document=bool(facts.get("issuer_document")),
         )
-        item = {"claim_version_ref": row["ref"], "subject_ref": row["subject_ref"],
-                "industry_ref": industry,
-                "statement": str(claim.get("normalized_statement") or "")[:240],
-                "document_ref": citation.get("document_ref"),
-                "form": verdict.get("form"), "survey_source": verdict.get("survey_source")}
+        item.update({"document_ref": citation.get("document_ref"),
+                     "form": verdict.get("form"), "survey_source": verdict.get("survey_source")})
         if not verdict["industry_level"]:
-            summary["not_industry_level"] += 1
-            key = str(verdict["refusal"]).split(":", 1)[0]
-            summary["refusals"][key] = summary["refusals"].get(key, 0) + 1
-            if show is None or len(summary["refused_examples"]) < show:
-                summary["refused_examples"].append({**item, "refusal": verdict["refusal"]})
-            if can_mark:
-                authority.record_review(claim_version_ref=row["ref"], inputs_hash=digest_inputs,
-                                        outcome="not_industry_level", refusal=verdict["refusal"])
+            refused(row, item, digest_inputs, verdict["refusal"])
             continue
         if not writable:
             summary["would_reattribute"].append(item)
             continue
+        rationale = (
+            f"按行业层面规则（{RULE_REF}）判定："
+            "陈述不指向任何单一公司，谈的是整个行业；在公司口径下仍然退役，"
+            "作为行业证据保留。")
+        if on_support:
+            rationale = (
+                f"独立核验认定所引原文支持这条结论，但它讲的是"
+                f"{'、'.join(about_other['other_subjects'])}而不是所挂公司"
+                f"（{about_other['contract_ref']}）；该主体属于本任务的行业"
+                f"（{ABOUT_OTHER_RULE_REF}），且按行业层面规则（{RULE_REF}）判定陈述"
+                "不指向任何单一公司。在公司口径下仍然退役，作为行业证据保留。")
         try:
             record = authority.reattribute(
                 claim_version_ref=row["ref"], actor_ref=principal,
                 decision_hash=row["decision_hash"], industry_ref=industry,
-                rationale=(
-                    f"按行业层面规则（{RULE_REF}）判定："
-                    "陈述不指向任何单一公司，谈的是整个行业；在公司口径下仍然退役，"
-                    "作为行业证据保留。"),
+                rationale=rationale,
                 cited_span=span, source_text=text, document_title=facts.get("title"),
                 roster_aliases=extra,
             )
@@ -741,7 +963,11 @@ def run_backfill(
 
 
 def reattributions_to_recheck(connection: Any) -> list[dict[str, Any]]:
-    """Automatic reattributions made under an earlier rule and still standing."""
+    """Standing automatic reattributions today's rules may disagree with.
+
+    Those made under an earlier industry rule, and (2026-09-28) those made on
+    a support verdict -- a later contract's re-review may answer otherwise.
+    """
 
     if not _table_exists(connection, TABLE):
         return []
@@ -750,13 +976,15 @@ def reattributions_to_recheck(connection: Any) -> list[dict[str, Any]]:
         f"SELECT r.reattribution_id AS id, r.claim_version_ref AS ref, "
         "r.content_hash AS reattribution_hash, r.rule_ref AS rule_ref, "
         "r.from_subject_ref AS subject_ref, r.industry_ref AS industry_ref, "
-        f"v.claim_json AS claim_json FROM {TABLE} r "
+        "json_extract(r.record_json, '$.retired_reason_code') AS reason_code, "
+        f"v.claim_json AS claim_json, v.content_hash AS claim_hash FROM {TABLE} r "
         "JOIN claim_versions v ON v.claim_version_id=r.claim_version_ref "
         "WHERE r.reason_code='industry_level_under_rule' "
         "ORDER BY r.created_at, r.claim_version_ref"
     ).fetchall()
     return [dict(row) for row in rows
-            if row["rule_ref"] in PRIOR_RULE_REFS and row["id"] not in withdrawn]
+            if (row["rule_ref"] in PRIOR_RULE_REFS or row["reason_code"] == SUPPORT_REASON)
+            and row["id"] not in withdrawn]
 
 
 def run_recheck(
@@ -769,15 +997,17 @@ def run_recheck(
     max_documents: int = DEFAULT_MAX_DOCUMENTS,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    """Re-judge automatic reattributions made under an earlier rule (2026-09-25b).
+    """Re-judge standing automatic reattributions today's rules may refuse (2026-09-25b).
 
-    Each one still standing is read again against its exact original under
-    today's rule; when the rule refuses it, the automation principal appends
-    a withdrawal (the authority re-runs the rule) and the Claim is simply
-    retired again.  Without a principal, without an authority or on
-    ``dry_run`` it reports only.  Bounded (``max_documents`` originals per
-    tick) and idempotent: a withdrawn one leaves the query; one today's rule
-    keeps is marked in the review cache under today's rule and inputs and is
+    Each one made under an earlier rule, or on a support verdict, is read
+    again against its exact original under today's rule (and today's
+    governing verdicts); when it is refused, the automation principal appends
+    a withdrawal (the authority re-runs the check) and the Claim is simply
+    retired again.  One whose verdict awaits the current contract's re-review
+    is left for a later tick.  Without a principal, without an authority or
+    on ``dry_run`` it reports only.  Bounded (``max_documents`` originals per
+    tick) and idempotent: a withdrawn one leaves the query; one today's rules
+    keep is marked in the review cache under today's rule and inputs and is
     not read again until either changes.
     """
 
@@ -785,7 +1015,7 @@ def run_recheck(
     summary: dict[str, Any] = {
         "rule_ref": RULE_REF, "candidates": 0, "examined": 0, "withdrawn": [],
         "would_withdraw": [], "confirmed": 0, "unreadable": 0, "deferred": 0,
-        "already_reviewed": 0, "skipped": [],
+        "awaiting_rereview": 0, "already_reviewed": 0, "skipped": [],
     }
     try:
         candidates = reattributions_to_recheck(connection)
@@ -797,50 +1027,64 @@ def run_recheck(
         return summary
     missions = covering_missions(connection)
     markers = authority.reviews() if authority is not None else {}
-    if not citations or any(row["ref"] not in citations for row in candidates):
-        citations = {**driver._citations(), **(citations or {})}
     texts = {} if texts is None else texts
     extra = dict(getattr(driver, "needles", {}) or {})
     writable = not dry_run and authority is not None and principal is not None
     read_here = 0
+    chain_read = False
     for row in candidates:
         mission = missions.get(row["subject_ref"])
         roster = {} if mission is None else mission_roster(mission["universe"], extra)
-        digest_inputs = inputs_hash(row["industry_ref"], roster)
+        claim = _claim_of(row)
+        on_support = row["reason_code"] == SUPPORT_REASON
+        about_other = None
+        if on_support:
+            about_other = about_other_evidence(
+                connection, claim_version_ref=row["ref"], claim=claim,
+                industry_ref=row["industry_ref"], roster=roster)
+            if about_other["deferred"]:
+                summary["awaiting_rereview"] += 1
+                continue
+        digest_inputs = inputs_hash(row["industry_ref"], roster,
+                                    None if about_other is None else about_other["verdict_keys"])
         marker = markers.get(row["ref"])
         if (marker is not None and marker["rule_ref"] == RULE_REF
                 and marker["inputs_hash"] == digest_inputs
                 and marker["outcome"] == "reattributed"):
             summary["already_reviewed"] += 1
             continue
-        citation = citations.get(row["ref"])
-        text = None
-        if citation is not None:
-            digest = citation["digest"]
-            if digest not in texts:
-                if read_here >= max(1, int(max_documents)):
-                    summary["deferred"] += 1
-                    continue
-                read_here += 1
-                texts[digest] = driver.source_text(digest)
-            text = texts[digest]
-        summary["examined"] += 1
-        span = None
-        if text is not None and citation is not None:
-            start, end = citation.get("start"), citation.get("end")
-            if isinstance(start, int) and isinstance(end, int) and 0 <= start < end <= len(text):
-                span = text[start:end]
-        if span is None:
-            summary["unreadable"] += 1
-            continue
-        facts = driver._document_facts(citation.get("document_ref"))
-        claim = json.loads(row["claim_json"])
-        verdict = judge(
-            statement=claim.get("normalized_statement"), cited_span=span,
-            industry_ref=row["industry_ref"], roster=roster,
-            document_title=facts.get("title"), source_text=text,
-            issuer_document=bool(facts.get("issuer_document")),
-        )
+        span = text = citation = None
+        if about_other is not None and not about_other["ok"]:
+            summary["examined"] += 1
+            verdict = {"industry_level": False, "refusal": about_other["refusal"]}
+        else:
+            if not chain_read and (citations is None or row["ref"] not in citations):
+                citations, chain_read = {**driver._citations(), **(citations or {})}, True
+            citation = (citations or {}).get(row["ref"])
+            if citation is not None:
+                digest = citation["digest"]
+                if digest not in texts:
+                    if read_here >= max(1, int(max_documents)):
+                        summary["deferred"] += 1
+                        continue
+                    read_here += 1
+                    texts[digest] = driver.source_text(digest)
+                text = texts[digest]
+            summary["examined"] += 1
+            if text is not None and citation is not None:
+                start, end = citation.get("start"), citation.get("end")
+                if isinstance(start, int) and isinstance(end, int) and 0 <= start < end <= len(text):
+                    span = text[start:end]
+            if span is None:
+                summary["unreadable"] += 1
+                continue
+            facts = driver._document_facts(citation.get("document_ref"))
+            verdict = judge(
+                statement=claim.get("normalized_statement"), cited_span=span,
+                industry_ref=row["industry_ref"], roster=roster,
+                document_title=facts.get("title"), source_text=text,
+                issuer_document=bool(facts.get("issuer_document")),
+            )
         if verdict["industry_level"]:
             summary["confirmed"] += 1
             if not dry_run and authority is not None:
@@ -849,18 +1093,23 @@ def run_recheck(
             continue
         item = {"claim_version_ref": row["ref"], "subject_ref": row["subject_ref"],
                 "industry_ref": row["industry_ref"], "refusal": verdict["refusal"],
+                "retired_reason_code": row["reason_code"],
                 "statement": str(claim.get("normalized_statement") or "")[:240]}
         if not writable:
             summary["would_withdraw"].append(item)
             continue
+        facts = {} if citation is None else driver._document_facts(citation.get("document_ref"))
+        if on_support:
+            rationale = (f"按今天的核验结论与行业规则重判：{verdict['refusal']}。"
+                         "这条结论不再作为行业证据；在公司口径下仍然退役。")
+        else:
+            rationale = (f"按行业层面规则 {RULE_REF} 重判：{verdict['refusal']}。"
+                         "单独出现的 capex 等支出词不再算作本行业证据；撤回行业改挂，"
+                         "该结论仍按公司口径退役。")
         try:
             record = authority.withdraw(
                 claim_version_ref=row["ref"], actor_ref=principal,
-                reattribution_hash=row["reattribution_hash"],
-                rationale=(
-                    f"按行业层面规则 {RULE_REF} 重判：{verdict['refusal']}。"
-                    "单独出现的 capex 等支出词不再算作本行业证据；撤回行业改挂，"
-                    "该结论仍按公司口径退役。"),
+                reattribution_hash=row["reattribution_hash"], rationale=rationale,
                 cited_span=span, source_text=text, document_title=facts.get("title"),
                 issuer_document=bool(facts.get("issuer_document")), roster_aliases=extra,
             )
@@ -873,12 +1122,17 @@ def run_recheck(
 
 
 __all__ = [
+    "ABOUT_OTHER_RULE_REF",
+    "AUTOMATIC_RETIREMENT_REASONS",
     "ClaimIndustryReattributionAuthority",
+    "SUPPORT_REASON",
+    "about_other_evidence",
     "ClaimReattributionConflict",
     "ClaimReattributionError",
     "ClaimReattributionNotFound",
     "ClaimReattributionValidationError",
     "DEFAULT_MAX_DOCUMENTS",
+    "DEFAULT_MAX_VERDICT_REVIEWS",
     "DEFAULT_MAX_WRITES",
     "REASON_CODES",
     "RULE_REF",

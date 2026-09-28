@@ -957,15 +957,18 @@ class ClaimReviewDriver:
         max_writes: int | None = None,
         dry_run: bool = False,
         show: int | None = 20,
+        defer_pending_rereview: bool = True,
     ) -> dict[str, Any]:
         """Record retired industry-level Claims against the mission's industry.
 
         The bounded, idempotent backfill of ``claim_industry_reattribution``
         (``run_backfill``): under the mission's ``claim_challenge`` grant it
-        appends a reattribution for each retired subject-absent Claim the
-        deterministic industry-level rule keeps; without the grant (or on
-        ``dry_run``) it reports what it would append.  A failure here never
-        costs the patrol its pass.
+        appends a reattribution for each retired subject-absent Claim -- and,
+        since 2026-09-28, each support retirement whose verdict is supported
+        and about this mission's industry -- the deterministic industry-level
+        rule keeps; without the grant (or on ``dry_run``) it reports what it
+        would append.  ``defer_pending_rereview=False`` is for read-only
+        simulations only.  A failure here never costs the patrol its pass.
         """
 
         from .claim_industry_reattribution import (
@@ -982,6 +985,7 @@ class ClaimReviewDriver:
                 max_documents=REATTRIBUTION_DOCUMENTS if max_documents is None else max_documents,
                 max_writes=REATTRIBUTION_WRITES if max_writes is None else max_writes,
                 dry_run=dry_run, show=show,
+                defer_pending_rereview=defer_pending_rereview or not dry_run,
             )
         except Exception as exc:  # noqa: BLE001 - the patrol's own pass stands
             return {"rule_ref": REATTRIBUTION_RULE_REF, "reattributed": [],

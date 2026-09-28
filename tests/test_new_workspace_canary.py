@@ -18,6 +18,11 @@ may be read twice -- including when a search under the intermediate version
 found the open document again and a second version was published over it
 before any carry ran (the Guidepoint re-search shape, 2026-09-28).
 
+A second case (2026-09-28) retires two Claims of the created workspace on a
+support verdict "about another subject" and runs the industry reattribution
+over them: an industry the rule has no vocabulary for, and a covered company,
+are both refused, remembered, and nothing is reattributed.
+
 Hermetic: every model is a fake, every connector a fake handle or a recorded
 body, the SEC ticker resolver a fixture, and opening a socket fails the test.
 """
@@ -971,6 +976,87 @@ class NewWorkspaceCanaryTests(unittest.TestCase):
         [reevaluation] = summary["subject_reevaluation"]
         self.assertEqual((reevaluation["mission_version_ref"], reevaluation["stop_reason"]),
                          (mission["id"], None), reevaluation)
+
+    # -- 2026-09-28: a support retirement about another subject -------------------
+    #
+    # The claim-review tick now also reads ``citation_support_rejected``
+    # retirements whose verdict is supported and about another subject.  In a
+    # workspace made by the formal flow the mission's industry is whatever the
+    # owner typed ("Industrial Robotics"), for which the industry rule has no
+    # vocabulary: nothing may be reattributed -- no industry is made up, the
+    # retirement stands -- and the refusal is remembered, so the next tick
+    # reads nothing again.  A covered company named as the other subject is
+    # refused before anything else.
+
+    def test_an_about_other_retirement_is_never_given_an_industry_the_rule_cannot_read(self) -> None:
+        from dalton_core.claim_industry_reattribution import (
+            ClaimIndustryReattributionAuthority, covering_missions, industry_reattributions,
+        )
+        from dalton_core.claim_retirement import ClaimRetirementAuthority, retired_claim_version_refs
+        from dalton_core.claim_review import ClaimReviewDriver
+        from dalton_core.claim_support_backfill import ClaimSupportBackfill
+        from dalton_core.claim_support_verification import BACKFILL_PURPOSE, ClaimSupportVerifier
+        from dalton_core.coverage_mission import CoverageMissionAuthority
+        from tests.test_claim_retirement import ClaimRetirementHarness, _Spool
+        from tests.test_claim_support_backfill import StatementModel
+
+        workspace, mission = self.create_workspace()
+        self.assertEqual(mission["industry_ref"], "industry:industrial-robotics")
+        store = DaltonStore(workspace.state_dir / "core.sqlite")
+        self.addCleanup(store.close)
+        import dalton_core
+        store.connection.executescript(
+            (Path(dalton_core.__file__).parent / "transcript_correction_schema.sql").read_text(
+                encoding="utf-8"))
+        [covering] = {row["mission_version_ref"] for row in covering_missions(store.connection).values()}
+        self.assertEqual(covering, mission["id"])
+
+        # Two Claims filed under WDGT, through the Ledger's own citation chain.
+        shim = type("Shim", (), {"store": store, "objects": {}, "_seq": 0})()
+        industry = ("Industrial robotics vendors across the sector report that factory "
+                    "automation orders from enterprise customers stayed strong in the quarter.")
+        company = ("Gizmo Motion raised its full-year outlook on stronger orders from "
+                   "automotive plants, the digest says.")
+        claims = []
+        for statement in (industry, company):
+            source = "Weekly robotics digest. " + statement + " Other remarks followed."
+            start = source.index(statement)
+            claims.append(ClaimRetirementHarness.claim(
+                shim, subject=WDGT, statement=statement, source=source,
+                span=(start, start + len(statement))))
+        missions = CoverageMissionAuthority(store)
+        challenges = ClaimRetirementAuthority(store)
+        reattributions = ClaimIndustryReattributionAuthority(store)
+        driver = ClaimReviewDriver(store=store, missions=missions, challenges=challenges,
+                                   spool=_Spool(shim.objects), needles={WDGT: ["widget"]},
+                                   reattributions=reattributions)
+        verifier = ClaimSupportVerifier(
+            store=store, purpose=BACKFILL_PURPOSE, daily_cap_micros=500_000,
+            model_call=StatementModel({
+                industry: ("supported", "about_other", "Industrial Robotics sector"),
+                company: ("supported", "about_other", "Gizmo Motion Corp. (GZMO)")}),
+            spend_today=lambda _p, _d: 0, producer_family=lambda ref: "deepseek-v4")
+        original = driver._citations
+        driver._citations = lambda: {ref: {**item, "route_decision_ref": "route-decision:drafter"}
+                                     for ref, item in original().items()}
+        backfill = ClaimSupportBackfill(store=store, missions=missions, verifier=verifier,
+                                        reader=driver, challenges=challenges, claim_sources=["test"])
+        retired = backfill.run_once(max_items=10)
+        self.assertEqual(set(retired["retired"]), {claim["ref"] for claim in claims}, retired)
+        before = retired_claim_version_refs(store.connection)
+
+        driver._citations = original
+        first = driver.reattribute_industry_findings(principal=AUTOMATION, show=None)
+        self.assertEqual((first["reattributed"], first["awaiting_rereview"]), ([], 0), first)
+        refusals = {item["claim_version_ref"]: item["refusal"] for item in first["refused_examples"]}
+        self.assertEqual(refusals, {claims[0]["ref"]: "no_industry_lexicon",
+                                    claims[1]["ref"]: "other_subject_names_company:covered:"
+                                    + GZMO + ",Gizmo,Motion,Corp"}, first)
+        self.assertEqual(reattributions.reattributions(), [])
+        self.assertEqual(industry_reattributions(store.connection), {})
+        self.assertEqual(retired_claim_version_refs(store.connection), before)
+        again = driver.reattribute_industry_findings(principal=AUTOMATION, show=None)
+        self.assertEqual((again["examined"], again["already_reviewed"]), (0, 2), again)
 
 
 class NextVersionIdTests(unittest.TestCase):
