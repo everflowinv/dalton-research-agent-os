@@ -126,6 +126,36 @@ GEOGRAPHIC_AXES = frozenset({
 })
 COUNTRY_MEMBER_PREFIX = "country:"
 
+# Operating segments need not partition the consolidated entity.  Alphabet's
+# 10-K (accession 0001652044-26-000018) splits CostsAndExpenses 2023 into
+# Google Services 176,685 and Google Cloud 31,372 -- 208,057 -- against a
+# consolidated 223,101: Other Bets and "Alphabet-level activities" carry the
+# other 15,044 and neither is filed as a member of that line.  The filer says
+# so in the same period, on srt:ConsolidationItemsAxis, by reporting operating
+# income for us-gaap:CorporateNonSegmentMember, and it files
+# us-gaap:AllOtherSegmentsMember on the segment axis for revenue.  Such a gap is
+# either reconciled exactly by a declared reconciling amount for the same line
+# and period, or -- when the filer has declared members or non-segment amounts
+# this breakdown leaves out -- it is not checkable and is ``not_applicable``.
+# A breakdown with no such declaration that misses its total still fails.
+BUSINESS_SEGMENT_AXES = frozenset({
+    "srt:SegmentAxis",
+    "srt:StatementBusinessSegmentsAxis",
+    "us-gaap:StatementBusinessSegmentsAxis",
+})
+CONSOLIDATION_ITEMS_AXES = frozenset({
+    "srt:ConsolidationItemsAxis",
+    "us-gaap:ConsolidationItemsAxis",
+})
+RECONCILING_MEMBERS = frozenset({
+    "us-gaap:CorporateNonSegmentMember",
+    "us-gaap:SegmentReconcilingItemsMember",
+    "us-gaap:MaterialReconcilingItemsMember",
+    "us-gaap:IntersegmentEliminationMember",
+    "srt:ConsolidationEliminationsMember",
+    "us-gaap:ConsolidationEliminationsMember",
+})
+
 # Durable identity for the closed semantics used to admit a forecast. This is
 # deliberately narrower than a source-code or release hash: only a change to
 # the validator contract may release a run held by a previous invariant
@@ -143,7 +173,12 @@ COUNTRY_MEMBER_PREFIX = "country:"
 # Version 8 reads an ISO ``country:`` member beside regional members on one
 # geographic axis as a possible "of which" country (see
 # ``GEOGRAPHIC_AXES``), not as a sixth disjoint region.
-FORECAST_INVARIANT_CONTRACT_REF = "forecast-economic-invariants:8"
+# Version 9 lets a segment breakdown fall short of its consolidated line when
+# the gap is exactly a declared reconciling amount, and reads it as
+# ``not_applicable`` when the filer declared, for the same period, segment
+# members or non-segment amounts the breakdown leaves out (see
+# ``RECONCILING_MEMBERS``).
+FORECAST_INVARIANT_CONTRACT_REF = "forecast-economic-invariants:9"
 FORECAST_INVARIANT_CONTRACT = {
     "schema_version": "forecast-economic-invariant-contract-0.1",
     "contract_ref": FORECAST_INVARIANT_CONTRACT_REF,
@@ -152,6 +187,9 @@ FORECAST_INVARIANT_CONTRACT = {
         "required_dimension_count": 1,
         "members_must_be_unique": True,
         "geographic_country_members": "partition-or-nested-in-region:v1",
+        "unallocated_residual": (
+            "declared-reconciling-item-or-declared-incomplete-members:v1"),
+        "reconciling_members": sorted(RECONCILING_MEMBERS),
     },
     # The model validator is part of admission just as the economic checks
     # are. Version the optional cost-slot wire here so a run refused by the
@@ -636,10 +674,23 @@ def _segment_sum(groups: Sequence[Mapping[str, Any]]) -> InvariantResult:
     failure, and a breakdown with no consolidated line to check it against is
     nothing to check -- both are ``not_applicable`` rather than a pass, because
     a pass would read as "the segments were checked".
+
+    A breakdown that misses its total passes when the gap is exactly a
+    reconciling amount the filer declared for the same line and period (one
+    item, or all of them together).  It is not checkable -- counted neither
+    as checked nor as a finding -- when the filer declared, for the same
+    period, members of the same axis this breakdown leaves out, or (on a
+    business-segment axis) amounts that belong to no segment.  Another axis's
+    breakdown of the same line and period that agrees to the unit with such an
+    uncheckable segment breakdown covers the same partial scope and is not
+    checkable either.  Anything else that misses is still a failure.
     """
 
     findings: list[str] = []
     checked = 0
+    excused: list[str] = []
+    partial_scope: list[tuple[Any, Any, Decimal]] = []
+    pending: list[tuple[Mapping[str, Any], Decimal, Decimal, int]] = []
     with localcontext() as ctx:
         ctx.prec = _PRECISION
         for group in groups:
@@ -649,25 +700,87 @@ def _segment_sum(groups: Sequence[Mapping[str, Any]]) -> InvariantResult:
             usable = [(value, member) for value, member in parts if value is not None]
             if total is None or len(usable) < 2 or len(usable) != len(parts):
                 continue
-            checked += 1
             summed = sum((value for value, _ in usable), Decimal(0))
             if _close(summed, total):
+                checked += 1
                 continue
             if _nested_countries_close(group, usable, total):
+                checked += 1
                 continue
+            if _reconciled(group, summed, total):
+                checked += 1
+                continue
+            why = _incomplete_members(group)
+            if why is not None:
+                excused.append(why)
+                if str(group.get("axis")) in BUSINESS_SEGMENT_AXES:
+                    partial_scope.append(
+                        (group.get("line"), group.get("period"), summed))
+                continue
+            pending.append((group, summed, total, len(usable)))
+        for group, summed, total, count in pending:
+            if any(line == group.get("line") and period == group.get("period")
+                   and _close(summed, scope)
+                   for line, period, scope in partial_scope):
+                excused.append(
+                    f"{group.get('line')} for {group.get('period')} on axis "
+                    f"{group.get('axis')} adds to {summed}, exactly what the "
+                    "segment breakdown that omits declared amounts adds to")
+                continue
+            checked += 1
             findings.append(
                 f"{group.get('line')} for {group.get('period')} on axis "
-                f"{group.get('axis')}: {len(usable)} segments add to {summed} "
+                f"{group.get('axis')}: {count} segments add to {summed} "
                 f"and the consolidated line is {total}")
     if findings:
         return InvariantResult(
             SEGMENT_SUM, FAIL, findings=tuple(findings), checked=checked)
+    excused_reason = None if not excused else (
+        f"{len(excused)} breakdown(s) not checkable against the consolidated "
+        f"line: {'; '.join(excused[:3])}"
+        + (f"; and {len(excused) - 3} more" if len(excused) > 3 else ""))
     if not checked:
         return InvariantResult(
             SEGMENT_SUM, NOT_APPLICABLE, checked=0,
-            reason="no line has both a consolidated figure and a breakdown to "
-                   "check it against")
-    return InvariantResult(SEGMENT_SUM, PASS, checked=checked)
+            reason=excused_reason or (
+                "no line has both a consolidated figure and a breakdown to "
+                "check it against"))
+    return InvariantResult(
+        SEGMENT_SUM, PASS, checked=checked, reason=excused_reason)
+
+
+def _reconciled(group: Mapping[str, Any], summed: Decimal, total: Decimal) -> bool:
+    """The gap is one declared reconciling amount, or all of them together."""
+
+    items = [value for value in (_decimal(item.get("value"))
+                                 for item in (group.get("reconciling_items") or []))
+             if value is not None]
+    if not items:
+        return False
+    if any(_close(summed + value, total) for value in items):
+        return True
+    return len(items) > 1 and _close(summed + sum(items, Decimal(0)), total)
+
+
+def _incomplete_members(group: Mapping[str, Any]) -> str | None:
+    """Why the filer's own declarations say this breakdown is not the whole."""
+
+    head = (f"{group.get('line')} for {group.get('period')} on axis "
+            f"{group.get('axis')}")
+    missing = [str(item) for item in (group.get("undeclared_members") or [])]
+    if missing:
+        return (f"{head} omits member(s) {', '.join(sorted(missing))} the "
+                "filer declared on that axis for the same period")
+    # A reconciling amount filed for this very line is the filer's own
+    # account of what lies outside the segments; when it does not close the
+    # gap that is a contradiction, not a reason to stop checking.
+    if (str(group.get("axis")) in BUSINESS_SEGMENT_AXES
+            and not group.get("reconciling_items")):
+        non_segment = [str(item) for item in (group.get("non_segment_members") or [])]
+        if non_segment:
+            return (f"{head} leaves out amounts the filer reports for the same "
+                    f"period outside any segment ({', '.join(sorted(non_segment))})")
+    return None
 
 
 def _nested_countries_close(
@@ -893,6 +1006,12 @@ def segment_groups(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
 
     consolidated: dict[tuple[str, str, str], Any] = {}
     parts: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
+    # What the filer itself declared for each period, whatever the line: the
+    # members of each additive axis, and the reconciling (non-segment) amounts
+    # on the consolidation-items axis.  See ``RECONCILING_MEMBERS``.
+    axis_members: dict[tuple[str, str, str], set[str]] = {}
+    reconciling: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    non_segment: dict[tuple[str, str], set[str]] = {}
     for row in rows:
         concept = str(row.get("concept") or "")
         end = str(row.get("period_end") or "")
@@ -901,14 +1020,23 @@ def segment_groups(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
             continue
         axis = row.get("dimension_axis")
         key = (concept, start, end)
+        member = str(row.get("dimension_member") or "")
         if not axis and not row.get("is_breakdown"):
             consolidated[key] = row.get("value")
         elif (start and axis and str(axis) in ADDITIVE_SEGMENT_AXES
               and row.get("dimension_count") == 1):
             parts.setdefault((*key, str(axis)), []).append({
-                "member": str(row.get("dimension_member") or ""),
+                "member": member,
                 "value": row.get("value"),
             })
+            if member:
+                axis_members.setdefault((start, end, str(axis)), set()).add(member)
+        elif (start and axis and str(axis) in CONSOLIDATION_ITEMS_AXES
+              and member in RECONCILING_MEMBERS
+              and row.get("dimension_count") == 1):
+            reconciling.setdefault(key, []).append(
+                {"member": member, "value": row.get("value")})
+            non_segment.setdefault((start, end), set()).add(member)
     out: list[dict[str, Any]] = []
     for (concept, start, end, axis), members in sorted(parts.items()):
         if (concept, start, end) not in consolidated:
@@ -922,13 +1050,26 @@ def segment_groups(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
         member_names = [str(item.get("member") or "") for item in members]
         if not all(member_names) or len(set(member_names)) != len(member_names):
             continue
-        out.append({
+        group: dict[str, Any] = {
             "line": concept,
             "period": f"{start}..{end}" if start else end,
             "axis": axis,
             "total": consolidated[(concept, start, end)],
             "parts": sorted(members, key=lambda item: item["member"]),
-        })
+        }
+        # Only present when there is something to say, so a subject whose
+        # filer declared none of these is byte-for-byte what it was.
+        undeclared = sorted(
+            axis_members.get((start, end, axis), set()) - set(member_names))
+        if undeclared:
+            group["undeclared_members"] = undeclared
+        items = reconciling.get((concept, start, end))
+        if items:
+            group["reconciling_items"] = sorted(
+                items, key=lambda item: (item["member"], str(item["value"])))
+        if axis in BUSINESS_SEGMENT_AXES and non_segment.get((start, end)):
+            group["non_segment_members"] = sorted(non_segment[(start, end)])
+        out.append(group)
     return out
 
 

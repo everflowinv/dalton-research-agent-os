@@ -668,7 +668,7 @@ class GeographicCountryMemberTests(unittest.TestCase):
 
     def test_the_contract_version_moved(self):
         self.assertEqual(ei.FORECAST_INVARIANT_CONTRACT_REF,
-                         "forecast-economic-invariants:8")
+                         "forecast-economic-invariants:9")
         self.assertEqual(
             ei.FORECAST_INVARIANT_CONTRACT["segment_sum"]["geographic_country_members"],
             "partition-or-nested-in-region:v1")
