@@ -9,7 +9,49 @@
 
 ---
 
-（当前没有待部署批次。）
+## 批次 2026-09-28g（main `b188ba30` 及之后）
+
+### 这批解决什么（批次 f 部署后验证中发现的问题，以及待你决定、已代为处理的事项）
+
+| 主题 | 效果 |
+|---|---|
+| **Guidepoint 待处理 review 迁不过去**（`9d2ed711` `2d268987` `12c5d3c7` `229ee7c5`） | 迁移判定只把"已结算或已有 review"的后续行算作接管，重搜留下的 `already_in_authority` 行不再挡住迁移。Guidepoint 车道补上已持有文档的对账。parity 的判定口径与迁移保持一致；抽取 tick 汇总会报告被过滤的条数和原因。模拟结果：legacy 迁 164 条、ws-7d 迁 42 条，没有重复阅读，起草费用约 $0.10。canary 加了"两次升版中间夹一次重搜"的用例。 |
+| **10-K 第四季配对**（`ab2d3112`） | "最近四个季度"把 10-K 所报的第四季也算进去，按各公司自己的财年处理，并与 bounded-planner 路径防重复派发。legacy 会派发 ACN 的 10-K（Q4 增速 +7.26%）。AMZN、GOOGL、META、MSFT、IBM、EPAM、CTSH、DXC 的 10-K 只报全年数，现有规则答不了，见下方"待办"。 |
+| **数字入账去重与标签**（`ab994fdd` `0894dead`） | 同一文档按 (公司, 指标, 起止日期, 数值×量级) 只入账一次；标签取申报的 XBRL 行标签。 |
+| **GOOGL segment_sum 卡住**（`940fb5b4`） | 申报了对账项的差额算作通过；分部成员不完整时判为 not_applicable。GOOGL 回放 38 组全部解除，META、AMZN、MSFT 结果不变。 |
+| **DXC "970" 反复被拒**（`9e7056ff`） | 被引的 "$970 million" 可以支撑 "970 million 美元"；数字被拒时给一次修复机会，不再每轮都付费重放同一个被拒的回答。 |
+| **纪要缺少发言人**（`b56ab1bb`） | 编号式的"发言人1/2/3"按未知处理；"Name :" 这种逐行标注能解析出发言人。核验升到 v4，prompt 写明"发言人未知"不等于"说话的是别人"。v3 拒绝过的约 570 条会各重新核验一次，费用只有几美元。 |
+| **恢复 independence predicates 的脚本**（`922e817b`） | 谓词内容取自 `policy.DEFAULT_POLICY`。rehearse 结果：legacy、ws-7d 受影响的路由都是 0 条。 |
+
+全量测试：见文末"测试记录"。
+
+### 部署与部署后（两条命令）
+
+```zsh
+zsh ~/Projects/dalton-research-agent-os/docs/ops/deploy.sh
+zsh ~/Projects/dalton-research-agent-os/docs/ops/run-batch-g-post-deploy.sh
+```
+
+第二条会依次执行：
+1. 恢复 legacy、ws-7d 的 independence predicates，两边都会升一次 mission 版本。
+2. 对齐 ws-7d 的模型路由，共 19 项选择。
+3. 补上 ws-7d 的 xai 凭证槽位。这一步会自动停掉 ws-7d 的 3 个服务，补完后再拉起来。
+4. 撤回 10 条重复的数字 claim。
+
+每一步都会先 dry-run 核对，任何一步失败都会停下来。
+
+### 待办（需要新规则或新设计，没放进本批）
+
+- **第四季用"全年减前三季"推导（FY−9M）**：大多数公司的 10-K 只报全年数，不报第四季单季，所以 Q4 增速目前一直缺失。要补上，需要新增一条自动入账规则（新的 rule ref），并由 owner 签入新策略。**我建议做**，下一批会实现这条规则和签入脚本。
+- AMZN 和 MSFT 的产品轴同时申报了两套粒度（加起来是合并数的 2 倍），走到 forecast 门禁时会像 GOOGL 一样被卡住。
+- model_spec 的 structure repair 只看到第一个错误就付费修复；应该一次把错误收集全，确认都能修再付费。
+- legacy 的 brain 和 verifier 两个类别在路由对齐里被跳过了，因为 legacy 自身在这两项上前后不一致，需要定一条统一的链。
+- legacy v26 有 46 行 Guidepoint 记录找不到已完成的采集；其中 `already_in_authority` 状态的行永远不会被重新采集。
+- 核验 v3/v4 的"双家族才拒绝"需要你在 cockpit 模型页，给 `claim_support_verifier` 和 `claim_support_backfill` 各加一个非 Gemini 家族的核验模型。
+
+### 测试记录
+
+在 main `b188ba30` 上跑全量测试：10677 个，全部通过（skipped 4）。
 
 ---
 
