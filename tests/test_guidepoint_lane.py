@@ -36,6 +36,8 @@ from dalton_core.guidepoint_search import (
     FakeGuidepointHandle,
     GuidepointSearchGovernance,
     guidepoint_daily_call_ceiling,
+    guidepoint_excerpts_in_authority,
+    guidepoint_search_spec_hash,
 )
 from dalton_core.mission_guidepoint_lane import (
     GuidepointLaneCoordinator,
@@ -47,7 +49,7 @@ from dalton_core.mission_guidepoint_lane import (
     load_guidepoint_discovery_plan,
     validate_guidepoint_discovery_plan,
 )
-from dalton_core.store import canonical_json
+from dalton_core.store import canonical_json, content_hash
 from tests.p9a_fixtures import bootstrap_method_authorities, mission_params
 from tests.test_guidepoint_search_lane import ROWS, Clock, Harness
 
@@ -821,6 +823,198 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual(result["status"], "unconfigured")
         self.assertIn("LookupError", result["reason"])
         self.assertEqual(result["source_ref"], GUIDEPOINT)
+
+
+class _ProvingAcquisitions:
+    """An acquisition launcher whose ticket directory holds ``held`` excerpts."""
+
+    def __init__(self, held):
+        self.held = dict(held)  # document_ref -> ticket_ref
+        self.scans = 0
+
+    def succeeded_tickets_by_document(self):
+        self.scans += 1
+        return dict(self.held)
+
+    def read_completed_manifest(self, ticket_ref, document_ref):
+        if self.held.get(document_ref) != ticket_ref:
+            raise GuidepointLaunchRejected("completed acquisition files are unavailable")
+        return {"document_ref": document_ref, "status": "complete"}
+
+
+
+class AlreadyHeldTests(unittest.TestCase):
+    """2026-09-28: a Guidepoint re-search must not strand what is already acquired.
+
+    Every re-search records the excerpts an earlier search returned as
+    ``already_in_authority``.  The lane never reconciled those rows, and the
+    review carry refused any document a later version had a row for: 164
+    legacy and 42 ws-7d reviews sat on superseded versions, 0 open under the
+    version in force, and extraction had nothing to do.
+    """
+
+    REF = "coverage-mission:us-it-services"
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.state = self.root / "state"
+        self.state.mkdir()
+        self.clock = Clock()
+        self.plan = small_plan()
+        self.lane = LaneHarness(self.state, self.clock)
+        self.addCleanup(self.lane.close)
+        self.m = self.lane.missions
+        self.patch = patched_discovery_sources()
+        self.patch.start()
+        self.addCleanup(self.patch.stop)
+        self.day = date(2026, 9, 9)
+
+    def publish(self, number):
+        current = self.m.active_mission(self.REF)
+        params = mission_params(self.lane.method)
+        params["autonomy"]["may_write"] = sorted(
+            set(params["autonomy"]["may_write"]) | {"source_discovery", "observation"})
+        for item in params["source_plan"]:
+            if item["source_ref"] == GUIDEPOINT:
+                item["status"] = "connected"
+        params.pop("mission_ref")
+        params.update({"version_id": f"coverage-mission-version:us-it-services:gp{number}",
+                       "prior_version_ref": current["id"],
+                       "idempotency_key": f"coverage-mission:us-it-services:gp{number}"})
+        return self.m.create_mission(self.REF, **params)
+
+    def search(self):
+        """One Guidepoint search under the version in force, as the child records it."""
+
+        self.day += timedelta(days=1)  # a new call, not a replay
+        mission = self.m.active_mission(self.REF)
+        parameters = build_guidepoint_parameters(
+            self.plan, spec_ref="it-services-demand", company_ref=ACN, as_of=self.day)
+        receipt = self.lane.h.search.search(self.lane.h.search.build_request(parameters))
+        present = guidepoint_excerpts_in_authority(
+            self.lane.h.core.connection, receipt["document_refs"],
+            exclude_invocation_ref=receipt["connector_invocation_ref"])
+        grant = self.m.authorize_source_discovery(
+            company_ref=ACN, source_ref=GUIDEPOINT, requested_by=AUTOMATION,
+            mission_version_ref=mission["id"])
+        return self.m.record_source_discovery(
+            authorization=grant, discovery_plan_ref=self.plan["id"],
+            discovery_plan_hash=self.plan["content_hash"], spec_ref="it-services-demand",
+            query_hash=guidepoint_search_spec_hash(parameters),
+            parameters=parameters,
+            connector_invocation_ref=receipt["connector_invocation_ref"],
+            connector_invocation_hash=receipt["connector_invocation_hash"],
+            source_envelope_ref=receipt["source_envelope_ref"],
+            source_envelope_hash=receipt["source_envelope_hash"],
+            document_refs=receipt["document_refs"], in_authority_document_refs=present)
+
+    def acquire(self, row, ticket_ref):
+        self.m.mark_discovered_document_launched(row["record_id"], ticket_ref)
+        self.m.settle_discovered_document(row["record_id"], status="acquired")
+        return self.m.register_document_review(row["record_id"], requested_by=AUTOMATION)
+
+    def coordinator(self, acquisitions):
+        return GuidepointLaneCoordinator(
+            missions=self.m, connection=self.lane.h.core.connection,
+            launcher=StubLauncher({}), plan=self.plan, clock=self.clock,
+            acquisition_launcher=acquisitions)
+
+    def owed(self):
+        return sorted(tuple(row) for row in self.lane.h.core.connection.execute(
+            "SELECT r.mission_version_ref, r.document_ref, r.created_at "
+            "FROM coverage_mission_document_reviews r "
+            "JOIN coverage_mission_pointer p ON p.mission_version_id=r.mission_version_ref "
+            "WHERE r.state='awaiting_human_extraction'").fetchall())
+
+    def statuses(self, version):
+        return sorted(row["status"] for row in self.m.discovered_documents(version["id"]))
+
+    def test_an_open_review_is_carried_across_two_re_searches_and_read_once(self) -> None:
+        v1 = self.m.active_mission(self.REF)
+        self.search()
+        first, *rest = self.m.discovered_documents(v1["id"])
+        ticket = "guidepoint-acquire-run:" + "a" * 24
+        review = self.acquire(first, ticket)
+        acquisitions = _ProvingAcquisitions({first["document_ref"]: ticket})
+        v2 = self.publish(2)
+        self.search()
+        v3 = self.publish(3)
+        self.search()
+        self.assertEqual(set(self.statuses(v2)), {"already_in_authority"})
+        self.assertEqual(set(self.statuses(v3)), {"already_in_authority"})
+        self.assertEqual(self.owed(), [])
+        census = self.m.awaiting_review_carry_census(self.REF)
+        self.assertEqual(census["dispositions"]["carryable"], 1)
+        tick = self.coordinator(acquisitions).settle_already_held()
+        [carried] = tick["carried"]
+        self.assertEqual((carried["status"], carried["review_id"]), ("carried", review["review_id"]))
+        # Settled in place under v3, the queue position kept, read once.
+        self.assertEqual(self.owed(), [(v3["id"], first["document_ref"], self.m.document_review(
+            review["review_id"])["created_at"])])
+        row = next(r for r in self.m.discovered_documents(v3["id"])
+                   if r["document_ref"] == first["document_ref"])
+        self.assertEqual((row["status"], row["ticket_ref"]), ("acquired", ticket))
+        # The excerpts no acquisition holds are counted, not settled.
+        self.assertEqual(tick["settled"], [])
+        self.assertEqual(tick["no_completed_acquisition"], {"already_in_authority": len(rest)})
+        # Idempotent: the next tick, the next carry and the extraction-side
+        # carry find nothing owed.
+        again = self.coordinator(acquisitions).settle_already_held()
+        self.assertEqual((again["carried"], again["settled"]), ([], []))
+        self.assertEqual(self.m.carry_forward_awaiting_reviews(self.REF), [])
+        self.assertEqual(len(self.owed()), 1)
+        census = self.m.awaiting_review_carry_census(self.REF)
+        self.assertEqual(census["dispositions"]["carryable"], 0)
+        self.assertEqual(census["dispositions"]["later_version_review"], 1)
+
+    def test_a_row_already_held_under_the_version_in_force_is_settled_and_reviewed(self) -> None:
+        v1 = self.m.active_mission(self.REF)
+        self.search()
+        first = self.m.discovered_documents(v1["id"])[0]
+        ticket = "guidepoint-acquire-run:" + "b" * 24
+        review = self.acquire(first, ticket)
+        self.m.resolve_document_review(
+            review["review_id"], resolution="dismissed", actor_ref=AUTOMATION,
+            expected_review_hash=content_hash(self.m.document_review(review["review_id"])),
+            rationale="ADR-0005: no admissible statement")
+        # The same search again, same version: the excerpt is held, decided,
+        # and must not be opened a second time.
+        acquisitions = _ProvingAcquisitions({first["document_ref"]: ticket})
+        coordinator = self.coordinator(acquisitions)
+        self.assertEqual(coordinator.settle_already_held()["settled"], [])
+        # A fresh excerpt the acquisition directory holds under the version in
+        # force (acquired by hand, say): settled, one review, once.
+        v2 = self.publish(2)
+        self.search()
+        second = next(r for r in self.m.discovered_documents(v2["id"])
+                      if r["document_ref"] != first["document_ref"])
+        acquisitions.held[second["document_ref"]] = "guidepoint-acquire-run:" + "c" * 24
+        tick = self.coordinator(acquisitions).settle_already_held()
+        [settled] = [e for e in tick["settled"] if e["document_ref"] == second["document_ref"]]
+        self.assertEqual((settled["status"], settled["review_status"]), ("acquired", "fresh"))
+        self.assertEqual(acquisitions.scans, 2)
+        before = self.owed()
+        self.coordinator(acquisitions).settle_already_held()
+        self.assertEqual(self.owed(), before)
+        self.assertIn(second["document_ref"], [row[1] for row in before])
+
+    def test_run_once_reconciles_before_it_acquires(self) -> None:
+        class Missions:
+            def __init__(self, inner):
+                self.inner = inner
+
+            def __getattr__(self, name):
+                return getattr(self.inner, name)
+
+        tick = GuidepointLaneCoordinator(
+            missions=Missions(self.m), connection=self.lane.h.core.connection,
+            launcher=RefusingLauncher({}), plan=self.plan, clock=self.clock,
+            acquisition_launcher=None,
+        ).run_once(as_of=self.day)
+        self.assertEqual(tick["already_held"]["status"], "unconfigured")
+        self.assertEqual(list(tick).index("already_held"), list(tick).index("acquisition") - 1)
 
 
 class AcquisitionLauncherTests(unittest.TestCase):

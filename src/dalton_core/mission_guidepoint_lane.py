@@ -386,9 +386,10 @@ class GuidepointLaneCoordinator:
     child launcher, exactly as ``MissionSourceDiscoveryCoordinator`` does --
     the provider call needs a process main thread for the transport watchdog.
 
-    A tick is four things in order: settle the children the last tick
-    launched, settle finished acquisitions, drain the acquisition queue (free,
-    so it runs even when search quota is gone), and only then spend a search.
+    A tick is five things in order: settle the children the last tick
+    launched, settle finished acquisitions, reconcile rows whose excerpt is
+    already acquired, drain the acquisition queue (free, so it runs even when
+    search quota is gone), and only then spend a search.
     Settling first is what stops the ledger filling with rows that say
     ``launched`` about processes that died three days ago.
     """
@@ -656,6 +657,127 @@ class GuidepointLaneCoordinator:
             settled.append(entry)
         return settled
 
+    # -- already-held reconciliation ---------------------------------------
+    def _completed_acquisition(self) -> Any:
+        """``document_ref -> proof`` for excerpts a completed acquisition holds.
+
+        Guidepoint's "in authority" (the excerpt sits in an earlier search
+        envelope, ``guidepoint_excerpts_in_authority``) is not what a review
+        reads: extraction reads the acquisition manifest.  So a row is held
+        only when a succeeded acquisition ticket for its excerpt reads back
+        whole -- the same check extraction makes when a row names no ticket.
+        """
+
+        launcher = self.acquisition_launcher
+        index_of = getattr(launcher, "succeeded_tickets_by_document", None)
+        index: dict[str, str] | None = None
+        if index_of is not None:
+            try:
+                index = index_of()
+            except Exception:  # noqa: BLE001 - unreadable directory: prove nothing
+                index = {}
+
+        proven: dict[str, bool] = {}
+
+        def prove(document_ref: str) -> bool:
+            try:
+                if index is None:
+                    launcher.locate_completed_manifest(document_ref)
+                    return True
+                ticket_ref = index.get(document_ref)
+                if ticket_ref is None:
+                    return False
+                launcher.read_completed_manifest(ticket_ref, document_ref)
+                return True
+            except Exception:  # noqa: BLE001 - not provable is not held
+                return False
+
+        def held(document_ref: str) -> bool:
+            if document_ref not in proven:
+                proven[document_ref] = prove(document_ref)
+            return proven[document_ref]
+
+        return held
+
+    def settle_already_held(self) -> dict[str, Any]:
+        """Settle this lane's unsettled rows whose excerpt is already acquired.
+
+        2026-09-28, the reconciliation ``MissionSourceDiscoveryCoordinator``
+        has run since P9d-12 (``settle_already_held``) and this lane never
+        did.  A re-search records every excerpt an earlier search returned as
+        ``already_in_authority``; nothing moved such a row on, so a document
+        found again under a new mission version was never acquired there and
+        never reviewed.  Two steps, in this order:
+
+        1. Carry this source's open reviews from superseded versions
+           (``carry_forward_awaiting_reviews``): a review that was waiting
+           keeps its place in the queue and is not opened a second time.
+        2. Every remaining ``discovered`` / ``already_in_authority`` /
+           ``acquisition_failed`` row of the version in force whose excerpt a
+           completed acquisition holds is settled ``acquired`` and its review
+           registered.  An excerpt with no completed acquisition is counted
+           (``no_completed_acquisition``), not settled: there is nothing for a
+           review to read.
+        """
+
+        result: dict[str, Any] = {"carried": [], "settled": []}
+        if self.acquisition_launcher is None:
+            return {**result, "status": "unconfigured"}
+        try:
+            # The carry's ceiling, not its default: a review the carry leaves
+            # for the next tick is one step 2 would open afresh instead.
+            result["carried"] = self.missions.carry_forward_awaiting_reviews(
+                self.plan["mission_ref"], source_ref=GUIDEPOINT_SOURCE_REF, limit=500,
+            )
+        except Exception as exc:  # noqa: BLE001 - maintenance never takes the tick down
+            result["carried"] = [{"status": "error", "reason": f"{type(exc).__name__}: {exc}"}]
+        # Every unsettled row of the version in force, not the first hundred
+        # the generic reconciliation hands out: rows no acquisition holds
+        # would otherwise sit in front of the ones that are, every tick.
+        documents = [dict(row) for row in self.connection.execute(
+            "SELECT d.* FROM coverage_mission_discovered_documents d "
+            "JOIN coverage_mission_pointer p ON p.mission_version_id=d.mission_version_ref "
+            "WHERE d.source_ref=? "
+            "AND d.status IN ('discovered','already_in_authority','acquisition_failed') "
+            "ORDER BY CASE d.status WHEN 'already_in_authority' THEN 0 ELSE 1 END,"
+            "d.updated_at DESC,d.record_id LIMIT 2000",
+            (GUIDEPOINT_SOURCE_REF,),
+        ).fetchall()]
+        if not documents:
+            return result
+        held = self._completed_acquisition()
+        unheld: dict[str, int] = {}
+        for document in documents:
+            if not held(document["document_ref"]):
+                unheld[document["status"]] = unheld.get(document["status"], 0) + 1
+        if unheld:
+            result["no_completed_acquisition"] = unheld
+        documents = [document for document in documents if held(document["document_ref"])][:100]
+        for document in documents:
+            entry: dict[str, Any] = {
+                "record_id": document["record_id"],
+                "document_ref": document["document_ref"],
+            }
+            try:
+                settled = self.missions.settle_document_already_held(document["record_id"])
+            except Exception as exc:  # noqa: BLE001 - a refusal, not a crash
+                result["settled"].append(
+                    {**entry, "status": f"not_settled:{type(exc).__name__}", "review_status": None})
+                continue
+            entry["status"] = settled["status"]
+            try:
+                review = self.missions.register_document_review(
+                    document["record_id"],
+                    requested_by=self.missions.mission(
+                        document["mission_version_ref"]
+                    )["autonomy"]["automation_principal"],
+                )
+                entry["review_status"], entry["review_id"] = review["status"], review["review_id"]
+            except Exception as exc:  # noqa: BLE001 - a refusal, not a crash
+                entry["review_status"] = f"not_registered:{type(exc).__name__}"
+            result["settled"].append(entry)
+        return result
+
     # -- acquisition (free) ------------------------------------------------
     def launch_acquisition(self) -> dict[str, Any]:
         """Turn one queued excerpt into a manifest.  Spends no Guidepoint call.
@@ -808,6 +930,9 @@ class GuidepointLaneCoordinator:
         return {
             "settled_dispatches": self.settle_dispatches(),
             "settled_documents": self.settle_documents(),
+            # Before acquisition: a row settled here is one the queue need
+            # not look at, and a carried review keeps its place.
+            "already_held": self.settle_already_held(),
             "acquisition": self.launch_acquisition(),
             **self.launch_discovery(as_of=as_of),
         }
