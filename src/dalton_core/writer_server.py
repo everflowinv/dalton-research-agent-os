@@ -6090,6 +6090,24 @@ class WriterServer:
                 "lane_status": "not_authorized",
                 "lane_reason": "observed source location is not an exact SEC accession",
             }
+        # 2026-09-28: the quarterly coordinator now queues 10-Ks too.  One
+        # accession run twice, under two windows, is two plans and two Claims
+        # for one quarter; whichever path got there first answers it.
+        from .mission_sec_quarters import accession_in_hand
+
+        connection = getattr(self.coverage_mission, "connection", None)
+        in_hand = None if connection is None else accession_in_hand(connection, accession)
+        if in_hand is not None:
+            return {
+                **observation,
+                "mission_version_ref": authorization["mission_version_ref"],
+                "mission_version_hash": authorization["mission_version_hash"],
+                "lane_status": "already_dispatched",
+                "lane_reason": f"accession {accession} already has a {in_hand['state']} "
+                               f"{in_hand['form']} dispatch",
+                "lane_dispatch_ref": in_hand["dispatch_id"],
+                "expected_accession": accession,
+            }
         queued = self.coverage_mission.queue_sec_dispatch(
             authorization=authorization,
             form=observation["form"],
