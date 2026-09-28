@@ -5,8 +5,10 @@
 # 用法：zsh ~/Projects/dalton-research-agent-os/docs/ops/run-batch-g-post-deploy.sh
 set -u
 D=~/Projects/dalton-research-agent-os/docs/ops
-echo "######## 1/2 independence predicates、路由、凭证槽位"
+echo "######## 1/3 independence predicates、路由、凭证槽位"
 zsh $D/run-2026-09-28-restore-independence-and-parity-steps.sh || { echo "!! 第 1 步失败，停止。请把上面的输出发给我。" >&2; exit 1; }
-echo "######## 2/2 撤回重复的数字 claim"
+echo "######## 2/3 撤回重复的数字 claim"
 zsh $D/withdraw-document-figure-duplicates-2026-09-28.sh apply || { echo "!! 第 2 步失败。请把上面的输出发给我。" >&2; exit 1; }
+echo "######## 3/3 签入 FY−9M 第四季推导规则"
+zsh $D/sign-fy-minus-9m-rule-2026-09-28.sh apply || { echo "!! 第 3 步失败。请把上面的输出发给我。" >&2; exit 1; }
 echo "######## 全部完成"
