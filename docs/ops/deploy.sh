@@ -30,8 +30,12 @@ d = json.load(open(sys.argv[1]))
 h = d.get("health", {})
 print("health ok:", h.get("ok"), "| every_agent_on_target:", h.get("every_agent_on_target"),
       "| heartbeat_advanced:", h.get("controller_heartbeat_advanced"), "| writer_socket:", h.get("writer_socket_readable"))
-bad = [a for a in (d.get("applied") or {}).get("actions", []) if "->" in a and not a.rstrip().endswith("-> 0")]
-print("非 0 的 launchctl 结果：", bad or "无")
+acts = (d.get("applied") or {}).get("actions", [])
+retried_ok = {a.split("retry ", 1)[1].split(" ->")[0] for a in acts if a.startswith("retry ") and a.rstrip().endswith("-> 0")}
+bad = [a for a in acts if "->" in a and not a.rstrip().endswith("-> 0")
+       and not a.startswith("retry ") and a.split(" ->")[0] not in retried_ok]
+print("首次失败但重试成功：", len(retried_ok), "个" if retried_ok else "")
+print("仍然失败的 launchctl：", bad or "无")
 print("完整输出:", sys.argv[1])
 PY
 sleep 60
