@@ -9,6 +9,16 @@
 
 ---
 
+（当前没有待部署批次。）
+
+---
+
+## 已部署
+
+- 2026-09-29 约 13:00 UTC：批次 2026-09-28g，release `ae70706a…`（源 527fb058）。部署后已完成：恢复 independence predicates（legacy policy-19、ws-7d policy-7）、ws-7d 路由对齐（align 工具自身的比对有误报，改为以 parity 为准）、ws-7d 补 xai 槽位并重启、legacy 撤回 6 条重复数字、签入 FY−9M（legacy policy-20、ws-7d policy-8）。ws-7d 的 4 条重复数字撤回因 writer 刚重启而失败，需要用 ONLY=ws7d 重跑。
+
+<details><summary>批次 2026-09-28g 说明</summary>
+
 ## 批次 2026-09-28g（main `dd7e410d` 及之后）
 
 ### 这批解决什么（批次 f 部署后验证中发现的问题，以及待你决定、已代为处理的事项）
@@ -58,9 +68,8 @@ zsh ~/Projects/dalton-research-agent-os/docs/ops/run-batch-g-post-deploy.sh
 
 在 main `b188ba30` 上跑全量测试：10677 个，全部通过（skipped 4）。
 
----
+</details>
 
-## 已部署
 
 - 2026-09-28 10:50 UTC：批次 2026-09-27f，release `f9fe3f3e…`。第一次构建因 pypi 超时失败，已清理半成品后重建。controller 和 writer 首次 bootstrap 都返回 5，重试后成功。部署后：ws-7d 签入 policy-6，恢复 backfill（v3），撤回 6 条同义改写的重复 claim。
 
