@@ -84,6 +84,10 @@ LANE_PLAN_RULES: dict[str, tuple[str, ...]] = {
 _HEALTHY_TICK = {"idle", "launched", "busy", "dispatched", "waiting", "duplicate",
                  "recorded", "queued", "settled", "entered", "ok", "committed"}
 _UNCONFIGURED_CODES = {"lane_unconfigured_hold"}
+#: A discovery coordinator deferred this many ticks running is a warning: the
+#: tick's fair shares and starved-first order should reach it well before.
+DISCOVERY_DEFERRED_WARN_TICKS = 3
+_DISCOVERY_LANE = "mission_source_discovery"
 
 
 def _row(section: str, check: str, status: str, detail: str,
@@ -389,6 +393,82 @@ def check_lanes(env: Environment) -> list[dict[str, Any]]:
         rows.append(_sec_precondition(env))
     if env.mission is not None and "document_extraction" in ticks:
         rows.append(_maintenance_with_empty_queue(ticks["document_extraction"]))
+    rows.extend(_discovery_coordinator_rows(env))
+    return rows
+
+
+def _discovery_coordinator_history(env: Environment, limit: int) -> list[dict[str, Any]]:
+    """The discovery lane's per-coordinator states over its last ``limit`` ticks,
+    newest first. Rows from a release that did not record them are skipped."""
+
+    connection = _connect_ro(env.state / "tick-ledger.sqlite")
+    if connection is None:
+        return []
+    try:
+        rows = connection.execute(
+            "SELECT started_at, counts_json FROM tick_ledger_lanes WHERE driver_key=? "
+            "ORDER BY started_at DESC LIMIT ?", (_DISCOVERY_LANE, limit)).fetchall()
+    except sqlite3.Error:
+        return []
+    finally:
+        connection.close()
+    history = []
+    for row in rows:
+        try:
+            counts = json.loads(row["counts_json"])
+        except (TypeError, ValueError):
+            continue
+        coordinators = counts.get("coordinators") if isinstance(counts, dict) else None
+        if isinstance(coordinators, dict) and coordinators:
+            history.append({"started_at": row["started_at"], "coordinators": coordinators})
+        else:
+            # An older row breaks the run: nothing is known about it.
+            break
+    return history
+
+
+def _discovery_coordinator_rows(env: Environment, *,
+                                threshold: int = DISCOVERY_DEFERRED_WARN_TICKS
+                                ) -> list[dict[str, Any]]:
+    """Warn when one discovery coordinator was deferred ``threshold`` ticks running.
+
+    The discovery lane's own status is the AlphaEngine coordinator's, so an SEC
+    or web search coordinator reporting ``deferred: tick budget exhausted``
+    tick after tick looked, from the lane row, like an idle lane (legacy,
+    2026-09-25 to 09-29). The tick ledger now keeps every coordinator's word.
+    """
+
+    history = _discovery_coordinator_history(env, threshold)
+    if not history:
+        return []
+    rows = []
+    latest = history[0]["coordinators"]
+    for name in sorted(latest):
+        run = 0
+        for tick in history:
+            state = tick["coordinators"].get(name) or {}
+            if str(state.get("status") or "").split(":", 1)[0] != "deferred":
+                break
+            run += 1
+        state = latest[name]
+        streak = state.get("deferred_streak")
+        run = max(run, int(streak) if isinstance(streak, int) and not isinstance(streak, bool) else 0)
+        check = f"{_DISCOVERY_LANE}.{name}.deferred"
+        if run >= threshold:
+            rows.append(_row(
+                "lanes", check, WARN,
+                f"deferred {run} ticks running ({state.get('reason') or 'no reason given'}); "
+                "the discovery tick's shared budget is not reaching this coordinator",
+                fix="read tick_ledger_lanes.counts_json for mission_source_discovery "
+                    "(coordinators.*.share_seconds / elapsed_seconds): the coordinator that "
+                    "overruns its share is the one holding the store thread",
+                deferred_ticks=run))
+        else:
+            rows.append(_row(
+                "lanes", check, OK,
+                f"last tick: {state.get('status')}"
+                + (f", deferred {run} tick(s) running" if run else ""),
+                deferred_ticks=run))
     return rows
 
 

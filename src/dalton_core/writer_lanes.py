@@ -25,7 +25,8 @@ register_lane(LaneSpec(
     order=30,
     driver_key="mission_source_discovery",
     note="P9d-1: AlphaEngine, the SEC filings index and web search, one "
-         "deadline shared by all three; the writer owns all three "
+         "deadline for all three, each given a fair share of what is left "
+         "and the longest-deferred going first; the writer owns all three "
          "coordinators and their plan paths.",
 ))
 register_lane(LaneSpec(

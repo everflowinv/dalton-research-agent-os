@@ -5429,48 +5429,161 @@ class WriterServer:
     def _op_dispatch_mission_source_discovery(self, p: Mapping[str, Any]) -> Any:
         # Controller tick.  Unconfigured writers answer truthfully instead of
         # raising so the driver's tick summary shows the reason.  The
-        # AlphaEngine tick keeps its P9d-1 shape; the web search tick rides
-        # along under ``web_search``.
-        # P12f: one deadline for the whole op, shared by every lane below.
+        # AlphaEngine tick keeps its P9d-1 shape; the filings index and web
+        # search ride along under ``sec_filings_index`` and ``web_search``.
+        #
+        # P12f: one deadline for the whole op, shared by every coordinator.
         # Each lane had its own budget, so three lanes at twenty seconds each
         # was sixty inside a request this server abandons after thirty -- and
         # the controller then reported every lane as unavailable however much
-        # work they had actually done.
-        from .mission_source_discovery import _monotonic, TICK_BUDGET_SECONDS
+        # work they had actually done.  That ceiling stays: this op holds the
+        # single store thread (55595420), and nothing here may hold it longer.
+        #
+        # 2026-09-29: what changed is how the twenty seconds are shared.  The
+        # coordinators used to run in a fixed order against the one deadline,
+        # so whichever was slow at the front starved the others every tick --
+        # on legacy the AlphaEngine reconciliation took 14-16 s and SEC and
+        # web search reported "deferred: tick budget exhausted" for four days.
+        # Now each coordinator gets a fair share of what is left (the time
+        # remaining divided by the coordinators still to run, so an idle one
+        # hands its unused time to the next), a coordinator whose turn comes
+        # after the deadline is not started at all, and the one deferred
+        # longest goes first next tick (``discovery_coordinator_order``).
+        from .mission_source_discovery import (
+            ALPHAENGINE_SOURCE_REF, DISCOVERY_DEFERRED_REASON,
+            SEC_SOURCE_REF, TICK_BUDGET_SECONDS, WEB_SEARCH_SOURCE_REF,
+            _monotonic, discovery_coordinator_order, discovery_coordinator_state,
+        )
 
         self._retry_pending_first_mission_sec_plan()
 
-        deadline = _monotonic() + TICK_BUDGET_SECONDS
-        if self._source_discovery is None:
-            result: dict[str, Any] = {
-                "status": "unconfigured",
-                "reason": self._discovery_plan_error or "no discovery plan on this writer",
-            }
-        else:
-            result = self.source_discovery.dispatch_once(deadline)
+        started = _monotonic()
+        deadline = started + TICK_BUDGET_SECONDS
         # P10v: the filings index goes before web search, because the two share
         # one fetch slot and web search almost always has something queued.
-        # Live, five 10-Ks sat discovered while web search held the slot tick
-        # after tick -- not a deadlock, but a queue that refills faster than it
-        # drains starves the one behind it indefinitely. Serving the index
-        # first costs web search almost nothing: it wants one filing per
-        # company and rediscovers monthly, so it empties and yields, while web
-        # search is a continuous stream.
-        if self._sec_filings_source_discovery is None:
-            result["sec_filings_index"] = {
-                "status": "unconfigured",
-                "reason": self._sec_filings_plan_error or "no SEC filings plan on this writer",
-            }
-        else:
-            result["sec_filings_index"] = self._sec_filings_source_discovery.dispatch_once(deadline)
-        if self._web_source_discovery is None:
-            result["web_search"] = {
-                "status": "unconfigured",
-                "reason": self._web_search_plan_error or "no web search discovery plan on this writer",
-            }
-        else:
-            result["web_search"] = self.web_source_discovery.dispatch_once(deadline)
+        # That is still the order whenever nobody was deferred last tick.
+        coordinators: dict[str, tuple[Any, str, str]] = {
+            "alphaengine": (
+                self._source_discovery, ALPHAENGINE_SOURCE_REF,
+                self._discovery_plan_error or "no discovery plan on this writer"),
+            "sec_filings_index": (
+                self._sec_filings_source_discovery, SEC_SOURCE_REF,
+                self._sec_filings_plan_error or "no SEC filings plan on this writer"),
+            "web_search": (
+                self._web_source_discovery, WEB_SEARCH_SOURCE_REF,
+                self._web_search_plan_error or "no web search discovery plan on this writer"),
+        }
+        streaks = self._discovery_deferred_streaks()
+        order = discovery_coordinator_order(
+            [key for key, (coordinator, _, _) in coordinators.items()
+             if coordinator is not None], streaks)
+        results: dict[str, dict[str, Any]] = {}
+        states: dict[str, dict[str, Any]] = {}
+        for position, key in enumerate(order):
+            coordinator, source_ref, _ = coordinators[key]
+            now = _monotonic()
+            remaining = deadline - now
+            share = remaining / (len(order) - position)
+            if remaining <= 0:
+                # Starting it would only hold the store thread past the op's
+                # budget for reconciliation that the next tick does anyway.
+                results[key] = {
+                    "status": "deferred", "reason": DISCOVERY_DEFERRED_REASON,
+                    "source_ref": source_ref,
+                }
+            else:
+                results[key] = coordinator.dispatch_once(min(deadline, now + share))
+            state = discovery_coordinator_state(results[key])
+            state.update({
+                "position": position,
+                "share_seconds": round(max(0.0, share), 3),
+                "elapsed_seconds": round(max(0.0, _monotonic() - now), 3),
+            })
+            states[key] = state
+        for key, (coordinator, _, reason) in coordinators.items():
+            if coordinator is None:
+                results[key] = {"status": "unconfigured", "reason": reason}
+                states[key] = {"status": "unconfigured", "reason": reason[:200]}
+        # A streak counts ticks a coordinator was deferred *behind another*.
+        # The one that went first had the whole budget to start in; if it
+        # still ran out, that is its own slowness (the ledger keeps its
+        # ``deferred`` word) and not a reason to keep it at the front.
+        next_streaks = {
+            key: (int(streaks.get(key, 0) or 0) + 1
+                  if states[key]["status"] == "deferred"
+                  and states[key].get("position") != 0 else 0)
+            for key in coordinators
+        }
+        for key, state in states.items():
+            state["deferred_streak"] = next_streaks[key]
+        rotation = self._record_discovery_deferred_streaks(streaks, next_streaks)
+        result = results["alphaengine"]
+        result["sec_filings_index"] = results["sec_filings_index"]
+        result["web_search"] = results["web_search"]
+        # Every coordinator's own word, flat, so the tick ledger and the
+        # heartbeat can tell a deferred coordinator from an idle one without
+        # reading three differently shaped results.
+        result["coordinators"] = {key: states[key] for key in coordinators}
+        result["coordinator_order"] = list(order)
+        result["coordinator_budget_seconds"] = TICK_BUDGET_SECONDS
+        if rotation is not None:
+            result["coordinator_rotation"] = rotation
         return result
+
+    def _discovery_rotation_path(self) -> Path | None:
+        from .mission_source_discovery import DISCOVERY_ROTATION_FILENAME
+
+        if str(self.db_path) == ":memory:":
+            return None
+        return self.state_dir / DISCOVERY_ROTATION_FILENAME
+
+    def _discovery_deferred_streaks(self) -> dict[str, int]:
+        """Each coordinator's consecutive deferred ticks, kept across restarts.
+
+        Read from the file once and then kept in memory: a restart must not
+        send a starved coordinator back to the end of the queue, and one
+        unreadable file only costs the ordering, never the tick.
+        """
+
+        cached = getattr(self, "_discovery_streaks", None)
+        if cached is not None:
+            return dict(cached)
+        streaks: dict[str, int] = {}
+        path = self._discovery_rotation_path()
+        if path is not None:
+            try:
+                value = json.loads(path.read_text(encoding="utf-8"))
+                streaks = {
+                    str(key): max(0, int(count))
+                    for key, count in (value.get("deferred_streaks") or {}).items()
+                }
+            except (OSError, ValueError, TypeError, AttributeError):
+                streaks = {}
+        self._discovery_streaks = dict(streaks)
+        return streaks
+
+    def _record_discovery_deferred_streaks(
+        self, previous: Mapping[str, int], current: Mapping[str, int],
+    ) -> str | None:
+        """Keep the new streaks; write the file only when they changed."""
+
+        self._discovery_streaks = dict(current)
+        if {k: v for k, v in previous.items() if v} == {k: v for k, v in current.items() if v}:
+            return None
+        path = self._discovery_rotation_path()
+        if path is None:
+            return None
+        try:
+            temporary = path.with_name(path.name + ".tmp")
+            temporary.write_text(json.dumps({
+                "schema_version": "0.1",
+                "deferred_streaks": dict(sorted(current.items())),
+            }, sort_keys=True) + "\n", encoding="utf-8")
+            os.replace(temporary, path)
+        except OSError as exc:
+            # The tick's work stands; the ordering falls back to memory.
+            return f"unrecorded:{type(exc).__name__}"
+        return "recorded"
 
     def _mission_stage_driver(self) -> Any:
         """P10a: the stage driver, told which discovery specs actually exist."""
