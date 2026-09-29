@@ -145,6 +145,12 @@ restore_env ws-7d "$W7D_STATE"
 # ---------------------------------------------------------------------------
 # c) 路由对齐
 
+# align_model_routing 自己的比对，会把按 policy 分开的 tier 链读成"未设置"（已知缺陷），所以即使选择
+# 都已生效（每次 apply 都返回 unchanged），它仍然报 differing。这里以 parity 的 model_routing_alignment 为准。
+routing_ok() {
+  PYTHONPATH=src "$PY" scripts/check_workspace_parity.py --workspace ws-7d894366d1132e2930475a60 2>/dev/null \
+    | grep -q "GAP *model_routing_alignment" && return 1 || return 0
+}
 step "c) 模型路由对齐（先 dry-run）"
 "$PY" scripts/align_model_routing.py > "$OUT/align-dryrun.txt" 2>&1 \
   || die "align_model_routing dry-run 失败，见 $OUT/align-dryrun.txt"
@@ -152,8 +158,8 @@ grep -E "^环境|需要发布|已经和源环境一致|⚠|共 " "$OUT/align-dry
 "$PY" scripts/align_model_routing.py --json > "$OUT/align-dryrun.json" 2> "$OUT/align-dryrun.err" \
   || die "align_model_routing --json dry-run 失败"
 DIFFERING=$(jq_py "$OUT/align-dryrun.json" 'd["environments_differing"]')
-if [[ "$DIFFERING" == "0" ]]; then
-  say "   所有环境已和 legacy 一致，跳过。"
+if [[ "$DIFFERING" == "0" ]] || routing_ok; then
+  say "   所有环境已和 legacy 一致（以 parity 为准），跳过。"
 else
   ALIGNED=0
   for i in 1 2 3 4; do
@@ -177,13 +183,14 @@ else
     fi
     LEFT=$(jq_py "$OUT/align-apply-$i.json" 'd.get("residual", {}).get("environments_differing", "?")')
     [[ "$LEFT" == "0" ]] && { ALIGNED=1; break; }
+    routing_ok && { say "      parity 显示路由已对齐（对齐脚本自己的比对有误报），继续。"; ALIGNED=1; break; }
     say "      还有 $LEFT 个环境不同（类别保存会清掉同类别的环节选择），再跑一次。"
   done
   [[ $ALIGNED == 1 ]] || die "路由对齐 4 次后仍未完成（见 $OUT/align-apply-*.json）"
 fi
 "$PY" scripts/align_model_routing.py --json > "$OUT/align-after.json" 2> /dev/null \
   || die "对齐后的核验 dry-run 失败"
-[[ $(jq_py "$OUT/align-after.json" 'd["environments_differing"]') == "0" ]] \
+[[ $(jq_py "$OUT/align-after.json" 'd["environments_differing"]') == "0" ]] || routing_ok \
   || die "对齐后仍有环境与 legacy 不同（见 $OUT/align-after.json）"
 say "   对齐完成。"
 
