@@ -11,11 +11,21 @@
 
 （当前没有待部署批次。）
 
+### 下一批待做（已知、未开工）
+
+- `align_model_routing.py` 的比对有误报：它把按 policy 分开的 tier 链读成"未设置"，所以路由已经对齐时仍报 differing。目前 owner 脚本改为以 parity 为准来绕开。
+- ws-e399（空环境）的多个 model config 缺 openai、claude-cli 凭证槽位。新建 workspace 的流程应当一次补齐全部槽位。
+- AMZN、MSFT 的产品轴同时申报了两套粒度，走到 forecast 门禁时会被 segment_sum 卡住。
+- model_spec 的 structure repair 应当先把全部错误收集齐，确认都能修再付费。
+- legacy 的 brain 和 verifier 两个路由类别，源环境内部就不一致，需要定一条统一的链。
+- legacy v26 有 46 行 Guidepoint 记录找不到已完成的采集；`already_in_authority` 状态的行永远不会被重新采集。
+- 核验要做到"双家族才拒绝"，需要 owner 在 cockpit 模型页给 `claim_support_verifier` 和 `claim_support_backfill` 各加一个非 Gemini 家族的核验模型。
+
 ---
 
 ## 已部署
 
-- 2026-09-29 约 13:00 UTC：批次 2026-09-28g，release `ae70706a…`（源 527fb058）。部署后已完成：恢复 independence predicates（legacy policy-19、ws-7d policy-7）、ws-7d 路由对齐（align 工具自身的比对有误报，改为以 parity 为准）、ws-7d 补 xai 槽位并重启、legacy 撤回 6 条重复数字、签入 FY−9M（legacy policy-20、ws-7d policy-8）。ws-7d 的 4 条重复数字撤回因 writer 刚重启而失败，需要用 ONLY=ws7d 重跑。
+- 2026-09-29 约 13:00 UTC：批次 2026-09-28g，release `ae70706a…`（源 527fb058）。部署后已完成：恢复 independence predicates（legacy policy-19、ws-7d policy-7）、ws-7d 路由对齐（align 工具自身的比对有误报，改为以 parity 为准）、ws-7d 补 xai 槽位并重启、legacy 撤回 6 条重复数字、签入 FY−9M（legacy policy-20、ws-7d policy-8）。ws-7d 的 4 条重复数字撤回第一次因 writer 刚重启失败，用户随后以 ONLY=ws7d 重跑成功（11:42 UTC，4 条都已 retired）。
 
 <details><summary>批次 2026-09-28g 说明</summary>
 
