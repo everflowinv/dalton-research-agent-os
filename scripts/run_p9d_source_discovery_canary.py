@@ -24,6 +24,12 @@ Nothing here touches the source Core, the network or a paid model.  Steps:
 5. Re-read progress, counts and ``PRAGMA integrity_check``.  Evidence /
    Claim / Thesis counts must be unchanged.
 
+Before step 2 (2026-09-29): on the real-size copy, the "already in authority"
+reconciliation that heads every discovery tick must be index seeks and must
+finish well inside the tick.  Live, it took 14-16 s of the 20 s deadline the
+three discovery coordinators share, and nothing was searched or acquired for
+four days.
+
 Usage::
 
     python scripts/run_p9d_source_discovery_canary.py \
@@ -40,6 +46,7 @@ import shutil
 import sqlite3
 import sys
 import tempfile
+import time
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -57,7 +64,9 @@ from dalton_core.alphaengine_core_search import (  # noqa: E402
 )
 from dalton_core.bounded_alphaengine_probe import ALPHAENGINE_PROFILE_REF  # noqa: E402
 from dalton_core.coverage_mission import CoverageMissionAuthority  # noqa: E402
+from dalton_core.connector import ConnectorStore  # noqa: E402
 from dalton_core.mission_source_discovery import (  # noqa: E402
+    ALPHAENGINE_ALREADY_HELD_SQL,
     AlphaEngineSearchLauncher,
     MissionSourceDiscoveryCoordinator,
     build_discovery_parameters,
@@ -66,6 +75,9 @@ from dalton_core.mission_source_discovery import (  # noqa: E402
 from dalton_core.store import DaltonStore, canonical_json  # noqa: E402
 
 PLAN_PATH = ROOT / "deploy" / "phase9" / "p9d-us-it-services-discovery-plan-v1.json"
+#: Generous against the 20 s tick budget; the fixed query takes ~0.1 s on the
+#: legacy Core, the unfixed one 14-16 s.
+AUTHORITY_LOOKUP_MAX_SECONDS = 5.0
 NEW_DOC_ID = "130000099999999"
 COUNTED_TABLES = ("evidence_versions", "claim_versions", "thesis_versions")
 
@@ -190,6 +202,19 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 "max_alphaengine_calls_24h": active["budget"]["max_alphaengine_calls_24h"],
             }
             checks["counts_before"] = _counts(store)
+            # What the writer's start applies to this Core: the connector
+            # schema, including the join indexes the lookup below rides.
+            ConnectorStore(store)
+            lookup_plan = [row[3] for row in store.connection.execute(
+                "EXPLAIN QUERY PLAN " + ALPHAENGINE_ALREADY_HELD_SQL, ("source:alphaengine",),
+            ).fetchall()]
+            started = time.monotonic()
+            held_rows = store.connection.execute(
+                ALPHAENGINE_ALREADY_HELD_SQL, ("source:alphaengine",)).fetchall()
+            checks["authority_lookup"] = {
+                "plan": lookup_plan, "rows": len(held_rows),
+                "seconds": round(time.monotonic() - started, 3),
+            }
 
             search_launcher = AlphaEngineSearchLauncher(
                 state_dir=state, governance_path=search_governance, plan_path=PLAN_PATH,
@@ -322,7 +347,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     v2_docs = {(d["company_ref"], d["document_ref"]): d["status"] for d in checks["documents_under_v2"]}
     new_ref = f"alphaengine-doc:{NEW_DOC_ID}"
     stale = checks.get("shared_catalog_acquisition")
+    lookup = checks["authority_lookup"]
     result["ok"] = all([
+        not any(d.startswith("SCAN") or "AUTOMATIC" in d for d in lookup["plan"]),
+        lookup["seconds"] < AUTHORITY_LOOKUP_MAX_SECONDS,
         stale is None or (
             stale["ticket_status"] == "failed" and "StaleCatalog" in (stale["run_log_tail"] or "")
         ),
