@@ -123,6 +123,17 @@ ACQUISITION_WAIT_SECONDS = 90.0
 # unavailable:RemoteError -- the acquisitions were real work, but the tick's
 # budget and status never reached the cockpit, so the lane looked dead.
 TICK_BUDGET_SECONDS = 20.0
+# The three coordinators one discovery tick drives, in their P10v order: the
+# filings index ahead of web search because they share a fetch slot and web
+# search almost always has something queued. The keys are the ones the tick's
+# result already uses for the two nested coordinators.
+DISCOVERY_COORDINATOR_KEYS: tuple[str, ...] = (
+    "alphaengine", "sec_filings_index", "web_search",
+)
+# Where the writer keeps each coordinator's run of consecutive deferred ticks,
+# beside core.sqlite. Small, rewritten only when a streak changes.
+DISCOVERY_ROTATION_FILENAME = "discovery-coordinator-rotation.json"
+DISCOVERY_DEFERRED_REASON = "tick budget exhausted"
 # P13h: how far past a checklist requirement a spec may keep collecting.
 #
 # The cadence says how *often* a search may be repeated. It never said whether
@@ -2738,11 +2749,75 @@ class MissionSourceDiscoveryCoordinator:
         }
 
 
+def discovery_coordinator_order(
+    configured: Sequence[str], deferred_streaks: Mapping[str, int] | None = None,
+) -> list[str]:
+    """The order one discovery tick runs its configured coordinators in.
+
+    P12f gave the three coordinators one shared deadline, and they ran in a
+    fixed order. On legacy the AlphaEngine reconciliation at the head of the
+    tick then took 14-16 s of the 20, and SEC and web search reported
+    ``deferred: tick budget exhausted`` for four days: whatever is slow at the
+    front starves everything behind it, every tick.
+
+    The coordinator that has been deferred longest goes first; a tie, and
+    every coordinator that was not deferred, keeps the P10v order (the filings
+    index before web search, which share a fetch slot). The coordinator that
+    goes first always starts with the whole budget, so the writer ends its
+    streak whatever it reports; every other deferred streak grows by one, and
+    so a starved coordinator reaches the front within ``len(configured)``
+    ticks even behind ones that overrun their whole share every time. In the
+    healthy case nobody is deferred and the order is exactly the old one.
+    """
+
+    streaks = deferred_streaks or {}
+    rank = {key: index for index, key in enumerate(DISCOVERY_COORDINATOR_KEYS)}
+    return sorted(
+        configured,
+        key=lambda key: (-max(0, int(streaks.get(key, 0) or 0)),
+                         rank.get(key, len(rank)), key),
+    )
+
+
+def discovery_coordinator_state(result: Mapping[str, Any]) -> dict[str, Any]:
+    """One coordinator's tick, reduced to what the tick ledger and heartbeat keep.
+
+    ``deferred`` means the coordinator got no useful time: skipped because the
+    op's deadline had passed before its turn, or it ran but spent its share on
+    reconciliation and launched nothing before its own search was deferred. A
+    coordinator that acquired documents until its share ran out did work and
+    reports its own status, with ``budget_exhausted`` set.
+    """
+
+    status = str(result.get("status") or "missing")
+    discovery = result.get("discovery")
+    discovery = discovery if isinstance(discovery, Mapping) else {}
+    reason = result.get("reason")
+    if status == "idle" and discovery.get("status") == "deferred":
+        status = "deferred"
+        reason = discovery.get("reason") or DISCOVERY_DEFERRED_REASON
+    elif status == "idle" and discovery.get("status") not in (None, "idle"):
+        reason = reason or discovery.get("reason") or discovery.get("status")
+    state: dict[str, Any] = {"status": status}
+    if isinstance(reason, str) and reason:
+        state["reason"] = reason[:200]
+    if result.get("tick_budget_exhausted"):
+        state["budget_exhausted"] = True
+    if isinstance(result.get("acquisitions_launched"), int):
+        state["acquisitions_launched"] = result["acquisitions_launched"]
+    return state
+
+
 __all__ = [
     "ALPHAENGINE_SOURCE_REF",
     "AlphaEngineSearchLauncher",
     "DISCOVERY_PLAN_SCHEMA_VERSION",
     "TICK_BUDGET_SECONDS",
+    "DISCOVERY_COORDINATOR_KEYS",
+    "DISCOVERY_DEFERRED_REASON",
+    "DISCOVERY_ROTATION_FILENAME",
+    "discovery_coordinator_order",
+    "discovery_coordinator_state",
     "DISCOVERY_PLAN_SCHEMA_VERSION_V2",
     "DISCOVERY_PLAN_SCHEMA_VERSION_V3",
     "DISCOVERY_PLAN_SCHEMA_VERSIONS",

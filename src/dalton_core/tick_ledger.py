@@ -130,7 +130,7 @@ def bounded_counts(result: Mapping[str, Any]) -> dict[str, Any]:
 
     counts: dict[str, Any] = {}
     for key in sorted(result):
-        if key in {"status", "reason"} or len(counts) >= _MAX_COUNT_KEYS:
+        if key in {"status", "reason", "coordinators"} or len(counts) >= _MAX_COUNT_KEYS:
             continue
         value = result[key]
         if isinstance(value, bool) or isinstance(value, int) or isinstance(value, float):
@@ -141,7 +141,46 @@ def bounded_counts(result: Mapping[str, Any]) -> dict[str, Any]:
             counts[key] = len(value)
     if isinstance(result.get("reason"), str):
         counts["reason"] = result["reason"][:_MAX_TEXT]
+    coordinators = coordinator_states(result)
+    if coordinators:
+        # Outside the key cap: a lane that drives several coordinators (source
+        # discovery) reported only the first one's status at the top level,
+        # so a coordinator deferred tick after tick read as an idle lane.
+        counts["coordinators"] = coordinators
     return counts
+
+
+_COORDINATOR_FIELDS = ("status", "reason", "deferred_streak", "budget_exhausted",
+                       "acquisitions_launched", "position", "share_seconds",
+                       "elapsed_seconds")
+
+
+def coordinator_states(result: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    """Per-coordinator status and reason, for a lane that reports them."""
+
+    value = result.get("coordinators")
+    if not isinstance(value, Mapping):
+        return {}
+    states: dict[str, dict[str, Any]] = {}
+    for name, state in sorted(value.items()):
+        if not isinstance(state, Mapping) or len(states) >= _MAX_COUNT_KEYS:
+            continue
+        kept: dict[str, Any] = {}
+        for field in _COORDINATOR_FIELDS:
+            item = state.get(field)
+            if isinstance(item, str):
+                kept[field] = item[:_MAX_TEXT]
+            elif isinstance(item, (bool, int, float)):
+                kept[field] = item
+        states[str(name)[:_MAX_TEXT]] = kept
+    return states
+
+
+def deferred_coordinators(result: Mapping[str, Any]) -> list[str]:
+    """The coordinators of this lane result that got no time this tick."""
+
+    return [name for name, state in coordinator_states(result).items()
+            if status_word(state.get("status")) == "deferred"]
 
 
 def _apply_planner_budget_migration(connection: sqlite3.Connection) -> None:
@@ -291,7 +330,9 @@ class TickLedger:
         for key, result in sorted(lanes.items()):
             word = status_word(result.get("status"))
             exhausted = mentions_pool_exhausted(result)
-            idle = word in IDLE_STATUS_WORDS
+            # A lane whose own word is idle while one of its coordinators was
+            # deferred had work it could not reach; that is not an idle tick.
+            idle = word in IDLE_STATUS_WORDS and not deferred_coordinators(result)
             idle_lanes += int(idle)
             lane_rows.append((
                 tick_id, day, started_text, key,
@@ -608,6 +649,8 @@ __all__ = [
     "TickLedger",
     "TickLedgerError",
     "bounded_counts",
+    "coordinator_states",
+    "deferred_coordinators",
     "mentions_pool_exhausted",
     "default_path",
     "status_word",

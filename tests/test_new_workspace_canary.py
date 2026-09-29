@@ -932,6 +932,88 @@ class NewWorkspaceCanaryTests(unittest.TestCase):
         self.assertEqual(self.awaiting_in_active_version(), 0)
         self.assert_maintenance_runs_with_an_empty_queue(state, v2)
 
+        # ---- the discovery tick shares its budget ----
+        self.assert_discovery_budget_is_shared(workspace)
+
+    def assert_discovery_budget_is_shared(self, workspace) -> None:
+        """A slow AlphaEngine coordinator must not starve SEC and web search.
+
+        Legacy, 2026-09-25 to 09-29: the AlphaEngine reconciliation took most
+        of the 20 s the three coordinators share, the other two reported
+        ``deferred: tick budget exhausted`` every tick, and the tick ledger
+        showed an idle lane. Here the created workspace's own writer op runs
+        its real AlphaEngine coordinator, made to overrun the whole budget,
+        with SEC and web search behind it.
+        """
+
+        from dalton_core import mission_source_discovery as msd
+        from dalton_core.tick_ledger import TickLedger
+        from dalton_core.workspace_health_parity import Environment, check_lanes
+
+        state = workspace.state_dir
+        clock = {"now": 5000.0}
+        real = self.coordinator
+        reached: dict[str, list[float]] = {"sec_filings_index": [], "web_search": []}
+
+        class Overrunning:
+            source_ref = real.source_ref
+            plan = real.plan
+
+            def dispatch_once(inner, deadline=None):
+                result = real.dispatch_once(deadline)
+                clock["now"] += msd.TICK_BUDGET_SECONDS + 5.0
+                return result
+
+        class Recorder:
+            def __init__(inner, key):
+                inner.key, inner.plan = key, real.plan
+                inner.source_ref = {"sec_filings_index": msd.SEC_SOURCE_REF,
+                                    "web_search": msd.WEB_SEARCH_SOURCE_REF}[key]
+
+            def dispatch_once(inner, deadline=None):
+                reached[inner.key].append(clock["now"])
+                clock["now"] += 0.5
+                return {"status": "idle", "source_ref": inner.source_ref,
+                        "discovery": {"status": "idle"}, "acquisitions_launched": 0}
+
+        writer = self.writer
+        writer._source_discovery = Overrunning()
+        writer._sec_filings_source_discovery = Recorder("sec_filings_index")
+        writer._web_source_discovery = Recorder("web_search")
+        results = []
+        with patch.object(msd, "_monotonic", lambda: clock["now"]), \
+                TickLedger(state / "tick-ledger.sqlite") as ledger:
+            started = datetime(2026, 9, 29, 12, tzinfo=timezone.utc)
+            for index in range(4):
+                result = writer._op_dispatch_mission_source_discovery({})
+                results.append(result)
+                ledger.append_tick({"status": "ok", "mission_source_discovery": result},
+                                   started_at=started + timedelta(minutes=5 * index))
+                clock["now"] += 300.0
+                self.acquisitions.finish()
+        order = [r["coordinator_order"] for r in results]
+        self.assertEqual(order[0], ["alphaengine", "sec_filings_index", "web_search"])
+        self.assertEqual(results[0]["coordinators"]["web_search"]["status"], "deferred")
+        # Starved on the first tick, first on the next: both are reached.
+        self.assertEqual(order[1][:2], ["sec_filings_index", "web_search"])
+        self.assertGreaterEqual(len(reached["sec_filings_index"]), 2, order)
+        self.assertGreaterEqual(len(reached["web_search"]), 2, order)
+        # Nothing new was fetched by the extra AlphaEngine ticks.
+        self.assertEqual(sorted(self.acquisitions.calls), [DOC_A, DOC_B])
+        # The ledger keeps each coordinator's word, and the parity check sees
+        # no coordinator deferred three ticks running.
+        env = Environment("canary", state, service_config=workspace.config_path)
+        try:
+            rows = {row["check"]: row for row in check_lanes(env)
+                    if row["check"].startswith("mission_source_discovery.")}
+        finally:
+            env.close()
+        self.assertEqual(set(rows), {f"mission_source_discovery.{key}.deferred"
+                                     for key in ("alphaengine", "sec_filings_index", "web_search")})
+        for key in ("sec_filings_index", "web_search"):
+            self.assertEqual(rows[f"mission_source_discovery.{key}.deferred"]["status"], "ok",
+                             rows)
+
     def assert_maintenance_runs_with_an_empty_queue(self, state: Path, mission) -> None:
         from dalton_core import document_extraction_cli
         from dalton_core.document_extraction_cli import run_extraction
