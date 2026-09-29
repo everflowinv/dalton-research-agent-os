@@ -149,6 +149,41 @@ SEC_INDEX_LIMIT = 100
 TICKET_SCHEMA_VERSION = "0.1"
 TICKET_PREFIX = "alphaengine-discovery"
 WEB_SEARCH_TICKET_PREFIX = "web-search-discovery"
+
+# The AlphaEngine rows whose bytes are already in authority.  Every lookup in
+# the correlated subquery must be an index seek: this runs at the head of
+# every discovery tick, before acquisition and search, inside the one deadline
+# the AlphaEngine, SEC and web coordinators share.
+#
+# * ``+d.document_ref`` strips the column's TEXT affinity.  Compared with a
+#   bare TEXT column, ``json_extract(...)`` (no affinity) cannot use the
+#   ``(operation, json_extract(...document_ref))`` expression index, so SQLite
+#   seeked on ``operation`` alone and ran ``json_extract`` over every
+#   ``get_document`` call spec once per candidate row.
+# * The two joins ride ``idx_connector_invocations_call_spec`` and
+#   ``idx_connector_source_envelopes_invocation`` (connector_schema.sql).
+#   Without them SQLite built an automatic index over both tables on every
+#   execution.
+#
+# 2026-09-29, legacy: 775 candidate rows against 24k get_document call specs
+# took 14-16 s of the 20 s shared deadline with a cold page cache, so for four
+# days every coordinator's acquisition and search was "deferred: tick budget
+# exhausted" except in the hour after the nightly backup warmed the cache.
+ALPHAENGINE_ALREADY_HELD_SQL = (
+    "SELECT d.* FROM coverage_mission_discovered_documents d "
+    "JOIN coverage_mission_pointer p "
+    "ON p.mission_version_id=d.mission_version_ref "
+    "WHERE d.source_ref=? "
+    "AND d.status IN ('discovered','already_in_authority','acquisition_failed') "
+    "AND EXISTS (SELECT 1 FROM connector_call_specs c "
+    "JOIN connector_invocations i ON i.call_spec_ref=c.call_spec_id "
+    "JOIN connector_source_envelopes e "
+    "ON e.connector_invocation_ref=i.connector_invocation_id "
+    "WHERE c.operation='get_document' "
+    "AND json_extract(c.record_json,'$.parameters.document_ref')=+d.document_ref "
+    "AND e.status IN ('complete','partial')) "
+    "ORDER BY d.updated_at,d.record_id LIMIT 100"
+)
 LIVE_MODE_ARGS = ("--allow-network",)
 # JSON plan values are later compared with SQLite integer aggregates.  This is
 # a representation bound, not a product budget: the signed owner plan and, for
@@ -1257,22 +1292,8 @@ class MissionSourceDiscoveryCoordinator:
             # Select the authority-backed rows in SQL.  Taking the first N
             # generic candidates and testing them one by one permanently
             # starves a completed fetch sitting behind a large search result.
-            # The exact JSON path is indexed by connector_schema.sql.
             documents = [dict(row) for row in self.store.connection.execute(
-                "SELECT d.* FROM coverage_mission_discovered_documents d "
-                "JOIN coverage_mission_pointer p "
-                "ON p.mission_version_id=d.mission_version_ref "
-                "WHERE d.source_ref=? "
-                "AND d.status IN ('discovered','already_in_authority','acquisition_failed') "
-                "AND EXISTS (SELECT 1 FROM connector_call_specs c "
-                "JOIN connector_invocations i ON i.call_spec_ref=c.call_spec_id "
-                "JOIN connector_source_envelopes e "
-                "ON e.connector_invocation_ref=i.connector_invocation_id "
-                "WHERE c.operation='get_document' "
-                "AND json_extract(c.record_json,'$.parameters.document_ref')=d.document_ref "
-                "AND e.status IN ('complete','partial')) "
-                "ORDER BY d.updated_at,d.record_id LIMIT 100",
-                (self.source_ref,),
+                ALPHAENGINE_ALREADY_HELD_SQL, (self.source_ref,),
             ).fetchall()]
         for document in documents:
             if deadline is not None and _monotonic() >= deadline:

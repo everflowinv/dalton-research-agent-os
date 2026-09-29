@@ -46,6 +46,7 @@ from dalton_core.mission_source_discovery import (
     validate_discovery_plan,
 )
 from dalton_core.mission_source_discovery import (
+    ALPHAENGINE_ALREADY_HELD_SQL,
     _failed_cursor_dispatch_exists,
     _next_page_binding,
 )
@@ -1332,6 +1333,82 @@ class SearchChildTests(unittest.TestCase):
         self.assertEqual(status["status"], "failed")
         self.assertIn("probe_only", status["summary"]["failure_reason"])
         self.assertEqual(status["summary"]["provider_calls"], 0)
+
+
+class AuthorityLookupPlanTests(unittest.TestCase):
+    """2026-09-29: the "already in authority" lookups must be index seeks.
+
+    Live, the AlphaEngine reconciliation ran at the head of every discovery
+    tick and took 14-16 s of the 20 s deadline the AlphaEngine, SEC and web
+    coordinators share: its document_ref comparison could not use the
+    expression index, and the call spec -> invocation -> envelope joins had no
+    index, so SQLite built automatic ones on every execution.  For four days
+    every acquisition and every search was "deferred: tick budget exhausted".
+    A query plan is the only thing a unit-sized database can check -- the
+    tables are too small here for the time to show.
+    """
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.path = str(Path(self.temp.name) / "core.sqlite")
+        self.core = DaltonStore(self.path)
+        self.addCleanup(self.core.close)
+        ConnectorStore(self.core)
+        CoverageMissionAuthority(self.core)
+
+    def plan(self, sql: str, params: tuple) -> list[str]:
+        rows = self.core.connection.execute(f"EXPLAIN QUERY PLAN {sql}", params).fetchall()
+        return [row[3] for row in rows]
+
+    def captured(self, call) -> list[str]:
+        statements: list[str] = []
+        self.core.connection.set_trace_callback(statements.append)
+        try:
+            call()
+        finally:
+            self.core.connection.set_trace_callback(None)
+        return [text for text in statements if "connector_source_envelopes" in text]
+
+    def assert_seeks(self, details: list[str]) -> None:
+        joined = "\n".join(details)
+        self.assertIn("idx_connector_invocations_call_spec", joined)
+        self.assertIn("idx_connector_source_envelopes_invocation", joined)
+        self.assertNotIn("AUTOMATIC", joined)
+        self.assertFalse([d for d in details if d.startswith("SCAN")], joined)
+
+    def test_alphaengine_reconciliation_seeks_document_ref_and_both_joins(self) -> None:
+        details = self.plan(ALPHAENGINE_ALREADY_HELD_SQL, ("source:alphaengine",))
+        self.assertTrue(
+            any("idx_connector_call_operation_document (operation=? AND <expr>=?)" in d
+                for d in details),
+            details,
+        )
+        self.assert_seeks(details)
+
+    def test_public_web_and_alphaengine_single_lookups_seek_both_joins(self) -> None:
+        from dalton_core.bounded_alphaengine_probe import document_in_authority
+        from dalton_core.public_web_core_search import public_web_urls_in_authority
+
+        url_ref = "public-web-url:sha256:" + "0" * 64
+        web = self.captured(lambda: public_web_urls_in_authority(self.core.connection, [url_ref]))
+        self.assertEqual(len(web), 1)
+        self.assert_seeks(self.plan(web[0], ()))
+        alpha = self.captured(lambda: document_in_authority(self.core.connection, NEW_DOC))
+        self.assertEqual(len(alpha), 1)
+        self.assert_seeks(self.plan(alpha[0], ()))
+
+    def test_an_existing_core_gains_the_join_indexes_when_reopened(self) -> None:
+        self.core.connection.execute("DROP INDEX idx_connector_invocations_call_spec")
+        self.core.connection.execute("DROP INDEX idx_connector_source_envelopes_invocation")
+        self.core.connection.commit()
+        ConnectorStore(self.core)
+        names = {row[0] for row in self.core.connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='index'")}
+        self.assertLessEqual(
+            {"idx_connector_invocations_call_spec", "idx_connector_source_envelopes_invocation"},
+            names,
+        )
 
 
 if __name__ == "__main__":

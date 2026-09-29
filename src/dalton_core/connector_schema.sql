@@ -257,6 +257,15 @@ ON connector_call_specs(
   operation,
   json_extract(record_json,'$.parameters.document_ref')
 );
+-- "Is this document / URL already in authority" joins call spec -> invocation
+-- -> envelope.  Without these two, SQLite either scans every envelope or
+-- builds an automatic index over both tables on each execution: seconds per
+-- lookup once the tables hold tens of thousands of rows, and the discovery
+-- tick makes those lookups before it may search or acquire anything.
+CREATE INDEX IF NOT EXISTS idx_connector_invocations_call_spec
+ON connector_invocations(call_spec_ref);
+CREATE INDEX IF NOT EXISTS idx_connector_source_envelopes_invocation
+ON connector_source_envelopes(connector_invocation_ref);
 
 -- The UDF is an integrity boundary for the trusted single writer, not a
 -- hostile same-UID sandbox.
