@@ -133,6 +133,26 @@ def input_note(items):
               'instructions':[{'ref':i['ref'],'hash':i['hash'],'units':i['units'],'reason':i['reason'][:120]}
                               for i in x['instructions']]} for x in items]
     note=MARKER+canonical_json(compact)+'\nRepair only these held units from the supplied evidence. Date historical quantities explicitly; absent current evidence stays a gap.\n'
+    if len(note)>1800:
+        # The full held context remains the proof identity. Repeated group and
+        # source bindings need not consume the finite prior-body prompt twice.
+        # Keep the legacy wire for every input that already fit its bound.
+        sources=sorted({(x['source_ref'],x['source_hash']) for x in items})
+        instructions={}
+        source_indices={}
+        for item in compact:
+            source_index=sources.index((item['source_ref'],item['source_hash']))
+            for instruction in item['instructions']:
+                ref=instruction['ref']
+                if ref in instructions and instructions[ref]!=instruction:
+                    raise ValueError('repair request has conflicting prompt identities')
+                instructions[ref]=instruction
+                source_indices.setdefault(ref,set()).add(source_index)
+        compact={'context_hash':content_hash(items),
+                 'source_bindings':[{'ref':ref,'hash':digest} for ref,digest in sources],
+                 'instructions':[{**instructions[ref], 'source_indices':sorted(source_indices[ref])}
+                                 for ref in sorted(instructions)]}
+        note=MARKER+canonical_json(compact)+'\nRepair only these held units from the supplied evidence. Date historical quantities explicitly; absent current evidence stays a gap.\n'
     if len(note)>1800:raise ValueError('exact repair instructions exceed the existing bounded prior input')
     return note
 
