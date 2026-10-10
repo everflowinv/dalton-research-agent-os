@@ -1472,7 +1472,7 @@ class AgendaStore:
         source = _text(source, "source")
         if source not in {
             "local_cli", "openclaw_discord_reaction", "tailscale_dashboard",
-            "auto_accept_timeout",
+            "auto_accept_timeout", "shared_dashboard",
         }:
             raise AgendaValidationError("feedback source is invalid")
         source_event_ref = None if source_event_ref is None else _text(source_event_ref, "source_event_ref")

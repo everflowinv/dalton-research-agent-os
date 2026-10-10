@@ -3630,6 +3630,22 @@ class WriterServer:
     def _now(self) -> datetime:
         return datetime.now(timezone.utc)
 
+    def _configured_shared_subject(self, subject: Any) -> bool:
+        """Only the operator-configured gateway subject may use dashboard scope."""
+        if not isinstance(subject, str) or not subject.startswith("human:shared-"):
+            return False
+        from .service_config_location import service_config_path
+        from .shared_gateway_auth import validate_config
+        from .shared_access_identity import SharedLogin, shared_actor
+        path = (self._workspace.config_path if self._workspace is not None
+                else service_config_path(self.state_dir))
+        try:
+            raw = json.loads(Path(path).read_bytes())
+            binding = validate_config(raw.get("control", {}).get("config", {}).get("shared_gateway"))
+            return binding is not None and subject == shared_actor(SharedLogin(binding["principal"]))
+        except (OSError, ValueError, TypeError, AttributeError):
+            return False
+
     def _authorized_params(self, principal: Principal, operation: str, params: Mapping[str, Any]) -> dict[str, Any]:
         """Bind actor and invocation provenance to the authenticated principal."""
         result = dict(params)
@@ -3642,8 +3658,9 @@ class WriterServer:
         if actor_field is not None and scoped_first_mission:
             supplied_actor = result.get(actor_field)
             if (not isinstance(supplied_actor, str)
-                    or not supplied_actor.startswith("human:tailscale-")):
-                raise PermissionError("first mission requires the authenticated Tailscale subject")
+                    or not (supplied_actor.startswith("human:tailscale-")
+                            or self._configured_shared_subject(supplied_actor))):
+                raise PermissionError("first mission requires the authenticated dashboard subject")
         elif actor_field is not None:
             actor = principal.resolved_actor_ref
             supplied_actor = result.get(actor_field)
@@ -3697,8 +3714,11 @@ class WriterServer:
                 )
             elif principal.principal_id == "dashboard-control":
                 valid = (
-                    isinstance(subject_ref, str) and subject_ref.startswith("human:tailscale-")
-                    and result.get("source") == "tailscale_dashboard"
+                    isinstance(subject_ref, str)
+                    and ((subject_ref.startswith("human:tailscale-")
+                          and result.get("source") == "tailscale_dashboard")
+                         or (self._configured_shared_subject(subject_ref)
+                             and result.get("source") == "shared_dashboard"))
                     and isinstance(source_event_ref, str)
                     and source_event_ref.startswith("dashboard-feedback:")
                 )
@@ -3716,7 +3736,8 @@ class WriterServer:
             subject_ref = result.get("subject_ref")
             if not (
                 isinstance(subject_ref, str)
-                and subject_ref.startswith("human:tailscale-")
+                and (subject_ref.startswith("human:tailscale-")
+                     or self._configured_shared_subject(subject_ref))
             ):
                 raise PermissionError(
                     "scoped weekly brief feedback provenance is invalid"

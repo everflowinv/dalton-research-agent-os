@@ -234,7 +234,7 @@ class SharingIdentityTests(unittest.TestCase):
         result=app.post(login,session,session.csrf,b'{"decision_ref":"decision:control","verdict":"disagree"}')
         self.assertEqual(result['verdict'],'disagree')
         row=fixture.store.connection.execute('SELECT subject_ref,source,actor_ref FROM agenda_feedback').fetchone()
-        self.assertEqual(row['subject_ref'],shared_actor(login));self.assertEqual(row['actor_ref'],'bridge:tailscale-dashboard');self.assertEqual(row['source'],'tailscale_dashboard')
+        self.assertEqual(row['subject_ref'],shared_actor(login));self.assertEqual(row['actor_ref'],'bridge:tailscale-dashboard');self.assertEqual(row['source'],'shared_dashboard')
 
     def test_html_only_url_attributes_are_changed(self):
         body=b'<html><head></head><body><p>/admin is a research quote</p><a href="/admin">Admin</a><a href="https://external.example/doc">original</a></body></html>'

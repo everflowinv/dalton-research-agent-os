@@ -9,6 +9,8 @@ but retain their separate writer principals and fail-closed authority gates.
 
 from __future__ import annotations
 
+from .shared_access_identity import is_shared_login as _is_shared_login
+
 import argparse
 import hashlib
 import json
@@ -546,7 +548,7 @@ class AgendaControlPlane:
             idempotency_key=f"agenda-dashboard-feedback:{digest}",
             subject_ref=subject,
             prior_feedback_ref=prior_ref,
-            source="tailscale_dashboard",
+            source=("shared_dashboard" if _is_shared_login(login) else "tailscale_dashboard"),
             source_event_ref=f"dashboard-feedback:{digest}",
         )
         return {"status": result.get("status"), "decision_ref": decision_ref, "verdict": verdict}
