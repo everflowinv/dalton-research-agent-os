@@ -138,7 +138,7 @@ def _execution_proof(executor,admission,works):
     return proof,draft,verifier,[item['execution_proof'] for item in result]
 
 def _record_numeric(executor,admission,works):
-    from .claim_index_figures import MissionFigureAuthorityResolver, promote_figure
+    from .claim_index_figures import MissionFigureAuthorityResolver
     from .research_auto_commit import ResearchAutoCommitRejected
     from .store import GateRejected
     from .directed_numeric_output import quotes
@@ -146,7 +146,7 @@ def _record_numeric(executor,admission,works):
     source=source_binding(executor.connection,admission['request']['registration'],admission['company_ref']);quote_map=quotes(proof)
     votes={item['target_ref']:item['verdict'] for item in verifier['output']['targets']}
     targets={item['target_ref']:item for item in admission['numeric_authority']['targets']}
-    figures=[];pending=[];claims=[]
+    figures=[];pending=[];claims=[];supports=[]
     if verifier['output']['verdict']=='reject':
         pending=[{'target_ref':ref,'reason':'independent_numeric_verifier_rejected'} for ref in targets]
     else:
@@ -167,11 +167,21 @@ def _record_numeric(executor,admission,works):
                       and f['period']==target['period'] and f['source_manifest_hash']==source['source_manifest_hash']]
             if len(matching)!=1:raise DirectedNumericError('numeric Figure identity is absent or ambiguous')
             figure=matching[0]
-            if any(figure.get(k)!=expected[k] for k in ('quote_id','metric_ref','as_reported_label','period','value','unit','currency','scale','basis')) or figure['citation_text']!=citation:
-                raise DirectedNumericError('existing Figure conflicts with exact verified numeric answer')
+            support=None
+            if (figure['quote_id']!=expected['quote_id'] or figure['citation_text']!=citation
+                    or any(figure.get(k)!=expected[k] for k in ('metric_ref','as_reported_label','period','value','unit','currency','scale','basis'))):
+                from .directed_numeric_figure_support import figure_support, NumericMeasureIdentityConflict
+                try:
+                    support=figure_support(connection=executor.connection,registry=executor.registry,
+                        admission=admission,target=target,figure=figure,search_proof=proof,
+                        draft=draft,verifier=verifier)
+                except NumericMeasureIdentityConflict as exc:
+                    pending.append({'target_ref':ref,'reason':str(exc),'measure_conflict_proof':exc.proof})
+                    continue
             resolver=MissionFigureAuthorityResolver(executor.connection)
             try:
-                staged=promote_figure(executor.authority.store,executor.staging,figure=figure,
+                from .directed_numeric_figure_support import stage_exact_figure
+                staged=stage_exact_figure(executor,figure=figure,
                     actor_ref=admission['actor_ref'],idempotency_key=f'directed-numeric-figure:{admission["id"]}:{ref}',resolver=resolver)
                 committed=executor.authority.store.commit_policy_candidate(
                     evidence=staged['evidence'],claim=staged['claim'],material=staged['material'],
@@ -182,13 +192,24 @@ def _record_numeric(executor,admission,works):
                 pending.append({'target_ref':ref,'reason':'numeric_policy_authority_unavailable','detail':str(exc)})
                 continue
             if committed['status'] not in {'fresh','duplicate'}:raise DirectedNumericError('numeric canonical commit did not converge')
+            if support is None and staged['staging']['write_status']=='duplicate':
+                from .directed_numeric_figure_support import figure_support
+                support=figure_support(connection=executor.connection,registry=executor.registry,
+                    admission=admission,target=target,figure=figure,search_proof=proof,
+                    draft=draft,verifier=verifier)
             claim_row=executor.connection.execute('SELECT content_hash FROM claim_versions WHERE claim_version_id=?',(committed['claim_version_ref'],)).fetchone()
             evidence_row=executor.connection.execute('SELECT content_hash FROM evidence_versions WHERE evidence_version_id=?',(committed['evidence_version_ref'],)).fetchone()
             if claim_row is None or evidence_row is None:raise DirectedNumericError('numeric canonical records did not persist')
-            claims.append({'target_ref':ref,'claim_version_ref':committed['claim_version_ref'],
+            claim_binding={'target_ref':ref,'claim_version_ref':committed['claim_version_ref'],
                            'claim_version_hash':claim_row['content_hash'],'evidence_version_hash':evidence_row['content_hash'],
                            'evidence_version_ref':committed['evidence_version_ref'],
-                           'review_decision_ref':committed['review_decision_ref']})
+                           'review_decision_ref':committed['review_decision_ref']}
+            if support is not None:
+                from .directed_numeric_figure_support import canonical_commit_support
+                claim_binding['canonical_commit_support']=canonical_commit_support(
+                    executor.authority.store,bundle=staged,committed=committed)
+            claims.append(claim_binding)
+            if support is not None:supports.append(support)
             figures.append({**figure,'metric_definition_hash':target['metric_definition_hash']})
     result=coverage(list(targets.values()),figures,company_ref=admission['company_ref'],
                     document_ref=admission['request']['registration']['document_ref'],source_manifest_hash=source['source_manifest_hash'])
@@ -196,7 +217,7 @@ def _record_numeric(executor,admission,works):
     material_requests=[]
     from .material_requests import open_request
     for item in result['pending_targets']:
-        if item['reason']=='numeric_policy_authority_unavailable':continue
+        if item['reason']=='numeric_policy_authority_unavailable' or 'measure_conflict_proof' in item:continue
         target=targets[item['target_ref']]
         request=open_request(Path(executor.authority.store.path).parent,
             requester={'lane':'mission_document_research','product_ref':admission['question_version_ref'],
@@ -238,6 +259,12 @@ def _record_numeric(executor,admission,works):
           'source_binding':source,'model_accounting_proofs':accounting,'draft_proof_hash':draft['content_hash'],
           'verifier_proof_hash':verifier['content_hash'],'canonical_claims':claims,'material_requests':material_requests,'resolved_material_requests':resolved_requests,**result,
           'created_at':executor.clock().isoformat()}
+    if any('measure_conflict_proof' in item for item in result['pending_targets']):
+        from .directed_numeric_figure_support import MEASURE_CONFLICT_CONTRACT
+        body['measure_conflict_contract']=MEASURE_CONFLICT_CONTRACT
+    if supports:
+        from .directed_numeric_figure_support import SUPPORT_CONTRACT
+        body.update(figure_support_contract=SUPPORT_CONTRACT,figure_supports=supports)
     body['content_hash']=content_hash(body)
     return body
 
@@ -292,13 +319,30 @@ def read_numeric_result(executor,admission,works,formal):
     claims={r['target_ref']:r for r in receipt['canonical_claims']}
     if len(completed)!=len(receipt['completed_targets']) or len(claims)!=len(receipt['canonical_claims']) or set(claims)!=set(completed):
         raise DirectedNumericError('numeric result duplicates or drops target proof')
+    supports={}
+    if 'figure_support_contract' in receipt or 'figure_supports' in receipt:
+        from .directed_numeric_figure_support import SUPPORT_CONTRACT
+        items=receipt.get('figure_supports')
+        if receipt.get('figure_support_contract')!=SUPPORT_CONTRACT or not isinstance(items,list) or not items:
+            raise DirectedNumericError('numeric Figure support contract is invalid')
+        supports={item['target_ref']:item for item in items}
+        if len(supports)!=len(items) or not set(supports).issubset(completed):
+            raise DirectedNumericError('numeric Figure support targets differ from completion')
     figures=[]
     for ref,item in completed.items():
         if ref not in supported or ref not in approved or verifier['output']['verdict']!='pass':
             raise DirectedNumericError('numeric completion lacks independent accepted target')
         target=targets[ref];figure=resolver.figure(item['figure_ref']);resolver.verify_figure(figure)
         expected=verify_numeric_candidate(supported[ref],quotes(proof),numeric_contract_ref=CONTRACT_REF)
-        if figure['content_hash']!=item['figure_hash'] or item['metric_definition_hash']!=target['metric_definition_hash'] or any(figure[k]!=expected[k] for k in ('quote_id','metric_ref','as_reported_label','period','value','unit','currency','scale','basis')) or figure['citation_text']!=quotes(proof)[expected['quote_id']]:
+        if figure['content_hash']!=item['figure_hash'] or item['metric_definition_hash']!=target['metric_definition_hash']:
+            raise DirectedNumericError('completed numeric Figure differs from source-bound typed definition')
+        if ref in supports:
+            from .directed_numeric_figure_support import verify_support
+            verify_support(supports[ref],connection=executor.connection,registry=executor.registry,
+                admission=admission,target=target,figure=figure,search_proof=proof,
+                draft=draft,verifier=verifier)
+        elif any(figure[k]!=expected[k] for k in ('quote_id','metric_ref','as_reported_label','period','value','unit','currency','scale','basis')) or figure['citation_text']!=quotes(proof)[expected['quote_id']]:
+            # Historical receipts keep their original exact-quote contract.
             raise DirectedNumericError('completed numeric Figure differs from source-bound typed definition')
         bundle=build_figure_candidate(executor.connection,figure=figure,actor_ref=admission['actor_ref'],resolver=resolver)
         committed=claims[ref]
@@ -311,16 +355,48 @@ def read_numeric_result(executor,admission,works,formal):
             value=json.loads(held[json_key]);version=version_class(value)
             if canonical_json(version)!=held[json_key] or version['content_hash']!=held['content_hash'] or held['content_hash']!=committed[hash_key]:
                 raise DirectedNumericError('numeric canonical authority bytes differ')
-        decision_row=executor.connection.execute('SELECT * FROM reviewed_candidate_commits WHERE review_decision_ref=?',(committed['review_decision_ref'],)).fetchone()
+        canonical_key=f'policy-ledger:directed-numeric:{admission["id"]}:{ref}'
+        if 'canonical_commit_support' in committed:
+            if ref not in supports:raise DirectedNumericError('numeric canonical support lacks source support contract')
+            from .directed_numeric_figure_support import canonical_commit_support
+            if not isinstance(committed['canonical_commit_support'].get('idempotency_key'),str):
+                raise DirectedNumericError('numeric canonical support has no exact origin key')
+            rebuilt=canonical_commit_support(executor.authority.store,bundle=bundle,committed=committed,
+                idempotency_key=committed['canonical_commit_support'].get('idempotency_key'))
+            if canonical_json(rebuilt)!=canonical_json(committed['canonical_commit_support']):
+                raise DirectedNumericError('numeric canonical support mapping does not replay')
+            canonical_key=rebuilt['idempotency_key']
+        elif ref in supports:
+            raise DirectedNumericError('numeric source support lacks canonical commit support')
+        decision_row=executor.connection.execute('SELECT * FROM reviewed_candidate_commits WHERE idempotency_key=? AND review_decision_ref=?',
+            (canonical_key,committed['review_decision_ref'])).fetchone()
         if decision_row is None:raise DirectedNumericError('numeric canonical admission is absent')
         decision=validate_policy_commit_decision(json.loads(decision_row['decision_json']));saved=json.loads(decision_row['result_json'])
         if (canonical_json(decision)!=decision_row['decision_json'] or canonical_json(saved)!=decision_row['result_json']
-            or decision_row['idempotency_key']!=f'policy-ledger:directed-numeric:{admission["id"]}:{ref}'
+            or decision_row['idempotency_key']!=canonical_key
             or decision_row['request_hash']!=content_hash({'decision_hash':decision['content_hash'],'evidence_hash':bundle['evidence']['content_hash'],'claim_hash':bundle['claim']['content_hash']})
             or decision_row['candidate_claim_ref']!=bundle['claim']['id'] or decision_row['candidate_evidence_ref']!=bundle['evidence']['id']
             or saved['claim_version_ref']!=committed['claim_version_ref'] or saved['evidence_version_ref']!=committed['evidence_version_ref']):
             raise DirectedNumericError('numeric canonical admission is not bound to the exact Figure')
         figures.append({**figure,'metric_definition_hash':target['metric_definition_hash']})
+    conflicts=[item for item in receipt['pending_targets'] if 'measure_conflict_proof' in item]
+    if conflicts or 'measure_conflict_contract' in receipt:
+        from .directed_numeric_figure_support import MEASURE_CONFLICT_CONTRACT, NumericMeasureIdentityConflict, figure_support
+        if receipt.get('measure_conflict_contract')!=MEASURE_CONFLICT_CONTRACT or not conflicts:
+            raise DirectedNumericError('numeric measure conflict contract is invalid')
+        for item in conflicts:
+            ref=item['target_ref']
+            if ref not in supported or ref not in approved or ref in completed or verifier['output']['verdict']!='pass':
+                raise DirectedNumericError('numeric measure conflict lacks independently verified pending target')
+            figure=resolver.figure(item['measure_conflict_proof']['figure_ref'])
+            try:
+                figure_support(connection=executor.connection,registry=executor.registry,
+                    admission=admission,target=targets[ref],figure=figure,search_proof=proof,draft=draft,verifier=verifier)
+            except NumericMeasureIdentityConflict as exc:
+                if item['reason']!=str(exc) or canonical_json(item['measure_conflict_proof'])!=canonical_json(exc.proof):
+                    raise DirectedNumericError('numeric measure conflict proof does not replay')
+            else:
+                raise DirectedNumericError('numeric measure conflict is not proved')
     replayed=coverage(list(targets.values()),figures,company_ref=admission['company_ref'],document_ref=admission['request']['registration']['document_ref'],source_manifest_hash=receipt['source_binding']['source_manifest_hash'])
     if receipt['status']!=replayed['status'] or receipt['completed_targets']!=replayed['completed_targets'] or {x['target_ref'] for x in receipt['pending_targets']}!={x['target_ref'] for x in replayed['pending_targets']}:
         raise DirectedNumericError('numeric completion declaration differs from canonical target coverage')
