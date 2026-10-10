@@ -63,3 +63,29 @@ CREATE TRIGGER IF NOT EXISTS mission_document_research_withdrawals_no_delete
 BEFORE DELETE ON mission_document_research_withdrawals BEGIN
     SELECT RAISE(ABORT, 'mission document withdrawals are append-only');
 END;
+
+-- One local-only, versioned reconciliation of existing paid numeric proofs.
+-- The existing MissionDocumentResearchAuthority owns this additive migration.
+CREATE TABLE IF NOT EXISTS mission_document_numeric_local_reconciliations (
+    admission_ref TEXT NOT NULL REFERENCES mission_document_research_admissions(admission_id),
+    repair_version TEXT NOT NULL CHECK(repair_version = 'numeric-local-figure-reconciliation:0.1'),
+    authorization_ref TEXT NOT NULL UNIQUE,
+    admission_hash TEXT NOT NULL,
+    record_json TEXT NOT NULL,
+    content_hash TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(admission_ref, repair_version)
+);
+CREATE TRIGGER IF NOT EXISTS numeric_local_reconciliations_authorized_insert
+BEFORE INSERT ON mission_document_numeric_local_reconciliations
+WHEN dalton_mission_document_research_authorized() = 0 BEGIN
+    SELECT RAISE(ABORT, 'local numeric reconciliation requires MissionDocumentResearchAuthority');
+END;
+CREATE TRIGGER IF NOT EXISTS numeric_local_reconciliations_no_update
+BEFORE UPDATE ON mission_document_numeric_local_reconciliations BEGIN
+    SELECT RAISE(ABORT, 'local numeric reconciliation is append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS numeric_local_reconciliations_no_delete
+BEFORE DELETE ON mission_document_numeric_local_reconciliations BEGIN
+    SELECT RAISE(ABORT, 'local numeric reconciliation is append-only');
+END;

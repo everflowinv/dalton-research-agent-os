@@ -259,6 +259,9 @@ def _record_numeric(executor,admission,works):
           'source_binding':source,'model_accounting_proofs':accounting,'draft_proof_hash':draft['content_hash'],
           'verifier_proof_hash':verifier['content_hash'],'canonical_claims':claims,'material_requests':material_requests,'resolved_material_requests':resolved_requests,**result,
           'created_at':executor.clock().isoformat()}
+    if 'numeric_local_reconciliation_ref' in works[3]['metadata']:
+        body['local_reconciliation']={k:works[3]['metadata'][k] for k in (
+            'numeric_local_reconciliation_ref','numeric_local_reconciliation_hash','numeric_local_reconciliation_contract')}
     if any('measure_conflict_proof' in item for item in result['pending_targets']):
         from .directed_numeric_figure_support import MEASURE_CONFLICT_CONTRACT
         body['measure_conflict_contract']=MEASURE_CONFLICT_CONTRACT
@@ -268,14 +271,30 @@ def _record_numeric(executor,admission,works):
     body['content_hash']=content_hash(body)
     return body
 
-def complete_numeric_stage(executor,admission,works):
+def complete_numeric_stage(executor,admission,works,*,failure_as_terminal=False):
     work=works[3];lease=executor.scheduler.claim(executor.actor_ref,work_order_id=work['id'])
     if lease is None:return {'status':'pending','work_order_ref':work['id']}
     executor.scheduler.validate_lease_for_use(work['id'],lease['attempt']['attempt_number'],executor.actor_ref,
         lease['lease_token'],lease_revision_ref=lease['lease']['id'],lease_hash=lease['lease']['content_hash'],work_order_hash=lease['work_order_hash'])
     row=executor.connection.execute('SELECT record_json,content_hash FROM mission_document_numeric_results WHERE admission_ref=?',(admission['id'],)).fetchone()
     if row is None:
-        body=_record_numeric(executor,admission,works)
+        try:
+            body=_record_numeric(executor,admission,works)
+        except Exception as exc:
+            if failure_as_terminal:
+                from .directed_numeric_local_reconciliation import CONTRACT
+                now=executor.clock().isoformat()
+                error={'code':'NUMERIC_LOCAL_RECONCILIATION_FAILED','message':str(exc)[:500],
+                       'retryable':False,'responsibility':'administrator'}
+                failed=ResultEnvelope(schema_version='0.1',
+                    id='result-envelope:numeric-local-reconciliation-failed:'+content_hash({'work':work['id'],'error':error})[:32],
+                    created_at=now,work_order_ref=work['id'],invocation_ref='execution:'+work['id'],
+                    status='failed',outputs={},actual_side_effects=(),usage_refs=(),artifact_refs=(),
+                    error=error,metadata={'authority_ref':admission['id'],'local_reconciliation_contract':CONTRACT}).to_dict()
+                executor.scheduler.complete(work['id'],lease['attempt']['attempt_number'],executor.actor_ref,
+                    lease['lease_token'],failed,idempotency_key=work['id']+':terminal-local-failure',
+                    result_envelope_hash=content_hash(failed))
+            raise
         with executor._transaction() as cur:
             cur.execute('INSERT INTO mission_document_numeric_results VALUES(?,?,?,?,?,?)',
                 (admission['id'],admission['content_hash'],work['id'],canonical_json(body),body['content_hash'],body['created_at']))
@@ -306,6 +325,13 @@ def read_numeric_result(executor,admission,works,formal):
     if (receipt['source_binding']!=source_binding(executor.connection,admission['request']['registration'],admission['company_ref']) or receipt['source_proof_hash']!=proof['content_hash']
         or receipt['draft_proof_hash']!=draft['content_hash'] or receipt['verifier_proof_hash']!=verifier['content_hash'] or receipt['model_accounting_proofs']!=accounting):
         raise DirectedNumericError('numeric execution receipt differs from actual source/paid proofs')
+    if 'numeric_local_reconciliation_ref' in works[3]['metadata'] or 'local_reconciliation' in receipt:
+        from .directed_numeric_local_reconciliation import verify_reconciliation_work
+        verify_reconciliation_work(executor,admission,works)
+        expected_binding={k:works[3]['metadata'][k] for k in (
+            'numeric_local_reconciliation_ref','numeric_local_reconciliation_hash','numeric_local_reconciliation_contract')}
+        if receipt.get('local_reconciliation')!=expected_binding:
+            raise DirectedNumericError('numeric local reconciliation receipt binding differs')
     resolver=MissionFigureAuthorityResolver(executor.connection)
     from .claim_index_figures import build_figure_candidate
     from .research_auto_commit import validate_policy_commit_decision

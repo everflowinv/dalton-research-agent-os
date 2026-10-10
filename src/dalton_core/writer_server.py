@@ -850,6 +850,7 @@ HUMAN_GOVERNANCE_OPERATIONS = frozenset({
     "mission_source_discoveries", "mission_discovered_documents",
     "mission_document_reviews", "resolve_mission_document_review",
     "reopen_mission_document_review",
+    "reconcile_numeric_local_figures",
     "authorize_mission_document_reentry",
     "authorize_mission_document_paid_recovery",
     "authorize_mission_document_unproved_recovery",
@@ -1391,6 +1392,7 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     "reopen_mission_document_review": frozenset({
         "review_id", "expected_review_hash", "decision_ref", "failed_windows", "actor_ref",
     }),
+    "reconcile_numeric_local_figures": frozenset({"admission_ref", "expected_admission_hash", "actor_ref"}),
     "authorize_mission_document_reentry": frozenset({"admission_ref", "actor_ref"}),
     # 2026-10-07: ``job_ref`` polls the governed job a request started.
     "authorize_mission_document_paid_recovery": frozenset({
@@ -1664,6 +1666,7 @@ OPERATION_ACTOR_FIELDS: dict[str, str] = {
     "publish_first_workspace_mission": "actor_ref",
     "resolve_mission_document_review": "actor_ref",
     "reopen_mission_document_review": "actor_ref",
+    "reconcile_numeric_local_figures": "actor_ref",
     "authorize_mission_document_reentry": "actor_ref",
     "authorize_mission_document_paid_recovery": "actor_ref",
     "authorize_mission_document_unproved_recovery": "actor_ref",
@@ -6357,6 +6360,11 @@ class WriterServer:
             failed_windows=values["failed_windows"],
             formal_reader=FailedDocumentWindowReader(self._scheduler),
         )
+
+    def _op_reconcile_numeric_local_figures(self, p: Mapping[str, Any]) -> Any:
+        # Zero-cost maintenance: never invoke run_once's model dispatch path.
+        from .directed_numeric_local_reconciliation import writer_reconcile
+        return writer_reconcile(self, dict(p))
 
     def _op_authorize_mission_document_reentry(self, p: Mapping[str, Any]) -> Any:
         # The owner's door for a document-research admission whose controlled

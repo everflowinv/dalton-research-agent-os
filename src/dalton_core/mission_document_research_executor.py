@@ -3260,7 +3260,7 @@ def _sealed_epoch_chain_root(
     return dict(work)
 
 
-def _effective_staging_work(
+def _ordinary_staging_work(
     admission: Mapping[str, Any], scheduler: Scheduler,
     registry: DocumentResearchRegistry, effective: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
@@ -3307,6 +3307,15 @@ def _effective_staging_work(
             or prior["metadata"]["upstream_work_order_ref"] != effective[2]["id"]):
         return current
     return prior
+
+
+
+def _effective_staging_work(admission, scheduler, registry, effective):
+    current = _ordinary_staging_work(admission, scheduler, registry, effective)
+    if admission.get("numeric_authority") is not None:
+        from .directed_numeric_local_reconciliation import effective_reconciliation_work
+        return effective_reconciliation_work(admission,scheduler,registry,effective,current)
+    return current
 
 
 def validate_mission_document_work_authority(authority, scheduler, work, *, worker=None):
