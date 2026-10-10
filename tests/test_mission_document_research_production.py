@@ -715,7 +715,10 @@ class MissionDocumentResearchProductionTests(unittest.TestCase):
             self.assertEqual(resumed["status"], "resumed", resumed)
             resumed_exit=launcher.wait(timeout=60)
             self.assertEqual(resumed_exit, 0, _child_diagnostics(launcher,resumed["ticket_ref"]) if resumed_exit else None)
-            self.assertEqual(coordinator.dispatch_once()["status"], "idle")
+            after_resume = coordinator.dispatch_once()
+            self.assertEqual(after_resume["status"], "idle", canonical_json(after_resume)
+                             + _child_diagnostics(launcher,resumed["ticket_ref"])
+                             if after_resume["status"] != "idle" else None)
         # One capped no-send Work, one fresh authorized draft, one verifier.
         self.assertEqual(len(broker.requests), 3)
         self.assertEqual(len({item["workOrderId"] for item in broker.requests}), 3)
