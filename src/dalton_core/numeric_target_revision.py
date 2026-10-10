@@ -27,6 +27,37 @@ def target_scope(targets: Any) -> list[list[Any]]:
     return sorted(rows, key=lambda row: tuple('' if v is None else v for v in row))
 
 
+def _zero_answer_parent(parent: Mapping[str, Any], result: Mapping[str, Any]) -> bool:
+    """Shared prerequisite, not permission to change an inquiry or call a model."""
+    old_authority = parent.get('numeric_authority')
+    return bool(old_authority and result.get('numeric_authority') == old_authority
+        and not result.get('completed_targets') and not result.get('canonical_claims')
+        and {t['target_ref'] for t in result['pending_targets']}
+            == {t['target_ref'] for t in old_authority['targets']}
+        and old_authority.get('target_revision_proof') is None)
+
+
+def _revision_consumers(connection, *, company_ref, admission_ref, numeric_result_hash):
+    # Withdrawn consumers remain present and still spend the one revision.
+    return connection.execute(
+        "SELECT admission_id FROM mission_document_research_admissions WHERE company_ref=? "
+        "AND json_extract(record_json,'$.numeric_authority.target_revision_proof.admission_ref')=? "
+        "AND json_extract(record_json,'$.numeric_authority.target_revision_proof.numeric_result_hash')=? "
+        "ORDER BY created_at, admission_id",
+        (company_ref, admission_ref, numeric_result_hash)).fetchall()
+
+
+def revision_source_candidate(connection, parent, result, numeric_result_hash) -> bool:
+    """Planning hint only, after the caller's strong admission/final-result replay.
+
+    A new inquiry still needs _proof_for's mission/company/question/source and
+    operative-target checks, and the writer's transaction-time consumption CAS.
+    """
+    return bool(result.get('status') == 'waiting_evidence'
+        and _zero_answer_parent(parent, result)
+        and not _revision_consumers(connection, company_ref=parent['company_ref'],
+            admission_ref=parent['id'], numeric_result_hash=numeric_result_hash))
+
 def _proof_for(authority, mission_ref: str, inquiry: Mapping[str, Any], admission_ref: str):
     strategy = inquiry.get('directed_document') or {}
     if strategy.get('strategy_version') != CONTRACT_REF:
@@ -44,15 +75,9 @@ def _proof_for(authority, mission_ref: str, inquiry: Mapping[str, Any], admissio
     if pending is None:
         return None
     result = pending['result']
-    old_authority = parent.get('numeric_authority')
-    if (not old_authority or result.get('numeric_authority') != old_authority
-            or result.get('completed_targets') or result.get('canonical_claims')
-            or {t['target_ref'] for t in result['pending_targets']}
-                != {t['target_ref'] for t in old_authority['targets']}):
+    if not _zero_answer_parent(parent, result):
         return None
-    # A revision of a revision cannot buy another round of the same inquiry.
-    if old_authority.get('target_revision_proof') is not None:
-        return None
+    old_authority = parent['numeric_authority']
     old_scope, new_scope = target_scope(old_authority['targets']), target_scope(strategy['numeric_targets'])
     if not ({tuple(row[1:]) for row in new_scope} - {tuple(row[1:]) for row in old_scope}):
         return None  # deleting unresolved targets is not a revision either.
@@ -122,12 +147,8 @@ def revision_consumer(authority, proof, *, company_ref):
     All admissions count, including withdrawn ones. A withdrawal must not
     silently replenish the same source-result's paid revision allowance.
     """
-    rows = authority.connection.execute(
-        "SELECT admission_id FROM mission_document_research_admissions WHERE company_ref=? "
-        "AND json_extract(record_json,'$.numeric_authority.target_revision_proof.admission_ref')=? "
-        "AND json_extract(record_json,'$.numeric_authority.target_revision_proof.numeric_result_hash')=? "
-        "ORDER BY created_at, admission_id",
-        (company_ref, proof['admission_ref'], proof['numeric_result_hash'])).fetchall()
+    rows = _revision_consumers(authority.connection, company_ref=company_ref,
+        admission_ref=proof['admission_ref'], numeric_result_hash=proof['numeric_result_hash'])
     if not rows:
         return None
     record = authority.admission(rows[0][0])

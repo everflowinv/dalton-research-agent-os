@@ -30,7 +30,7 @@ class CompletedContextProjectionTests(unittest.TestCase):
                        'not numeric/formula authority','ALL numeric_targets','period/unit/currency/basis',
                        'independent original verification is required','No identical paid retry',
                        'copy document/version/result hashes exactly','not a human gate','Inventing either voids the whole plan',
-                       'you may not decide a lower count is enough','Never move its replaces_numeric_rejection binding across document/version',
+                       'invent no item or lower sufficient count','Never move its replaces_numeric_rejection binding across document/version',
                        'money uses unit currency with currency USD','a duration uses years with null currency'):
             self.assertIn(phrase,text)
         self.assertIn('OUTPUT_SCHEMA='+canonical_json(OUTPUT_SCHEMA),text)

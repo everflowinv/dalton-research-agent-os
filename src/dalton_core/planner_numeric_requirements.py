@@ -117,6 +117,8 @@ def numeric_waiting_targets(feedback: Sequence[Mapping[str, Any]]) -> dict[str, 
             row = {'target_ref': ref, 'reason': reason[:180],
                    'document_ref': observation['document_ref'], 'document_version_hash': version,
                    'numeric_result_hash': observation['numeric_result_hash']}
+            if observation.get('target_revision_candidate') is True:
+                row['target_revision_candidate'] = True
             if len(reason) > 180:
                 row.update(reason_excerpted=True, full_reason_hash=content_hash(reason))
             pending.append(row)

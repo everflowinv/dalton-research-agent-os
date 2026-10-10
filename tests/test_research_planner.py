@@ -310,10 +310,10 @@ class PromptTests(unittest.TestCase):
 
     def test_company_ir_is_public_web_material_not_a_connector(self):
         prompt = build_prompt(state())
-        self.assertIn("`source:company-ir` names first-party material", prompt)
-        self.assertIn("it is not a separate connector", prompt)
-        self.assertIn("existing public-web search and fetch path", prompt)
-        self.assertIn("Never tell the user to connect or approve a company-IR source", prompt)
+        self.assertIn("`source:company-ir` is first-party investor-relations material", prompt)
+        self.assertIn("not a separate connector", prompt)
+        self.assertIn("existing public-web search/fetch only when connected and approved", prompt)
+        self.assertIn("never ask to connect/approve company-IR", prompt)
 
     @staticmethod
     def document(company_ref, number, *, preview_bytes, reviewed=False):
@@ -381,7 +381,7 @@ class PromptTests(unittest.TestCase):
             meta["preview_triplets_total"],
             meta["preview_triplets_retained"] + meta["preview_triplets_omitted"],
         )
-        self.assertIn("without original_preview was not shown", prompt)
+        self.assertIn("no original_preview means content was not shown", prompt)
 
         original_ids = [
             (document["document_ref"], document["document_version_hash"])
@@ -992,8 +992,8 @@ class InquiryTests(unittest.TestCase):
 
     def test_the_prompt_says_the_standard_is_not_the_planner_to_change(self):
         prompt = build_prompt(state())
-        self.assertIn("fixed standard", prompt)
-        self.assertIn("you may not decide a lower count is enough", prompt)
+        self.assertIn("checklist is fixed", prompt)
+        self.assertIn("invent no item or lower sufficient count", prompt)
         self.assertIn("inquiries", prompt)
 
 

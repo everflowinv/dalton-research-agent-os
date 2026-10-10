@@ -545,7 +545,9 @@ class RecoveryCardTests(unittest.TestCase):
         self.assertEqual(epam["entry"]["mode"], "admin")
         self.assertEqual(epam["entry"]["href"], "/admin#run")
         self.assertEqual([a["door"] for a in epam["entry"]["actions"]], ["reentry", "withdraw"])
-        self.assertIn("恢复专项课题研究", epam["action"])
+        self.assertFalse(epam["actionable"])
+        self.assertEqual(epam["responsibility"], "administrator")
+        self.assertIn("管理员检查执行凭证", epam["action"])
         self.assertNotIn("待决事项", json.dumps(epam["entry"], ensure_ascii=False))
         msft = cards["mission-document-research-admission:5a2365a22059a0000000000000000000"]
         self.assertEqual([a["door"] for a in msft["entry"]["actions"]], ["withdraw"])

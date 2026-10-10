@@ -369,6 +369,9 @@ def numeric_feedback(connection,mission_version_ref):
             result['resolved_numeric_rejections'] = [
                 {k: proof[k] for k in ('admission_ref','admission_hash','rejection_ref','rejection_hash')}
                 for proof in admission['numeric_authority'].get('capability_upgrade_proofs', ())]
+        from .numeric_target_revision import revision_source_candidate
+        if revision_source_candidate(connection, admission, value, digest):
+            result['target_revision_candidate'] = True
         result['content_hash']=content_hash(result);results.append(result)
     return results
 

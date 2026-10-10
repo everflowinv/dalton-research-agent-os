@@ -293,8 +293,8 @@ class PlannerStateTests(unittest.TestCase):
         self.assertIn("reading_pipeline", PROMPT_PROJECTION_RULE["company_core_fields"])
         prompt = build_prompt({"companies": [], "totals": {}})
         self.assertIn("not a human gate", prompt)
-        self.assertIn("Assess incomplete reading/figures by the exact automatic step and cause, never vague depth", prompt)
-        self.assertIn("Never order `extract_figures` for quarterly_financials lines/segments already held there", prompt)
+        self.assertIn("Diagnose incomplete reading/figures by exact automatic step and cause, never vague depth", prompt)
+        self.assertIn("Never order `extract_figures` for held quarterly lines/segments", prompt)
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -1627,6 +1627,30 @@ def _reentry_sentence(attempt: Mapping[str, Any] | None) -> str:
     return ""
 
 
+def _technical_reentry_exhaustion(item: dict[str, Any]) -> dict[str, Any]:
+    """Classify the lane's exact exhausted re-entry refusal, not arbitrary prose.
+
+    This is an execution hand-off, not a request for an analyst to buy sources.
+    Keep the existing recovery doors and uncertain accounting records intact.
+    """
+
+    detail = item.get("detail") or {}
+    if (detail.get("lane") != "mission_document_research"
+            or detail.get("reason") != REENTRY_REBOUND_REASON
+                + ":controlled reentry was already attempted"):
+        return item
+    company = detail.get("company") or "研究任务"
+    item.update(
+        title=f"{company}：自动恢复仍未完成，等待管理员检查",
+        why_blocked="系统已自动更新执行凭证并尝试恢复，但该次恢复已经用过，研究尚未完成。",
+        action="管理员检查执行凭证和已记录的失败，再按技术详情中的既有恢复条件处理；原调用与费用记录保留。",
+        consequence="这项研究仍未形成答案；不会因此自动增加恢复次数或费用额度。",
+        where=ADMIN_RUN_WHERE, actionable=False,
+        responsibility="administrator", status="system_repair_pending",
+    )
+    return item
+
+
 def _escalated_hold_item(
     lane: str, hold: Mapping[str, Any], *, at: str, path: str,
     subject: Mapping[str, Any] | None = None, door_used: bool = False,
@@ -1707,7 +1731,7 @@ def _escalated_hold_item(
     if automatic is not None:
         title = (f"系统将自动重试：{company} · {_summary(question)}" if question
                  else f"系统将自动重试：{company} 的一项原文专题研究")
-    return _item(
+    return _technical_reentry_exhaustion(_item(
         "controlled_recovery", ref=f"lane:{lane}:{admission_ref}", at=at,
         title=title,
         why=(f"「{lane_label(lane)}」里这项研究任务已停下，原因：{reason_label}。" + why),
@@ -1731,7 +1755,7 @@ def _escalated_hold_item(
                 # 2026-10-06: the page offers the stop button itself (the
                 # same withdraw door, through the writer, with a receipt).
                 "stop_line": stoppable},
-    )
+    ))
 
 
 def _numeric_contract_system_item(core, lane, hold, *, at, path, subject):
@@ -1955,7 +1979,7 @@ def held_lanes(
             instructions, action = action, (
                 "这一步没有页面按钮：需要技术管理员在本机执行一条授权命令；"
                 "具体做法和命令见技术详情。")
-        out.append(_item(
+        out.append(_technical_reentry_exhaustion(_item(
             "controlled_recovery", ref=f"lane:{lane}", at=at,
             title=(f"「{lane_label(lane)}」自动重试过一次仍然失败，等你决定" if retried
                    else f"「{lane_label(lane)}」停着等授权"),
@@ -1969,7 +1993,7 @@ def held_lanes(
                     "reason_label": hold_reason_label(reason),
                     "held": value.get("held"),
                     **({"instructions": instructions} if instructions else {})},
-        ))
+        )))
     return out
 
 

@@ -333,7 +333,8 @@ class LaneTests(unittest.TestCase):
         self.assertEqual(group["detail"]["escalated"], 1)
         self.assertEqual(group["detail"]["holds_path"], str(path))
         self.assertEqual(group["detail"]["status"], "resumed")
-        self.assertIn("本轮在处理另一条研究任务", group["why_blocked"])
+        self.assertIn("等待管理员检查", group["why_blocked"])
+        self.assertFalse(group["actionable"])
         # The legacy stop the lane re-enters by itself says so.
         self.assertIsNotNone(items[1]["detail"]["automatic_retry"])
 
