@@ -1099,6 +1099,14 @@ def parse_suggestions(text: str, context: Mapping[str, Any], *, tolerant: bool =
         wire = json.loads(unwrap_model_json(text), object_pairs_hook=pairs)
     except (ValueError, TypeError) as exc:
         raise ResearchVerificationError("suggestion output is not strict JSON") from exc
+    # A provider sometimes emits the JSON number 0.1 for the declared string
+    # version. Only the live tolerant reader normalizes that exact number;
+    # strict edited/staged input and every other envelope rule stay unchanged.
+    # The recorded raw Result text and its hash are never rewritten here.
+    if (tolerant and isinstance(wire, dict)
+            and type(wire.get("schema_version")) is float
+            and wire["schema_version"] == 0.1):
+        wire = {**wire, "schema_version": "0.1"}
     if (not isinstance(wire, dict) or set(wire) != {"schema_version", "suggestions"}
             or wire["schema_version"] != "0.1" or not isinstance(wire["suggestions"], list)
             or len(wire["suggestions"]) > 5):
