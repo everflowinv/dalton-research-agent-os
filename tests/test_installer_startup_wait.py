@@ -17,7 +17,7 @@ END = "# Validate every independently verified model pair"
 
 class InstallerStartupWaitTests(unittest.TestCase):
     def _run(self, *, timeout: str, healthy_on: int | None,
-             health_delay: str = "0.1"):
+             health_delay: str = "0.1", sleeps: list[float] | None = None):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             venv = root / "venv"
@@ -36,7 +36,7 @@ class InstallerStartupWaitTests(unittest.TestCase):
             fake_bin = root / "bin"
             fake_bin.mkdir()
             sleep = fake_bin / "sleep"
-            sleep.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            sleep.write_text('#!/bin/sh\necho "$1" >> "$SLEEPS"\nexit 0\n', encoding="utf-8")
             sleep.chmod(0o755)
             source = INSTALL.read_text(encoding="utf-8")
             fragment = source[source.index(START):source.index(END)]
@@ -46,7 +46,7 @@ class InstallerStartupWaitTests(unittest.TestCase):
                 "wait_for_healthy_runtime",
             ])
             env = {**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}",
-                   "CALLS": str(calls), "DALTON_STARTUP_TIMEOUT_SECONDS": timeout,
+                   "CALLS": str(calls), "SLEEPS": str(root / "sleeps"), "DALTON_STARTUP_TIMEOUT_SECONDS": timeout,
                    "HEALTH_DELAY": health_delay}
             if healthy_on is not None:
                 env["HEALTHY_ON"] = str(healthy_on)
@@ -54,6 +54,8 @@ class InstallerStartupWaitTests(unittest.TestCase):
                 ["zsh", "-c", command], text=True, capture_output=True, env=env,
                 timeout=10)
             count = int(calls.read_text()) if calls.exists() else 0
+            if sleeps is not None and (root / "sleeps").exists():
+                sleeps.extend(float(line) for line in (root / "sleeps").read_text().splitlines())
             return completed, count
 
     def test_configured_wait_reaches_a_late_healthy_tick(self):
@@ -71,11 +73,16 @@ class InstallerStartupWaitTests(unittest.TestCase):
         # old sleep-counter loop would always wait a separate two seconds
         # before its final diagnostic.
         before = __import__("time").monotonic()
+        sleeps = []
         completed, calls = self._run(
-            timeout="1", healthy_on=None, health_delay="0.6")
+            timeout="1", healthy_on=None, health_delay="0.6", sleeps=sleeps)
         elapsed = __import__("time").monotonic() - before
         self.assertNotEqual(completed.returncode, 0)
-        self.assertEqual(calls, 2)
+        # Scheduling and sleep granularity can produce an extra final probe.
+        # The actual guarantee is deadline accounting: every requested sleep
+        # fits the remaining one-second deadline, never the old fixed 2s.
+        self.assertIn(calls, (2, 3))
+        self.assertTrue(all(0 < delay < 1 for delay in sleeps), sleeps)
         self.assertLess(elapsed, 2.4)
 
     def test_invalid_timeout_is_refused_before_health(self):

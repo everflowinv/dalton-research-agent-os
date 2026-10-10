@@ -23,7 +23,7 @@ jobs:
     env:
       PYTHONUNBUFFERED: "1"
       PYTHONDONTWRITEBYTECODE: "1"
-      DALTON_TEST_DIAGNOSTICS_DIR: ${{ runner.temp }}/dalton-test-diagnostics
+      DALTON_TEST_DIAGNOSTICS_DIR: /tmp/dalton-test-diagnostics
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -51,6 +51,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: subprocess-diagnostics-py${{ matrix.python-version }}-${{ github.sha }}
-          path: ${{ runner.temp }}/dalton-test-diagnostics
+          path: /tmp/dalton-test-diagnostics
           if-no-files-found: warn
           retention-days: 7

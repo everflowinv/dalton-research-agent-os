@@ -13,6 +13,22 @@ from dalton_core.migrations.projection_indexes import (
 from tests import test_scheduler as fixture
 
 
+def expression_cover_probe():
+    """Independent engine capability, not the production fold/index SQL."""
+    with sqlite3.connect(':memory:') as probe:
+        probe.execute('CREATE TABLE capability_probe(identity TEXT,payload TEXT)')
+        payload=json.dumps({'capabilities':['read','核验'], 'body':'x'*20000},ensure_ascii=False)
+        probe.execute('INSERT INTO capability_probe VALUES(?,?)',('synthetic',payload))
+        probe.execute("CREATE INDEX expression_probe ON capability_probe(identity,json_extract(payload,'$.capabilities'))")
+        sql="SELECT identity,json_extract(payload,'$.capabilities') FROM capability_probe INDEXED BY expression_probe"
+        values=probe.execute(sql).fetchall()
+        opcodes=probe.execute('EXPLAIN '+sql).fetchall()
+        rootpage=probe.execute("SELECT rootpage FROM sqlite_master WHERE name='capability_probe'").fetchone()[0]
+        cursors={r[2] for r in opcodes if r[1]=='OpenRead' and r[3]==rootpage}
+        raw_reads=[r for r in opcodes if r[1]=='Column' and r[2] in cursors]
+        return values,raw_reads
+
+
 class WorkOrderCoverTests(unittest.TestCase):
     def setUp(self):
         clear_folds()
@@ -50,13 +66,26 @@ class WorkOrderCoverTests(unittest.TestCase):
         sql = _WORK_ORDER_FOLD._cold_select(self.c)
         plan = [r[3] for r in self.c.execute('EXPLAIN QUERY PLAN ' + sql, (0,))]
         self.assertTrue(any('USING INDEX ' + SPEC.name in p or 'USING COVERING INDEX ' + SPEC.name in p for p in plan), plan)
+        self.assertEqual(before, list(self.c.execute('SELECT work_order_id,created_at,work_order_json FROM scheduler_work_orders ORDER BY rowid')))
+
+    def test_expression_cover_probe_preserves_values_on_every_engine(self):
+        values,_=expression_cover_probe()
+        self.assertEqual(len(values),1)
+        self.assertEqual(values[0][0],'synthetic')
+        self.assertEqual(json.loads(values[0][1]),['read','核验'])
+
+    def test_supported_engine_reads_no_historic_json_column(self):
+        _,raw_reads=expression_cover_probe()
+        if raw_reads:
+            self.skipTest(f'SQLite {sqlite3.sqlite_version}: independent expression-cover probe rereads the source table; cold-cover optimization unavailable')
+        ensure_indexes(self.c,[SPEC])
+        sql=_WORK_ORDER_FOLD._cold_select(self.c)
         # Expression indexes may open a deferred table cursor; prove no Column
         # reads that cursor, so no historic work_order_json page is fetched.
         opcodes = list(self.c.execute('EXPLAIN ' + sql, (0,)))
         rootpage = self.c.execute("SELECT rootpage FROM sqlite_master WHERE name='scheduler_work_orders'").fetchone()[0]
         table_cursors = {r[2] for r in opcodes if r[1]=='OpenRead' and r[3]==rootpage}
         self.assertFalse(any(r[1]=='Column' and r[2] in table_cursors for r in opcodes))
-        self.assertEqual(before, list(self.c.execute('SELECT work_order_id,created_at,work_order_json FROM scheduler_work_orders ORDER BY rowid')))
 
     def test_warm_append_retains_exact_rowid_seek(self):
         ensure_indexes(self.c, [SPEC])

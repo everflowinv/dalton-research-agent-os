@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 import tempfile
 import unittest
 from datetime import timedelta, datetime, timezone
@@ -155,11 +156,11 @@ class DeploymentModelPairTests(unittest.TestCase):
         for settings in cases:
             with self.subTest(settings=settings):
                 result = subprocess.run(["/bin/zsh", "-s"], input=prefix, text=True,
-                                        capture_output=True, env={"PATH": "/usr/bin:/bin", **settings})
+                                        capture_output=True, env={"PATH": "/usr/bin:/bin", "PYTHON_SOURCE": sys.executable, **settings})
                 self.assertEqual(result.returncode, 2, result.stderr)
                 self.assertNotIn("PRECHECK_OK", result.stdout)
         result = subprocess.run(["/bin/zsh", "-s"], input=prefix, text=True,
-                                capture_output=True, env={"PATH": "/usr/bin:/bin",
+                                capture_output=True, env={"PATH": "/usr/bin:/bin", "PYTHON_SOURCE": sys.executable,
                                     "DALTON_DOSSIER_MODEL_TIER": "brain",
                                     "DALTON_DOSSIER_VERIFIER_MODEL_TIER": "verifier"})
         self.assertEqual(result.returncode, 0, result.stderr)
