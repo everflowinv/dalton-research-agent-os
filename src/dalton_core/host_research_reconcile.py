@@ -40,20 +40,23 @@ def selections(desired):
         yield {'purpose': subject, 'thinking_level': entry['level'], 'reason': entry['reason']}
 
 
-def consumer_policies(environment):
-    from .model_selection import model_configs, _runtime_policy_config, ModelSelectionError
+def _consumer_policy_bindings(environment):
+    from .model_selection import model_configs, _runtime_policy_config, ModelSelectionError, RETIRED_PURPOSES
     from .model_router import ModelRouter
     from .store import content_hash
-    pins = model_configs(environment.state_dir)
+    pins = [(pin, None) for pin in model_configs(environment.state_dir)]
     for purpose in ('plan', 'human_intent', 'agenda_planning', 'thesis_impact_assessment', 'thesis_impact_verifier'):
+        if purpose in RETIRED_PURPOSES:
+            continue
         try:
             runtime = _runtime_policy_config(environment.state_dir, purpose)
         except ModelSelectionError:
             runtime = None
         if runtime is not None:
-            pins.append(runtime)
+            pins.append((runtime, purpose))
     policies = {}
-    for pin in pins:
+    bindings = []
+    for pin, purpose in pins:
         config = pin.get('runtime_config', pin['config'])
         router_db = pin.get('router_db', config.get('model_router_db'))
         ref = config[pin.get('field', 'routing_policy_ref')]
@@ -66,6 +69,14 @@ def consumer_policies(environment):
             if policy.get('content_hash') != content_hash({k: v for k, v in policy.items() if k != 'content_hash'}):
                 raise settings.HostSettingsError('模型策略内容校验失败')
             policies[key] = policy
+        bindings.append((policies[key], purpose))
+    return bindings
+
+
+def consumer_policies(environment):
+    policies = {}
+    for policy, _ in _consumer_policy_bindings(environment):
+        policies[policy["policy_version_ref"]] = policy
     return list(policies.values())
 
 
@@ -83,8 +94,15 @@ def policy_matches(policy, params):
             and (params['mode'] != 'explicit' or entry.get('chain') == params['chain']))
 
 
-def selection_landed(environment, params, policies=None):
-    policies = consumer_policies(environment) if policies is None else policies
+def selection_landed(environment, params, bindings=None):
+    # Registered lane configs are repointed by every normal selection save.
+    # A resident service pin is repointed only for its own purpose/tier.
+    # Check that exact scope rather than requiring unrelated runtime pins to
+    # carry selections that the ordinary writer intentionally did not publish.
+    from .model_fallback_chain import tier_for
+    bindings = _consumer_policy_bindings(environment) if bindings is None else bindings
+    policies = [policy for policy, purpose in bindings if purpose is None or
+                (tier_for(purpose) == params['tier'] if 'tier' in params else purpose == params['purpose'])]
     return bool(policies) and all(policy_matches(policy, params) for policy in policies)
 
 
@@ -123,9 +141,9 @@ def _sync_shared(manager, desired):
 
 def pending(environment, manager, desired):
     problems = []
-    policies = consumer_policies(environment)
+    bindings = _consumer_policy_bindings(environment)
     for params in selections(desired):
-        if not selection_landed(environment, params, policies):
+        if not selection_landed(environment, params, bindings):
             problems.append('model')
             break
     budget = desired['research_budget']
@@ -176,11 +194,11 @@ def reconcile_writer(server):
         if environment is None:
             raise settings.HostSettingsError('当前研究项目不属于共用设置的主机')
         _sync_shared(manager, desired)
-        policies = consumer_policies(environment)
+        bindings = _consumer_policy_bindings(environment)
         for params in selections(desired):
-            if not selection_landed(environment, params, policies):
+            if not selection_landed(environment, params, bindings):
                 server._op_set_model_selection({**params, 'actor_ref': desired['actor_ref']})
-                policies = consumer_policies(environment)
+                bindings = _consumer_policy_bindings(environment)
         budget = desired['research_budget']
         row = server.store.connection.execute('SELECT mission_ref FROM coverage_mission_pointer ORDER BY updated_at DESC LIMIT 1').fetchone()
         if budget is not None and row is not None:

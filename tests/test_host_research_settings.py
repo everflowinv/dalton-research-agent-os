@@ -96,6 +96,70 @@ class HostSettingsTests(unittest.TestCase):
         server._reload_planner_model_config=lambda:(True,'applied')
         return server
 
+    def _separate_runtime_pins(self):
+        model=json.loads((self.state/'research-planner-model-config.json').read_text())
+        original=self.router.get_policy(model['routing_policy_ref'])
+        refs={}
+        for name in ('plan','intent','retired'):
+            body={k:v for k,v in original.items() if k!='content_hash'}
+            body.update(id='policy:host-'+name, policy_version_ref='model-routing-policy-version:host-'+name+':1',
+                        version=1, prior_version_ref=None)
+            if name != 'retired':
+                body['fallback_chains']={'tiers':{'brain':original['fallback_chains']['tiers']['brain']}}
+                body.pop('purpose_overrides',None);body.pop('thinking_level_overrides',None)
+            wire={**body,'content_hash':content_hash(body)}
+            self.router.register_policy(wire);refs[name]=wire['policy_version_ref']
+        self.service['bounded_planner']['config']['planner_routing_policy_ref']=refs['plan']
+        self.service['control']['config']['intent_composer']={
+            'routing_policy_ref':refs['intent'],'model_router_db':model['model_router_db'],
+            'credential_slot_refs':model['credential_slot_refs']}
+        self.service['agenda']={'enabled':False,'config':{'routing_policy_ref':refs['retired'],
+            'model_router_db':model['model_router_db']}}
+        write_owner_only(self.workspace.config_path,self.service)
+        return refs
+
+    def test_separate_runtime_lineages_match_only_normal_writer_selection_scope(self):
+        refs=self._separate_runtime_pins();retired=self.router.get_policy(refs['retired'])
+        desired=self.seed()
+        for selection in ({'tier':'brain','mode':'explicit','chain':['profile:gpt-6-astra']},
+                          {'tier':'cheap','mode':'explicit','chain':['profile:deepseek-v4-flash']},
+                          {'purpose':'document_extraction','mode':'explicit','chain':['profile:gpt-6-astra']}):
+            desired=settings.save(self.manager,actor_ref='human:owner',expected_hash=desired['content_hash'],
+                selection=selection,source_state_dir=self.state)['desired']
+        reconcile.reconcile_writer(self.writer())
+        self.assertEqual('applied',reconcile.status(self.manager)['status'])
+        service=json.loads(self.workspace.config_path.read_text())
+        runtime=self.router.get_policy(service['bounded_planner']['config']['planner_routing_policy_ref'])
+        self.assertEqual(['profile:gpt-6-astra'],runtime['fallback_chains']['tiers']['brain'])
+        self.assertNotIn('cheap',runtime['fallback_chains']['tiers'])
+        self.assertNotIn('document_extraction',runtime.get('purpose_overrides',{}))
+        self.assertEqual(retired,self.router.get_policy(refs['retired']))
+        self.assertEqual(refs['retired'],service['agenda']['config']['routing_policy_ref'])
+        before=self.router.connection.execute('SELECT policy_json FROM model_routing_policy_versions ORDER BY rowid').fetchall()
+        config_before=self.workspace.config_path.read_bytes()
+        reconcile.reconcile_writer(self.writer())
+        self.assertEqual(before,self.router.connection.execute('SELECT policy_json FROM model_routing_policy_versions ORDER BY rowid').fetchall())
+        self.assertEqual(config_before,self.workspace.config_path.read_bytes())
+        # A relevant runtime mismatch still blocks; no ordinary fallback or
+        # unrelated registered policy can certify an old planner pin.
+        service['bounded_planner']['config']['planner_routing_policy_ref']=refs['plan']
+        write_owner_only(self.workspace.config_path,service)
+        with self.assertRaises(settings.HostSettingsError):reconcile.assert_reconciled(self.state)
+
+    def test_explicit_runtime_purpose_and_thinking_are_still_required(self):
+        self._separate_runtime_pins();desired=self.seed()
+        for selection in ({'purpose':'human_intent','mode':'explicit','chain':['profile:gpt-6-astra']},
+                          {'purpose':'human_intent','thinking_level':'medium','reason':'核对明确指令'}):
+            desired=settings.save(self.manager,actor_ref='human:owner',expected_hash=desired['content_hash'],
+                selection=selection,source_state_dir=self.state)['desired']
+        with self.assertRaises(settings.HostSettingsError):reconcile.assert_reconciled(self.state)
+        reconcile.reconcile_writer(self.writer())
+        self.assertEqual('applied',reconcile.status(self.manager)['status'])
+        service=json.loads(self.workspace.config_path.read_text())
+        policy=self.router.get_policy(service['control']['config']['intent_composer']['routing_policy_ref'])
+        self.assertEqual(['profile:gpt-6-astra'],policy['purpose_overrides']['human_intent']['chain'])
+        self.assertEqual('medium',policy['thinking_level_overrides']['human_intent']['level'])
+
     def test_seed_preserves_formal_authorities_and_records_strong_creation_defaults(self):
         before = self.store.connection.execute('SELECT record_json FROM coverage_mission_versions').fetchall()
         desired = self.seed()

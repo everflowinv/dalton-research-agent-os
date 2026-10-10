@@ -141,16 +141,13 @@ class MissionDocumentModelAuthorityTests(unittest.TestCase):
 
     def test_cold_changed_snapshot_retries_normal_read_and_preserves_policy(self):
         from unittest.mock import patch
-        from contextlib import contextmanager
         fixture=self._fixture()
         module,flaky,opens=self._flaky_budget(1,sqlite3.OperationalError('read_only WAL requires existing WAL/SHM; no sidecars were created'))
         waits=[]
         flaky.policy_from_connection=module.ThesisImpactBudgetStore.policy_from_connection
-        @contextmanager
-        def changed(_path):
-            yield fixture.budget.connection
-            raise sqlite3.OperationalError('cold WAL authority changed during immutable snapshot')
-        with patch.object(module,'ThesisImpactBudgetStore',flaky),patch('dalton_core.readonly_sqlite.connect_cold_wal_snapshot',changed):
+        with patch.object(module,'ThesisImpactBudgetStore',flaky),patch(
+            'dalton_core.budget_policy_snapshot.read_checkpointed_budget_policy',
+            side_effect=sqlite3.OperationalError('cold WAL authority changed during immutable snapshot')):
             actual=module._installed_budget_policy(fixture.budget.path,'budget-policy:mission-annual:1',stage='draft',sleep=waits.append)
         self.assertEqual(actual,fixture.budget.policy('budget-policy:mission-annual:1'))
         self.assertEqual((len(opens),waits),(2,[0.5]))

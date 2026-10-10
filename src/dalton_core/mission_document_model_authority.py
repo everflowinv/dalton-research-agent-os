@@ -103,18 +103,13 @@ def _installed_budget_policy(
                 isinstance(exc, sqlite3.OperationalError)
                 and "wal requires existing wal/shm" in str(exc).lower()
             ):
-                # A clean shutdown checkpoints WAL and removes its sidecars.
-                # Ordinary mode=ro cannot open that file without creating SHM.
-                # Read only the immutable policy row through a guarded cold
-                # snapshot; live usage/accounting never takes this path.
+                # Closed writers may leave no sidecars or an empty WAL only.
+                # Read only the immutable registered policy under full file
+                # guards; live usage/accounting never takes this path.
                 try:
-                    from .readonly_sqlite import connect_cold_wal_snapshot
+                    from .budget_policy_snapshot import read_checkpointed_budget_policy
 
-                    with connect_cold_wal_snapshot(budget_db) as connection:
-                        connection.row_factory = sqlite3.Row
-                        return ThesisImpactBudgetStore.policy_from_connection(
-                            connection, policy_ref
-                        )
+                    return read_checkpointed_budget_policy(budget_db, policy_ref)
                 except Exception as cold_exc:
                     exc = cold_exc
             if attempt < _BUDGET_RETRY_ATTEMPTS and _budget_read_is_retryable(exc):
