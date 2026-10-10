@@ -131,8 +131,16 @@ def record(router: Any, *, work: Any, route: Mapping[str, Any], profile: Mapping
         raise ValueError('output-contract failure observation is in the future')
     if now >= until:
         return None
+    purpose = (work.metadata or {}).get('purpose')
+    # This immutable task predates metadata.purpose. Its trusted worker and
+    # router already use this exact purpose; do not rewrite historical Work.
+    if purpose is None and (work.metadata or {}).get('task_ref') in {
+            'model-task:mission-document-extraction:0.1',
+            'task:document-numeric-extraction:0.1',
+            'task:metric-discovery-extraction:0.2'}:
+        purpose = 'document_extraction'
     binding = scope(profile, policy_ref=route['policy_version_ref'], policy_hash=route['policy_hash'],
-                    purpose=(work.metadata or {}).get('purpose'), budget=work.budget,
+                    purpose=purpose, budget=work.budget,
                     thinking_level=route['thinking_level'])
     proof = {'work_ref': work.id, 'work_hash': content_hash(work.to_dict()),
              'route_ref': route['id'], 'route_hash': route['content_hash'],

@@ -396,6 +396,9 @@ class RoutedTranscriptPolishModelWorker:
     def _after_accounting(self, work, route, accounting):
         """Specialized tasks settle only after durable usage/cost records."""
 
+    def _after_accounted_result(self, work, route, profile, invocation, adapter_result):
+        """Optional bookkeeping after specialized settlement, before completion."""
+
     def _after_capacity_deferred(self, work, route, adapter_result):
         """Specialized budget ledgers may release proved broker-local refusal."""
 
@@ -795,6 +798,8 @@ class RoutedTranscriptPolishModelWorker:
             namespace=self.namespace,
         )
         accounting_failure = self._after_accounting(work, route, accounting)
+        if accounting_failure is None:
+            self._after_accounted_result(work, route, profile, invocation, adapter_result)
         try:
             self.scheduler.validate_lease_for_use(
                 work.id,

@@ -1403,6 +1403,16 @@ class DocumentExtractionModelWorker(RoutedTranscriptPolishModelWorker):
                 retry_seconds=retry_within_lease(self.scheduler, work.id,
                     route["attempt_number"], self.clock()))
 
+    def _after_accounted_result(self, work, route, profile, invocation, adapter_result):
+        if self.budget_store is None or self.admission is None:
+            return
+        from .model_output_contract_hold import record_after_settlement
+        # The helper rereads the actual settlement. Deferred/unknown accounting
+        # cannot create a hold, and replay never extends its original expiry.
+        record_after_settlement(self.router, work=work, route=route, profile=profile,
+            invocation=invocation, result=adapter_result, budget_store=self.budget_store,
+            admission_id=self.admission["admission_id"])
+
     def _after_capacity_deferred(self, work, route, adapter_result):
         if self.budget_store is not None and self.admission is not None:
             self.budget_store.settle(
