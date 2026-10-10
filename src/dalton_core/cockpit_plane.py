@@ -8523,6 +8523,23 @@ class CockpitPlane:
             served = row["last_served"]
             from .call_budget import THINKING_LEVELS, resolve_thinking_level
             thinking = resolve_thinking_level(purpose, policy=pinned)
+            call_view = call_budget_view(self.config.state_dir, purpose, binding=binding)
+            output_holds = {}
+            output_hold_note = last_output_skip_note = None
+            if purpose == "document_extraction" and pinned is not None and bound_db:
+                from .model_route_observation import output_contract_hold_view, last_output_hold_skip_note
+                try:
+                    with closing(ModelRouter(bound_db, read_only=True)) as observed_router:
+                        output_holds = output_contract_hold_view(observed_router, policy=pinned,
+                            purpose=purpose, profiles={link["model"]: bound_catalogue[link["model"]]
+                                for link in chain if link["model"] in bound_catalogue},
+                            call_budget=call_view["effective"], thinking_level=thinking, now=checked_at)
+                        last_output_skip_note = last_output_hold_skip_note(observed_router, served)
+                    if output_holds:
+                        output_hold_note = next(iter(output_holds.values()))["note"]
+                except (ModelRouterError, sqlite3.Error, OSError, ValueError) as exc:
+                    output_hold_note = "本环节输出超限暂避记录暂不可读：" + _reason(exc)
+            chain = [{**link, "output_contract_hold": output_holds.get(link["model"])} for link in chain]
             purposes.append({
                 "thinking_level": thinking,
                 "thinking_level_choices": (["low"] if purpose.endswith("_verifier")
@@ -8558,7 +8575,9 @@ class CockpitPlane:
                     if isinstance(override, Mapping) and row["tier"] == "verifier"
                     else None
                 ),
-                "call_budget": call_budget_view(self.config.state_dir, purpose, binding=binding),
+                "call_budget": call_view,
+                "output_contract_hold_note": output_hold_note,
+                "last_output_contract_skip_note": last_output_skip_note,
                 "run_budget": call_budget_view(self.config.state_dir, purpose, binding=binding, kind="run"),
                 "chain": chain,
                 "cooldown_note": purpose_cooldown_note(
@@ -8591,6 +8610,8 @@ class CockpitPlane:
                     "position": served["chain_position"],
                     "at": served["created_at"],
                     "cost_usd": served["estimated_cost_usd"],
+                    "policy_version_ref": served.get("policy_version_ref"),
+                    "selection_changed_since_call": served.get("policy_version_ref") != policy_ref,
                 },
                 "last_served_note": (
                     "该环节尚无调用记录" if served is None else

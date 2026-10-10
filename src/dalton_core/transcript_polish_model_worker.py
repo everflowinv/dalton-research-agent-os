@@ -799,6 +799,7 @@ class RoutedTranscriptPolishModelWorker:
         )
         accounting_failure = self._after_accounting(work, route, accounting)
         if accounting_failure is None:
+            self._accounted_route_replayed = route_replayed
             self._after_accounted_result(work, route, profile, invocation, adapter_result)
         try:
             self.scheduler.validate_lease_for_use(

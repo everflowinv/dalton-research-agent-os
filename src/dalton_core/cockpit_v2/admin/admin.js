@@ -576,7 +576,8 @@
         txt(p.tier_label), txt(p.mode_label), chain || "—", thinkingLabel(p.thinking_level || "low"),
         p.last_served ? `${txt(p.last_served.display_name)} · ${when(p.last_served.at)}` : txt(p.last_served_note),
         eff.max_output_tokens != null ? count(eff.max_output_tokens) : "—",
-        [p.requires_restart ? "修改需重启" : null, p.cooldown_note, p.pin_note].filter(Boolean).join("；") || "—"];
+        [p.requires_restart ? "修改需重启" : null, p.cooldown_note, p.output_contract_hold_note,
+          p.last_output_contract_skip_note, p.last_served?.selection_changed_since_call ? "上次调用使用的是当时保存的配置" : null, p.pin_note].filter(Boolean).join("；") || "—"];
     });
     return table(["环节", "档位", "选择方式", "当前顺序", "思考强度", "上次实际使用", ["单次回答长度上限（token）", true], "说明"], rows);
   }

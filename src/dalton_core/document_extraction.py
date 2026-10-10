@@ -1415,6 +1415,15 @@ class DocumentExtractionModelWorker(RoutedTranscriptPolishModelWorker):
                     route["attempt_number"], self.clock()))
 
     def _after_accounted_result(self, work, route, profile, invocation, adapter_result):
+        from .model_route_observation import record_extraction_single_route
+        try:
+            self.route_observation = record_extraction_single_route(self.router, work=work,
+                route=route, profile=profile, invocation=invocation, result=adapter_result,
+                replayed=bool(getattr(self, "_accounted_route_replayed", False)))
+        except sqlite3.Error:
+            # Optional display records never prevent the already-accounted
+            # result completing, nor create a reason to call the provider again.
+            self.route_observation = {"status": "observation_store_unavailable"}
         if self.budget_store is None or self.admission is None:
             return
         from .model_output_contract_hold import record_after_settlement

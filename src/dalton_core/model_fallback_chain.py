@@ -1320,6 +1320,7 @@ def purpose_selection(
                     "decision_id": served["decision_id"],
                     "created_at": served["created_at"],
                     "estimated_cost_usd": _link_cost_usd(router, served, costs),
+                    "policy_version_ref": served["policy_version_ref"],
                 }
             ),
         })
