@@ -6,6 +6,7 @@ import json
 import os
 import sqlite3
 import sys
+import tempfile
 import time
 import unittest
 from datetime import datetime, timezone
@@ -36,6 +37,24 @@ from tests.test_mission_annual_research import COMPANY, MissionAnnualFixture
 from tests.test_openclaw_model_adapter import (
     FakeBroker, failure_response, seal, success_response,
 )
+
+
+def _child_diagnostics(launcher, ticket_ref):
+    """Keep the exact hermetic child failure, including replay failures."""
+    path=launcher._ticket_path(ticket_ref)
+    files={}
+    for name in ('run.log','summary.json','ticket.json'):
+        candidate=path.with_name(name)
+        if candidate.is_file():
+            with candidate.open('rb') as handle:
+                handle.seek(max(0,candidate.stat().st_size-8192))
+                files[name]=handle.read(8192).decode('utf-8',errors='replace')
+    text=canonical_json({'ticket_ref':ticket_ref,'files':files})
+    destination=os.environ.get('DALTON_TEST_DIAGNOSTICS_DIR')
+    if destination:
+        output=Path(destination)/'mission-document-research';output.mkdir(parents=True,exist_ok=True)
+        (output/(path.parent.name+'.json')).write_text(text+'\n',encoding='utf-8')
+    return text
 
 
 def _verifier_pass(statement):
@@ -391,7 +410,8 @@ class MissionDocumentResearchProductionTests(unittest.TestCase):
             replay = launcher.resume(
                 admission_ref=admission["id"], admission_hash=admission["content_hash"],
                 prior_ticket_ref=ticket["id"], authorization="test:exact-scheduler-replay")
-            self.assertEqual(launcher.wait(timeout=60), 0)
+            replay_exit=launcher.wait(timeout=60)
+            self.assertEqual(replay_exit, 0, _child_diagnostics(launcher,replay["id"]) if replay_exit else None)
             self.assertEqual(launcher.status(replay["id"])["summary"]["status"], "complete")
         self.assertEqual(len(broker.requests), 2)
         with mock.patch.dict(os.environ, {"PYTHONPATH": python_path}):
@@ -677,7 +697,8 @@ class MissionDocumentResearchProductionTests(unittest.TestCase):
             time.sleep(max(0.0, retry_at - time.time()) + 0.05)
             resumed = coordinator.dispatch_once()
             self.assertEqual(resumed["status"], "resumed", resumed)
-            self.assertEqual(launcher.wait(timeout=60), 0)
+            resumed_exit=launcher.wait(timeout=60)
+            self.assertEqual(resumed_exit, 0, _child_diagnostics(launcher,resumed["ticket_ref"]) if resumed_exit else None)
             self.assertEqual(coordinator.dispatch_once()["status"], "idle")
         # One capped no-send Work, one fresh authorized draft, one verifier.
         self.assertEqual(len(broker.requests), 3)
@@ -705,3 +726,21 @@ class MissionDocumentResearchProductionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ChildDiagnosticsTests(unittest.TestCase):
+    def test_exact_child_tail_and_failure_summary_survive_fixture_cleanup(self):
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);ticket=root/'exact-ticket'/'ticket.json';ticket.parent.mkdir()
+            ticket.write_text('{"id":"exact-ticket","status":"failed"}')
+            ticket.with_name('run.log').write_text('discarded prefix'+('x'*9000)+'exact failure tail')
+            ticket.with_name('summary.json').write_text('{"error":"synthetic replay refusal"}')
+            destination=root/'artifacts'
+            with mock.patch.dict(os.environ,{'DALTON_TEST_DIAGNOSTICS_DIR':str(destination)}):
+                diagnostic=json.loads(_child_diagnostics(SimpleNamespace(_ticket_path=lambda ref:ticket),'exact-ticket'))
+            self.assertEqual(diagnostic['ticket_ref'],'exact-ticket')
+            self.assertEqual(len(diagnostic['files']['run.log']),8192)
+            self.assertTrue(diagnostic['files']['run.log'].endswith('exact failure tail'))
+            self.assertIn('synthetic replay refusal',diagnostic['files']['summary.json'])
+            self.assertEqual(json.loads((destination/'mission-document-research/exact-ticket.json').read_text()),diagnostic)

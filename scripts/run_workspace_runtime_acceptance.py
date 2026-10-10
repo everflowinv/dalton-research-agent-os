@@ -175,7 +175,7 @@ def _start_controller(workspace: Any) -> subprocess.Popen[str]:
     raise RuntimeError("controller did not complete a real tick")
 
 
-def _stop(process: subprocess.Popen[str] | None) -> None:
+def _stop(process: subprocess.Popen[str] | None, *, diagnostics: Path | None = None) -> None:
     if process is None:
         return
     if process.poll() is None:
@@ -184,9 +184,14 @@ def _stop(process: subprocess.Popen[str] | None) -> None:
             process.wait(timeout=8)
         except subprocess.TimeoutExpired:
             process.kill(); process.wait(timeout=5)
-    for stream in (process.stdout, process.stderr):
-        if stream is not None:
-            stream.close()
+    if diagnostics is not None:
+        out,err=process.communicate(timeout=5)
+        _write(diagnostics,{'pid':process.pid,'returncode':process.returncode,
+                           'stdout_tail':out[-8192:],'stderr_tail':err[-8192:]})
+    else:
+        for stream in (process.stdout, process.stderr):
+            if stream is not None:
+                stream.close()
 
 
 def _heartbeat(workspace: Any) -> dict[str, Any]:
@@ -412,8 +417,19 @@ def run_acceptance(output: Path) -> dict[str, Any]:
                               "cross_mission_approval": cross_approval},
             }
         finally:
+            failed=sys.exc_info()[0] is not None
             for process in reversed(processes):
-                _stop(process)
+                _stop(process,diagnostics=output/f'process-{process.pid}.json' if failed else None)
+            if failed:
+                # This runner uses invented missions and rehearsal transports.
+                # Keep only bounded lane/child diagnostics, never token configs.
+                workspaces=[a]+([b] if 'b' in locals() else [])
+                for workspace in workspaces:
+                    for path in [workspace.state_dir/'run/heartbeat.json',
+                                 *sorted((workspace.state_dir/'discoveries').glob('*/ticket.json'))[-4:]]:
+                        if path.is_file():
+                            data=path.read_text(encoding='utf-8')
+                            (output/f'{workspace.slug}-{path.parent.name}-{path.name}').write_text(data[-8192:],encoding='utf-8')
     receipt = {**receipt, "content_hash": content_hash(receipt)}
     _write(output / "receipt.json", receipt)
     return {**receipt, "receipt_path": str(output / "receipt.json")}

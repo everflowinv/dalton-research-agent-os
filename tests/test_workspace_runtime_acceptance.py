@@ -1,4 +1,8 @@
 import json
+import os
+import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -6,7 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from scripts.run_workspace_runtime_acceptance import run_acceptance, _wait_initial_screen
+from scripts.run_workspace_runtime_acceptance import run_acceptance, _wait_initial_screen, _stop
 
 
 class WorkspaceRuntimeAcceptanceTests(unittest.TestCase):
@@ -34,10 +38,30 @@ class WorkspaceRuntimeAcceptanceTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "workspace mission authority differs"):
             _wait_initial_screen(authority, mission)
 
+    def test_failed_fixture_process_preserves_exact_exit_and_bounded_logs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            process=subprocess.Popen([sys.executable,'-c',"import sys; print('synthetic stdout'); print('synthetic stderr',file=sys.stderr); raise SystemExit(9)"],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+            process.wait(timeout=5)
+            path=Path(directory)/'diagnostic.json'
+            _stop(process,diagnostics=path)
+            diagnostic=json.loads(path.read_text())
+            self.assertEqual(diagnostic['pid'],process.pid)
+            self.assertEqual(diagnostic['returncode'],9)
+            self.assertIn('synthetic stdout',diagnostic['stdout_tail'])
+            self.assertIn('synthetic stderr',diagnostic['stderr_tail'])
+
     def test_two_real_engines_keep_processing_and_refuse_cross_namespace_inputs(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as directory:
             output = Path(directory) / "receipt"
-            result = run_acceptance(output)
+            try:
+                result = run_acceptance(output)
+            except Exception as exc:
+                files={p.name:p.read_text(encoding='utf-8')[-8192:]
+                       for p in sorted(output.glob('*.json')) if p.is_file()}
+                destination=os.environ.get('DALTON_TEST_DIAGNOSTICS_DIR')
+                if destination and output.is_dir():
+                    shutil.copytree(output,Path(destination)/'workspace-runtime-acceptance',dirs_exist_ok=True)
+                raise AssertionError(f'{exc}; hermetic process diagnostics={json.dumps(files)}') from exc
             self.assertEqual(result["status"], "passed")
             self.assertEqual(result["external_provider_calls"], 0)
             self.assertGreater(result["continuous_processing"]["a_ticks_after_b"],
